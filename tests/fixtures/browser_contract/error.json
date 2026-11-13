@@ -1,5 +1,5 @@
 {
-  "description": "Every refusal: {\"error\": <code>, \"message\": <text>}. The example's name is its code. Hosts check status and code against these; the messages are examples, and the router's own text may differ. approval_required adds pending_id, expires_at and held: what the approval will run, from the browser's own read of the page (kind \"commit\" or \"position\", the step's action, names: the sorted distinct names of the elements that make it a commit, none for position, and the url it is bound to).",
+  "description": "Every refusal: {\"error\": <code>, \"message\": <text>}. The example's name is its code. Hosts check status and code against these; the messages are examples, and the router's own text may differ. approval_required adds pending_id, expires_at and held: what the approval will run, from the browser's own read of the page (kind \"commit\" or \"position\", the step's action, names: the sorted distinct names of the elements that make it a commit, none for position, and the url it is bound to). A type with focused true that the host won't type types nothing and answers password_field when the focus is on a secret, card or password field, not_a_text_field when it is on anything else that isn't a text entry, and focus_unreadable when the host can't read what has the focus. One whose focus leaves that field before the text and its Enter are all typed stops there and answers stale_element, or password_field when the focus moved onto a secret, card or password field.",
   "examples": {
     "unauthorized": {
       "where": "any route",
@@ -62,6 +62,24 @@
       "body": {
         "error": "password_field",
         "message": "element 3 is a secret field"
+      }
+    },
+    "not_a_text_field": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "response",
+      "status": 409,
+      "body": {
+        "error": "not_a_text_field",
+        "message": "the focused element is a button, not a text field"
+      }
+    },
+    "focus_unreadable": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "response",
+      "status": 409,
+      "body": {
+        "error": "focus_unreadable",
+        "message": "could not read what has the focus"
       }
     },
     "approval_required": {

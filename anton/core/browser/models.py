@@ -42,15 +42,16 @@ class Challenge(_Answer):
     kind: str
 
 
-class Element(_Answer):
-    """One numbered element of a page, as the agent reads and acts on it."""
+class _ElementFields(_Answer):
+    """What an element of the page and an element inside a frame share:
+    everything but the number a step names it by."""
 
-    id: int
     role: str
     name: str
     value: str | None = None
     #: The host withheld this field's value because it is secret (a password,
-    #: a one-time code, a card number). The agent must never type into it.
+    #: a one-time code, a card number the host takes for a payment card's). The
+    #: agent must never type into it.
     value_hidden: bool = False
     type: str = ""
     checked: bool | None = None
@@ -69,6 +70,64 @@ class Element(_Answer):
         return self.type == "password" or self.value_hidden
 
 
+class Element(_ElementFields):
+    """One numbered element of a page, as the agent reads and acts on it."""
+
+    id: int
+
+
+class FrameElement(_ElementFields):
+    """An element inside a child frame. It has no number, so a step reaches
+    it only by position, and a focused type (``FocusedType``) the field a
+    click there left the focus in. Hosts never send the value of an input,
+    a textarea or an editor (a select keeps its value and options)."""
+
+
+class FrameBox(_Answer):
+    """A frame's content box in the latest screenshot's pixels."""
+
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+class PagePoint(_Answer):
+    """A point in a document's content coordinates, in whole CSS pixels."""
+
+    x: int
+    y: int
+
+
+class Frame(_Answer):
+    """A rendered child frame of the page, or a frame inside a frame the host
+    read, listed unread after them (``Page.frames``). Hosts read a frame's
+    elements and text only when it is safe to (``read``): never a human
+    check, a payment, consent or sign-in frame, or one that holds a secret
+    field."""
+
+    #: Origin and path for http and https, ``about:blank`` or ``about:srcdoc``,
+    #: otherwise the scheme alone.
+    url: str
+    read: bool = False
+    #: None when the host can't place the frame on the screenshot.
+    box: FrameBox | None = None
+    #: The top-left of the frame element's content box in its document, in
+    #: whole CSS pixels: its top-left in the viewport plus the scroll offset
+    #: of each element in its containing-block chain, plus its document's
+    #: scroll unless that chain ends fixed to the view. So no scroll, the
+    #: page's or an inner column's, moves a frame that scrolls with the
+    #: content. A frame fixed to the view keeps its at; one a sticky element
+    #: holds stuck to the view moves it by the scroll. Both hosts send it with
+    #: every frame that has a box; None for a frame with no box, and from a
+    #: host that predates it.
+    at: PagePoint | None = None
+    offscreen: bool = False
+    elements: list[FrameElement] = []
+    text: str = ""
+    truncated: bool = False
+
+
 class Scroll(_Answer):
     y: int
     height: int
@@ -84,10 +143,26 @@ class Page(_Answer):
     text: str = ""
     truncated: bool = False
     scroll: Scroll | None = None
+    #: An opaque token naming the focused node, the deepest one through the
+    #: frames the host can read; when the focus is inside a frame it can't
+    #: read (a payment frame, another site's frame inside another site's, a
+    #: frame past its depth cap), the token names that frame's element. Equal
+    #: tokens are the same node. The desktop app's browser sends it, and
+    #: leaves it out only when nothing has the focus or it can't read the
+    #: page at all; the router's pod, which reads the focus again when a step
+    #: runs, leaves it out.
+    focus: str | None = None
     #: Check frames the person can see; the router's pod always sends it (empty
     #: when there are none) and leaves out invisible checks. None from a host
     #: that doesn't say.
     challenges: list[Challenge] | None = None
+    #: The page's rendered child frames, on-screen first, and after them a
+    #: host may list, unread, the frames inside a frame it read. Their
+    #: elements never carry a number, so nothing a step names by number is
+    #: inside one. Both hosts always send it (empty when there are none);
+    #: None from a host that predates it, which hasn't said where its frames
+    #: are.
+    frames: list[Frame] | None = None
 
 
 class ActionResult(_Answer):
@@ -96,6 +171,9 @@ class ActionResult(_Answer):
 
     ok: bool
     url: str
+    #: Whether the step changed what the page shows; None when the host can't
+    #: tell (a frame, canvas or media element, a hover, a wait) or doesn't say.
+    changed: bool | None = None
     page: Page | None = None
 
 
@@ -173,6 +251,23 @@ class HeldStep(_Answer):
     action: str
     names: list[str] = []
     url: str
+
+
+class FocusedType(BaseModel):
+    """A type step into the field that has the focus, a frame's field
+    included: no element and no point, since a frame's fields have no number.
+    Both hosts type it only when the focus is on a text entry that isn't
+    secret, and otherwise type nothing and refuse it (403 password_field, 409
+    not_a_text_field, 409 focus_unreadable). It types at the caret, as keys
+    do, and clears nothing first. ``submit`` presses Enter after the text; it
+    is always sent, so both hosts read one shape."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    action: Literal["type"]
+    focused: Literal[True]
+    text: str
+    submit: bool = False
 
 
 class StepKey(BaseModel):

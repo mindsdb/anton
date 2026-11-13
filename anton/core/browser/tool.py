@@ -9,9 +9,14 @@ watches beside the chat and takes over for sign-ins, CAPTCHAs and
 confirmations. Only their Done in the browser hands it back.
 
 Some steps never run on the model's word alone, whoever proposed them:
-typing into a secret field is refused, a step that commits something (a
+typing into a secret field is refused, and a step that commits something (a
 submit, a purchase, a message, a deletion) waits for the user's Approve on
-the write gate's card, and clicks by position ask once per page.
+the write gate's card. A click or drag by position runs at once: the web's
+browser holds one only on a commit control (or when set to hold every one),
+and the desktop app approves by itself the card the tool shows for the page
+there, by its Approve line. One that may land in a frame waits for a
+one-step Approve on both: the web's browser holds it as a control it can't
+read, and on the desktop the tool shows the card each time.
 
 ``browser_jev`` (settings) decides how much Jev does:
 
@@ -35,11 +40,14 @@ import json
 import logging
 import re
 import unicodedata
+from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 from urllib.parse import parse_qs, urlparse
 
 import httpx2 as httpx
+from pydantic import ValidationError
 
 from anton.core.browser.client import (
     FIRST_CALL_TIMEOUT_S,
@@ -48,7 +56,21 @@ from anton.core.browser.client import (
     BrowserError,
     cut_reason,
 )
-from anton.core.browser.models import ActionResult, Element, HeldStep, Page, SavedTab, Site, StepKey, Tab
+from anton.core.browser.models import (
+    ActionResult,
+    Element,
+    FocusedType,
+    Frame,
+    FrameBox,
+    FrameElement,
+    HeldStep,
+    Page,
+    PagePoint,
+    SavedTab,
+    Site,
+    StepKey,
+    Tab,
+)
 from anton.core.browser.page import CAPTCHA_NAME, format_page, human_check, signature
 from anton.core.browser.policy import (
     StepDecision,
@@ -301,6 +323,13 @@ _MODIFIER_KEYS = frozenset({"alt", "control", "meta", "shift"})
 _KEY_ALIASES = {"enter": "Enter", "return": "Enter", "\n": "Enter", "\r": "Enter", "space": " ", "spacebar": " "}
 _HOLD_RANK = {None: 0, "position": 1, "commit": 2}
 Hold = Literal["commit", "position"]
+#: Keys that change what a radio group or a select has picked: an arrow,
+#: Home, End, PageUp or PageDown checks another radio of the group, which
+#: clicks it, or picks another option, and Space checks the radio that has
+#: the focus.
+_PICKING_KEYS = frozenset({"ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", " "})
+#: The most controls a card names for a key that may pick one of them.
+_CARD_PICKS = 3
 
 
 @dataclass
@@ -599,7 +628,12 @@ async def _ensure_open(session: "ChatSession", url: str | None = None) -> None:
         # The host relaunches the browser on the same profile by itself if it
         # was reaped for idleness, so only a new URL needs a call here.
         if url:
-            await state.client.act(session_id=state.session_id, step={"action": "navigate", "url": url, "include_page": False})
+            step = {"action": "navigate", "url": url, "include_page": False}
+            # A navigate has no point, so it never goes into a frame; the
+            # desktop gets the field on every body all the same (_gate).
+            if session._browser_config.in_app:
+                step["into_frame"] = False
+            await state.client.act(session_id=state.session_id, step=step)
         return
     await state.client.open_session(session_id=state.session_id, url=url)
     state.opened = True
@@ -679,10 +713,64 @@ def _has_position(step: dict) -> bool:
     return any("x" in end or "y" in end for end in _ends(step))
 
 
+class _FrameAt(NamedTuple):
+    """A frame a step's point may land in, as the person saw it on a card:
+    its address and its box."""
+
+    url: str
+    box: FrameBox | None
+
+
+def _frames_under(body: dict, page: Page) -> frozenset[_FrameAt] | None:
+    """The frames a step by position may land in on ``page``: each frame
+    whose box holds one of its points, or every frame when the boxes can't
+    rule a point out (a frame the host couldn't place, a point not in
+    screenshot pixels, which the boxes are in, or a point that isn't two
+    numbers). None from a host that sends no ``frames``, which hasn't said
+    where its frames are."""
+    if page.frames is None:
+        return None
+    every = frozenset(_FrameAt(frame.url, frame.box) for frame in page.frames)
+    placed = [(_FrameAt(frame.url, frame.box), frame.box) for frame in page.frames if frame.box is not None]
+    if body.get("coords") != "screenshot" or len(placed) < len(page.frames):
+        return every
+    under: set[_FrameAt] = set()
+    for end in _ends(body):
+        if "x" not in end and "y" not in end:
+            continue
+        x, y = end.get("x"), end.get("y")
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (x, y)):
+            return every
+        under |= {at for at, box in placed if box.x <= x < box.x + box.width and box.y <= y < box.y + box.height}
+    return frozenset(under)
+
+
+def _in_frame(body: dict, page: Page) -> bool:
+    """Whether a step by position may land inside one of the page's frames
+    (``_frames_under``); any point may on a host that sends no ``frames``."""
+    under = _frames_under(body, page)
+    return under is None or bool(under)
+
+
 def _step_body(tc_input: dict) -> dict:
     step = tc_input.get("step")
     if not isinstance(step, dict) or step.get("action") not in STEP_ACTIONS:
         raise ValueError(f"act needs `step` with an action in {', '.join(STEP_ACTIONS)}")
+    if "focused" in step:
+        try:
+            focused = FocusedType.model_validate(step)
+        except ValidationError as exc:
+            raise ValueError(
+                '`focused` goes only on a type step, as {"action": "type", "focused": true, "text": "…"} with '
+                'optional "submit": true, and no element, point or other field'
+            ) from exc
+        return {**focused.model_dump(), "include_page": True}
+    if step.get("action") == "type" and step.get("element") is None:
+        raise ValueError(
+            'type needs `element`, a number from the latest page, or "focused": true to type into the field that '
+            'has the focus, such as a field inside a frame you clicked by pixel: {"action": "type", "focused": true, '
+            '"text": "…"}'
+        )
     # Hosts read "7" as 7. Only a number is checked against the page below,
     # so only a number goes out.
     if any("element" in end and not _is_id(end["element"]) for end in _ends(step)):
@@ -701,7 +789,7 @@ def _element(page: Page, element_id: object) -> Element | None:
     return next((el for el in page.elements if el.id == element_id), None)
 
 
-def _named(el: Element) -> str:
+def _named(el: Element | FrameElement) -> str:
     return f"{el.role} {json.dumps(el.name, ensure_ascii=False)}"
 
 
@@ -724,6 +812,202 @@ def _moved_element(*, seen: Page | None, current: Page, body: dict) -> str | Non
             f"Element [{element_id}] is now {_named(now)}, not the {_named(before)} you read: "
             "the page changed since you last read it."
         )
+    return None
+
+
+#: How many screenshot pixels apart two reads may put a frame that only
+#: scrolled, or frames that scrolled together: each host rounds a box's edges
+#: and the scroll position on its own, the router's pod to the nearest pixel
+#: and the desktop app's outward.
+_FRAME_ROUNDING_PX = 2
+
+
+class _FrameSpot(NamedTuple):
+    """A placed frame as two reads of one page compare it, in screenshot
+    pixels. In this field order, sorting puts a page's frames by address,
+    then left to right, then from the top: an order a scroll leaves alone."""
+
+    url: str
+    x: int
+    width: int
+    y: int
+    height: int
+
+
+def _frame_spots(frames: list[Frame]) -> tuple[list[str], list[_FrameSpot]]:
+    """The addresses of the frames the host couldn't place, and the placed
+    frames, each sorted (``_FrameSpot``)."""
+    unplaced = sorted(frame.url for frame in frames if frame.box is None)
+    placed = sorted(
+        _FrameSpot(frame.url, frame.box.x, frame.box.width, frame.box.y, frame.box.height)
+        for frame in frames if frame.box is not None
+    )
+    return unplaced, placed
+
+
+def _scrolled_in_place(before: list[_FrameSpot], now: list[_FrameSpot], scrolled: int) -> bool:
+    """Whether each placed frame of ``before`` is in its place at the same
+    index of ``now`` (``_frames_moved``): where it was on screen, or moved
+    with the scroll by the same rows as every other frame that moved."""
+    shifts: list[int] = []
+    for was, spot in zip(before, now):
+        if spot == was:
+            continue
+        shift = spot.y - was.y
+        if (
+            not scrolled
+            or (spot.url, spot.x, spot.width) != (was.url, was.x, was.width)
+            or abs(spot.height - was.height) > 1
+            or shift * scrolled > 0
+            or abs(shift) > abs(scrolled) + _FRAME_ROUNDING_PX
+        ):
+            return False
+        shifts.append(shift)
+    return not shifts or max(shifts) - min(shifts) <= _FRAME_ROUNDING_PX
+
+
+#: How many pixels apart two reads may put a frame's at or size, or a
+#: stuck sticky frame's at against the page's scroll: each host rounds
+#: them from fractional parts on its own.
+_PLACE_ROUNDING_PX = 1
+
+
+class _FramePlace(NamedTuple):
+    """A placed frame that carries at, as two reads of one page compare it:
+    its address, where it sits in its document, and its screenshot box."""
+
+    url: str
+    at: PagePoint
+    box: FrameBox
+
+
+def _frame_places(frames: list[Frame]) -> list[_FramePlace] | None:
+    """The placed frames, each with its at, or None when one carries none."""
+    places = [
+        _FramePlace(frame.url, frame.at, frame.box) for frame in frames if frame.box is not None and frame.at is not None
+    ]
+    return places if len(places) == sum(frame.box is not None for frame in frames) else None
+
+
+def _same_place(was: _FramePlace, now: _FramePlace) -> bool:
+    """Whether ``now`` is ``was`` where it was in its document: the same
+    address, at and size, a pixel of rounding apart."""
+    return now.url == was.url and all(
+        abs(a - b) <= _PLACE_ROUNDING_PX
+        for a, b in ((now.at.x, was.at.x), (now.at.y, was.at.y), (now.box.width, was.box.width), (now.box.height, was.box.height))
+    )
+
+
+def _stuck_to_view(was: _FramePlace, now: _FramePlace, scrolled: int) -> bool:
+    """Whether ``now`` is ``was`` held stuck to the view by a sticky element
+    (a sticky ad): the same address and screenshot box, with an at that
+    moved down its document by the page's scroll, a pixel of rounding apart.
+    A frame fixed to the view (a chat widget) keeps its at, so it is in its
+    place by ``_same_place``."""
+    return (
+        now.url == was.url
+        and now.box == was.box
+        and abs(now.at.x - was.at.x) <= _PLACE_ROUNDING_PX
+        and abs(now.at.y - was.at.y - scrolled) <= _PLACE_ROUNDING_PX
+    )
+
+
+def _unpaired(
+    before: list[_FramePlace], now: list[_FramePlace], fits: Callable[[_FramePlace, _FramePlace], bool],
+) -> tuple[list[_FramePlace], list[_FramePlace]]:
+    """What is left of each read once every frame of ``before`` takes the
+    first frame of ``now`` it ``fits``."""
+    left = list(now)
+    rest: list[_FramePlace] = []
+    for was in before:
+        match = next((i for i, spot in enumerate(left) if fits(was, spot)), None)
+        if match is None:
+            rest.append(was)
+        else:
+            del left[match]
+    return rest, left
+
+
+def _frames_moved(seen: Page, current: Page) -> bool:
+    """Whether, between two reads of one page, a frame came or went, or
+    changed address, size or place on the page.
+
+    When every placed frame of both reads carries at, which no scroll moves,
+    the page's or an inner column's, for a frame that scrolls with the
+    content or one fixed to the view, the frames are compared as a multiset
+    keyed by address, at and size, a pixel of rounding apart
+    (``_same_place``). A frame a sticky element holds stuck to the view
+    keeps its screenshot box while its at moves down the page by the page's
+    scroll, and is in its place too (``_stuck_to_view``); it is paired only
+    after the frames that kept their at, so a scroll that puts it exactly
+    where another frame of its address sits pairs each with its own.
+    Otherwise the place on the page is inferred from the boxes and the
+    page's scroll, as follows.
+
+    The boxes are in screenshot pixels and the list goes on-screen first, so
+    a scroll moves every box and may reorder the list. The frames are
+    compared as a multiset keyed by address, each matched in the sorted
+    order ``_FrameSpot`` gives. A frame is in its place when its box is where
+    it was on screen (no scroll, or a frame fixed to the view, such as a chat
+    widget), or when it moved with the scroll: up the screenshot as the page
+    scrolled down, or down as it scrolled up, no farther than the scroll,
+    since a host shrinks a wide view's screenshot and never grows it, and by
+    the same rows as every other frame that moved (``_scrolled_in_place``).
+    A frame fixed to the view (a sticky ad) can share its address, left edge
+    and width with frames that scroll, and then the sorted order may pair it
+    with one of them; so when that order doesn't put every frame in its
+    place, the spots equal in both reads are taken out as fixed and the rest
+    matched again. Both pairings are tried, because a scroll can also put a
+    frame exactly where another of its address was, and then taking that
+    spot out pairs the wrong ones. The page read doesn't say how much the
+    screenshot is shrunk, so frames that all moved together by less than the
+    scroll read as scrolled; a lone frame that moved down the page by
+    exactly the scroll reads as fixed to the view, and a frame in an inner
+    column that scrolled reads as moved. A host that sends no ``frames`` on
+    one read and frames on the other moved them."""
+    if seen.frames is None or current.frames is None:
+        return (seen.frames is None) != (current.frames is None)
+    unplaced, before = _frame_spots(seen.frames)
+    unplaced_now, now = _frame_spots(current.frames)
+    if unplaced != unplaced_now or len(before) != len(now):
+        return True
+    scrolled = current.scroll.y - seen.scroll.y if seen.scroll is not None and current.scroll is not None else 0
+    places, places_now = _frame_places(seen.frames), _frame_places(current.frames)
+    if places is not None and places_now is not None:
+        places, places_now = _unpaired(places, places_now, _same_place)
+        places, places_now = _unpaired(places, places_now, lambda was, now: _stuck_to_view(was, now, scrolled))
+        return bool(places or places_now)
+    if _scrolled_in_place(before, now, scrolled):
+        return False
+    stayed = Counter(before) & Counter(now)
+    return not _scrolled_in_place(
+        sorted((Counter(before) - stayed).elements()), sorted((Counter(now) - stayed).elements()), scrolled,
+    )
+
+
+def _moved_focus(*, seen: Page, current: Page, body: dict) -> str | None:
+    """Why the focus a step goes to may not be the one the card showed, or
+    None when nothing says so.
+
+    A press with no element and a focused type go wherever the focus is when
+    the step starts. The desktop's page read names the focused node
+    (``Page.focus``), and inside a frame it can't read, that frame's element,
+    so another token, or one present at one read and absent at the other,
+    says the focus moved: a page's own UI moved it inside its document (a
+    confirm dialog that takes it on its Delete button), into a frame, or
+    from one frame to another. Two reads that both leave it out have nothing
+    to compare. A frame that came or went, or changed address, size or place
+    on the page (``_frames_moved``), says a page or a frame may have moved
+    the focus, or the focused frame navigated, which keeps its element's
+    token. A scroll alone, and text that changes inside the same frame (a
+    clock), say nothing."""
+    to_focus = body.get("focused") is True or (body.get("action") == "press" and body.get("element") is None)
+    if not to_focus:
+        return None
+    if current.focus != seen.focus:
+        return "The focus moved while the card waited, so it may now be on a control the card didn't show."
+    if _frames_moved(seen, current):
+        return "The page's frames changed while the card waited, so the focus may now be on a control the card didn't show."
     return None
 
 
@@ -854,7 +1138,7 @@ def _picks(step: dict) -> list[str]:
     return [str(v) for v in (value if isinstance(value, list) else [value]) if v is not None]
 
 
-def _select_holds(select: Element | None, picks: list[str]) -> bool:
+def _select_holds(select: Element | FrameElement | None, picks: list[str]) -> bool:
     """Whether picking ``picks`` in ``select`` commits something, as the pod
     holds it: by the select's own name when that reads as an action, or as a
     click on each option it picks, unless the select sorts or filters ("Order
@@ -899,9 +1183,14 @@ def _classify(step: dict, *, url: str, requested: str | None = None, element: El
     """What the step needs before it runs, by the commit list: "commit" (one
     approval runs it once), "position" (one approval covers steps by position
     on this page) or None. ``element`` is the element the step names, the one
-    under the point for a step by position, or the focused one for a press.
-    ``requested`` is the address the page's navigation asked for before a
-    redirect."""
+    under the point for a step by position, or the focused one for a press or
+    a focused type. ``requested`` is the address the page's navigation asked
+    for before a redirect.
+
+    A focused type reaches whatever has the focus, which the tool can't see,
+    so its element is None; each host types it only into a text entry that
+    isn't secret and refuses it anywhere else, so it holds only when it
+    submits or types a line break, as a type into a named text field does."""
     consent = _consent_page(url) or (requested is not None and _consent_page(requested))
     commit_control = element is not None and _commit_name(element.name)
     action = step.get("action")
@@ -914,13 +1203,11 @@ def _classify(step: dict, *, url: str, requested: str | None = None, element: El
     clicks_it = step.get("element") is not None and not _is_text_entry(element) and (consent or commit_control)
     if action == "type":
         text = str(step.get("text", ""))
-        # A line break typed key by key presses Enter too.
+        # A line break typed key by key presses Enter too. The pod host and the
+        # desktop app both insert a typed tab as text and never press the Tab
+        # key, so a typed tab keeps the focus in its field.
         sends = step.get("submit") is True or "\n" in text or "\r" in text
-        # Typed key by key, a Tab moves the focus, and a space after it presses
-        # the control it lands on.
-        tab = text.find("\t")
-        tabs_on = tab >= 0 and " " in text[tab:]
-        return "commit" if (sends and not _is_search(element)) or tabs_on or clicks_it else None
+        return "commit" if (sends and not _is_search(element)) or clicks_it else None
     if action == "press":
         keys = _chord_keys(step.get("key"))
         enter = "Enter" in keys
@@ -959,7 +1246,9 @@ def _touched(page: Page, step: dict) -> list[Element | None]:
     """The elements a step names on the page: a drag's ends, or the step's own.
     A number the page doesn't list reads as an element with no name, which
     holds: the tool can't tell what it is. A press with no element goes to
-    whatever holds the focus, which the tool can't see either."""
+    whatever holds the focus, which the tool can't see either. A focused
+    type goes there too, but each host types it only into a text entry that
+    isn't secret, so it reads as no element (``_classify``)."""
     unknown = Element(id=-1, role="", name="")
     named = [end["element"] for end in _ends(step) if end.get("element") is not None]
     if named:
@@ -979,11 +1268,92 @@ def _note_load(state: _BrowserState, asked: str | None, landed: str) -> None:
     state.redirect = (asked, landed) if asked and landed != asked else None
 
 
-def _hold_of(state: _BrowserState, step: dict, page: Page) -> Hold | None:
-    """The strictest hold over every element the step touches."""
+def _key_picks(page: Page, step: dict, *, consent: bool) -> list[str]:
+    """The controls that commit something a press may check or pick with an
+    arrow, Home, End, PageUp, PageDown or Space (``_PICKING_KEYS``), as a card
+    names them; empty for any other step, or when the keys pick nothing that
+    commits.
+
+    The web's browser holds those keys by what they pick, from its own read
+    of the focus, a frame's included. The desktop's browser holds nothing and
+    its read names the focus only by a token (``Page.focus``), which says
+    whether the focus moved but not what it is on, so the tool holds them by
+    what the page lists: a radio the commit list holds, or a select whose pick it holds
+    (``_select_holds``), and on a consent page any radio or select. A secret
+    select (``value_hidden``) comes with none of its options, so it holds
+    whatever its name, as a frame the host didn't read does. A press
+    that names a radio may check any other radio the page lists, since the
+    page doesn't say which radios share its group. A press with no element
+    goes to whatever has the focus, so it may pick any such control the page
+    or a read frame lists, or one in a frame the host didn't read, or in any
+    frame of a host that doesn't list its frames. Past its cap a host leaves
+    elements out (``truncated``), a radio of a listed radio's group or a
+    whole radio group or select among them. So a press that names a radio on
+    a cut page may check a radio the page left out. A press with no element
+    on a cut page, or with a cut read frame, may pick in a control a list
+    left out, whatever the list shows: Tab steps run at once and may have
+    put the focus there. Such a press already holds when a key of it types,
+    deletes or is Enter or Space (``_classify``)."""
+    if step.get("action") != "press" or not _PICKING_KEYS.intersection(_chord_keys(step.get("key"))):
+        return []
+
+    def pick(el: Element | FrameElement) -> str | None:
+        """What the card names when a key may commit by picking in ``el``."""
+        if el.role == "radio":
+            return _named(el) if consent or _commit_name(el.name) else None
+        if el.options or el.role in ("combobox", "listbox"):
+            # A host sends a secret select with none of its options, so any
+            # of them may commit, as in a frame it didn't read.
+            if el.value_hidden:
+                return f"an option of {_named(el)}, which the browser didn't list"
+            holds = consent or _select_holds(el, [option for option in el.options if option.strip()])
+            return f"an option of {_named(el)}" if holds else None
+        return None
+
+    def left_out(what: str, truncated: bool, where: str) -> list[str]:
+        """What a cut list may have left out that the key may pick."""
+        return [f"{what} {where} didn't list"] if truncated else []
+
+    named = step.get("element")
+    if named is not None:
+        pressed = _element(page, named)
+        if pressed is None or pressed.role != "radio":
+            return []
+        others = [el for el in page.elements if el.role == "radio" and el.id != pressed.id]
+        return [name for name in map(pick, others) if name is not None] + left_out("a radio", page.truncated, "the page")
+    read = [frame for frame in page.frames or [] if frame.read]
+    in_frames = [el for frame in read for el in frame.elements]
+    picks = [name for name in map(pick, [*page.elements, *in_frames]) if name is not None]
+    picks += left_out("a radio or an option", page.truncated, "the page")
+    for frame in read:
+        picks += left_out("a radio or an option", frame.truncated, f"the frame {json.dumps(frame.url, ensure_ascii=False)}")
+    if page.frames is None:
+        picks.append("a control in a frame the browser didn't list")
+    picks += [
+        f"a control in the frame {json.dumps(frame.url, ensure_ascii=False)} the browser didn't read"
+        for frame in page.frames or [] if not frame.read
+    ]
+    return picks
+
+
+class _Holding(NamedTuple):
+    """What a step needs before it runs on a page (``_hold_of``)."""
+
+    kind: Hold | None
+    #: What its keys may pick that commits something (``_key_picks``).
+    picks: list[str]
+
+
+def _hold_of(state: _BrowserState, step: dict, page: Page) -> _Holding:
+    """The strictest hold over every element the step touches and every
+    control its keys may pick."""
     requested = _requested(state, page)
+    consent = _consent_page(page.url) or (requested is not None and _consent_page(requested))
+    picks = _key_picks(page, step, consent=consent)
     holds = [_classify(step, url=page.url, requested=requested, element=el) for el in _touched(page, step)]
-    return max(holds, key=_HOLD_RANK.__getitem__)
+    if picks:
+        holds.append("commit")
+    return _Holding(kind=max(holds, key=_HOLD_RANK.__getitem__), picks=picks)
 
 
 def _step_key(body: dict) -> str:
@@ -1005,6 +1375,8 @@ def _step_words(body: dict, element: Element | None, held: HeldStep | None = Non
         target = " and ".join(json.dumps(n, ensure_ascii=False) if n.strip() else "an unnamed control" for n in held.names)
         if _has_position(body) or action == "drag":
             return f"{_describe(body)}, on {target}"
+    elif body.get("focused") is True:
+        target = "the focused field"
     elif element is None or _has_position(body):
         return _describe(body)
     else:
@@ -1022,8 +1394,8 @@ def _step_words(body: dict, element: Element | None, held: HeldStep | None = Non
 def _secret_field(element_id: object) -> ToolOutcome:
     return ToolOutcome(
         content=(
-            f"Not typed: element [{element_id}] is a secret field (a password, a code or a card number). "
-            "Only the user fills those: call action=hand_to_user with a one-line reason."
+            f"Not done: element [{element_id}] is a secret field (a password, a code, or a card number the browser "
+            "takes for a payment card's). Only the user fills those: call action=hand_to_user with a one-line reason."
         ),
         ok=False,
         reason="browser_secret_field",
@@ -1044,8 +1416,11 @@ def _not_approved(body: dict, why: str) -> ToolOutcome:
     )
 
 
-def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False) -> str:
+def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False, changed: str | None = None) -> str:
+    """The card's text. ``changed`` is what changed after the person's
+    Approve on the card before (``_gate``), which makes this one ask again."""
     shown = _fence(f"{url}\n{step}")
+    again = f"{changed} after your Approve, so this asks again. " if changed else ""
     if hold == "position":
         commits = (
             "It may also commit something for you, such as a purchase, a payment, a message, a deletion or a form. "
@@ -1053,68 +1428,142 @@ def _card_prompt(*, hold: Hold, url: str, step: str, may_commit: bool = False) -
         )
         return (
             "**Approve clicks by position on this page?**\n\n"
-            "This step clicks or drags at a point the page's element list doesn't name, so it can't be "
+            f"{again}This step clicks or drags at a point the page's element list doesn't name, so it can't be "
             f"checked first:\n\n{shown}\n\n{commits}"
             "Approve covers clicks and drags by position on this page until it goes to another address. "
+            "A click or drag into an embedded frame still asks each time. "
             "Cancel, Skip or no answer stops it."
         )
     return (
         "**Approve this browser step?**\n\n"
-        "This step may commit something for you, such as a purchase, a payment, a message, a deletion "
+        f"{again}This step may commit something for you, such as a purchase, a payment, a message, a deletion "
         f"or a form:\n\n{shown}\n\n"
         "It runs only if you approve. Cancel, Skip or no answer stops it."
     )
 
 
-async def _gate(session: "ChatSession", *, state: _BrowserState, body: dict, page: Page, risky: bool) -> ToolOutcome | None:
-    """None when the step may be sent on ``page``; otherwise what to answer in
-    its place, before anything is sent. ``act`` and ``run`` both ask it, in
-    every ``browser_jev`` mode, so a step a page talked the model or Jev into
-    still waits for the user. ``risky`` is Jev rating the step as one that
-    commits something.
+async def _gate(
+    session: "ChatSession", *, state: _BrowserState, body: dict, page: Page, risky: bool, changed: str | None = None,
+) -> dict | ToolOutcome:
+    """The body to send when the step may be sent on ``page``; otherwise what
+    to answer in its place, before anything is sent. ``act`` and ``run`` both
+    ask it, in every ``browser_jev`` mode, so a step a page talked the model
+    or Jev into still waits for the user. ``risky`` is Jev rating the step as
+    one that commits something.
 
-    On the web the browser pod holds every step the commit list names, and
-    every step by position, whoever sends it, so those go straight to it and
-    the card comes when it answers ``approval_required`` (``_send_step``).
+    On the web the browser pod holds every step the commit list names, and a
+    step by position that lands on a commit control or in a frame (or every
+    step by position, when it is set to), whoever sends it, so those go
+    straight to it and the card comes when it answers ``approval_required``
+    (``_send_step``).
     Only a step Jev alone flags gets the card first there. The desktop app's
-    browser holds nothing, so this card is the only one it gets."""
+    browser holds nothing, so this card is the only one it gets. There a step
+    by position that may land inside a frame (``_in_frame``) gets the
+    one-step card every time, even after clicks by position were approved on
+    the page: the tool can't tell which of a frame's controls a point lands
+    on, so it can't check that one against the commit list. A press whose
+    arrow, Home, End, PageUp, PageDown or Space may pick a control that
+    commits something gets the one-step card naming it (``_key_picks``).
+
+    Every body it sends the desktop says whether the person approved a
+    one-step card for a step whose point may land in a frame
+    (``into_frame``), whatever held it: a click on a consent page or a drag
+    from a commit control gets the same card for the same step at the same
+    point. The desktop refuses a mouse press, or a drag's release, that lands
+    in a frame when it is false, so a frame that slides under the point after
+    this read gets no press under a position approval, or after a card for a
+    point outside every frame. With it true, the desktop presses only into
+    the frame under the point when the step starts. A focused type has no
+    point, so into_frame never stops it.
+
+    The desktop binds an approved step to nothing else the card showed: it
+    runs the step on whatever page is there when the step starts, and keeps
+    an element's number while the element lives. So after any Approve there
+    the tool reads the page again. An element the step names that now has
+    another role or name refuses the step (``_moved_element``), as act
+    refuses one before the card. So does, for a step that goes to the focus
+    (a press with no element, a focused type), a focus token that changed,
+    came or went, or a frame that came or went, or changed address, size or place on the
+    page, on the same address (``_moved_focus``); a scroll alone moves
+    neither. A page that went to another address, or,
+    after a card for a point that may land in a frame, a frame under the
+    point with another address or box, is asked about again on the new read
+    (``changed``), once; a page that changes again refuses the step. The
+    web's browser binds its own approval to the page's address and document,
+    and gets neither the second read nor into_frame."""
     key = _step_key(body)
     refused = state.refused.get((page.url, key))
     if refused is not None:
         return _not_approved(body, f"{refused} when it was asked earlier in this turn")
     element = _element(page, body.get("element"))
-    # Keys pressed into a secret field type into it just the same.
-    if body.get("action") in ("type", "press") and element is not None and element.secret:
+    # Keys pressed into a secret field type into it just the same, and a
+    # select fills it as surely; both hosts refuse all three (403
+    # password_field).
+    if body.get("action") in ("type", "press", "select") and element is not None and element.secret:
         return _secret_field(body.get("element"))
     host_holds = not session._browser_config.in_app
+    send = body if host_holds else {**body, "into_frame": False}
     if state.position_url is not None and state.position_url != page.url:
         state.position_url = None
-    listed = _hold_of(state, body, page)
+    listed, picks = _hold_of(state, body, page)
+    into_frame = not host_holds and _has_position(body) and _in_frame(body, page)
+    if into_frame and listed == "position":
+        listed = "commit"
     if listed == "position":
         if host_holds or state.position_url == page.url:
-            return None
+            return send
         hold: Hold = "position"
         approve = "Allow clicks by position on this page"
     elif listed == "commit":
         if host_holds:
-            return None
+            return send
         hold = "commit"
         approve = "Take this step once"
     elif risky:
         hold = "commit"
         approve = "Take this step once"
     else:
-        return None
+        return send
+    words = _step_words(body, element)
+    if picks:
+        shown = list(dict.fromkeys(picks))
+        more = f" or {len(shown) - _CARD_PICKS} more" if len(shown) > _CARD_PICKS else ""
+        words += f", which may pick {' or '.join(shown[:_CARD_PICKS])}{more}"
     cause = await ask_approval_card(
-        session, _card_prompt(hold=hold, url=page.url, step=_step_words(body, element)),
+        session, _card_prompt(hold=hold, url=page.url, step=words, changed=changed),
         approve_detail=approve, cancel_detail="Leave the page as it is", log_label="browser step",
     )
-    if cause is None:
-        if hold == "position":
-            state.position_url = page.url
-        return None
-    state.refused[(page.url, key)] = refusal_why(cause)
-    return _not_approved(body, refusal_why(cause))
+    if cause is not None:
+        state.refused[(page.url, key)] = refusal_why(cause)
+        return _not_approved(body, refusal_why(cause))
+    if hold == "position":
+        state.position_url = page.url
+    if host_holds:
+        return send
+    now = await state.client.page(session_id=state.session_id)
+    moved = _moved_element(seen=page, current=now, body=body)
+    if moved is None and now.url == page.url:
+        moved = _moved_focus(seen=page, current=now, body=body)
+    if moved is not None:
+        return ToolOutcome(
+            content=f"{moved} Nothing was done. The page now:\n\n{_show(state, now)}",
+            ok=False, reason="browser_stale_element",
+        )
+    if now.url != page.url:
+        changed_now = "The page went to another address"
+    elif into_frame and _frames_under(body, now) != _frames_under(body, page):
+        changed_now = "The frame under this point changed"
+    else:
+        return {**send, "into_frame": True} if into_frame else send
+    if changed is not None:
+        return ToolOutcome(
+            content=(
+                f"The page changed again after the user approved {_describe(body)} a second time. "
+                f"Nothing was done. The page now:\n\n{_show(state, now)}"
+            ),
+            ok=False, reason="browser_stale_element",
+        )
+    return await _gate(session, state=state, body=body, page=now, risky=risky, changed=changed_now)
 
 
 #: What a step can answer that doesn't say whether the browser ran it: no
@@ -1214,16 +1663,18 @@ async def _do_act(session: "ChatSession", tc_input: dict) -> str | ToolOutcome:
             content=f"{moved} Nothing was done. The page now:\n\n{_show(state, current)}",
             ok=False, reason="browser_stale_element",
         )
-    refusal = await _gate(session, state=state, body=body, page=current, risky=False)
-    if refusal is not None:
-        return refusal
-    result = await _send_step(session, state=state, body=body, page=current)
+    gated = await _gate(session, state=state, body=body, page=current, risky=False)
+    if isinstance(gated, ToolOutcome):
+        return gated
+    result = await _send_step(session, state=state, body=gated, page=current)
     if isinstance(result, ToolOutcome):
         return result
     state.steps.append(_describe(body, typed=False))
     page = result.page or await state.client.page(session_id=state.session_id)
     checked = await _unless_human_check(session, page)
-    return f"Done: {_describe(body)}.\n\n{checked or _show(state, page)}"
+    # Only a host's false says so; null is a host that can't tell.
+    note = " The page did not change." if result.changed is False else ""
+    return f"Done: {_describe(body)}.{note}\n\n{checked or _show(state, page)}"
 
 
 async def _do_screenshot(session: "ChatSession", tc_input: dict):
@@ -1285,7 +1736,9 @@ def _wait_for(state: _BrowserState, raw: object) -> dict | None:
 
 
 def _waited_for(wait_for: dict | None, page: Page) -> str:
-    """What the page shows of what the hand-over waited for, never a value."""
+    """What the page shows of what the hand-over waited for, never a value.
+    A host marks every secret field value_hidden, filled or empty, so the
+    page can't say whether the person filled one."""
     if not wait_for or "element" not in wait_for:
         return ""
     el = _element(page, wait_for["element"])
@@ -1293,7 +1746,9 @@ def _waited_for(wait_for: dict | None, page: Page) -> str:
         return f"Element [{wait_for['element']}] isn't on the page now: the user moved on from it."
     if wait_for["state"] == "checked":
         return f"Element [{el.id}] ({_named(el)}) is {'checked' if el.checked else 'not checked'} now."
-    return f"Element [{el.id}] ({_named(el)}) is {'filled in' if (el.value or el.value_hidden) else 'still empty'} now."
+    if el.secret:
+        return f"Element [{el.id}] ({_named(el)}) is a secret field: the page never shows its value, so it can't say whether it's filled in."
+    return f"Element [{el.id}] ({_named(el)}) is {'filled in' if el.value else 'still empty'} now."
 
 
 def _no_wait_for(exc: BrowserError) -> bool:
@@ -1498,6 +1953,9 @@ def _describe(step: dict, *, typed: bool = True) -> str:
         return f"scroll {step.get('direction', 'down')}"
     if action == "press":
         return f"press {step.get('key', '')}"
+    if action == "type" and step.get("focused") is True:
+        text = f" {step['text']!r}" if typed and "text" in step else ""
+        return f"type{text} into the focused field"
     return action
 
 
@@ -1587,6 +2045,8 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
 
     taken: list[str] = []
     stalls = 0
+    # The last step the run sent, as _step_key compares two steps.
+    last_step: str | None = None
     # Pages kept this run, by signature: kept once each.
     kept_here: set[str] = set()
     state.kept = []
@@ -1652,25 +2112,48 @@ async def _do_run(session: "ChatSession", tc_input: dict) -> str:
                 return _handback(state, f"The next step is {step.action}{hint}, but it needs {what} from you; use action=act.", taken, page)
             if body.get("element") is not None and step.target_p < min_p:
                 return _handback(state, f"Not sure which element to {step.action}; take it with action=act.", taken, page)
+            if session._browser_config.in_app:
+                # The desktop's browser holds nothing and keeps an element's
+                # number while the element lives, so a button a wizard
+                # relabels in place ("Continue" to "Place order") during
+                # Jev's calls keeps the number Jev picked. The gate holds on
+                # the page as it is now, as act's does; the web's browser
+                # holds by its own read.
+                now = await state.client.page(session_id=state.session_id)
+                moved = _moved_element(seen=page, current=now, body=body)
+                page = now
+                if moved is not None:
+                    return _handback(state, f"Paused before {_describe(body)}. {moved} Nothing was done.", taken, page)
             if body.get("element") is not None and _is_captcha(page, body["element"]):
                 return _handback(
                     state, "The next step acts on a human check, which only the user completes. "
                     "Call action=hand_to_user with a one-line reason.", taken, page,
                 )
 
-            refusal = await _gate(session, state=state, body=body, page=page, risky=step.risky_p >= RISKY_P)
-            if refusal is not None:
-                return _handback(state, f"Paused before {_describe(body)}. {refusal.content}", taken, page)
+            gated = await _gate(session, state=state, body=body, page=page, risky=step.risky_p >= RISKY_P)
+            if isinstance(gated, ToolOutcome):
+                return _handback(state, f"Paused before {_describe(body)}. {gated.content}", taken, page)
 
             before = signature(page)
-            result = await _send_step(session, state=state, body={**body, "include_page": True}, page=page)
+            before_text = page.text
+            result = await _send_step(session, state=state, body={**gated, "include_page": True}, page=page)
             if isinstance(result, ToolOutcome):
                 return _handback(state, f"Paused at {_describe(body)}. {result.content}", taken, page)
             acted += 1
             taken.append(_describe(body))
             state.steps.append(_describe(body, typed=False))
             page = result.page or await state.client.page(session_id=state.session_id)
-            stalls = stalls + 1 if signature(page) == before else 0
+            # A stall: the host says nothing changed; or neither the elements nor
+            # the text did; or the elements didn't and the step repeats the one
+            # before. Text that arrives late after a new step is progress, while
+            # a dead button clicked again on a page whose clock or carousel ticks
+            # during every step still hands back. The host's true never resets
+            # the count by itself.
+            step_key = _step_key(body)
+            same = signature(page) == before
+            stalled = result.changed is False or (same and (page.text == before_text or step_key == last_step))
+            last_step = step_key
+            stalls = stalls + 1 if stalled else 0
             if stalls >= MAX_STALLS:
                 return _handback(state, "The last steps changed nothing on the page; take over with action=act.", taken, page)
 
@@ -1819,10 +2302,28 @@ def _refused(session: "ChatSession", exc: BrowserError) -> ToolOutcome:
     if code == "password_field":
         return ToolOutcome(
             content=(
-                "Not typed: the browser refused to type into a secret field (a password, a code or a card "
-                "number). Only the user fills those: call action=hand_to_user with a one-line reason."
+                "Not typed: the browser refused to type into a secret field (a password, a code, or a card number "
+                "the browser takes for a payment card's). Only the user fills those: call action=hand_to_user with a "
+                "one-line reason."
             ),
             ok=False, reason="browser_secret_field",
+        )
+    if code == "not_a_text_field":
+        return ToolOutcome(
+            content=(
+                "Not typed: what has the focus isn't an ordinary text field (not_a_text_field), so the browser typed "
+                "nothing. Click the field by pixel first (inside a frame) or name its element, then type again."
+            ),
+            ok=False, reason="browser_bad_input",
+        )
+    if code == "focus_unreadable":
+        return ToolOutcome(
+            content=(
+                "Not typed: the browser couldn't tell what has the focus (focus_unreadable), so it typed nothing. "
+                "Click the field by pixel first and type again; a field in a payment or sign-in frame is the user's "
+                "to fill (hand_to_user)."
+            ),
+            ok=False, reason="browser_bad_input",
         )
     if code == "person_only":
         return ToolOutcome(
@@ -2083,8 +2584,8 @@ BROWSER: you and the user share a real browser. The user sees it beside this cha
 - When a site takes its search in the address (most travel, shopping and search sites, e.g. kayak.com/flights/SFO-WAS/2026-11-27/2026-11-29), open the results address directly instead of filling the form. Building that address from the site's known pattern is allowed.
 - Otherwise start with action=run, a goal, and every value it will need in `inputs` (dates as YYYY-MM-DD). run takes the steps it is sure of quickly, keeps what pages on its way show that the goal needs, and hands back with them and the page when it isn't sure; then continue with action=act.
 - To act yourself, use action=act with a step: {"action":"click","element":17}, {"action":"type","element":4,"text":"…","submit":true}, {"action":"select","element":9,"value":"Blue"}, {"action":"scroll","direction":"down"}, {"action":"press","element":4,"key":"Enter"}, {"action":"back"}, {"action":"navigate","url":"…"}. Element numbers come from the latest page.
-- Where the page list has nothing to point at (a canvas, a drawing, a map), use pixels from your latest screenshot: {"action":"click","x":412,"y":230}. Clicks also take "button":"right" and "clicks":2. Drag with {"action":"drag","from":{"element":5} or {"x":…,"y":…},"to":{…}}; that's how shapes get drawn, sliders moved and items reordered.
-- Never ask for, read out, or type a password, one-time code, or card number; the tool refuses to type into a secret field. For sign-ins, CAPTCHAs, two-factor codes and payments, call action=hand_to_user with a short reason and let the user do it in the browser.
+- Where the page list has nothing to point at (a canvas, a drawing, a map), use pixels from your latest screenshot: {"action":"click","x":412,"y":230}. Clicks also take "button":"right" and "clicks":2. Drag with {"action":"drag","from":{"element":5} or {"x":…,"y":…},"to":{…}}; that's how shapes get drawn, sliders moved and items reordered. Controls inside a frame have no number: click them by pixel from your latest screenshot; each such step waits for the user's Approve. To fill an ordinary field inside a frame, click it by pixel (one Approve), then type into it with {"action":"type","focused":true,"text":"…"}, which types at the caret of the field that has the focus, at once and with no card; with "submit":true it also presses Enter, and waits for the user's Approve. The browser refuses it when the focus isn't on an ordinary text field. A press step with no element goes wherever the focus is: Tab runs at once. In the desktop app's browser, Enter, Space and a key that types or deletes each wait for the user's Approve, and so does an arrow, Home, End, PageUp or PageDown while the page or a frame lists a radio or select option that commits something, or the browser cut a list short, or a frame wasn't read, or the page lists a secret select; the web's browser reads the focused control, even in a frame, and holds such a key only where it may commit something. In the web's browser a key that types or deletes into a frame's text field runs at once, Enter and Space there wait, and so does a chord with Tab before a key that picks or edits (Tab+ArrowDown, Tab+a), which the desktop app's browser refuses. The browser refuses keys and typing into a secret field there, as anywhere, and a sign-in, two-factor code or payment in a frame is the user's to do (hand_to_user).
+- Never ask for, read out, or type a password, one-time code, or payment card number; the tool refuses to type into a secret field. A field for a gift, loyalty or library card's number is usually an ordinary field; if the browser refuses it as a secret field, hand it over. For sign-ins, CAPTCHAs, two-factor codes and payments, call action=hand_to_user with a short reason and let the user do it in the browser.
 - Never tick, agree to or affirm a policy, consent, terms or "I've read and understood" box for the user, and never make a choice only they can make; those are theirs, through hand_to_user too.
 - hand_to_user is only for those. Never use it to hand over work you found hard; if you can't do something with these actions, stop and say so in the chat, with what you tried and another way to get it done.
 - When the user must act on the page, don't end your turn asking them to do it and tell you: call hand_to_user with a one-line reason they'll see ("Check United's unaccompanied-minor policy box") and wait_for naming what to watch: {"element": N, "state": "checked"} for that checkbox, radio or toggle, {"element": N, "state": "filled"} for a field, or {"page": "changes"} for a sign-in, a check or anything that moves the page on. The call waits while they do it and returns, with the page, a few seconds after it's done or when they click Done; then carry on.

@@ -1,5 +1,9 @@
 {
-  "description": "POST /sessions/{id}/action: one step. x and y with coords \"screenshot\" are pixels on the latest screenshot, which the host scales back to the page. A point wins over an element when a step has both. The answer carries the page after the step when include_page is true.",
+  "description": "POST /sessions/{id}/action: one step. x and y with coords \"screenshot\" are pixels on the latest screenshot, which the host scales back to the page. A point wins over an element when a step has both. A step settles before the host answers. Neither host ends a settle for quiet, or for a step that started nothing, before settle_quiet_ms from its start, so a request the step starts by then (a search box's debounced suggestions) is waited for. A step that by then has changed nothing, started no main-frame request or navigation and left nothing shown marked aria-busy answers there. One that started a main-frame request or a navigation, or finds the page aria-busy, waits until those requests are done, nothing shown is marked aria-busy and the page has shown no change for settle_quiet_ms, at most settle_max_ms from the settle's start. One that only changed the page in place waits for that quiet at most settle_quiet_ms past the host's first look at the page after the step, so a page that changes on its own (a ticker) doesn't hold every step to the cap. A navigation's cap is each host's own. The router's browser waits up to 5 s each for a navigation to commit and for its new page's DOMContentLoaded (a navigate step's own load has waited up to 30 s for it), then for the new page's network to go idle too, and stops at the later of settle_max_ms from the settle's start and 1.5 s after that DOMContentLoaded wait, never past 31.5 s from the step's start. The desktop app's browser waits for a navigate, back, forward or reload step's page to finish loading, up to 30 s, before the settle, and stops every settle, a navigation's too, at settle_max_ms from its start or 0.5 s before the step's 33 s budget ends, whichever comes first. changed says whether the step changed what the page shows: true, false, or null when the host can't tell (a frame, canvas or media element in view or under the step, a closed shadow root, a hover, a wait, a read, or a page it couldn't watch). The answer carries the page after the step when include_page is true. A type step with focused true, its text and submit, and no element or point, types into the field that has the focus, inside a frame too. It types at the caret, as keys do, and clears nothing first. The host types it only when that field is a text entry that isn't secret (a text, search, email, url, tel or number input, a textarea, or an editor); otherwise it types nothing and refuses it: 403 password_field for a secret, card or password field, 409 not_a_text_field for anything else, and 409 focus_unreadable when it can't read what has the focus. Before each key, and before the Enter submit adds, the host reads the focus again: when it has left that field the host stops typing, keeps what it typed, and answers 409 stale_element, or 403 password_field when the focus is now on a secret, card or password field. A type with focused true that also names an element or a point, or clear other than false, a type with focused other than true, and focused on any other action are refused with 400 bad_request. into_frame is true only when the person approved this one step on a card and its point may land in a frame, whatever held it. The desktop app's browser, which holds no steps itself, refuses (409) a mouse press, or a drag's release, that lands in a frame when into_frame is false or missing; into_frame never stops a focused type, which has no point. The router's browser holds its own steps and ignores into_frame.",
+  "limits": {
+    "settle_max_ms": 3000,
+    "settle_quiet_ms": 400
+  },
   "examples": {
     "click an element": {
       "where": "POST /sessions/{id}/action",
@@ -42,6 +46,82 @@
         "include_page": true
       }
     },
+    "type into the focused field": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "body": {
+        "action": "type",
+        "focused": true,
+        "text": "ada@example.test",
+        "submit": false,
+        "include_page": true
+      }
+    },
+    "a focused type that names an element": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "refused": true,
+      "body": {
+        "action": "type",
+        "focused": true,
+        "text": "ada@example.test",
+        "submit": false,
+        "include_page": true,
+        "element": 1
+      }
+    },
+    "a focused type at a point": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "refused": true,
+      "body": {
+        "action": "type",
+        "focused": true,
+        "text": "ada@example.test",
+        "submit": false,
+        "include_page": true,
+        "x": 200,
+        "y": 350,
+        "coords": "screenshot"
+      }
+    },
+    "a focused type that clears the field first": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "refused": true,
+      "body": {
+        "action": "type",
+        "focused": true,
+        "text": "ada@example.test",
+        "submit": false,
+        "include_page": true,
+        "clear": true
+      }
+    },
+    "a type with focused false": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "refused": true,
+      "body": {
+        "action": "type",
+        "focused": false,
+        "text": "ada@example.test",
+        "submit": false,
+        "include_page": true,
+        "element": 1
+      }
+    },
+    "a press with focused": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "refused": true,
+      "body": {
+        "action": "press",
+        "focused": true,
+        "key": "a",
+        "include_page": true
+      }
+    },
     "drag from an element to a point": {
       "where": "POST /sessions/{id}/action",
       "kind": "request",
@@ -58,6 +138,18 @@
         "coords": "screenshot"
       }
     },
+    "click at a point the person approved as one step that may land in a frame": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "request",
+      "body": {
+        "action": "click",
+        "x": 200,
+        "y": 350,
+        "include_page": true,
+        "coords": "screenshot",
+        "into_frame": true
+      }
+    },
     "the answer with the page after": {
       "where": "POST /sessions/{id}/action",
       "kind": "response",
@@ -65,6 +157,7 @@
       "body": {
         "ok": true,
         "url": "https://shop.example.test/cart",
+        "changed": true,
         "page": {
           "url": "https://shop.example.test/cart",
           "title": "Your cart",
@@ -93,7 +186,8 @@
           ],
           "truncated": true,
           "text": "Your cart. 1 item. Total $999.",
-          "challenges": []
+          "challenges": [],
+          "frames": []
         }
       }
     },
@@ -103,7 +197,18 @@
       "status": 200,
       "body": {
         "ok": true,
-        "url": "https://shop.example.test/cart"
+        "url": "https://shop.example.test/cart",
+        "changed": true
+      }
+    },
+    "a step that changed nothing": {
+      "where": "POST /sessions/{id}/action",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "ok": true,
+        "url": "https://shop.example.test/cart",
+        "changed": false
       }
     }
   }

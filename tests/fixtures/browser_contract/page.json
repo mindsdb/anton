@@ -1,5 +1,55 @@
 {
-  "description": "GET /sessions/{id}/page: the active tab as numbered elements and text. Secret fields (password, one-time code, card) carry value_hidden and never their value. challenges lists only check frames the person can see: a non-empty box in the viewport, not hidden. An element may carry context (the names of up to two containers around it, innermost last, joined by ' › ') and in_dialog (true inside an open dialog).",
+  "description": "GET /sessions/{id}/page: the active tab as numbered elements and text. Secret fields (password, one-time code, card) carry value_hidden and never their value. challenges lists only check frames the person can see: a non-empty box in the viewport, not hidden. An element may carry context (the names of up to two containers around it, innermost last, joined by ' › ') and in_dialog (true inside an open dialog). elements never lists a frame. Past the cap it lists the on-screen elements ahead of the off-screen ones, each group in page order, and truncated says more elements exist than are listed; when every shown element fits, a host may keep page order or use the same order. A host may list an open dialog's elements (in_dialog) ahead of both groups. A page may carry focus: an opaque token naming the focused node, the deepest one through frames that the host can read; when the focus is inside a frame the host can't read, the token names that frame's element. Equal tokens mean the same node. A host may omit focus, and omits it when nothing is focused. text is the page's text cut at max_text when the page isn't scrolled or the text fits; otherwise it starts at the top of the view after a leading '…', and the start of the text above the view follows when the budget allows. A secret editor's text is never in text or in any name, and max_text 0 gives ''. frames lists the page's rendered child frames, on-screen first, and a host may list after them, unread, the frames inside a frame it read. Each frame has url (origin and path for http and https, about:blank or about:srcdoc, otherwise the scheme alone), read, box (the frame's content box in screenshot pixels, null when the host can't place it), offscreen (true when it is out of view), and for a read frame its elements, text and truncated. A host sends at with every frame whose box isn't null: the top-left {x, y} of the frame element's content box (the box that box gives in screenshot pixels) in its document's content coordinates, in CSS pixels rounded to whole ones. That is the box's top-left in the viewport plus the scroll offset of each element in the frame element's containing-block chain, plus its document's scroll unless that chain ends at an element fixed to the view. The chain holds the elements whose scroll moves it: an element in flow (static, relative or sticky) moves with its parent's scroll, and an absolute or fixed one with its containing block's as CSS defines it (an absolute one's nearest positioned ancestor, a fixed one's nearest ancestor with a transform, a filter or the like, else none), and so on up from each. So no scroll, its document's or an inner column's, changes the at of a frame that scrolls with the content, or of one fixed to the view. A frame that a sticky element holds stuck to the view keeps its box as its document scrolls, so its at moves by the scroll. Frame elements are read-only: no id and no field value (a select keeps its value and options), so a step reaches them only by position, and a type with focused true reaches the field the focus is in. A frame is never read when it is a human check, a consent page, on a payment_frame_hosts or sign_in_frame_hosts host or under one, holds a secret, card-named or sign-in field, or is under frame_min_read_px either way, and a host leaves unread a frame it finds the person can't see. A host reads at most frames_read frames, in the order frames lists them, and a frame it leaves unread for any of these reasons takes none of them. A field's two name forms are the values of its card_field_attributes (name, id, aria-label and placeholder) joined in that order with a space, a missing one as empty, and that joined value's word-split form: each of card_field_word_breaks applied in order, case-sensitive, replacing every match with its first group and a space ($1 ), so cardNumberInput reads as card Number Input and CVVCode as CVV Code. In each form, every match of card_field_exempt, ignoring case, is replaced with a space, and the field is card-named when card_field_name, ignoring case, matches what is left of either form. The exempt pattern matches the number of a card that isn't a payment card, such as a gift, loyalty, library or insurance card, so giftCardNumber and 'Library card number' are ordinary fields, while giftCardCvv and a field named cardNumber with the aria-label 'Gift card number' stay card-named. A card-named field is a secret field: it carries value_hidden and never its value, and a type into it, by element or with focused true, a select of it or a press of a key that edits text in it answers 403 password_field. A read frame lists at most elements_per_frame elements and text_per_frame characters of text. A host that places and reads frames apart from the page's own read gives them at most frames_phase_ms from the read's start; a frame that doesn't answer in time is listed unread, with box null.",
+  "limits": {
+    "frames_read": 5,
+    "elements_per_frame": 50,
+    "text_per_frame": 1000,
+    "frame_min_read_px": 32,
+    "frames_phase_ms": 2000,
+    "payment_frame_hosts": [
+      "stripe.com",
+      "braintreegateway.com",
+      "braintree-api.com",
+      "adyen.com",
+      "checkout.com",
+      "squareup.com",
+      "squarecdn.com",
+      "recurly.com",
+      "chargebee.com",
+      "spreedly.com",
+      "authorize.net",
+      "cybersource.com",
+      "worldpay.com",
+      "paddle.com",
+      "paypal.com",
+      "shopifycs.com",
+      "shopifyinc.com",
+      "pay.google.com",
+      "mollie.com",
+      "razorpay.com",
+      "nmi.com",
+      "klarna.com"
+    ],
+    "sign_in_frame_hosts": [
+      "accounts.google.com",
+      "appleid.apple.com",
+      "login.microsoftonline.com",
+      "login.live.com",
+      "facebook.com"
+    ],
+    "card_field_name": "(^|[^a-z0-9]|card|cc)(cvc|cvv2?|csc)([^a-z0-9]|$)|card[\\s._-]*(numbers?|num|no)(?![a-z])|(^|[^a-z0-9])cc[\\s._-]*(numbers?|num)(?![a-z])|security[\\s._-]*code",
+    "card_field_exempt": "(gift|loyalty|rewards?|library|members?(hip)?|insurance|health|medicare|medicaid|student|transit|benefits?|sim|national[\\s._-]*id)[\\s._-]*card[\\s._-]*(numbers?|num|no)(?![a-z])",
+    "card_field_word_breaks": [
+      "([a-z0-9])(?=[A-Z])",
+      "([A-Z])(?=[A-Z][a-z])"
+    ],
+    "card_field_attributes": [
+      "name",
+      "id",
+      "aria-label",
+      "placeholder"
+    ]
+  },
   "examples": {
     "a sign-in page with a check frame": {
       "where": "GET /sessions/{id}/page",
@@ -66,11 +116,6 @@
             "disabled": true
           },
           {
-            "id": 9,
-            "role": "clickable",
-            "name": "Widget containing a Cloudflare security challenge"
-          },
-          {
             "id": 10,
             "role": "link",
             "name": "Forgot password?",
@@ -90,6 +135,22 @@
           {
             "host": "challenges.cloudflare.com",
             "kind": "cloudflare"
+          }
+        ],
+        "frames": [
+          {
+            "url": "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile",
+            "read": false,
+            "box": {
+              "x": 362,
+              "y": 420,
+              "width": 300,
+              "height": 65
+            },
+            "at": {
+              "x": 362,
+              "y": 420
+            }
           }
         ]
       }
@@ -126,7 +187,284 @@
         ],
         "truncated": true,
         "text": "Your cart. 1 item. Total $999.",
-        "challenges": []
+        "challenges": [],
+        "frames": []
+      }
+    },
+    "a page with a frame": {
+      "where": "GET /sessions/{id}/page",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "url": "https://news.example.test/article",
+        "title": "Article",
+        "scroll": {
+          "y": 1200,
+          "height": 5200,
+          "viewport": 800
+        },
+        "elements": [
+          {
+            "id": 1,
+            "role": "link",
+            "name": "Home"
+          },
+          {
+            "id": 2,
+            "role": "button",
+            "name": "Share"
+          }
+        ],
+        "truncated": false,
+        "text": "… Sign up below for the weekly digest.",
+        "challenges": [],
+        "focus": "7D0E2B9A41C3:118",
+        "frames": [
+          {
+            "url": "https://forms.example.test/newsletter",
+            "read": true,
+            "box": {
+              "x": 112,
+              "y": 300,
+              "width": 560,
+              "height": 180
+            },
+            "at": {
+              "x": 112,
+              "y": 1500
+            },
+            "elements": [
+              {
+                "role": "textbox",
+                "name": "Email"
+              },
+              {
+                "role": "button",
+                "name": "Subscribe"
+              }
+            ],
+            "text": "Get the weekly digest. Email Subscribe",
+            "truncated": false
+          },
+          {
+            "url": "https://js.stripe.com/v3/elements-inner-card",
+            "read": false,
+            "box": {
+              "x": 112,
+              "y": 520,
+              "width": 560,
+              "height": 44
+            },
+            "at": {
+              "x": 112,
+              "y": 1720
+            }
+          },
+          {
+            "url": "about:srcdoc",
+            "read": false,
+            "box": null
+          }
+        ]
+      }
+    },
+    "a checkout page with a card field named card_number": {
+      "where": "GET /sessions/{id}/page",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "url": "https://shop.example.test/checkout",
+        "title": "Checkout",
+        "scroll": {
+          "y": 0,
+          "height": 1600,
+          "viewport": 800
+        },
+        "elements": [
+          {
+            "id": 1,
+            "role": "textbox",
+            "name": "Email",
+            "value": "ada@example.test"
+          },
+          {
+            "id": 2,
+            "role": "textbox",
+            "name": "Name on card",
+            "value": "Ada Example"
+          },
+          {
+            "id": 3,
+            "role": "textbox",
+            "name": "Card",
+            "value_hidden": true
+          },
+          {
+            "id": 4,
+            "role": "button",
+            "name": "Pay $42.00"
+          }
+        ],
+        "truncated": false,
+        "text": "Checkout. Pay $42.00.",
+        "challenges": [],
+        "frames": []
+      }
+    },
+    "values that name a field for a card": {
+      "where": "a field's name, id, aria-label or placeholder",
+      "kind": "classification",
+      "body": {
+        "card_named": true,
+        "values": [
+          "cardnumber",
+          "card_number",
+          "card-number",
+          "card.number",
+          "CardNumber",
+          "card number",
+          "cardnum",
+          "card_num",
+          "cardNo",
+          "card_no",
+          "ccnum",
+          "cc_num",
+          "cc-num",
+          "cc_number",
+          "cc-number",
+          "cvc",
+          "CVC",
+          "cvv",
+          "CVV",
+          "cvv2",
+          "card_cvc",
+          "cardCvc",
+          "card-cvv",
+          "cc_cvv",
+          "cc-csc",
+          "billing_cvv2",
+          "cvv_code",
+          "csc",
+          "security_code",
+          "securityCode",
+          "Card number",
+          "Card Number",
+          "Security code",
+          "CVC / CVV",
+          "cardNumberInput",
+          "CardNumberTextBox",
+          "ctl00_Main_CardNumberTextBox",
+          "ccNumberInput",
+          "creditCardNumberInput",
+          "cardNumberField",
+          "cardNumbers",
+          "cvvInput",
+          "txtCVV",
+          "CVVCode",
+          "CCNumber",
+          "creditCardNumber",
+          "prepaidCardNumber",
+          "storeCardNumber",
+          "fleetCardNumber",
+          "businessCardNumber",
+          "debitCardNumber",
+          "giftCardCvv",
+          "paymentCardNumber",
+          "virtualCardNumber",
+          "corporateCardNumber",
+          "bankCardNumber",
+          "chargeCardNumber",
+          "purchasingCardNumber",
+          "procurementCardNumber",
+          "travelCardNumber",
+          "visaCardNumber",
+          "mastercardNumber",
+          "amexCardNumber",
+          "discoverCardNumber",
+          "dinersClubCardNumber",
+          "Diners Club card number",
+          "jcbCardNumber",
+          "unionPayCardNumber",
+          "maestroCardNumber",
+          "ebtCardNumber"
+        ]
+      }
+    },
+    "values that don't name a field for a card": {
+      "where": "a field's name, id, aria-label or placeholder",
+      "kind": "classification",
+      "body": {
+        "card_named": false,
+        "values": [
+          "name",
+          "email",
+          "acc_number",
+          "account_number",
+          "account_no",
+          "access_code",
+          "cardholder_name",
+          "cardholder",
+          "card_type",
+          "cardnotes",
+          "gift_card_message",
+          "discount_code",
+          "promo_code",
+          "postal_code",
+          "zip_code",
+          "phone_number",
+          "order_number",
+          "invoice_no",
+          "recv_count",
+          "success_count",
+          "security_question",
+          "Name on card",
+          "Card holder name",
+          "Cc",
+          "cardholderName",
+          "cardNotes",
+          "cardNoteText",
+          "cardType",
+          "CardHolder",
+          "giftCardNumber",
+          "txtGiftCardNumber",
+          "ctl00_Main_GiftCardNumberTextBox",
+          "loyalty_card_number",
+          "Library card number",
+          "membershipCardNumber",
+          "insuranceCardNumber",
+          "nationalIdCardNumber",
+          "rewardsCardNumber",
+          "memberCardNo",
+          "health_card_number",
+          "Medicare card number",
+          "medicaidCardNumber",
+          "studentCardNumber",
+          "transitCardNum",
+          "benefitsCardNumber",
+          "simCardNumber"
+        ]
+      }
+    },
+    "a field named for a card only by two of its attributes together": {
+      "where": "a field's name, id, aria-label or placeholder",
+      "kind": "classification",
+      "body": {
+        "card_named": true,
+        "attributes": {
+          "id": "card",
+          "aria-label": "Number"
+        }
+      }
+    },
+    "a card field whose aria-label names a gift card": {
+      "where": "a field's name, id, aria-label or placeholder",
+      "kind": "classification",
+      "body": {
+        "card_named": true,
+        "attributes": {
+          "name": "cardNumber",
+          "aria-label": "Gift card number"
+        }
       }
     }
   }

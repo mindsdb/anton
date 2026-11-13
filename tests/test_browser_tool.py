@@ -12,6 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from anton.core.browser import client as browser_client
+from anton.core.browser import page as browser_page
 from anton.core.browser import tool as browser_tool
 from anton.core.browser.client import BrowserClient
 from anton.core.browser.config import BrowserConfig, DecisionsProxy, DecisionsTarget
@@ -42,6 +43,7 @@ PAGE = {
         {"id": 4, "role": "button", "name": "Disabled thing", "disabled": True},
     ],
     "text": "Welcome to the shop",
+    "frames": [],
 }
 CHECKOUT = {
     "url": "https://shop.example/checkout",
@@ -55,12 +57,14 @@ CHECKOUT = {
         {"id": 10, "role": "searchbox", "name": "Search orders"},
     ],
     "text": "Total $999",
+    "frames": [],
 }
 CHALLENGE = {
     "url": "https://claude.ai/login",
     "title": "Just a moment...",
     "elements": [{"id": 1, "role": "checkbox", "name": "Verify you are human"}],
     "text": "claude.ai\nPerforming security verification\nThis website uses a security service to protect against malicious bots.",
+    "frames": [],
 }
 
 
@@ -98,6 +102,9 @@ class FakeHost:
         #: What the browser says it holds in an approval_required answer:
         #: none, as an older host answers, unless a test sets it.
         self.held: dict | None = None
+        #: Whether each step changed what the page shows: null, "can't
+        #: tell", unless a test sets it.
+        self.changed: bool | None = None
 
     def page(self):
         self.shown = self.pages[0] if len(self.pages) == 1 else self.pages.pop(0)
@@ -140,7 +147,7 @@ class FakeHost:
             if held is not None:
                 return held
             page = self.page()
-            return httpx.Response(200, json={"ok": True, "url": page["url"], "page": page})
+            return httpx.Response(200, json={"ok": True, "url": page["url"], "changed": self.changed, "page": page})
         if path.endswith("/sites") and request.method == "GET":
             return httpx.Response(200, json={"sites": self.sites})
         if path.endswith("/sites") and request.method == "POST":
@@ -354,6 +361,21 @@ def test_format_page_is_one_line_per_element_under_an_untrusted_heading():
     assert '[6] textbox "Password" (password)' in checkout and '[8] textbox "Card number" (secret field)' in checkout
 
 
+def test_format_page_lists_on_screen_frames_it_did_not_read_ten_at_most():
+    frames = [{"url": "https://ads.example.test/below", "read": False, "box": None, "offscreen": True}]
+    frames += [
+        {"url": f"https://ads.example.test/{i}", "read": False, "box": {"x": 0, "y": 60 * i, "width": 300, "height": 50}}
+        for i in range(12)
+    ]
+    frames.append({"url": "https://forms.example.test/later", "read": True, "offscreen": True, "text": "Join the list"})
+    text = format_page(model({**PAGE, "frames": frames}))
+    assert [line for line in text.splitlines() if line.endswith("(not read)")] == [
+        f'Frame "https://ads.example.test/{i}" (not read)' for i in range(browser_page.MAX_UNREAD_FRAME_LINES)
+    ]
+    # A frame the host read is shown wherever it is.
+    assert 'Frame "https://forms.example.test/later" (no numbers: act by pixel):' in text and "Join the list" in text
+
+
 def test_the_prompt_makes_the_browser_the_last_resort_after_connectors():
     prompt = browser_tool.BROWSER_TOOL_PROMPT
     assert "The browser is the last resort." in prompt
@@ -431,6 +453,15 @@ def test_an_on_screen_captcha_frame_is_a_check_only_from_a_host_that_sends_no_ch
     assert human_check(model(framed)) == "reCAPTCHA"
     hcaptcha = {**PAGE, "elements": [{"id": 9, "role": "Iframe", "name": "Widget containing checkbox for hCaptcha security challenge"}]}
     assert human_check(model(hcaptcha)) == "hCaptcha"
+
+
+def test_signature_ignores_the_order_a_host_lists_elements_in():
+    """One host lists the elements in view first and the other keeps page
+    order, so the order of the list alone never reads as a change."""
+    reordered = {**PAGE, "elements": list(reversed(PAGE["elements"]))}
+    assert signature(model(PAGE)) == signature(model(reordered))
+    renamed = {**PAGE, "elements": [{**PAGE["elements"][0], "name": "Find"}, *PAGE["elements"][1:]]}
+    assert signature(model(PAGE)) != signature(model(renamed))
 
 
 def test_signature_changes_with_values():
@@ -710,6 +741,19 @@ async def test_act_takes_one_step_and_returns_the_page():
     assert ("POST", "/sessions/t-1/action", {"action": "click", "element": 2, "include_page": True}) == host.calls[-1][:3]
 
 
+async def test_act_says_when_the_step_changed_nothing():
+    host = FakeHost()
+    host.changed = False
+    session = make_session(host)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 2}})
+    assert result.content.startswith("Done: click [2]. The page did not change.\n\n")
+    # Changed, or a host that can't tell: nothing more to say.
+    for changed in (True, None):
+        host.changed = changed
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 2}})
+        assert result.content.startswith("Done: click [2].\n\n")
+
+
 async def test_act_reads_coordinates_as_screenshot_pixels(elicit_answers):
     host = FakeHost()
     session = make_session(host, elicitor=FakeElicitor())
@@ -729,7 +773,7 @@ async def test_on_the_desktop_act_drags_between_an_element_and_a_point(elicit_an
     step = {"action": "drag", "from": {"element": 5}, "to": {"x": 600, "y": 300}}
     result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
     assert result.content.startswith("Done: drag [5] to (600, 300).")
-    assert host.calls[-1][2] == {**step, "coords": "screenshot", "include_page": True}
+    assert host.calls[-1][2] == {**step, "coords": "screenshot", "include_page": True, "into_frame": False}
     # Element to element: nothing to scale, and nothing to approve.
     await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "drag", "from": {"element": 5}, "to": {"element": 6}}})
     assert "coords" not in host.calls[-1][2]
@@ -765,15 +809,22 @@ async def test_act_refuses_an_element_that_changed_since_the_model_read_it():
 
 
 async def test_typing_into_a_secret_field_is_refused():
-    host = FakeHost(pages=[CHECKOUT])
+    """A type, a key or a select into a field the host marks secret
+    (value_hidden: a password, a one-time code, a cc- autocomplete field or a
+    card-named one such as name=card_number) is refused before anything is
+    sent, as both hosts refuse it with 403 password_field."""
+    expiry = {"id": 11, "role": "combobox", "name": "Expiry month", "value_hidden": True}
+    host = FakeHost(pages=[{**CHECKOUT, "elements": [*CHECKOUT["elements"], expiry]}])
     session = make_session(host)
     for step in (
         {"action": "type", "element": 6, "text": "hunter2"},
         {"action": "type", "element": 8, "text": "4111 1111 1111 1111"},
         {"action": "press", "key": "h", "element": 6},
+        {"action": "select", "element": 11, "value": "04"},
     ):
         result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
         assert result.ok is False and result.reason == "browser_secret_field", step
+        assert f"element [{step['element']}] is a secret field" in result.content, step
         assert "hand_to_user" in result.content
     assert host.posted("/action") == []
 
@@ -792,6 +843,53 @@ async def test_a_hosts_password_field_refusal_reads_as_a_secret_field():
     result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 1, "text": "x"}})
     assert result.ok is False and result.reason == "browser_secret_field"
     assert "MindsHub" not in result.content
+
+
+async def test_the_prompt_the_skill_and_each_secret_field_refusal_name_a_payment_card_and_not_any_card():
+    """Both hosts take a field for a card's secret only when it names a
+    payment card: a field whose name, id, aria-label or placeholder names a
+    gift, loyalty or library card's number is an ordinary field, read and
+    typed into for the person (page.json's card_field_exempt). A field named
+    cardNumber is still a payment card's, even where its label or aria-label
+    says gift card, so the hosts refuse a type into it. The prompt and the
+    skill say such a field is usually ordinary, and to hand it over when the
+    browser refuses it. Both refusals of a type into a secret field say the
+    browser took the card number for a payment card's, not that it is one."""
+    from pathlib import Path
+
+    prompt = " ".join(browser_tool.BROWSER_TOOL_PROMPT.split())
+    skill = " ".join((Path(browser_tool.__file__).parents[1] / "memory" / "builtin_skills" / "browser" / "SKILL.md").read_text().split())
+    for text in (prompt, skill):
+        assert "(a gift, loyalty or library card's number is an ordinary field)" not in text
+        assert (
+            "A field for a gift, loyalty or library card's number is usually an ordinary field; if the browser "
+            "refuses it as a secret field, hand it over"
+        ) in text
+    assert (
+        "Never ask for, read out, or type a password, one-time code, or payment card number; the tool refuses to "
+        "type into a secret field."
+    ) in prompt
+    assert (
+        "Sign-ins, CAPTCHAs, two-factor codes, payment card details and anything else secret are the user's to do."
+    ) in skill
+
+    host = FakeHost(pages=[CHECKOUT])
+    session = make_session(host)
+    ours = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 8, "text": "4111"}})
+    original = host.handler
+
+    def handler(request):
+        if request.url.path.endswith("/action"):
+            return httpx.Response(403, json={"error": "password_field", "message": "element 1 is a secret field"})
+        return original(request)
+
+    answer_with(session, handler)
+    theirs = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 9, "text": "x"}})
+    for result in (ours, theirs):
+        assert result.reason == "browser_secret_field"
+        content = " ".join(result.content.split())
+        assert "a payment card number)" not in content
+        assert "a secret field (a password, a code, or a card number the browser takes for a payment card's)" in content
 
 
 async def test_on_the_desktop_a_commit_click_waits_for_approve(elicit_answers):
@@ -819,7 +917,7 @@ async def test_on_the_desktop_an_approved_commit_posts_once(elicit_answers):
     elicit_answers.answers.append("approve")
     result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 7}})
     assert result.ok is True and result.content.startswith("Done: click [7].")
-    assert host.posted("/action") == [{"action": "click", "element": 7, "include_page": True}]
+    assert host.posted("/action") == [{"action": "click", "element": 7, "include_page": True, "into_frame": False}]
 
 
 async def test_on_the_desktop_a_commit_step_with_no_one_to_ask_is_refused():
@@ -868,7 +966,10 @@ async def test_on_the_desktop_sending_text_in_a_message_box_waits_for_approve(el
     assert plain.ok is True and not plain.reason
 
 
-async def test_on_the_desktop_position_steps_ask_once_per_page(elicit_answers):
+async def test_on_the_desktop_one_position_card_covers_the_page_and_carries_the_approve_line_the_app_answers(elicit_answers):
+    """The desktop app approves the card for clicks by position by itself,
+    by its Approve line, so a click by position runs at once there too. The
+    card covers the page until it goes to another address."""
     host = FakeHost(pages=[PAGE])
     session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
     elicit_answers.answers += ["approve", "approve"]
@@ -877,11 +978,719 @@ async def test_on_the_desktop_position_steps_ask_once_per_page(elicit_answers):
     await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 30, "y": 40}})
     assert len(elicit_answers.requests) == 1
     assert "Approve clicks by position on this page?" in elicit_answers.requests[0].prompt
+    assert [o.detail for o in elicit_answers.requests[0].options][0] == "Allow clicks by position on this page"
     # Another address: ask again.
     host.pages = [{**PAGE, "url": "https://shop.example/other"}]
     await browser_tool.handle_browser(session, click)
     assert len(elicit_answers.requests) == 2
     assert len(host.posted("/action")) == 3
+
+
+def test_every_line_on_approving_clicks_by_position_says_a_click_into_a_frame_asks_each_time():
+    """The position card, the module's account of what waits for the user,
+    the README, the prompt and the skill all say that a click by position
+    runs at once and one that may land in a frame waits for a one-step
+    Approve on both hosts. None says clicks by position ask once per page:
+    the desktop app approves that card by itself."""
+    from pathlib import Path
+
+    card = browser_tool._card_prompt(hold="position", url=PAGE["url"], step="click at (10, 20)")
+    assert "A click or drag into an embedded frame still asks each time." in card
+    module = " ".join(browser_tool.__doc__.split())
+    readme = " ".join((Path(__file__).parents[1] / "README.md").read_text().split())
+    for text in (module, readme):
+        assert "ask once per page" not in text and "asks once per page" not in text
+    assert "A click or drag by position runs at once: the web's browser holds one only on a commit control" in module
+    assert "the desktop app approves by itself the card the tool shows for the page" in module
+    assert "One that may land in a frame waits for a one-step Approve on both" in module
+    assert (
+        "a click by position runs at once, except that a click or drag by position that may land in a frame "
+        "(an embedded form or widget) waits for a one-step Approve on both hosts."
+    ) in readme
+    assert "Controls inside a frame have no number" in browser_tool.BROWSER_TOOL_PROMPT
+    assert "each such step waits for the user's Approve" in browser_tool.BROWSER_TOOL_PROMPT
+    skill = (Path(browser_tool.__file__).parents[1] / "memory" / "builtin_skills" / "browser" / "SKILL.md").read_text()
+    assert "each such click waits for the user's Approve" in skill
+
+
+def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_frame():
+    """A frame's fields have no number, so the model clicks one by pixel and
+    types into it with a focused type: one step, with no card unless it
+    submits, on both hosts. Keys pressed one at a time go wherever the focus
+    is, and each host holds a different set of them: the desktop app's
+    browser, which can't see the focus, holds every key that types, deletes,
+    presses or may pick a commit option, or may pick in a list it cut short;
+    the web's browser reads the focus, in a frame too, and holds one only
+    where it may commit something: a key that types or deletes into a
+    frame's text field runs at once there, Enter and Space wait, and so does
+    a chord with Tab before a key that picks or edits (Tab+Tab, Tab+Escape
+    and Tab+Shift run at once there). The text says that, not that typing
+    goes key by key or that the arrows always run at once."""
+    from pathlib import Path
+
+    prompt = " ".join(browser_tool.BROWSER_TOOL_PROMPT.split())
+    skill = " ".join((Path(browser_tool.__file__).parents[1] / "memory" / "builtin_skills" / "browser" / "SKILL.md").read_text().split())
+    for text in (prompt, skill):
+        assert "hand the browser over rather than typing" not in text
+        assert "A secret, card or sign-in field there is the user's" not in text
+        assert "type into it with press steps" not in text and "one key each" not in text
+        assert "Tab, the arrows and other keys run at once" not in text
+        assert "any radio in a list it cut short" not in text
+        assert "a chord with Tab before another key" not in text
+        for sentence in (
+            'To fill an ordinary field inside a frame, click it by pixel (one Approve), then type into it with '
+            '{"action":"type","focused":true,"text":"…"}, which types at the caret of the field that has the focus, '
+            'at once and with no card; with "submit":true it also presses Enter, and waits for the user\'s Approve.',
+            "The browser refuses it when the focus isn't on an ordinary text field.",
+            "A press step with no element goes wherever the focus is: Tab runs at once.",
+            "In the desktop app's browser, Enter, Space and a key that types or deletes each wait for the user's "
+            "Approve, and so does an arrow, Home, End, PageUp or PageDown while the page or a frame lists a radio or "
+            "select option that commits something, or the browser cut a list short, or a frame wasn't read, or the "
+            "page lists a secret select; the web's browser reads the focused "
+            "control, even in a frame, and holds such a key only where it may commit something.",
+            "In the web's browser a key that types or deletes into a frame's text field runs at once, Enter and Space "
+            "there wait, and so does a chord with Tab before a key that picks or edits (Tab+ArrowDown, Tab+a), which "
+            "the desktop app's browser refuses.",
+            "The browser refuses keys and typing into a secret field there, as anywhere, and a sign-in, two-factor "
+            "code or payment in a frame is the user's to do",
+        ):
+            assert sentence in text, sentence
+    assert "hand_to_user is only for those." in prompt
+
+
+@pytest.mark.parametrize("config", [
+    BrowserConfig(base_url=BASE, profile=SID), BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"),
+], ids=["web", "desktop"])
+async def test_a_focused_type_fills_a_frames_field_in_one_step_and_waits_only_to_submit(elicit_answers, config):
+    """After a click by pixel puts the focus in a frame's field, one type
+    step with focused true fills it with no card on either host. The host
+    checks the focus is an ordinary text field. With submit it presses Enter,
+    which may send the form, so it waits for the user's Approve: on the
+    desktop the tool's card comes first, on the web the browser holds it."""
+    host = FakeHost(pages=[FRAMED])
+    session = make_session(host, elicitor=FakeElicitor(), config=config)
+    typed = await browser_tool.handle_browser(session, {
+        "action": "act", "step": {"action": "type", "focused": True, "text": "ada@example.test"},
+    })
+    assert typed.ok is True and typed.content.startswith("Done: type 'ada@example.test' into the focused field.")
+    sent = {"action": "type", "focused": True, "text": "ada@example.test", "submit": False, "include_page": True}
+    assert host.posted("/action") == [{**sent, "into_frame": False} if config.in_app else sent]
+    assert elicit_answers.requests == []
+    assert session._browser_state.steps == ["type into the focused field"]
+
+    for step in (
+        {"action": "type", "focused": True, "text": "ada@example.test", "submit": True},
+        {"action": "type", "focused": True, "text": "ada@example.test\n"},
+    ):
+        elicit_answers.answers.append("cancel")
+        before = len(elicit_answers.requests)
+        held = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert held.reason == "browser_step_not_approved", step
+        assert len(elicit_answers.requests) == before + 1, step
+    assert 'type "ada@example.test" into the focused field and press Enter' in elicit_answers.prompts()[0]
+    assert len(host.posted("/action")) == (1 if config.in_app else 3)
+
+
+def test_a_focused_type_is_the_one_type_step_without_an_element():
+    """The step parser sends a focused type in the one shape both hosts take
+    (submit always said), and refuses any other type with no element, so
+    the model learns the shape from the tool, not from a host's 400."""
+    body = browser_tool._step_body({"step": {"action": "type", "focused": True, "text": "a b"}})
+    assert body == {"action": "type", "focused": True, "text": "a b", "submit": False, "include_page": True}
+    assert browser_tool._step_body({"step": {"action": "type", "focused": True, "text": "x", "submit": True}})["submit"] is True
+    for bad in (
+        {"action": "type", "text": "x"},
+        {"action": "type", "focused": True, "element": 4, "text": "x"},
+        {"action": "type", "focused": True, "x": 10, "y": 20, "text": "x"},
+        {"action": "type", "focused": "true", "text": "x"},
+        {"action": "type", "focused": False, "text": "x"},
+        {"action": "type", "focused": True},
+        {"action": "type", "focused": True, "text": 5},
+        {"action": "type", "focused": True, "text": "x", "submit": "yes"},
+        {"action": "type", "focused": True, "text": "x", "clear": False},
+        {"action": "press", "focused": True, "key": "a"},
+    ):
+        with pytest.raises(ValueError):
+            browser_tool._step_body({"step": bad})
+
+
+async def test_act_says_how_to_type_without_an_element():
+    host = FakeHost()
+    session = make_session(host)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "text": "x"}})
+    assert result.ok is False and result.reason == "browser_bad_input"
+    assert '"focused": true' in result.content
+    assert host.posted("/action") == []
+
+
+@pytest.mark.parametrize(("status", "code", "says"), [
+    (409, "not_a_text_field", "Click the field by pixel first"),
+    (409, "focus_unreadable", "couldn't tell what has the focus"),
+    (403, "password_field", "secret field"),
+])
+async def test_a_hosts_refusal_of_a_focused_type_says_what_to_do(status, code, says):
+    host = FakeHost(pages=[FRAMED])
+    session = make_session(host)
+    original = host.handler
+
+    def handler(request):
+        if request.url.path.endswith("/action"):
+            return httpx.Response(status, json={"error": code, "message": "refused"})
+        return original(request)
+
+    answer_with(session, handler)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "focused": True, "text": "x"}})
+    assert result.ok is False and says in result.content, code
+    assert "MindsHub" not in result.content
+
+
+#: A page with one read frame, boxed in screenshot pixels.
+FRAMED = {
+    **PAGE,
+    "frames": [{
+        "url": "https://forms.example.test/newsletter", "read": True,
+        "box": {"x": 112, "y": 300, "width": 560, "height": 180},
+        "elements": [{"role": "button", "name": "Subscribe"}], "text": "Get the weekly digest.",
+    }],
+}
+
+
+async def test_on_the_desktop_a_click_by_position_inside_a_frame_gets_the_commit_card_after_a_position_approval(elicit_answers):
+    """The desktop's browser holds nothing and can't name what a frame's
+    controls do, so a click into a frame gets the one-step card every time,
+    even after clicks by position were approved on the page."""
+    host = FakeHost(pages=[FRAMED])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    elicit_answers.answers += ["approve"] * 3
+    outside = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 10, "y": 10}})
+    assert outside.content.startswith("Done: click at (10, 10).")
+    for _ in range(2):
+        inside = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 200, "y": 350}})
+        assert inside.content.startswith("Done: click at (200, 350).")
+    prompts = elicit_answers.prompts()
+    assert len(prompts) == 3 and "Approve clicks by position on this page?" in prompts[0]
+    assert all(p.startswith("**Approve this browser step?**") for p in prompts[1:])
+    assert [o.detail for o in elicit_answers.requests[1].options][0] == "Take this step once"
+
+    # A frame the host couldn't place may be under any point.
+    host.pages = [{**FRAMED, "frames": [{"url": "about:srcdoc", "read": False, "box": None}]}]
+    unplaced = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 10, "y": 10}})
+    assert unplaced.reason == "browser_step_not_approved"
+    assert elicit_answers.prompts()[3].startswith("**Approve this browser step?**")
+    # Nor can a point in page pixels be held against boxes in screenshot pixels.
+    host.pages = [FRAMED]
+    in_page_px = await browser_tool.handle_browser(
+        session, {"action": "act", "step": {"action": "click", "x": 20, "y": 20, "coords": "page"}},
+    )
+    assert in_page_px.reason == "browser_step_not_approved"
+    assert elicit_answers.prompts()[4].startswith("**Approve this browser step?**")
+    assert len(host.posted("/action")) == 3
+
+
+async def test_on_the_desktop_a_step_says_into_frame_only_after_the_one_step_frame_card(elicit_answers):
+    """The desktop's browser refuses a press, or a drag's release, that lands
+    in a frame unless the step says the person approved it as one step that
+    may land there, so a frame that slides under a point after the read
+    gets no press under a position approval. into_frame is true only after
+    that card; it is false under a position approval and with no card at
+    all. The web's browser holds its own steps and gets no into_frame."""
+    host = FakeHost(pages=[FRAMED])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    elicit_answers.answers += ["approve"] * 3
+    for step in (
+        {"action": "click", "element": 2},
+        {"action": "click", "x": 10, "y": 10},
+        {"action": "click", "x": 30, "y": 40},
+        {"action": "click", "x": 200, "y": 350},
+        {"action": "drag", "from": {"x": 10, "y": 10}, "to": {"x": 200, "y": 350}},
+    ):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.content.startswith("Done:"), step
+    prompts = elicit_answers.prompts()
+    assert "Approve clicks by position on this page?" in prompts[0]
+    assert all(p.startswith("**Approve this browser step?**") for p in prompts[1:]) and len(prompts) == 3
+    assert [body["into_frame"] for body in host.posted("/action")] == [False, False, False, True, True]
+    assert host.posted("/action")[3] == {
+        "action": "click", "x": 200, "y": 350, "include_page": True, "coords": "screenshot", "into_frame": True,
+    }
+
+    web = FakeHost(pages=[FRAMED])
+    session = make_session(web, elicitor=FakeElicitor())
+    elicit_answers.answers.append("approve")
+    await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 200, "y": 350}})
+    assert len(web.posted("/action")) == 2 and all("into_frame" not in body for body in web.posted("/action"))
+
+
+async def test_on_the_desktop_a_frame_that_changes_under_the_point_while_the_card_waits_is_asked_about_again(elicit_answers):
+    """The one-step card for a point that may land in a frame approves the
+    frame the person saw there, and the desktop binds the step to the frame
+    under the point only when the step starts. So after the Approve the tool
+    reads the page again, and asks again on that read when the frame under
+    the point has another address or another box, as it refuses an element
+    number that names another element now. A frame that changes again after
+    the second card refuses the step. Text that changes inside the same
+    frame (a clock) is no other frame."""
+    desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
+    frame = FRAMED["frames"][0]
+    swapped = {**FRAMED, "frames": [{**frame, "url": "https://ads.example.test/slot"}]}
+    moved = {**FRAMED, "frames": [{**frame, "box": {**frame["box"], "y": 320}}]}
+    ticking = {**FRAMED, "frames": [{**frame, "text": "Get the weekly digest. 12:01"}]}
+    click = {"action": "act", "step": {"action": "click", "x": 200, "y": 350}}
+    sent = {"action": "click", "x": 200, "y": 350, "include_page": True, "coords": "screenshot", "into_frame": True}
+
+    host = FakeHost(pages=[FRAMED, swapped, swapped])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, click)
+    assert result.content.startswith("Done: click at (200, 350).")
+    prompts = elicit_answers.prompts()
+    assert len(prompts) == 2 and all(p.startswith("**Approve this browser step?**") for p in prompts)
+    assert "The frame under this point changed after your Approve" not in prompts[0]
+    assert "The frame under this point changed after your Approve, so this asks again." in prompts[1]
+    assert host.posted("/action") == [sent]
+
+    host = FakeHost(pages=[FRAMED, moved, FRAMED])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, click)
+    assert result.ok is False and result.reason == "browser_stale_element"
+    assert "changed again" in result.content and "Nothing was done." in result.content
+    assert len(elicit_answers.prompts()) == 4 and host.posted("/action") == []
+
+    host = FakeHost(pages=[FRAMED, ticking])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(session, click)
+    assert result.content.startswith("Done: click at (200, 350).")
+    assert len(elicit_answers.prompts()) == 5 and host.posted("/action") == [sent]
+
+
+async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_a_frame_changes_while_its_card_waits(elicit_answers):
+    """A press with no element and a focused type go wherever the focus is
+    when the step starts, and the desktop binds an approved step to nothing
+    the card showed. While the card waits, a page or a frame can move the
+    focus into another frame, or navigate the focused frame, so the
+    approved Enter would land on a control the card never showed. So after
+    the Approve the tool reads the page again and refuses the step when a
+    frame has another address, size or place on the page, or a frame came
+    or went, as it refuses an element number that names another element
+    now. Text that changes inside the same frame (a clock) changes no frame,
+    and the step runs.
+
+    The boxes are in screenshot pixels and the list goes on-screen first,
+    so the person scrolling the page to look at what the card asks about
+    moves every box and may reorder the list. A frame that moved with the
+    scroll, at the screenshot's scale and a pixel of rounding apart, or
+    stayed where it was on screen (a chat widget fixed to the view), is in
+    its place, and the step runs. That holds when a sticky ad shares its
+    address and width with ads that scroll, and when a scroll puts an ad
+    exactly where another ad of its address was."""
+    desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
+    frame = FRAMED["frames"][0]
+    chat = {"url": "https://chat.example.test/widget", "read": False, "box": {"x": 700, "y": 600, "width": 300, "height": 180}}
+    video = {"url": "https://video.example.test/embed", "read": False, "box": {"x": 112, "y": 900, "width": 560, "height": 315}}
+    ad = {"url": "https://ads.example.test/slot", "read": False, "box": {"x": 20, "y": 100, "width": 300, "height": 250}}
+
+    def at(scroll_y: int, *frames: dict) -> dict:
+        return {**FRAMED, "scroll": {"y": scroll_y, "height": 2400, "viewport": 800}, "frames": list(frames)}
+
+    def moved(placed: dict, **box: int) -> dict:
+        return {**placed, "box": {**placed["box"], **box}}
+
+    changed = {
+        "a frame with another address": (FRAMED, {**FRAMED, "frames": [{**frame, "url": "https://ads.example.test/slot"}]}),
+        "a frame with another box": (FRAMED, {**FRAMED, "frames": [moved(frame, y=320)]}),
+        "a frame two pixels lower with no scroll": (at(120, frame), at(120, moved(frame, y=302))),
+        "a frame that came": (FRAMED, {**FRAMED, "frames": [frame, {"url": "https://forms.example.test/pay", "read": False, "box": None}]}),
+        "a frame that went": (FRAMED, {**FRAMED, "frames": []}),
+        "a frame that moved on the page while it scrolled": (
+            at(0, frame, video), at(120, moved(frame, y=180), moved(video, y=840)),
+        ),
+        "a frame that moved farther than the scroll": (at(0, frame), at(120, moved(frame, y=100))),
+        "a frame that moved against the scroll": (at(0, frame), at(120, moved(frame, y=420))),
+        "a frame that grew while it scrolled": (at(0, frame), at(120, moved(frame, y=180, height=240))),
+        "a frame that moved sideways while it scrolled": (at(0, frame), at(120, moved(frame, y=180, x=140))),
+        "a frame with another address after a scroll": (
+            at(0, frame), at(120, {**moved(frame, y=180), "url": "https://ads.example.test/slot"}),
+        ),
+        "a frame that came after a scroll": (at(0, frame), at(120, moved(frame, y=180), chat)),
+        "an ad that moved on the page beside a sticky ad at its address": (
+            at(0, ad, moved(ad, y=600), moved(ad, y=900)), at(500, moved(ad, y=-400), moved(ad, y=600), moved(ad, y=600)),
+        ),
+    }
+    unchanged = {
+        "text that changed inside the frame": (FRAMED, {**FRAMED, "frames": [{**frame, "text": "Get the weekly digest. 12:01"}]}),
+        "a scroll": (at(0, frame), at(120, moved(frame, y=180))),
+        "a scroll that put another frame on screen first": (
+            at(0, frame, video), at(600, moved(video, y=300), moved(frame, y=-300)),
+        ),
+        "a scroll on a wide view's smaller screenshot": (at(0, frame, video), at(200, moved(frame, y=140), moved(video, y=740))),
+        "a scroll that rounds a frame a pixel apart": (
+            at(0, frame, video), at(120, moved(frame, y=179, height=181), moved(video, y=780)),
+        ),
+        "a scroll beside a frame fixed to the view": (at(0, frame, chat), at(120, moved(frame, y=180), chat)),
+        "a scroll beside a sticky ad at the address of ads that scroll": (
+            at(0, ad, moved(ad, y=600), moved(ad, y=900)), at(500, moved(ad, y=-400), moved(ad, y=600), moved(ad, y=400)),
+        ),
+        "a scroll that puts an ad where another ad at its address was": (at(0, ad, moved(ad, y=600)), at(500, moved(ad, y=-400), ad)),
+    }
+    for step in ({"action": "press", "key": "Enter"}, {"action": "type", "focused": True, "text": "ada@example.test", "submit": True}):
+        for what, (seen, after) in changed.items():
+            host = FakeHost(pages=[seen, after])
+            session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+            elicit_answers.answers.append("approve")
+            before = len(elicit_answers.requests)
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is False and result.reason == "browser_stale_element", (step, what)
+            assert "so the focus may now be on a control the card didn't show. Nothing was done." in result.content, (step, what)
+            assert len(elicit_answers.requests) == before + 1, (step, what)
+            assert host.posted("/action") == [], (step, what)
+        for what, (seen, after) in unchanged.items():
+            host = FakeHost(pages=[seen, after])
+            session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+            elicit_answers.answers.append("approve")
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is True and result.content.startswith("Done:"), (step, what, result.content)
+            assert host.posted("/action") == [{**browser_tool._step_body({"step": step}), "into_frame": False}], (step, what)
+
+
+async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place_in_the_document_when_both_reads_carry_it(elicit_answers):
+    """Both hosts send each placed frame's at: the frame element's top-left
+    in its document, in whole CSS pixels, which no scroll moves, the page's
+    or an inner column's. When every placed frame of both reads carries it,
+    the tool compares the frames by address, at and size, a pixel of
+    rounding apart, so the person scrolling an inner column while the card
+    waits, which moves a frame on the screenshot while the page's scroll
+    stays put, runs the step, on the desktop's shrunk and outward-rounded
+    screenshot and on the pod's alike. A frame fixed to the view (a chat
+    widget) keeps its box and its at, inside a scrolling column too, since
+    only the scrolls of its containing-block chain count. A frame a sticky
+    element holds stuck to the view (a sticky ad) keeps its box while its at
+    moves down the page by the page's scroll, and is in its place too. A
+    frame that moved within the column's content, even by exactly the
+    column's scroll so its box stayed put, or came, went, or changed
+    address or size, refuses the step. A read without at falls back to
+    comparing boxes against the page's scroll, which reads an inner
+    column's scroll as a frame that moved."""
+    desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
+    # The desktop's screenshot at 0.8 of the view, edges rounded outward.
+    form = {**FRAMED["frames"][0], "box": {"x": 112, "y": 300, "width": 448, "height": 144}, "at": {"x": 140, "y": 375}}
+    video = {"url": "https://video.example.test/embed", "read": False, "box": {"x": 112, "y": 900, "width": 560, "height": 315}, "at": {"x": 140, "y": 1125}}
+    chat = {"url": "https://chat.example.test/widget", "read": False, "box": {"x": 700, "y": 600, "width": 300, "height": 180}, "at": {"x": 875, "y": 750}}
+    ad = {"url": "https://ads.example.test/slot", "read": False, "box": {"x": 20, "y": 100, "width": 300, "height": 250}, "at": {"x": 25, "y": 125}}
+    # The pod's screenshot at the view's own size, edges rounded to the nearest pixel.
+    pod_form = {**form, "box": {"x": 140, "y": 375, "width": 560, "height": 180}}
+
+    def at(scroll_y: int, *frames: dict) -> dict:
+        return {**FRAMED, "scroll": {"y": scroll_y, "height": 2400, "viewport": 800}, "frames": list(frames)}
+
+    def moved(placed: dict, *, on_page: dict | None = None, **box: int) -> dict:
+        return {**placed, "box": {**placed["box"], **box}, "at": {**placed["at"], **(on_page or {})}}
+
+    def bare(placed: dict) -> dict:
+        return {key: value for key, value in placed.items() if key != "at"}
+
+    changed = {
+        "a frame that moved down the column's content": (at(0, form), at(0, moved(form, y=348, on_page={"y": 435}))),
+        "a frame that moved down the column's content by the column's scroll": (
+            at(0, form), at(0, moved(form, on_page={"y": 525})),
+        ),
+        "a frame that moved sideways in the column while it scrolled": (
+            at(0, form), at(0, moved(form, x=144, y=180, on_page={"x": 180})),
+        ),
+        "a frame two pixels down the page": (at(0, form), at(0, moved(form, y=302, on_page={"y": 377}))),
+        "a frame with another address after the column scrolled": (
+            at(0, form), at(0, {**moved(form, y=180), "url": "https://ads.example.test/slot"}),
+        ),
+        "a frame that grew while the column scrolled": (at(0, form), at(0, moved(form, y=180, height=200))),
+        "a frame that came while the column scrolled": (at(0, form), at(0, moved(form, y=180), chat)),
+        "a frame that went while the column scrolled": (at(0, form, chat), at(0, chat)),
+        "a frame fixed to the view that moved on the screen": (
+            at(0, form, chat), at(200, moved(form, y=140), moved(chat, y=560, on_page={"y": 700})),
+        ),
+        "a frame whose at moved by the scroll while its box moved on the screen": (
+            at(0, form, chat), at(200, moved(form, y=140), moved(chat, y=560, on_page={"y": 950})),
+        ),
+        "an inner column's scroll on reads that carry no at": (at(0, bare(form)), at(0, bare(moved(form, y=180)))),
+        "an inner column's scroll on a read that carries no at": (at(0, form), at(0, bare(moved(form, y=180)))),
+    }
+    unchanged = {
+        "an inner column's scroll on the desktop's screenshot": (at(0, form), at(0, moved(form, y=180))),
+        "an inner column's scroll that rounds a frame a pixel apart": (at(0, form), at(0, moved(form, y=179, height=145))),
+        "an inner column's scroll that rounds at a pixel apart": (at(0, form), at(0, moved(form, y=180, on_page={"y": 376}))),
+        "an inner column's scroll on the pod's screenshot": (at(0, pod_form), at(0, moved(pod_form, y=225))),
+        "the page's scroll and an inner column's together": (
+            at(0, form, video), at(200, moved(form, y=20), moved(video, y=740)),
+        ),
+        "the page's scroll beside a frame fixed to the view": (at(0, form, chat), at(200, moved(form, y=140), chat)),
+        "an inner column's scroll beside a frame fixed to the view in that column": (
+            at(0, form, chat), at(0, moved(form, y=180), chat),
+        ),
+        "the page's scroll beside a frame a sticky element holds stuck to the view": (
+            at(0, form, chat), at(200, moved(form, y=140), moved(chat, on_page={"y": 950})),
+        ),
+        "the page's scroll beside a sticky ad at the address of ads that scroll": (
+            at(0, ad, moved(ad, y=600, on_page={"y": 750}), moved(ad, y=900, on_page={"y": 1125})),
+            at(625, moved(ad, on_page={"y": 750}), moved(ad, on_page={"y": 750}), moved(ad, y=400, on_page={"y": 1125})),
+        ),
+        "the page's scroll that puts an ad where another ad at its address was": (
+            at(0, ad, moved(ad, y=600, on_page={"y": 750})), at(625, moved(ad, on_page={"y": 750}), moved(ad, y=-400)),
+        ),
+        "the page's scroll on a read that carries no at": (at(0, form), at(120, bare(moved(form, y=204)))),
+    }
+    for step in ({"action": "press", "key": "Enter"}, {"action": "type", "focused": True, "text": "ada@example.test", "submit": True}):
+        for what, (seen, after) in changed.items():
+            host = FakeHost(pages=[seen, after])
+            session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+            elicit_answers.answers.append("approve")
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is False and result.reason == "browser_stale_element", (step, what)
+            assert "The page's frames changed while the card waited" in result.content, (step, what)
+            assert host.posted("/action") == [], (step, what)
+        for what, (seen, after) in unchanged.items():
+            host = FakeHost(pages=[seen, after])
+            session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+            elicit_answers.answers.append("approve")
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is True and result.content.startswith("Done:"), (step, what, result.content)
+            assert host.posted("/action") == [{**browser_tool._step_body({"step": step}), "into_frame": False}], (step, what)
+
+
+async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_the_focus_moves_while_its_card_waits(elicit_answers):
+    """The desktop's page read names the focused node (``focus``, an opaque
+    token, the deepest node through the frames it can read, and inside a
+    frame it can't read, that frame's element), and leaves it out only when
+    nothing has the focus or it can't read the page at all. A page whose own
+    UI moves the focus while the card waits, as a confirm dialog that takes
+    it on its Delete button, or a page that moves it from one payment or
+    other site's frame to another, moves no frame, so after the Approve the
+    tool compares the token too: another token, or one present at one read
+    and absent at the other, refuses a press with no element or a focused
+    type. The same token, a scroll included, runs the step, and so do two
+    reads that both leave it out, as the web's browser does, which leave
+    nothing to compare. A step that names its element goes to that element,
+    whatever had the focus."""
+    desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
+    form = {**FRAMED, "scroll": {"y": 0, "height": 2400, "viewport": 800}, "focus": "4F1A:31"}
+    frame = FRAMED["frames"][0]
+    bare = {key: value for key, value in form.items() if key != "focus"}
+    unread = [
+        {"url": "https://js.stripe.com/v3/elements-inner-card", "read": False, "box": {"x": 112, "y": 520, "width": 560, "height": 44}},
+        {"url": "https://js.stripe.com/v3/elements-inner-cvc", "read": False, "box": {"x": 112, "y": 580, "width": 260, "height": 44}},
+    ]
+    in_card = {**form, "frames": [frame, *unread], "focus": "4F1A:40"}
+    changed = {
+        "another node": (form, {**form, "focus": "4F1A:58"}),
+        "a node in another frame": (form, {**form, "focus": "9C02:7"}),
+        "a frame the host can't read to another": (in_card, {**in_card, "focus": "4F1A:44"}),
+        "a focus that came": (bare, form),
+        "a focus that went": (form, bare),
+    }
+    unchanged = {
+        "the same node": (form, {**form, "frames": [{**frame, "text": "Get the weekly digest. 12:01"}]}),
+        "the same node after a scroll": (
+            form, {**form, "scroll": {**form["scroll"], "y": 120}, "frames": [{**frame, "box": {**frame["box"], "y": 180}}]},
+        ),
+        "no token on either read": (FRAMED, FRAMED),
+    }
+    for step in ({"action": "press", "key": "Enter"}, {"action": "type", "focused": True, "text": "ada@example.test", "submit": True}):
+        for what, (seen, after) in changed.items():
+            host = FakeHost(pages=[seen, after])
+            session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+            elicit_answers.answers.append("approve")
+            before = len(elicit_answers.requests)
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is False and result.reason == "browser_stale_element", (step, what)
+            assert (
+                "The focus moved while the card waited, so it may now be on a control the card didn't show. "
+                "Nothing was done."
+            ) in result.content, (step, what)
+            assert len(elicit_answers.requests) == before + 1, (step, what)
+            assert host.posted("/action") == [], (step, what)
+        for what, (seen, after) in unchanged.items():
+            host = FakeHost(pages=[seen, after])
+            session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+            elicit_answers.answers.append("approve")
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is True and result.content.startswith("Done:"), (step, what, result.content)
+            assert host.posted("/action") == [{**browser_tool._step_body({"step": step}), "into_frame": False}], (step, what)
+
+    named = {**CHECKOUT, "focus": "4F1A:31"}
+    host = FakeHost(pages=[named, {**named, "focus": "4F1A:58"}])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 7}})
+    assert result.ok is True and result.content.startswith("Done:")
+    assert host.posted("/action") == [{"action": "click", "element": 7, "include_page": True, "into_frame": False}]
+
+
+async def test_on_the_desktop_a_page_that_moves_on_while_any_card_waits_is_asked_about_again_or_refused(elicit_answers):
+    """The desktop's browser binds an approved step to nothing the card
+    showed: it runs the step on whatever page is there when the step starts,
+    and keeps an element's number while the element lives. So after any
+    Approve there the tool reads the page again. A page that went to another
+    address while the card waited (the person opened another order, or the
+    site moved on by itself) is asked about again on the new read, even when
+    it embeds the same frame at the same box or names the same control; an
+    address that changes again after the second card refuses the step. An
+    element the step names that the page relabeled or removed refuses it, as
+    act refuses one before the card. The web's browser binds its own
+    approval to the page's address and document, and gets no second read."""
+    desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
+    again = "The page went to another address after your Approve, so this asks again."
+
+    other = {**FRAMED, "url": "https://shop.example/orders/2/pay", "title": "Pay order 2"}
+    host = FakeHost(pages=[FRAMED, other, other])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 200, "y": 350}})
+    assert result.content.startswith("Done: click at (200, 350).")
+    prompts = elicit_answers.prompts()
+    assert len(prompts) == 2 and all(p.startswith("**Approve this browser step?**") for p in prompts)
+    assert again not in prompts[0] and again in prompts[1]
+    assert "https://shop.example/orders/2/pay\n" in prompts[1]
+    assert host.posted("/action") == [
+        {"action": "click", "x": 200, "y": 350, "include_page": True, "coords": "screenshot", "into_frame": True},
+    ]
+
+    order = {**CHECKOUT, "url": "https://shop.example/orders/1/checkout"}
+    next_order = {**CHECKOUT, "url": "https://shop.example/orders/2/checkout"}
+    place = {"action": "act", "step": {"action": "click", "element": 7}}
+    host = FakeHost(pages=[order, next_order, next_order])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, place)
+    assert result.content.startswith("Done:")
+    prompts = elicit_answers.prompts()[2:]
+    assert len(prompts) == 2 and again not in prompts[0] and again in prompts[1]
+    assert "https://shop.example/orders/1/checkout\n" in prompts[0] and "https://shop.example/orders/2/checkout\n" in prompts[1]
+    assert host.posted("/action") == [{"action": "click", "element": 7, "include_page": True, "into_frame": False}]
+
+    third = {**CHECKOUT, "url": "https://shop.example/orders/3/checkout"}
+    host = FakeHost(pages=[order, next_order, third])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, place)
+    assert result.ok is False and result.reason == "browser_stale_element"
+    assert "changed again" in result.content and "Nothing was done." in result.content
+    assert len(elicit_answers.prompts()) == 6 and host.posted("/action") == []
+
+    relabeled = {**order, "elements": [{**e, "name": "Delete my account"} if e["id"] == 7 else e for e in order["elements"]]}
+    host = FakeHost(pages=[order, relabeled])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(session, place)
+    assert result.ok is False and result.reason == "browser_stale_element"
+    assert 'Element [7] is now button "Delete my account", not the button "Place order"' in result.content
+    assert "Nothing was done." in result.content
+    assert len(elicit_answers.prompts()) == 7 and host.posted("/action") == []
+
+    # The position card approves clicks by position on one address.
+    host = FakeHost(pages=[PAGE, {**PAGE, "url": "https://shop.example/account"}, {**PAGE, "url": "https://shop.example/account"}])
+    session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 10, "y": 10}})
+    assert result.content.startswith("Done: click at (10, 10).")
+    prompts = elicit_answers.prompts()[7:]
+    assert len(prompts) == 2 and all("Approve clicks by position on this page?" in p for p in prompts)
+    assert again not in prompts[0] and again in prompts[1]
+    assert [body["into_frame"] for body in host.posted("/action")] == [False]
+
+    web = FakeHost(pages=[order, next_order])
+    session = make_session(web, elicitor=FakeElicitor())
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(session, place)
+    assert result.content.startswith("Done:")
+    assert len(elicit_answers.prompts()) == 10
+    assert [(m, p) for m, p, _, _ in web.calls if p.endswith("/page")] == [("GET", f"/sessions/{SID}/page")]
+
+
+async def test_on_the_desktop_the_navigate_that_opens_an_address_in_an_open_session_says_into_frame_false():
+    """Every step body anton sends the desktop says into_frame, the navigate
+    that open or run sends for an address in a session already open too, so
+    no body leaves the field to the desktop's default. The web's browser
+    gets none."""
+    for config, field in ((BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"), {"into_frame": False}), (None, {})):
+        host = FakeHost()
+        session = make_session(host, config=config)
+        await browser_tool.handle_browser(session, {"action": "open"})
+        await browser_tool.handle_browser(session, {"action": "open", "url": "https://shop.example/other"})
+        assert host.posted("/action") == [
+            {"action": "navigate", "url": "https://shop.example/other", "include_page": False, **field},
+        ]
+
+
+async def test_on_the_desktop_a_step_held_for_another_reason_says_into_frame_after_its_one_step_card(elicit_answers):
+    """A step by position that holds for another reason (any click on a
+    consent page, a drag from a commit control) gets the same one-step card
+    as one held because it may land in a frame, and the person approves the
+    same step at the same point. So it says into_frame when its point may
+    land in a frame, and the desktop doesn't refuse a step the person just
+    approved. After the same card, a point outside every frame and a step by
+    element still say false."""
+    consent = {**FRAMED, "url": "https://accounts.example.test/signin/oauth/consent?client_id=x&response_type=code"}
+    host = FakeHost(pages=[consent])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    elicit_answers.answers += ["approve"] * 3
+    for step in ({"action": "click", "x": 200, "y": 350}, {"action": "click", "x": 10, "y": 10}, {"action": "click", "element": 2}):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.content.startswith("Done:"), step
+    assert [body["into_frame"] for body in host.posted("/action")] == [True, False, False]
+
+    order = {**FRAMED, "elements": [*PAGE["elements"], {"id": 7, "role": "button", "name": "Place order"}]}
+    host = FakeHost(pages=[order])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    elicit_answers.answers += ["approve"] * 2
+    for step in (
+        {"action": "drag", "from": {"element": 7}, "to": {"x": 200, "y": 350}},
+        {"action": "drag", "from": {"element": 7}, "to": {"x": 10, "y": 10}},
+    ):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.content.startswith("Done:"), step
+    assert [body["into_frame"] for body in host.posted("/action")] == [True, False]
+
+    # A drag from a point in a frame onto a commit control.
+    host = FakeHost(pages=[order])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(
+        session, {"action": "act", "step": {"action": "drag", "from": {"x": 200, "y": 350}, "to": {"element": 7}}},
+    )
+    assert result.content.startswith("Done:")
+    assert [body["into_frame"] for body in host.posted("/action")] == [True]
+
+    # A page that a redirect from an authorization request landed on holds
+    # as a consent page whatever its own address.
+    landed = {**FRAMED, "url": "https://accounts.example.test/signin"}
+    host = FakeHost(pages=[landed])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    await browser_tool.handle_browser(
+        session, {"action": "open", "url": "https://accounts.example.test/o/oauth2/auth?client_id=x&response_type=code"},
+    )
+    elicit_answers.answers.append("approve")
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 200, "y": 350}})
+    assert result.content.startswith("Done:")
+    assert [body["into_frame"] for body in host.posted("/action")] == [True]
+    prompts = elicit_answers.prompts()
+    assert len(prompts) == 7 and all(p.startswith("**Approve this browser step?**") for p in prompts)
+    assert {[o.detail for o in r.options][0] for r in elicit_answers.requests} == {"Take this step once"}
+
+
+async def test_on_a_desktop_that_sends_no_frames_every_click_by_position_gets_the_one_step_card(elicit_answers):
+    """An in-app browser that predates ``frames`` doesn't say where its
+    frames are, so any point may land in one: no click by position runs
+    under a position approval for the page there."""
+    older = {key: value for key, value in PAGE.items() if key != "frames"}
+    host = FakeHost(pages=[older])
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    elicit_answers.answers += ["approve"] * 2
+    for _ in range(2):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "x": 10, "y": 10}})
+        assert result.content.startswith("Done: click at (10, 10).")
+    prompts = elicit_answers.prompts()
+    assert len(prompts) == 2 and all(p.startswith("**Approve this browser step?**") for p in prompts)
+    assert [o.detail for o in elicit_answers.requests[0].options][0] == "Take this step once"
+    assert [body["into_frame"] for body in host.posted("/action")] == [True, True]
 
 
 async def test_on_the_desktop_a_point_on_a_step_that_names_an_element_is_a_position_step(elicit_answers):
@@ -1314,6 +2123,157 @@ async def test_run_stops_when_steps_change_nothing(fake_jev):
     fake_jev.queue += [jev_answers("scroll_down")] * 3
     result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer"})
     assert "changed nothing" in result.content
+
+
+async def test_run_counts_a_scroll_that_only_reorders_the_element_list_as_a_stall(fake_jev):
+    """A host that lists the elements in view first reorders its list when a
+    scroll moves what is in view, with the same elements and text. Whether
+    the step was progress doesn't depend on a host's list order, so the run
+    hands back after MAX_STALLS such scrolls on either host."""
+    flipped = {**PAGE, "elements": list(reversed(PAGE["elements"]))}
+    host = FakeHost(pages=[PAGE, flipped, PAGE, flipped, PAGE, flipped])
+    session = make_session(host)
+    fake_jev.queue += [jev_answers("scroll_down")] * 5
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer"})
+    assert "changed nothing" in result.content and len(host.posted("/action")) == browser_tool.MAX_STALLS
+
+
+async def test_run_does_not_stall_on_text_that_arrives_late(fake_jev):
+    """Results that fill in after a click change the text and not the
+    elements; the run goes on while each step is a new one."""
+    pages = [{**PAGE, "text": f"Searching… {i} results so far"} for i in range(5)]
+    host = FakeHost(pages=pages)
+    host.changed = True
+    session = make_session(host)
+    fake_jev.queue += [
+        jev_answers("click", target="e2"), jev_answers("scroll_down"), jev_answers("click", target="e3"), jev_answers("done"),
+    ]
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search for laptops"})
+    assert "changed nothing" not in result.content
+    assert "Jev reports the goal is done" in result.content and len(host.posted("/action")) == 3
+
+
+async def test_run_hands_back_when_the_host_says_changed_but_nothing_did(fake_jev):
+    """A host's true never resets the stall count by itself, and its false
+    counts a stall even when the text moved between the two reads: a clock
+    that ticked while Jev picked the step, outside the step's own watch."""
+    host = FakeHost()
+    host.changed = True
+    session = make_session(host)
+    fake_jev.queue += [jev_answers("scroll_down")] * 3
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer"})
+    assert "changed nothing" in result.content and len(host.posted("/action")) == browser_tool.MAX_STALLS
+
+    moved_between_steps = FakeHost(pages=[{**PAGE, "text": f"12:0{i}"} for i in range(5)])
+    moved_between_steps.changed = False
+    session = make_session(moved_between_steps)
+    fake_jev.queue[:] = [jev_answers("scroll_down")] * 3
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "find the footer"})
+    assert "changed nothing" in result.content and len(moved_between_steps.posted("/action")) == browser_tool.MAX_STALLS
+
+
+async def test_run_hands_back_from_a_dead_button_on_a_page_whose_clock_ticks_during_each_step(fake_jev):
+    """A clock or a carousel in the page's text changes during every step,
+    so the host answers true with new text and the same elements, as it does
+    for late text. A step that repeats the one before it on the same
+    elements still counts as a stall, so clicking a dead button hands back
+    after MAX_STALLS repeats rather than running to max_steps."""
+    host = FakeHost(pages=[{**PAGE, "text": f"Now 12:00:0{i}"} for i in range(9)])
+    host.changed = True
+    session = make_session(host)
+    fake_jev.queue += [jev_answers("click", target="e2")] * 6
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search", "max_steps": 6})
+    assert "changed nothing" in result.content
+    assert len(host.posted("/action")) == browser_tool.MAX_STALLS + 1
+
+
+async def test_on_the_desktop_run_sends_each_step_with_into_frame_false_and_hands_back_from_a_dead_button(fake_jev):
+    """The desktop browser asks Jev on MindsHub, so run sends it steps, each
+    through the gate. Run picks steps by element, scroll and back, never a
+    point, so none may land in a frame and each says into_frame false. A
+    dead button on a page whose clock ticks hands back after MAX_STALLS
+    repeats there, as on the web."""
+    host = FakeHost(pages=[{**FRAMED, "text": f"Now 12:00:0{i}"} for i in range(9)])
+    host.changed = True
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    fake_jev.queue += [jev_answers("scroll_down"), *[jev_answers("click", target="e2")] * 6]
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "search", "max_steps": 8})
+    assert "changed nothing" in result.content
+    assert fake_jev.calls[0]["base_url"] == "https://api.mindshub.ai/v1"
+    posted = host.posted("/action")
+    assert len(posted) == 1 + browser_tool.MAX_STALLS + 1
+    assert [body["into_frame"] for body in posted] == [False] * len(posted)
+
+
+@pytest.mark.parametrize("config", [
+    BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"),
+    BrowserConfig(base_url=LOOPBACK, profile=SID, token="k", decisions=OWN),
+], ids=["jev-on-mindshub", "hosts-own-model"])
+async def test_on_the_desktop_every_step_run_sends_goes_through_the_gate_and_says_into_frame(fake_jev, elicit_answers, config):
+    """Whichever decision model picks the desktop browser's steps, every body
+    run sends there says into_frame: the navigate to run's address in a
+    session already open, a step that runs at once, and the steps the
+    person approved on the one-step card, one the commit list holds and one
+    Jev rates risky. None is a point, so each says false."""
+    pages = [{**CHECKOUT, "frames": FRAMED["frames"], "text": f"Total $999 ({i})"} for i in range(9)]
+    host = FakeHost(pages=pages)
+    host.changed = True
+    session = make_session(host, elicitor=FakeElicitor(), config=config)
+    await browser_tool.handle_browser(session, {"action": "open"})
+    fake_jev.queue += [
+        jev_answers("type", target="e9", input_key="note"),
+        jev_answers("click", target="e7"),
+        jev_answers("click", target="e10", risky=0.9),
+        jev_answers("done"),
+    ]
+    elicit_answers.answers += ["approve", "approve"]
+    result = await browser_tool.handle_browser(session, {
+        "action": "run", "goal": "place the order", "url": CHECKOUT["url"], "inputs": {"note": "Leave it at the door"},
+    })
+    assert "Jev reports the goal is done" in result.content
+    posted = host.posted("/action")
+    assert [(body["action"], body.get("element")) for body in posted] == [("navigate", None), ("type", 9), ("click", 7), ("click", 10)]
+    assert [body["into_frame"] for body in posted] == [False] * 4
+    prompts = elicit_answers.prompts()
+    assert len(prompts) == 2 and all(p.startswith("**Approve this browser step?**") for p in prompts)
+    assert len(fake_jev.calls) == 4
+
+
+async def test_on_the_desktop_run_reads_the_page_before_each_step_and_hands_back_from_a_button_relabeled_in_place(
+    fake_jev, elicit_answers,
+):
+    """The desktop's browser holds nothing and keeps an element's number while
+    the element lives, so a wizard that relabels its button in place from
+    "Continue" to "Place order" keeps the number Jev picked. run asks Jev on
+    one read and sends after Jev's calls, so on the desktop it reads the page
+    again right before the gate and hands back, sending nothing, when the
+    element Jev picked has another role or name there, as act refuses one;
+    the gate holds on that read. The web's browser holds by its own read of
+    the page and gets no extra one."""
+    cont = {**PAGE, "elements": [*PAGE["elements"], {"id": 7, "role": "button", "name": "Continue"}]}
+    working = {**cont, "text": "Working..."}
+    relabeled = {**PAGE, "elements": [*PAGE["elements"], {"id": 7, "role": "button", "name": "Place order"}]}
+    jev_picks = [jev_answers("click", target="e7"), jev_answers("click", target="e7"), jev_answers("done")]
+
+    host = FakeHost(pages=[cont, cont, working, relabeled])
+    host.changed = True
+    session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    fake_jev.queue[:] = jev_picks
+    result = await browser_tool.handle_browser(session, {"action": "run", "goal": "continue"})
+    assert 'Element [7] is now button "Place order", not the button "Continue" you read' in result.content
+    assert "Nothing was done." in result.content
+    assert host.posted("/action") == [{"action": "click", "element": 7, "into_frame": False, "include_page": True}]
+    assert elicit_answers.prompts() == []
+    made = [f"{m} {p.rsplit('/', 1)[1]}" for m, p, _, _ in host.calls if p.endswith(("/page", "/action"))]
+    assert made == ["GET page", "GET page", "POST action", "GET page"]
+
+    web = FakeHost(pages=[cont, cont, working, relabeled])
+    web.changed = True
+    session = make_session(web, elicitor=FakeElicitor())
+    fake_jev.queue[:] = jev_picks
+    await browser_tool.handle_browser(session, {"action": "run", "goal": "continue"})
+    made = [f"{m} {p.rsplit('/', 1)[1]}" for m, p, _, _ in web.calls if p.endswith(("/page", "/action"))]
+    assert made[:3] == ["GET page", "POST action", "POST action"]
 
 
 async def test_run_clamps_max_steps(fake_jev):
@@ -1753,19 +2713,42 @@ async def test_a_human_check_waits_for_the_page_to_change(fake_jev, done_in_the_
     assert host.posted("/control")[0]["wait_for"] == {"page": "changes"}
 
 
-async def test_a_field_hand_over_never_carries_or_reports_the_value(done_in_the_browser, sent_events):
-    filled = {**POLICY, "elements": [*POLICY["elements"][:3], {**POLICY["elements"][3], "value_hidden": True}]}
+async def test_a_secret_field_hand_over_never_carries_the_value_or_says_whether_it_is_filled(done_in_the_browser, sent_events):
+    """A host marks every secret field value_hidden, filled or empty, so a
+    page read can't say whether the person filled one. After Done the tool
+    says that, not "filled in": here the person clicked Done on a page that
+    never changed, and the security code is still empty."""
     host = FakeHost(pages=[POLICY])
     session = make_session(host, elicitor=FakeElicitor())
-    handed_back_after(host, session, 2, then=filled)
+    handed_back_after(host, session, 2, then=POLICY)
     await read(session, host, POLICY)
     result = await browser_tool.handle_browser(session, {
         "action": "hand_to_user", "reason": "Enter the security code", "wait_for": {"element": 15, "state": "filled"},
     })
     assert host.posted("/control")[0]["wait_for"] == {"element": 15, "state": "filled"}
-    assert "is filled in now" in result.content
+    assert (
+        'Element [15] (textbox "Security code") is a secret field: the page never shows its value, so it can\'t '
+        "say whether it's filled in."
+    ) in result.content
+    assert "is filled in now" not in result.content and "still empty" not in result.content
     assert "value" not in json.dumps(host.posted("/control"))
     assert all("value" not in json.dumps(props) for _, props in sent_events)
+
+
+@pytest.mark.parametrize(("then", "says"), [
+    ({**POLICY, "elements": [*POLICY["elements"][:2], {**POLICY["elements"][2], "value": "+1 555 0100"}, POLICY["elements"][3]]}, "is filled in now"),
+    (POLICY, "is still empty now"),
+], ids=["filled", "empty"])
+async def test_an_ordinary_field_hand_over_says_whether_it_is_filled_and_never_the_value(done_in_the_browser, then, says):
+    host = FakeHost(pages=[POLICY])
+    session = make_session(host, elicitor=FakeElicitor())
+    handed_back_after(host, session, 2, then=then)
+    await read(session, host, POLICY)
+    result = await browser_tool.handle_browser(session, {
+        "action": "hand_to_user", "reason": "Enter the guardian's phone", "wait_for": {"element": 14, "state": "filled"},
+    })
+    assert f'Element [14] (textbox "Guardian\'s phone") {says}.' in result.content
+    assert "555 0100" not in result.content.split("\n\n")[0]
 
 
 @pytest.mark.parametrize(("wait_for", "says"), [
@@ -1814,10 +2797,16 @@ async def test_a_host_without_wait_for_still_takes_the_hand_over(done_in_the_bro
 def test_human_check_spots_verification_pages_only():
     assert human_check(model(CHALLENGE)) == "Cloudflare"
     assert human_check(model({"url": "https://x.com/cdn-cgi/challenge-platform/h/b", "title": "", "elements": []})) == "Cloudflare"
-    # An embedded widget: the host lists its visible frame, and the element
-    # list shows only a clickable frame named by its title.
-    embedded = {**PAGE, "challenges": [{"host": "challenges.cloudflare.com", "kind": "cloudflare"}]}
+    # An embedded widget: the host lists its visible check frame in
+    # challenges, and in frames unread; the element list never lists a frame.
+    embedded = {
+        **PAGE, "challenges": [{"host": "challenges.cloudflare.com", "kind": "cloudflare"}],
+        "frames": [{"url": "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile", "read": False}],
+    }
     assert human_check(model(embedded)) == "Cloudflare"
+    doc = " ".join(human_check.__doc__.split())
+    assert "the element list shows only as a frame" not in doc
+    assert "which hosts list in challenges and, unread, in frames, never as an element" in doc
     assert human_check(model({**PAGE, "challenges": [{"host": "captcha.example", "kind": "other"}]})) == "a security check"
     framed = {**PAGE, "elements": [{"id": 9, "role": "clickable", "name": "Widget containing a Cloudflare security challenge"}]}
     assert human_check(model(framed)) == "Cloudflare"
@@ -2062,14 +3051,20 @@ async def test_on_the_desktop_a_type_or_press_on_a_commit_control_holds_as_its_c
     assert host.posted("/action") == []
 
 
-async def test_on_the_desktop_typed_text_that_tabs_and_then_types_a_space_holds(elicit_answers):
-    host = FakeHost(pages=[CHECKOUT])
+async def test_on_the_desktop_typed_text_with_a_tab_and_then_a_space_runs_at_once(elicit_answers):
+    """Each host inserts a typed tab as text and never presses the Tab key,
+    so a tab keeps the focus in its field and a space after it types a
+    space there: a pasted table row or tab-indented text into a named field
+    or into a frame's focused field runs with no card."""
+    host = FakeHost(pages=[{**CHECKOUT, "frames": FRAMED["frames"]}])
     session = _desktop(host)
-    elicit_answers.answers.append("cancel")
-    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 5, "text": "a\t "}})
-    assert result.reason == "browser_step_not_approved" and host.posted("/action") == []
-    plain = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 5, "text": "a b"}})
-    assert plain.ok is True and not plain.reason
+    for step in (
+        {"action": "type", "element": 9, "text": "a\t b"},
+        {"action": "type", "focused": True, "text": "Ada\tLovelace 1815"},
+    ):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.ok is True and not result.reason, step
+    assert elicit_answers.requests == [] and len(host.posted("/action")) == 2
 
 
 def test_the_commit_list_reads_names_as_the_pod_folds_them():
@@ -2184,6 +3179,239 @@ def test_an_arrow_on_a_select_holds_as_picking_any_of_its_options():
     assert browser_tool._classify({"action": "press", "element": 3, "key": "Tab"}, url="https://shop.example/", element=tab) is None, (
         "Tab leaves the select without picking"
     )
+
+
+#: A page whose radio group can delete the account.
+CLOSE_ACCOUNT = {
+    **PAGE,
+    "url": "https://shop.example/account/close",
+    "elements": [
+        {"id": 3, "role": "radio", "name": "Keep my account", "checked": True},
+        {"id": 4, "role": "radio", "name": "Delete my account", "checked": False},
+        {"id": 5, "role": "textbox", "name": "Why are you leaving?"},
+    ],
+}
+
+
+def _framed_with(elements: list[dict], *, read: bool = True) -> dict:
+    """PAGE with one frame, read with ``elements`` or left unread."""
+    frame = {"url": "https://forms.example.test/account", "read": read, "box": {"x": 112, "y": 300, "width": 560, "height": 180}}
+    if read:
+        frame |= {"elements": elements, "text": ""}
+    return {**PAGE, "frames": [frame]}
+
+
+async def test_on_the_desktop_a_key_that_may_check_a_commit_radio_waits_for_approve(elicit_answers):
+    """An arrow, Home, End, PageUp or PageDown on a radio group checks
+    another radio of it and clicks it, as the pod holds those keys. The
+    desktop's browser holds nothing, so a key that may check "Delete my
+    account" gets the card a click on it gets: one that names a radio of
+    the group, and one with no element, which goes to whatever has the
+    focus. The page doesn't say which radios share a group, so every radio
+    it lists counts."""
+    host = FakeHost(pages=[CLOSE_ACCOUNT])
+    session = _desktop(host)
+    for step in (
+        {"action": "click", "element": 4},
+        {"action": "press", "element": 3, "key": "ArrowDown"},
+        {"action": "press", "key": "ArrowDown"},
+        {"action": "press", "key": "End"},
+        {"action": "press", "key": "Shift+PageDown"},
+    ):
+        elicit_answers.answers.append("cancel")
+        before = len(elicit_answers.requests)
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.reason == "browser_step_not_approved", step
+        assert len(elicit_answers.requests) == before + 1, step
+    assert host.posted("/action") == []
+    prompts = elicit_answers.prompts()
+    assert 'press ArrowDown in radio "Keep my account", which may pick radio "Delete my account"' in prompts[1]
+    assert 'press ArrowDown, which may pick radio "Delete my account"' in prompts[2]
+
+
+#: CLOSE_ACCOUNT read past the desktop's cap, which lists on-screen elements
+#: first: "Delete my account" sits just below the view and is left out.
+CLOSE_ACCOUNT_CUT = {
+    **CLOSE_ACCOUNT,
+    "elements": [el for el in CLOSE_ACCOUNT["elements"] if el["name"] != "Delete my account"],
+    "truncated": True,
+}
+
+
+async def test_on_the_desktop_a_key_that_may_check_a_radio_a_cut_list_left_out_waits_for_approve(elicit_answers):
+    """Past its cap a host leaves out elements, so the group of a listed
+    radio may hold a commit radio the page didn't list. A key that names a
+    listed radio, or one with no element where the page or a read frame
+    lists a radio, then gets the card, saying what it may pick."""
+    frame_cut = _framed_with([{"role": "radio", "name": "Keep my account", "checked": True}])
+    frame_cut["frames"][0]["truncated"] = True
+    for page, step, may_pick in (
+        (CLOSE_ACCOUNT_CUT, {"action": "press", "element": 3, "key": "ArrowDown"}, "a radio the page didn't list"),
+        (CLOSE_ACCOUNT_CUT, {"action": "press", "key": "ArrowDown"}, "a radio or an option the page didn't list"),
+        (frame_cut, {"action": "press", "key": "End"}, 'a radio or an option the frame "https://forms.example.test/account" didn\'t list'),
+    ):
+        host = FakeHost(pages=[page])
+        session = _desktop(host)
+        elicit_answers.answers.append("cancel")
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.reason == "browser_step_not_approved", step
+        assert host.posted("/action") == [], step
+        assert f"which may pick {may_pick}" in elicit_answers.prompts()[-1], step
+
+
+async def test_on_the_desktop_a_key_with_no_element_waits_on_any_cut_list_whatever_it_lists(elicit_answers):
+    """Past its cap the desktop leaves elements out (300 on the page,
+    on-screen first, and 50 in a read frame), a whole radio group or select
+    included, and Tab steps run at once, so the focus may sit on a control
+    the cut list doesn't show. An arrow, Home, End, PageUp or PageDown with
+    no element then waits wherever the page's list or a read frame's list
+    was cut, though the cut list shows no radio or select. Tab, and a key
+    that names a listed link, run at once."""
+    long_page = {**PAGE, "elements": [{"id": n, "role": "link", "name": f"Story {n}"} for n in range(1, 301)], "truncated": True}
+    frame_cut = _framed_with([{"role": "link", "name": "Terms"}])
+    frame_cut["frames"][0]["truncated"] = True
+    for page, where in ((long_page, "the page"), (frame_cut, 'the frame "https://forms.example.test/account"')):
+        host = FakeHost(pages=[page])
+        session = _desktop(host)
+        for key in ("PageDown", "ArrowDown", "End"):
+            elicit_answers.answers.append("cancel")
+            before = len(elicit_answers.requests)
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "key": key}})
+            assert result.reason == "browser_step_not_approved", (where, key)
+            assert len(elicit_answers.requests) == before + 1, (where, key)
+            assert f"which may pick a radio or an option {where} didn't list" in elicit_answers.prompts()[-1], (where, key)
+        before = len(elicit_answers.requests)
+        for step in ({"action": "press", "key": "Tab"}, {"action": "press", "element": 1, "key": "ArrowDown"}):
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is True and not result.reason, (where, step)
+        assert len(elicit_answers.requests) == before
+        assert [body["key"] for body in host.posted("/action")] == ["Tab", "ArrowDown"], where
+
+
+@pytest.mark.parametrize("page", [
+    _framed_with([{"role": "radio", "name": "Keep my account", "checked": True}, {"role": "radio", "name": "Delete my account"}]),
+    _framed_with([{"role": "combobox", "name": "With selected", "value": "", "options": ["", "Delete selected"]}]),
+    _framed_with([], read=False),
+    {**PAGE, "frames": None},
+], ids=["commit radio in a read frame", "commit option in a read frame", "unread frame", "host sends no frames"])
+async def test_on_the_desktop_a_key_with_no_element_waits_where_a_frame_may_hold_a_commit_option(elicit_answers, page):
+    """A frame's controls carry no number, so a key into one has no
+    element. It waits when a read frame lists a radio or select option that
+    commits something, and when a frame wasn't read or the host doesn't say
+    where its frames are: the tool can't see what the key would pick there."""
+    host = FakeHost(pages=[page])
+    session = _desktop(host)
+    elicit_answers.answers.append("cancel")
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "key": "ArrowDown"}})
+    assert result.reason == "browser_step_not_approved"
+    assert host.posted("/action") == [] and len(elicit_answers.requests) == 1
+
+
+async def test_on_the_desktop_a_key_with_no_element_waits_where_a_secret_select_hides_its_options(elicit_answers):
+    """Both hosts send a secret select (a card-named one such as
+    name=card_no, or a cc- autocomplete one) with value_hidden and none of
+    its options, so the tool can't tell whether a key at the focus would
+    pick "Remove this card". An arrow, Home, End, PageUp, PageDown or Space
+    with no element then waits, as a key does where a frame wasn't read,
+    whatever the select's name; the card says the browser didn't list its
+    options. A press that names the select is refused as a key into a secret
+    field, before any card."""
+    saved_card = {"id": 5, "role": "combobox", "name": "Saved card", "value_hidden": True}
+    payment = {**PAGE, "url": "https://shop.example/account/payment", "elements": [*PAGE["elements"], saved_card]}
+    host = FakeHost(pages=[payment])
+    session = _desktop(host)
+    for key in ("ArrowDown", "End", " "):
+        elicit_answers.answers.append("cancel")
+        before = len(elicit_answers.requests)
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "key": key}})
+        assert result.reason == "browser_step_not_approved", key
+        assert len(elicit_answers.requests) == before + 1, key
+        assert 'which may pick an option of combobox "Saved card", which the browser didn\'t list' in elicit_answers.prompts()[-1], key
+    before = len(elicit_answers.requests)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "element": 5, "key": "ArrowDown"}})
+    assert result.ok is False and result.reason == "browser_secret_field"
+    assert len(elicit_answers.requests) == before
+    assert host.posted("/action") == []
+
+
+async def test_on_the_desktop_arrows_in_a_plain_list_run_at_once(elicit_answers):
+    """Arrows, Home, End, PageUp and PageDown where nothing they may pick
+    commits anything run at once, with no element or on a radio of a
+    group that commits nothing, and Tab and Escape run at once on the page
+    with the commit radio too: the card is only where a key may commit."""
+    plain = {
+        **_framed_with([{"role": "radio", "name": "Weekly", "checked": True}, {"role": "radio", "name": "Monthly"}]),
+        "elements": [
+            {"id": 3, "role": "radio", "name": "Small", "checked": True},
+            {"id": 4, "role": "radio", "name": "Large"},
+            {"id": 5, "role": "listbox", "name": "Sort by", "options": ["Newest", "Order date"]},
+        ],
+    }
+    host = FakeHost(pages=[plain])
+    session = _desktop(host)
+    steps = [
+        {"action": "press", "key": "ArrowDown"},
+        {"action": "press", "element": 3, "key": "ArrowDown"},
+        {"action": "press", "key": "PageDown"},
+        {"action": "press", "key": "Home"},
+        {"action": "press", "element": 5, "key": "ArrowUp"},
+    ]
+    for step in steps:
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.ok is True and not result.reason, step
+    on_the_commit_page = FakeHost(pages=[CLOSE_ACCOUNT])
+    commit_session = _desktop(on_the_commit_page)
+    for key in ("Tab", "Escape", "Shift+Tab"):
+        result = await browser_tool.handle_browser(commit_session, {"action": "act", "step": {"action": "press", "key": key}})
+        assert result.ok is True and not result.reason, key
+    assert elicit_answers.requests == []
+    assert len(host.posted("/action")) == len(steps) and len(on_the_commit_page.posted("/action")) == 3
+
+
+async def test_on_the_desktop_a_key_that_may_check_any_radio_on_a_consent_page_waits(elicit_answers):
+    """On an OAuth consent page every pick grants something, however plainly
+    a radio is named ("All repositories"), so an arrow that may check a radio
+    there waits, on a radio and with no element, and the card names the
+    radio it may check. The same page at an address that isn't a consent
+    page runs both at once."""
+    radios = [
+        {"id": 3, "role": "radio", "name": "Only select repositories", "checked": True},
+        {"id": 4, "role": "radio", "name": "All repositories"},
+    ]
+    consent = {**PAGE, "url": "https://code.example.test/login/oauth/authorize?client_id=x&response_type=code", "elements": radios}
+    on_radio = {"action": "press", "element": 3, "key": "ArrowDown"}
+    no_element = {"action": "press", "key": "ArrowDown"}
+    host = FakeHost(pages=[consent])
+    session = _desktop(host)
+    for step in (on_radio, no_element):
+        elicit_answers.answers.append("cancel")
+        before = len(elicit_answers.requests)
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.reason == "browser_step_not_approved", step
+        assert len(elicit_answers.requests) == before + 1, step
+    prompts = elicit_answers.prompts()
+    assert 'press ArrowDown in radio "Only select repositories", which may pick radio "All repositories"' in prompts[0]
+    assert 'press ArrowDown, which may pick radio "Only select repositories" or radio "All repositories"' in prompts[1]
+    assert host.posted("/action") == []
+
+    settings = FakeHost(pages=[{**consent, "url": "https://code.example.test/settings/installations"}])
+    session = _desktop(settings)
+    before = len(elicit_answers.requests)
+    for step in (on_radio, no_element):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.ok is True and not result.reason, step
+    assert len(elicit_answers.requests) == before and len(settings.posted("/action")) == 2
+
+
+async def test_on_the_web_the_tool_leaves_an_arrow_on_a_radio_group_to_the_browsers_own_hold(elicit_answers):
+    """The web's browser holds an arrow by what it picks, from its own read of
+    the focus, so the tool sends it on and shows a card only when the
+    browser holds it."""
+    host = FakeHost(pages=[CLOSE_ACCOUNT])
+    session = make_session(host, elicitor=FakeElicitor())
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "key": "ArrowDown"}})
+    assert result.ok is True and elicit_answers.requests == []
+    assert host.posted("/action") == [{"action": "press", "key": "ArrowDown", "include_page": True}]
 
 
 async def test_on_the_desktop_a_position_approval_ends_when_the_page_goes_to_another_address(elicit_answers):
