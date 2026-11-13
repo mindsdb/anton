@@ -2812,6 +2812,41 @@ async def test_on_the_desktop_arrows_in_a_plain_list_run_at_once(elicit_answers)
     assert len(host.posted("/action")) == len(steps) and len(on_the_commit_page.posted("/action")) == 3
 
 
+async def test_on_the_desktop_a_key_that_may_check_any_radio_on_a_consent_page_waits(elicit_answers):
+    """On an OAuth consent page every pick grants something, however plainly
+    a radio is named ("All repositories"), so an arrow that may check a radio
+    there waits, on a radio and with no element, and the card names the
+    radio it may check. The same page at an address that isn't a consent
+    page runs both at once."""
+    radios = [
+        {"id": 3, "role": "radio", "name": "Only select repositories", "checked": True},
+        {"id": 4, "role": "radio", "name": "All repositories"},
+    ]
+    consent = {**PAGE, "url": "https://code.example.test/login/oauth/authorize?client_id=x&response_type=code", "elements": radios}
+    on_radio = {"action": "press", "element": 3, "key": "ArrowDown"}
+    no_element = {"action": "press", "key": "ArrowDown"}
+    host = FakeHost(pages=[consent])
+    session = _desktop(host)
+    for step in (on_radio, no_element):
+        elicit_answers.answers.append("cancel")
+        before = len(elicit_answers.requests)
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.reason == "browser_step_not_approved", step
+        assert len(elicit_answers.requests) == before + 1, step
+    prompts = elicit_answers.prompts()
+    assert 'press ArrowDown in radio "Only select repositories", which may pick radio "All repositories"' in prompts[0]
+    assert 'press ArrowDown, which may pick radio "Only select repositories" or radio "All repositories"' in prompts[1]
+    assert host.posted("/action") == []
+
+    settings = FakeHost(pages=[{**consent, "url": "https://code.example.test/settings/installations"}])
+    session = _desktop(settings)
+    before = len(elicit_answers.requests)
+    for step in (on_radio, no_element):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.ok is True and not result.reason, step
+    assert len(elicit_answers.requests) == before and len(settings.posted("/action")) == 2
+
+
 async def test_on_the_web_the_tool_leaves_an_arrow_on_a_radio_group_to_the_browsers_own_hold(elicit_answers):
     """The web's browser holds an arrow by what it picks, from its own read of
     the focus, so the tool sends it on and shows a card only when the
