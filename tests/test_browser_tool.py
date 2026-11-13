@@ -1402,22 +1402,31 @@ async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place
 
 async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_the_focus_moves_while_its_card_waits(elicit_answers):
     """The desktop's page read names the focused node (``focus``, an opaque
-    token, the deepest node through frames), and leaves it out when nothing
-    has the focus or it can't read it. A page whose own UI moves the focus
-    while the card waits, as a confirm dialog that takes it on its Delete
-    button, moves no frame, so after the Approve the tool compares the token
-    too: another token, or one that came or went, refuses a press with no
-    element or a focused type. The same token, a scroll included, runs the
-    step, and so do two reads that both leave it out, as the web's browser
-    does. A step that names its element goes to that element, whatever had
-    the focus."""
+    token, the deepest node through the frames it can read, and inside a
+    frame it can't read, that frame's element), and leaves it out only when
+    nothing has the focus or it can't read the page at all. A page whose own
+    UI moves the focus while the card waits, as a confirm dialog that takes
+    it on its Delete button, or a page that moves it from one payment or
+    other site's frame to another, moves no frame, so after the Approve the
+    tool compares the token too: another token, or one present at one read
+    and absent at the other, refuses a press with no element or a focused
+    type. The same token, a scroll included, runs the step, and so do two
+    reads that both leave it out, as the web's browser does, which leave
+    nothing to compare. A step that names its element goes to that element,
+    whatever had the focus."""
     desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
     form = {**FRAMED, "scroll": {"y": 0, "height": 2400, "viewport": 800}, "focus": "4F1A:31"}
     frame = FRAMED["frames"][0]
     bare = {key: value for key, value in form.items() if key != "focus"}
+    unread = [
+        {"url": "https://js.stripe.com/v3/elements-inner-card", "read": False, "box": {"x": 112, "y": 520, "width": 560, "height": 44}},
+        {"url": "https://js.stripe.com/v3/elements-inner-cvc", "read": False, "box": {"x": 112, "y": 580, "width": 260, "height": 44}},
+    ]
+    in_card = {**form, "frames": [frame, *unread], "focus": "4F1A:40"}
     changed = {
         "another node": (form, {**form, "focus": "4F1A:58"}),
         "a node in another frame": (form, {**form, "focus": "9C02:7"}),
+        "a frame the host can't read to another": (in_card, {**in_card, "focus": "4F1A:44"}),
         "a focus that came": (bare, form),
         "a focus that went": (form, bare),
     }

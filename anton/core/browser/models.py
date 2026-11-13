@@ -138,11 +138,14 @@ class Page(_Answer):
     text: str = ""
     truncated: bool = False
     scroll: Scroll | None = None
-    #: An opaque token naming the focused node, the deepest one through
-    #: frames: equal tokens are the same node. The desktop app's browser sends
-    #: it, and leaves it out when nothing has the focus or it can't read it;
-    #: the router's pod, which reads the focus again when a step runs, leaves
-    #: it out.
+    #: An opaque token naming the focused node, the deepest one through the
+    #: frames the host can read; when the focus is inside a frame it can't
+    #: read (a payment frame, another site's frame inside another site's, a
+    #: frame past its depth cap), the token names that frame's element. Equal
+    #: tokens are the same node. The desktop app's browser sends it, and
+    #: leaves it out only when nothing has the focus or it can't read the
+    #: page at all; the router's pod, which reads the focus again when a step
+    #: runs, leaves it out.
     focus: str | None = None
     #: Check frames the person can see; the router's pod always sends it (empty
     #: when there are none) and leaves out invisible checks. None from a host

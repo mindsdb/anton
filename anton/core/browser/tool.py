@@ -987,13 +987,15 @@ def _moved_focus(*, seen: Page, current: Page, body: dict) -> str | None:
 
     A press with no element and a focused type go wherever the focus is when
     the step starts. The desktop's page read names the focused node
-    (``Page.focus``), so another token, or one that came or went, says the
-    focus moved: a page's own UI moved it inside its document (a confirm
-    dialog that takes it on its Delete button) or into a frame. A frame that
-    came or went, or changed address, size or place on the page
-    (``_frames_moved``), says a page or a frame may have moved the focus, or
-    the focused frame navigated, which a read that can't name the focus
-    misses. A scroll alone, and text that changes inside the same frame (a
+    (``Page.focus``), and inside a frame it can't read, that frame's element,
+    so another token, or one present at one read and absent at the other,
+    says the focus moved: a page's own UI moved it inside its document (a
+    confirm dialog that takes it on its Delete button), into a frame, or
+    from one frame to another. Two reads that both leave it out have nothing
+    to compare. A frame that came or went, or changed address, size or place
+    on the page (``_frames_moved``), says a page or a frame may have moved
+    the focus, or the focused frame navigated, which keeps its element's
+    token. A scroll alone, and text that changes inside the same frame (a
     clock), say nothing."""
     to_focus = body.get("focused") is True or (body.get("action") == "press" and body.get("element") is None)
     if not to_focus:
@@ -1477,7 +1479,7 @@ async def _gate(
     another role or name refuses the step (``_moved_element``), as act
     refuses one before the card. So does, for a step that goes to the focus
     (a press with no element, a focused type), a focus token that changed,
-    or a frame that came or went, or changed address, size or place on the
+    came or went, or a frame that came or went, or changed address, size or place on the
     page, on the same address (``_moved_focus``); a scroll alone moves
     neither. A page that went to another address, or,
     after a card for a point that may land in a frame, a frame under the
