@@ -41,6 +41,7 @@ import logging
 import re
 import unicodedata
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 from urllib.parse import parse_qs, urlparse
@@ -64,6 +65,7 @@ from anton.core.browser.models import (
     FrameElement,
     HeldStep,
     Page,
+    PagePoint,
     SavedTab,
     Site,
     StepKey,
@@ -864,9 +866,79 @@ def _scrolled_in_place(before: list[_FrameSpot], now: list[_FrameSpot], scrolled
     return not shifts or max(shifts) - min(shifts) <= _FRAME_ROUNDING_PX
 
 
+#: How many pixels apart two reads may put a frame's at or size, or a
+#: frame fixed to the view's at against the page's scroll: each host rounds
+#: them from fractional parts on its own.
+_PLACE_ROUNDING_PX = 1
+
+
+class _FramePlace(NamedTuple):
+    """A placed frame that carries at, as two reads of one page compare it:
+    its address, where it sits in its document, and its screenshot box."""
+
+    url: str
+    at: PagePoint
+    box: FrameBox
+
+
+def _frame_places(frames: list[Frame]) -> list[_FramePlace] | None:
+    """The placed frames, each with its at, or None when one carries none."""
+    places = [
+        _FramePlace(frame.url, frame.at, frame.box) for frame in frames if frame.box is not None and frame.at is not None
+    ]
+    return places if len(places) == sum(frame.box is not None for frame in frames) else None
+
+
+def _same_place(was: _FramePlace, now: _FramePlace) -> bool:
+    """Whether ``now`` is ``was`` where it was in its document: the same
+    address, at and size, a pixel of rounding apart."""
+    return now.url == was.url and all(
+        abs(a - b) <= _PLACE_ROUNDING_PX
+        for a, b in ((now.at.x, was.at.x), (now.at.y, was.at.y), (now.box.width, was.box.width), (now.box.height, was.box.height))
+    )
+
+
+def _fixed_to_view(was: _FramePlace, now: _FramePlace, scrolled: int) -> bool:
+    """Whether ``now`` is ``was`` fixed to the view (a chat widget, a sticky
+    ad): the same address and screenshot box, with an at that moved down its
+    document by the page's scroll, a pixel of rounding apart."""
+    return (
+        now.url == was.url
+        and now.box == was.box
+        and abs(now.at.x - was.at.x) <= _PLACE_ROUNDING_PX
+        and abs(now.at.y - was.at.y - scrolled) <= _PLACE_ROUNDING_PX
+    )
+
+
+def _unpaired(
+    before: list[_FramePlace], now: list[_FramePlace], fits: Callable[[_FramePlace, _FramePlace], bool],
+) -> tuple[list[_FramePlace], list[_FramePlace]]:
+    """What is left of each read once every frame of ``before`` takes the
+    first frame of ``now`` it ``fits``."""
+    left = list(now)
+    rest: list[_FramePlace] = []
+    for was in before:
+        match = next((i for i, spot in enumerate(left) if fits(was, spot)), None)
+        if match is None:
+            rest.append(was)
+        else:
+            del left[match]
+    return rest, left
+
+
 def _frames_moved(seen: Page, current: Page) -> bool:
     """Whether, between two reads of one page, a frame came or went, or
     changed address, size or place on the page.
+
+    When every placed frame of both reads carries at, which no scroll moves,
+    the page's or an inner column's, the frames are compared as a multiset
+    keyed by address, at and size, a pixel of rounding apart
+    (``_same_place``). A frame fixed to the view keeps its screenshot box
+    while its at moves down the page by the page's scroll, and is in its
+    place too (``_fixed_to_view``); it is paired only after the frames that
+    kept their at, so a scroll that puts it exactly where another frame of
+    its address sits pairs each with its own. Otherwise the place on the
+    page is inferred from the boxes and the page's scroll, as follows.
 
     The boxes are in screenshot pixels and the list goes on-screen first, so
     a scroll moves every box and may reorder the list. The frames are
@@ -886,8 +958,9 @@ def _frames_moved(seen: Page, current: Page) -> bool:
     spot out pairs the wrong ones. The page read doesn't say how much the
     screenshot is shrunk, so frames that all moved together by less than the
     scroll read as scrolled; a lone frame that moved down the page by
-    exactly the scroll reads as fixed to the view. A host that sends no
-    ``frames`` on one read and frames on the other moved them."""
+    exactly the scroll reads as fixed to the view, and a frame in an inner
+    column that scrolled reads as moved. A host that sends no ``frames`` on
+    one read and frames on the other moved them."""
     if seen.frames is None or current.frames is None:
         return (seen.frames is None) != (current.frames is None)
     unplaced, before = _frame_spots(seen.frames)
@@ -895,6 +968,11 @@ def _frames_moved(seen: Page, current: Page) -> bool:
     if unplaced != unplaced_now or len(before) != len(now):
         return True
     scrolled = current.scroll.y - seen.scroll.y if seen.scroll is not None and current.scroll is not None else 0
+    places, places_now = _frame_places(seen.frames), _frame_places(current.frames)
+    if places is not None and places_now is not None:
+        places, places_now = _unpaired(places, places_now, _same_place)
+        places, places_now = _unpaired(places, places_now, lambda was, now: _fixed_to_view(was, now, scrolled))
+        return bool(places or places_now)
     if _scrolled_in_place(before, now, scrolled):
         return False
     stayed = Counter(before) & Counter(now)

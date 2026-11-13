@@ -1307,6 +1307,99 @@ async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_a_frame_change
             assert host.posted("/action") == [{**browser_tool._step_body({"step": step}), "into_frame": False}], (step, what)
 
 
+async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place_in_the_document_when_both_reads_carry_it(elicit_answers):
+    """Both hosts send each placed frame's at: the frame element's top-left
+    in its document, in whole CSS pixels, which no scroll moves, the page's
+    or an inner column's. When every placed frame of both reads carries it,
+    the tool compares the frames by address, at and size, a pixel of
+    rounding apart, so the person scrolling an inner column while the card
+    waits, which moves a frame on the screenshot while the page's scroll
+    stays put, runs the step, on the desktop's shrunk and outward-rounded
+    screenshot and on the pod's alike. A frame fixed to the view (a chat
+    widget, a sticky ad) keeps its box while its at moves down the page by
+    the page's scroll, and is in its place too. A frame that moved within
+    the column's content, even by exactly the column's scroll so its box
+    stayed put, or came, went, or changed address or size, refuses the
+    step. A read without at falls back to comparing boxes against the
+    page's scroll, which reads an inner column's scroll as a frame that
+    moved."""
+    desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
+    # The desktop's screenshot at 0.8 of the view, edges rounded outward.
+    form = {**FRAMED["frames"][0], "box": {"x": 112, "y": 300, "width": 448, "height": 144}, "at": {"x": 140, "y": 375}}
+    video = {"url": "https://video.example.test/embed", "read": False, "box": {"x": 112, "y": 900, "width": 560, "height": 315}, "at": {"x": 140, "y": 1125}}
+    chat = {"url": "https://chat.example.test/widget", "read": False, "box": {"x": 700, "y": 600, "width": 300, "height": 180}, "at": {"x": 875, "y": 750}}
+    ad = {"url": "https://ads.example.test/slot", "read": False, "box": {"x": 20, "y": 100, "width": 300, "height": 250}, "at": {"x": 25, "y": 125}}
+    # The pod's screenshot at the view's own size, edges rounded to the nearest pixel.
+    pod_form = {**form, "box": {"x": 140, "y": 375, "width": 560, "height": 180}}
+
+    def at(scroll_y: int, *frames: dict) -> dict:
+        return {**FRAMED, "scroll": {"y": scroll_y, "height": 2400, "viewport": 800}, "frames": list(frames)}
+
+    def moved(placed: dict, *, on_page: dict | None = None, **box: int) -> dict:
+        return {**placed, "box": {**placed["box"], **box}, "at": {**placed["at"], **(on_page or {})}}
+
+    def bare(placed: dict) -> dict:
+        return {key: value for key, value in placed.items() if key != "at"}
+
+    changed = {
+        "a frame that moved down the column's content": (at(0, form), at(0, moved(form, y=348, on_page={"y": 435}))),
+        "a frame that moved down the column's content by the column's scroll": (
+            at(0, form), at(0, moved(form, on_page={"y": 525})),
+        ),
+        "a frame that moved sideways in the column while it scrolled": (
+            at(0, form), at(0, moved(form, x=144, y=180, on_page={"x": 180})),
+        ),
+        "a frame two pixels down the page": (at(0, form), at(0, moved(form, y=302, on_page={"y": 377}))),
+        "a frame with another address after the column scrolled": (
+            at(0, form), at(0, {**moved(form, y=180), "url": "https://ads.example.test/slot"}),
+        ),
+        "a frame that grew while the column scrolled": (at(0, form), at(0, moved(form, y=180, height=200))),
+        "a frame that came while the column scrolled": (at(0, form), at(0, moved(form, y=180), chat)),
+        "a frame that went while the column scrolled": (at(0, form, chat), at(0, chat)),
+        "a frame fixed to the view that moved on the screen": (
+            at(0, form, chat), at(200, moved(form, y=140), moved(chat, y=560, on_page={"y": 950})),
+        ),
+        "an inner column's scroll on reads that carry no at": (at(0, bare(form)), at(0, bare(moved(form, y=180)))),
+        "an inner column's scroll on a read that carries no at": (at(0, form), at(0, bare(moved(form, y=180)))),
+    }
+    unchanged = {
+        "an inner column's scroll on the desktop's screenshot": (at(0, form), at(0, moved(form, y=180))),
+        "an inner column's scroll that rounds a frame a pixel apart": (at(0, form), at(0, moved(form, y=179, height=145))),
+        "an inner column's scroll that rounds at a pixel apart": (at(0, form), at(0, moved(form, y=180, on_page={"y": 376}))),
+        "an inner column's scroll on the pod's screenshot": (at(0, pod_form), at(0, moved(pod_form, y=225))),
+        "the page's scroll and an inner column's together": (
+            at(0, form, video), at(200, moved(form, y=20), moved(video, y=740)),
+        ),
+        "the page's scroll beside a frame fixed to the view": (
+            at(0, form, chat), at(200, moved(form, y=140), moved(chat, on_page={"y": 950})),
+        ),
+        "the page's scroll beside a sticky ad at the address of ads that scroll": (
+            at(0, ad, moved(ad, y=600, on_page={"y": 750}), moved(ad, y=900, on_page={"y": 1125})),
+            at(625, moved(ad, on_page={"y": 750}), moved(ad, on_page={"y": 750}), moved(ad, y=400, on_page={"y": 1125})),
+        ),
+        "the page's scroll that puts an ad where another ad at its address was": (
+            at(0, ad, moved(ad, y=600, on_page={"y": 750})), at(625, moved(ad, on_page={"y": 750}), moved(ad, y=-400)),
+        ),
+        "the page's scroll on a read that carries no at": (at(0, form), at(120, bare(moved(form, y=204)))),
+    }
+    for step in ({"action": "press", "key": "Enter"}, {"action": "type", "focused": True, "text": "ada@example.test", "submit": True}):
+        for what, (seen, after) in changed.items():
+            host = FakeHost(pages=[seen, after])
+            session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+            elicit_answers.answers.append("approve")
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is False and result.reason == "browser_stale_element", (step, what)
+            assert "The page's frames changed while the card waited" in result.content, (step, what)
+            assert host.posted("/action") == [], (step, what)
+        for what, (seen, after) in unchanged.items():
+            host = FakeHost(pages=[seen, after])
+            session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+            elicit_answers.answers.append("approve")
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is True and result.content.startswith("Done:"), (step, what, result.content)
+            assert host.posted("/action") == [{**browser_tool._step_body({"step": step}), "into_frame": False}], (step, what)
+
+
 async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_the_focus_moves_while_its_card_waits(elicit_answers):
     """The desktop's page read names the focused node (``focus``, an opaque
     token, the deepest node through frames), and leaves it out when nothing

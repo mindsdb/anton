@@ -91,6 +91,13 @@ class FrameBox(_Answer):
     height: int
 
 
+class PagePoint(_Answer):
+    """A point in a document's content coordinates, in whole CSS pixels."""
+
+    x: int
+    y: int
+
+
 class Frame(_Answer):
     """A rendered child frame of the page, or a frame inside a frame the host
     read, listed unread after them (``Page.frames``). Hosts read a frame's
@@ -104,6 +111,12 @@ class Frame(_Answer):
     read: bool = False
     #: None when the host can't place the frame on the screenshot.
     box: FrameBox | None = None
+    #: The frame element's top-left in its document: its top-left in the
+    #: viewport plus the page's scroll plus the scroll offset of every
+    #: scrolling element it sits in, so no scroll, the page's or an inner
+    #: column's, moves it. Both hosts send it with every frame that has a box;
+    #: None for a frame with no box, and from a host that predates it.
+    at: PagePoint | None = None
     offscreen: bool = False
     elements: list[FrameElement] = []
     text: str = ""

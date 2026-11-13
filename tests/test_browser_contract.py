@@ -633,6 +633,9 @@ def test_the_page_fixture_places_each_frame_on_its_page_whatever_scrolls():
     assert placed == 3
     framed = fixture.examples["a page with a frame"].body
     assert [frame.get("at") for frame in framed["frames"]] == [{"x": 112, "y": 1500}, {"x": 112, "y": 1720}, None]
+    assert [frame.model_dump().get("at") for frame in Page.model_validate(framed).frames] == [
+        {"x": 112, "y": 1500}, {"x": 112, "y": 1720}, None,
+    ]
 
 
 def test_the_page_model_says_what_the_page_fixture_says_of_its_frames():
