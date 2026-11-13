@@ -1086,8 +1086,11 @@ def _key_picks(page: Page, step: dict, *, consent: bool) -> list[str]:
     page doesn't say which radios share its group. A press with no element
     goes to whatever has the focus, so it may pick any such control the page
     or a read frame lists, or one in a frame the host didn't read, or in any
-    frame of a host that doesn't list its frames. Such a press already holds
-    when a key of it types, deletes or is Enter or Space (``_classify``)."""
+    frame of a host that doesn't list its frames. Past its cap a host leaves
+    elements out (``truncated``), so where a cut list holds a radio, its group
+    may hold a radio the list left out, and the press may check that one too.
+    Such a press already holds when a key of it types, deletes or is Enter
+    or Space (``_classify``)."""
     if step.get("action") != "press" or not _PICKING_KEYS.intersection(_chord_keys(step.get("key"))):
         return []
 
@@ -1100,15 +1103,23 @@ def _key_picks(page: Page, step: dict, *, consent: bool) -> list[str]:
             return f"an option of {_named(el)}" if holds else None
         return None
 
+    def cut_radio(listed: list[Element] | list[FrameElement], truncated: bool, where: str) -> list[str]:
+        """The radio a cut list may have left out of a listed radio's group."""
+        return [f"a radio {where} didn't list"] if truncated and any(el.role == "radio" for el in listed) else []
+
     named = step.get("element")
     if named is not None:
         pressed = _element(page, named)
         if pressed is None or pressed.role != "radio":
             return []
         others = [el for el in page.elements if el.role == "radio" and el.id != pressed.id]
-        return [name for name in map(pick, others) if name is not None]
-    in_frames = [el for frame in page.frames or [] if frame.read for el in frame.elements]
+        return [name for name in map(pick, others) if name is not None] + cut_radio(page.elements, page.truncated, "the page")
+    read = [frame for frame in page.frames or [] if frame.read]
+    in_frames = [el for frame in read for el in frame.elements]
     picks = [name for name in map(pick, [*page.elements, *in_frames]) if name is not None]
+    picks += cut_radio(page.elements, page.truncated, "the page")
+    for frame in read:
+        picks += cut_radio(frame.elements, frame.truncated, f"the frame {json.dumps(frame.url, ensure_ascii=False)}")
     if page.frames is None:
         picks.append("a control in a frame the browser didn't list")
     picks += [
@@ -2281,7 +2292,7 @@ BROWSER: you and the user share a real browser. The user sees it beside this cha
 - When a site takes its search in the address (most travel, shopping and search sites, e.g. kayak.com/flights/SFO-WAS/2026-11-27/2026-11-29), open the results address directly instead of filling the form. Building that address from the site's known pattern is allowed.
 - Otherwise start with action=run, a goal, and every value it will need in `inputs` (dates as YYYY-MM-DD). run takes the steps it is sure of quickly, keeps what pages on its way show that the goal needs, and hands back with them and the page when it isn't sure; then continue with action=act.
 - To act yourself, use action=act with a step: {"action":"click","element":17}, {"action":"type","element":4,"text":"…","submit":true}, {"action":"select","element":9,"value":"Blue"}, {"action":"scroll","direction":"down"}, {"action":"press","element":4,"key":"Enter"}, {"action":"back"}, {"action":"navigate","url":"…"}. Element numbers come from the latest page.
-- Where the page list has nothing to point at (a canvas, a drawing, a map), use pixels from your latest screenshot: {"action":"click","x":412,"y":230}. Clicks also take "button":"right" and "clicks":2. Drag with {"action":"drag","from":{"element":5} or {"x":…,"y":…},"to":{…}}; that's how shapes get drawn, sliders moved and items reordered. Controls inside a frame have no number: click them by pixel from your latest screenshot; each such step waits for the user's Approve. To fill an ordinary field inside a frame, click it by pixel (one Approve), then type into it with {"action":"type","focused":true,"text":"…"}, which types at the caret of the field that has the focus, at once and with no card; with "submit":true it also presses Enter, and waits for the user's Approve. The browser refuses it when the focus isn't on an ordinary text field. A press step with no element goes wherever the focus is: Tab runs at once. In the desktop app's browser, Enter, Space and a key that types or deletes each wait for the user's Approve, and so does an arrow, Home, End, PageUp or PageDown while the page or a frame lists a radio or select option that commits something, or a frame wasn't read; the web's browser reads the focused control, even in a frame, and holds such a key only where it may commit something. The browser refuses keys and typing into a secret field there, as anywhere, and a sign-in, two-factor code or payment in a frame is the user's to do (hand_to_user).
+- Where the page list has nothing to point at (a canvas, a drawing, a map), use pixels from your latest screenshot: {"action":"click","x":412,"y":230}. Clicks also take "button":"right" and "clicks":2. Drag with {"action":"drag","from":{"element":5} or {"x":…,"y":…},"to":{…}}; that's how shapes get drawn, sliders moved and items reordered. Controls inside a frame have no number: click them by pixel from your latest screenshot; each such step waits for the user's Approve. To fill an ordinary field inside a frame, click it by pixel (one Approve), then type into it with {"action":"type","focused":true,"text":"…"}, which types at the caret of the field that has the focus, at once and with no card; with "submit":true it also presses Enter, and waits for the user's Approve. The browser refuses it when the focus isn't on an ordinary text field. A press step with no element goes wherever the focus is: Tab runs at once. In the desktop app's browser, Enter, Space and a key that types or deletes each wait for the user's Approve, and so does an arrow, Home, End, PageUp or PageDown while the page or a frame lists a radio or select option that commits something, or any radio in a list it cut short, or a frame wasn't read; the web's browser reads the focused control, even in a frame, and holds such a key only where it may commit something. The browser refuses keys and typing into a secret field there, as anywhere, and a sign-in, two-factor code or payment in a frame is the user's to do (hand_to_user).
 - Never ask for, read out, or type a password, one-time code, or card number; the tool refuses to type into a secret field. For sign-ins, CAPTCHAs, two-factor codes and payments, call action=hand_to_user with a short reason and let the user do it in the browser.
 - hand_to_user is only for those. Never use it to hand over work you found hard; if you can't do something with these actions, stop and say so in the chat, with what you tried and another way to get it done.
 - Only the user hands the browser back, with Done in the browser. Until then you can't act in it or read the page: say what you need in chat and end your turn.

@@ -986,7 +986,8 @@ def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_fra
             "A press step with no element goes wherever the focus is: Tab runs at once.",
             "In the desktop app's browser, Enter, Space and a key that types or deletes each wait for the user's "
             "Approve, and so does an arrow, Home, End, PageUp or PageDown while the page or a frame lists a radio or "
-            "select option that commits something, or a frame wasn't read; the web's browser reads the focused "
+            "select option that commits something, or any radio in a list it cut short, or a frame wasn't read; the "
+            "web's browser reads the focused "
             "control, even in a frame, and holds such a key only where it may commit something.",
             "The browser refuses keys and typing into a secret field there, as anywhere, and a sign-in, two-factor "
             "code or payment in a frame is the user's to do",
@@ -2708,6 +2709,48 @@ async def test_on_the_desktop_a_key_that_may_check_a_commit_radio_waits_for_appr
     prompts = elicit_answers.prompts()
     assert 'press ArrowDown in radio "Keep my account", which may pick radio "Delete my account"' in prompts[1]
     assert 'press ArrowDown, which may pick radio "Delete my account"' in prompts[2]
+
+
+#: CLOSE_ACCOUNT read past the desktop's cap, which lists on-screen elements
+#: first: "Delete my account" sits just below the view and is left out.
+CLOSE_ACCOUNT_CUT = {
+    **CLOSE_ACCOUNT,
+    "elements": [el for el in CLOSE_ACCOUNT["elements"] if el["name"] != "Delete my account"],
+    "truncated": True,
+}
+
+
+async def test_on_the_desktop_a_key_that_may_check_a_radio_a_cut_list_left_out_waits_for_approve(elicit_answers):
+    """Past its cap a host leaves out elements, so the group of a listed
+    radio may hold a commit radio the page didn't list. A key that names a
+    listed radio, or one with no element where the page or a read frame
+    lists a radio, then gets the card, saying what it may pick."""
+    frame_cut = _framed_with([{"role": "radio", "name": "Keep my account", "checked": True}])
+    frame_cut["frames"][0]["truncated"] = True
+    for page, step, may_pick in (
+        (CLOSE_ACCOUNT_CUT, {"action": "press", "element": 3, "key": "ArrowDown"}, "a radio the page didn't list"),
+        (CLOSE_ACCOUNT_CUT, {"action": "press", "key": "ArrowDown"}, "a radio the page didn't list"),
+        (frame_cut, {"action": "press", "key": "End"}, 'a radio the frame "https://forms.example.test/account" didn\'t list'),
+    ):
+        host = FakeHost(pages=[page])
+        session = _desktop(host)
+        elicit_answers.answers.append("cancel")
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.reason == "browser_step_not_approved", step
+        assert host.posted("/action") == [], step
+        assert f"which may pick {may_pick}" in elicit_answers.prompts()[-1], step
+
+
+async def test_on_the_desktop_keys_on_a_cut_list_with_no_radio_run_at_once(elicit_answers):
+    """A cut list that lists no radio leaves no group to cut, so PageDown,
+    an arrow and End with no element run at once on a long page."""
+    long_page = {**PAGE, "elements": [{"id": n, "role": "link", "name": f"Story {n}"} for n in range(1, 301)], "truncated": True}
+    host = FakeHost(pages=[long_page])
+    session = _desktop(host)
+    for key in ("PageDown", "ArrowDown", "End"):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "press", "key": key}})
+        assert result.ok is True and not result.reason, key
+    assert elicit_answers.requests == [] and len(host.posted("/action")) == 3
 
 
 @pytest.mark.parametrize("page", [
