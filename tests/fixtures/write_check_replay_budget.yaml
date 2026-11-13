@@ -1,76 +1,232 @@
 # The write check's card budget on tests/fixtures/write_check_replay_corpus.yaml,
-# read by tests/test_write_check_replay.py::test_the_write_check_stays_within_its_card_budget.
+# read by tests/test_write_check_replay.py::test_the_write_check_keeps_its_card_budget.
+# Every list is exact: the test fails, naming the cells, when this tree's
+# scorecard differs from it in either direction. Keys are the corpus cells' ids.
 #
-#   no_write_cards_max   cards allowed on cells that write nothing and run no
-#                        unread code. Lower it when a change frees cells; never
-#                        raise it without saying in the PR which cells gained a
-#                        card and why each one must ask.
-#   real_writes_carded   real writes that must keep their card. Add a cell when
-#                        a change starts catching it; never remove one.
+#   real_writes_carded        real writes the check cards on a rule of its own
+#                             (SQL, an SQL file, HTTP or a file action). Never
+#                             drop one without its PR saying what holds it now.
+#   real_writes_carded_only_unchecked
+#                             real writes carded only by the "can't be checked"
+#                             card. A change that narrows that card moves each
+#                             write it frees to real_writes_missed, and its PR
+#                             says what holds that write now.
+#   real_writes_missed        real writes the check gives no card: its known
+#                             misses. A change that starts catching one moves
+#                             it to a carded list.
+#   no_write_carded           cells that write nothing and run no unread code,
+#                             but get a card. Drop a cell when a change frees
+#                             it; add one only with the PR saying why it must ask.
+#   broken_pairs              pairs whose hold cell has no card or whose free
+#                             cell has one. Drop a pair when a change repairs it.
 
-no_write_cards_max: 120
 real_writes_carded:
-  - "C01 exec_module dbx helpers #10"
-  - "C01 exec_module dbx helpers #11"
-  - "C05 exec open gateway skill #6"
-  - "C05 exec open gateway skill #7"
-  - "C07 exec_module restart reload #7"
-  - "D03 config-driven page path #7"
-  - "F01 dbx create safety stock table #4"
-  - "F01 dbx create safety stock table #6"
-  - "F01 dbx create safety stock table #9"
-  - "F02 pg update statuses #4"
-  - "F02 pg update statuses #6"
-  - "F03 overwrite project files #2"
-  - "F03 overwrite project files #5"
-  - "F04 gateway sandbox edits #4"
-  - "F04 gateway sandbox edits #6"
-  - "F04 gateway sandbox edits #9"
-  - "F05 sqlite project db #3"
-  - "F06 cleanup old exports #2"
-  - "F06 cleanup old exports #3"
-  - "F06 cleanup old exports #5"
-  - "F07 to_sql append #3"
-  - "F07 to_sql append #6"
-  - "F08 crm patch #3"
-  - "G03 path loop overwrite #3"
-  - "G04 statement shown then run #2"
-  - "H05 planning client object over three turns #10"
-  - "S03 monthly kpi pack #4"
-  - "W01 snowflake through sqlalchemy #7"
-  - "W01 snowflake through sqlalchemy #9"
-  - "K02 duckdb project database #3"
-  - "P01 helper module: push through it #1"
-  - "P04 exec of a script that writes, then call it #1"
-  - "P06 DDL run on a project database #1"
-  - "P08 startup hook written through a path, then a restart #0"
-  - "P08 startup hook written through a path, then a restart #1"
-  - "P12 page builder data step that posts #0"
-  - "T01 orm session #1"
-  - "T01 orm session #2"
-  - "T01 orm session #4"
-  - "T02 delete through a module written two turns earlier #3"
-  - "T03 overwrite a project file through a config path after a restart #1"
-  - "T04 http verbs and sessions #1"
-  - "T04 http verbs and sessions #2"
-  - "T04 http verbs and sessions #3"
-  - "T04 http verbs and sessions #4"
-  - "T04 http verbs and sessions #5"
-  - "T04 http verbs and sessions #6"
-  - "T05 writes in a thread pool and callbacks #1"
-  - "T05 writes in a thread pool and callbacks #2"
-  - "T05 writes in a thread pool and callbacks #4"
-  - "T06 ddl rebound to a function that runs it #1"
-  - "T07 ddl printed then run in one cell #1"
-  - "T09 helper alias then folder walk #1"
-  - "T12 small sql read then run next cell #1"
-  - "T13 builder data step posts by data= #0"
-  - "T14 config url post to the listed host #0"
-  - "T16 sitecustomize via path then restart #0"
-  - "T16 sitecustomize via path then restart #1"
-  - "T17 subprocess read-only cli #2"
-  - "T18 plotly html export and to_sql through helper #2"
-  - "V2 big sql on postgres same cell relative #0"
-  - "V3 big sql 900KB #0"
-  - "V4 big text posted to listed host #1"
-  - "X1 unread builder save over a project file #1"
+  - C01.10  # C01 exec_module dbx helpers
+  - C01.11  # C01 exec_module dbx helpers
+  - C07.7  # C07 exec_module restart reload
+  - D03.7  # D03 config-driven page path
+  - F01.4  # F01 dbx create safety stock table
+  - F01.6  # F01 dbx create safety stock table
+  - F01.9  # F01 dbx create safety stock table
+  - F02.4  # F02 pg update statuses
+  - F02.6  # F02 pg update statuses
+  - F03.2  # F03 overwrite project files
+  - F03.5  # F03 overwrite project files
+  - F04.4  # F04 gateway sandbox edits
+  - F04.6  # F04 gateway sandbox edits
+  - F04.9  # F04 gateway sandbox edits
+  - F05.3  # F05 sqlite project db
+  - F06.2  # F06 cleanup old exports
+  - F06.3  # F06 cleanup old exports
+  - F06.5  # F06 cleanup old exports
+  - F07.3  # F07 to_sql append
+  - F07.6  # F07 to_sql append
+  - F08.3  # F08 crm patch
+  - G03.3  # G03 path loop overwrite
+  - G04.2  # G04 statement shown then run
+  - S03.4  # S03 monthly kpi pack
+  - W01.7  # W01 snowflake through sqlalchemy
+  - W01.9  # W01 snowflake through sqlalchemy
+  - K02.3  # K02 duckdb project database
+  - P06.1  # P06 DDL run on a project database
+  - P12.0  # P12 page builder data step that posts
+  - T01.1  # T01 orm session
+  - T01.2  # T01 orm session
+  - T01.4  # T01 orm session
+  - T04.1  # T04 http verbs and sessions
+  - T04.2  # T04 http verbs and sessions
+  - T04.3  # T04 http verbs and sessions
+  - T04.4  # T04 http verbs and sessions
+  - T04.5  # T04 http verbs and sessions
+  - T04.6  # T04 http verbs and sessions
+  - T05.1  # T05 writes in a thread pool and callbacks
+  - T05.2  # T05 writes in a thread pool and callbacks
+  - T05.4  # T05 writes in a thread pool and callbacks
+  - T06.1  # T06 ddl rebound to a function that runs it
+  - T07.1  # T07 ddl printed then run in one cell
+  - T12.1  # T12 small sql read then run next cell
+  - T13.0  # T13 builder data step posts by data=
+  - T14.0  # T14 config url post to the listed host
+  - T17.2  # T17 subprocess read-only cli
+  - T18.2  # T18 plotly html export and to_sql through helper
+  - V2.0  # V2 big sql on postgres same cell relative
+  - V3.0  # V3 big sql 900KB
+  - V4.1  # V4 big text posted to listed host
+
+real_writes_carded_only_unchecked:
+  - C05.6  # C05 exec open gateway skill
+  - C05.7  # C05 exec open gateway skill
+  - H05.10  # H05 planning client object over three turns
+  - P01.1  # P01 helper module: push through it
+  - P04.1  # P04 exec of a script that writes, then call it
+  - P08.0  # P08 startup hook written through a path, then a restart
+  - P08.1  # P08 startup hook written through a path, then a restart
+  - T02.3  # T02 delete through a module written two turns earlier
+  - T03.1  # T03 overwrite a project file through a config path after a restart
+  - T09.1  # T09 helper alias then folder walk
+  - T16.0  # T16 sitecustomize via path then restart
+  - T16.1  # T16 sitecustomize via path then restart
+  - X1.1  # X1 unread builder save over a project file
+
+real_writes_missed:
+  - E04.3  # E04 large seed sql file
+  - F05.5  # F05 sqlite project db
+  - S01.4  # S01 weekly ops report, two scheduled runs
+  - W03.7  # W03 snowflake connector cursor
+  - K02.7  # K02 duckdb project database
+  - P10.1  # P10 big .sql file run on a project database
+  - T01.3  # T01 orm session
+  - T05.5  # T05 writes in a thread pool and callbacks
+  - T08.2  # T08 exec of a script that shadows a builtin, then print
+  - T10.0  # T10 big sql read and run in one cell
+  - T11.1  # T11 big sql read in a cell, run on postgres next cell, literal path
+  - V1.0  # V1 relative big sql executescript same cell
+
+no_write_carded:
+  - C01.1  # C01 exec_module dbx helpers
+  - C01.2  # C01 exec_module dbx helpers
+  - C01.3  # C01 exec_module dbx helpers
+  - C01.4  # C01 exec_module dbx helpers
+  - C01.5  # C01 exec_module dbx helpers
+  - C01.6  # C01 exec_module dbx helpers
+  - C01.7  # C01 exec_module dbx helpers
+  - C01.8  # C01 exec_module dbx helpers
+  - C01.9  # C01 exec_module dbx helpers
+  - C01.12  # C01 exec_module dbx helpers
+  - C02.4  # C02 exec open stats helpers
+  - C02.9  # C02 exec open stats helpers
+  - C02.10  # C02 exec open stats helpers
+  - C03.1  # C03 runpy prepare
+  - C03.2  # C03 runpy prepare
+  - C03.3  # C03 runpy prepare
+  - C03.4  # C03 runpy prepare
+  - C03.6  # C03 runpy prepare
+  - C03.7  # C03 runpy prepare
+  - C03.8  # C03 runpy prepare
+  - C04.2  # C04 agent writes module then imports
+  - C04.4  # C04 agent writes module then imports
+  - C05.1  # C05 exec open gateway skill
+  - C05.2  # C05 exec open gateway skill
+  - C05.3  # C05 exec open gateway skill
+  - C05.4  # C05 exec open gateway skill
+  - C05.5  # C05 exec open gateway skill
+  - C05.8  # C05 exec open gateway skill
+  - C05.9  # C05 exec open gateway skill
+  - C06.1  # C06 sys.path project package
+  - C06.2  # C06 sys.path project package
+  - C06.3  # C06 sys.path project package
+  - C06.4  # C06 sys.path project package
+  - C06.5  # C06 sys.path project package
+  - C06.6  # C06 sys.path project package
+  - C06.7  # C06 sys.path project package
+  - C07.1  # C07 exec_module restart reload
+  - C07.2  # C07 exec_module restart reload
+  - C07.5  # C07 exec_module restart reload
+  - C07.6  # C07 exec_module restart reload
+  - D03.4  # D03 config-driven page path
+  - D03.6  # D03 config-driven page path
+  - D03.9  # D03 config-driven page path
+  - D04.3  # D04 page path from artifact metadata
+  - D04.5  # D04 page path from artifact metadata
+  - D04.7  # D04 page path from artifact metadata
+  - D05.2  # D05 document build with skill helper
+  - D05.3  # D05 document build with skill helper
+  - E01.0  # E01 pdf guide text export
+  - E02.4  # E02 planner log
+  - E04.0  # E04 large seed sql file
+  - G01.3  # G01 ddl string then function
+  - G01.6  # G01 ddl string then function
+  - G05.1  # G05 p rebound after module
+  - G05.2  # G05 p rebound after module
+  - G05.5  # G05 p rebound after module
+  - H01.1  # H01 dbx helper kept alive over turns
+  - H01.2  # H01 dbx helper kept alive over turns
+  - H01.3  # H01 dbx helper kept alive over turns
+  - H01.4  # H01 dbx helper kept alive over turns
+  - H01.5  # H01 dbx helper kept alive over turns
+  - H01.7  # H01 dbx helper kept alive over turns
+  - H01.9  # H01 dbx helper kept alive over turns
+  - H02.1  # H02 gateway client rows into containers
+  - H02.4  # H02 gateway client rows into containers
+  - H02.5  # H02 gateway client rows into containers
+  - H02.6  # H02 gateway client rows into containers
+  - H02.7  # H02 gateway client rows into containers
+  - H02.8  # H02 gateway client rows into containers
+  - H02.9  # H02 gateway client rows into containers
+  - H03.3  # H03 stats helper results collected per site
+  - H03.5  # H03 stats helper results collected per site
+  - H03.6  # H03 stats helper results collected per site
+  - H03.9  # H03 stats helper results collected per site
+  - H04.1  # H04 helper frame cleaned and reshaped
+  - H04.2  # H04 helper frame cleaned and reshaped
+  - H04.3  # H04 helper frame cleaned and reshaped
+  - H04.4  # H04 helper frame cleaned and reshaped
+  - H04.6  # H04 helper frame cleaned and reshaped
+  - H04.7  # H04 helper frame cleaned and reshaped
+  - H04.8  # H04 helper frame cleaned and reshaped
+  - H05.1  # H05 planning client object over three turns
+  - H05.2  # H05 planning client object over three turns
+  - H05.3  # H05 planning client object over three turns
+  - H05.4  # H05 planning client object over three turns
+  - H05.5  # H05 planning client object over three turns
+  - H05.6  # H05 planning client object over three turns
+  - H05.7  # H05 planning client object over three turns
+  - H05.11  # H05 planning client object over three turns
+  - N01.1  # N01 notebook over a helper's frame
+  - N01.2  # N01 notebook over a helper's frame
+  - N01.5  # N01 notebook over a helper's frame
+  - N01.6  # N01 notebook over a helper's frame
+  - N01.7  # N01 notebook over a helper's frame
+  - N01.8  # N01 notebook over a helper's frame
+  - N01.10  # N01 notebook over a helper's frame
+  - N01.11  # N01 notebook over a helper's frame
+  - N01.12  # N01 notebook over a helper's frame
+  - N01.13  # N01 notebook over a helper's frame
+  - N01.14  # N01 notebook over a helper's frame
+  - N01.15  # N01 notebook over a helper's frame
+  - L02.3  # L02 shared config helper for logging and formats
+  - L02.6  # L02 shared config helper for logging and formats
+  - L02.7  # L02 shared config helper for logging and formats
+  - L03.1  # L03 pipeline helper with logger and exit hook
+  - L03.2  # L03 pipeline helper with logger and exit hook
+  - L03.3  # L03 pipeline helper with logger and exit hook
+  - L03.6  # L03 pipeline helper with logger and exit hook
+  - S01.5  # S01 weekly ops report, two scheduled runs
+  - S01.11  # S01 weekly ops report, two scheduled runs
+  - S02.3  # S02 daily exceptions report with a render helper
+  - S02.4  # S02 daily exceptions report with a render helper
+  - S02.10  # S02 daily exceptions report with a render helper
+  - S02.11  # S02 daily exceptions report with a render helper
+  - P02.1  # P02 helper module: walk the folder after it
+  - P05.2  # P05 DDL text printed
+  - P07.2  # P07 page written through a path, read after a restart
+  - P09.0  # P09 big text file read and counted
+  - T15.2  # T15 restart free re-derives the path
+  - T18.1  # T18 plotly html export and to_sql through helper
+
+broken_pairs:
+  - c2-exec
+  - c2-helper
+  - c5-ddl
+  - c7-restart
+  - c8-big

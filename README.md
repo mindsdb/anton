@@ -311,9 +311,11 @@ uv run python -I scripts/write_check_replay.py --tree /path/to/other/anton --com
 uv run python -I scripts/write_check_replay.py --tree . --compare other.json   # exit 1 on a lost hold or more noise
 ```
 
-It runs any anton commit's write check, the older `earlier_code=` form included. It exits 2 when it refuses to score: Python imported the check from anywhere but `--tree`, it can't import one there, or `--compare` got a scorecard of another corpus. A failed `--compare` exits 1. A check that raises counts as a card, as it does in a session. `--code-root` passes the project folder as a local pad's `code_root` on a tree that takes it.
+It runs any anton commit's write check, the older `earlier_code=` form included. It exits 2 when it refuses to score: Python imported the check from anywhere but `--tree`, it can't import one there, or `--compare` got a scorecard of another corpus. A failed `--compare` exits 1. `--accept <yaml>` maps cells that write nothing and may newly ask to the reason each must, under `no_write_cards`; `--compare` doesn't count those cards against the base. A lost real-write card can't be accepted. A check that raises counts as a card, as it does in a session. `--code-root` passes the project folder as a local pad's `code_root` on a tree that takes it.
 
-`tests/test_write_check_replay.py` holds this tree to `tests/fixtures/write_check_replay_budget.yaml`. Every real write listed there keeps its card, and cards on cells that write nothing stay at or under `no_write_cards_max`. A change that frees cells lowers the ceiling and lists any real write it starts catching. A change that adds cards says in its PR which cells gained one and why each must ask.
+Every cell has an `id`, its key in scorecards and the budget: the chat's code and a number. A new cell takes its chat's next free number, so no other key moves.
+
+`tests/test_write_check_replay.py` holds this tree to `tests/fixtures/write_check_replay_budget.yaml`. Its lists are exact: the real writes carded on a rule of their own, those carded only by the "can't be checked" card, the known misses, the cells that write nothing but get a card, and the broken pairs. The test fails when the scorecard differs from any list in either direction, and names the cells. So a change that frees five cells and cards five others fails too. A change that frees cells or starts catching a write updates the lists. A change that adds cards says in its PR which cells gained one and why each must ask, and a change that narrows the "can't be checked" card says what holds each write it frees.
 
 ---
 

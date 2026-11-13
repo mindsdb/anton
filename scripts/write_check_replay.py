@@ -19,11 +19,14 @@ one under `--tree`, or two scorecards replayed different corpora.
 With `--compare <scorecard.json>`, the run is held to the bar a release
 check uses: it fails (exit 1) when a real write the base carded loses its
 card, or when cards on cells that write nothing rise above the base's.
+`--accept <yaml>` names cells that write nothing and may newly ask, each with
+its reason; those cards don't count against the bar. A lost real-write card
+can't be accepted.
 
 Usage:
   python -I scripts/write_check_replay.py --tree <anton tree> [--corpus <yaml>]
-      [--out <scorecard.json>] [--compare <base scorecard.json>] [--code-root]
-      [--commit <sha>] [--ablate <module function>=<empty value> ...]
+      [--out <scorecard.json>] [--compare <base scorecard.json>] [--accept <yaml>]
+      [--code-root] [--commit <sha>]
 """
 
 from __future__ import annotations
@@ -44,13 +47,12 @@ from pathlib import Path
 from typing import Literal, NoReturn
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CORPUS = HERE.parent / "tests" / "fixtures" / "write_check_replay_corpus.yaml"
 KINDS = ("unchecked", "sql", "sql_file", "http", "files")
 FILE_ACTIONS = frozenset({"delete", "rename", "move", "overwrite", "append"})
-EMPTY_VALUES = {"list": list, "tuple": tuple, "none": lambda: None, "false": lambda: False}
 REFUSED = 2
 
 
@@ -64,6 +66,7 @@ def _refuse(message: str) -> NoReturn:
 
 
 class CorpusCell(BaseModel):
+    id: str = Field(pattern=r"^[A-Z]+\d*\.\d+$")
     code: str
     real_write: bool
     why: str = ""
@@ -95,11 +98,20 @@ class Corpus(BaseModel):
     rule: str
     chats: list[Chat]
 
+    @model_validator(mode="after")
+    def _ids_are_unique(self) -> Corpus:
+        seen = Counter(cell.id for chat in self.chats for cell in chat.cells)
+        repeated = sorted(i for i, n in seen.items() if n > 1)
+        if repeated:
+            raise ValueError(f"cell ids used more than once: {repeated}")
+        return self
+
 
 # ── scorecard ───────────────────────────────────────────────────────────────
 
 
 class CellResult(BaseModel):
+    id: str
     chat: str
     cell: int
     turn: int
@@ -116,7 +128,7 @@ class CellResult(BaseModel):
 
     @property
     def key(self) -> str:
-        return f"{self.chat} #{self.cell}"
+        return self.id
 
 
 class Tally(BaseModel):
@@ -135,7 +147,6 @@ class Scorecard(BaseModel):
     commit: str
     signature: Literal["earlier", "earlier_code"]
     code_root: bool
-    ablations: list[str]
     corpus_sha256: str
     cells: int
     questions: int
@@ -215,7 +226,7 @@ def _write_files(root: Path, files: dict, seed: int, subst) -> None:
 class WriteCheck:
     """One tree's write check, called the way its own signature takes it."""
 
-    def __init__(self, tree: Path, *, code_root: bool, ablations: list[str]) -> None:
+    def __init__(self, tree: Path, *, code_root: bool) -> None:
         sys.path.insert(0, str(tree))
         try:
             wc = importlib.import_module("anton.core.utils.write_check")
@@ -224,12 +235,6 @@ class WriteCheck:
         imported = Path(wc.__file__).resolve()
         if not imported.is_relative_to(tree):
             _refuse(f"the write check came from {imported}, not from --tree {tree}")
-        for spec in ablations:
-            name, _, empty = spec.partition("=")
-            if not hasattr(wc, name) or empty not in EMPTY_VALUES:
-                _refuse(f"can't ablate {spec!r} on this tree")
-            make = EMPTY_VALUES[empty]
-            setattr(wc, name, lambda *a, _make=make, **k: _make())
         self.wc = wc
         params = inspect.signature(wc.find_cell_writes).parameters
         self.signature: Literal["earlier", "earlier_code"] = "earlier" if "earlier" in params else "earlier_code"
@@ -286,7 +291,7 @@ def _replay_chat(check: WriteCheck, chat: Chat, rules, seed: int, first_turn: in
                 except Exception:  # the product asks when the check fails
                     card, crashed, kinds, causes, recorded = True, True, ["unchecked"], ["crash"], {}
                 results.append(CellResult(
-                    chat=chat.name, cell=i, turn=turn, style=chat.style, card=card, crashed=crashed, kinds=kinds,
+                    id=cell.id, chat=chat.name, cell=i, turn=turn, style=chat.style, card=card, crashed=crashed, kinds=kinds,
                     causes=causes, real_write=cell.real_write, runs_unread=cell.runs_unread, pair=cell.pair,
                     role=cell.role, secs=round(time.time() - started, 3)))
                 entry = {"code": code, "errored": cell.errored, "ended_process": False}
@@ -305,12 +310,11 @@ def _commit_of(tree: Path, given: str | None) -> str:
     return done.stdout.strip() if done.returncode == 0 else "unknown"
 
 
-def replay(tree: Path, corpus_path: Path, *, code_root: bool = False, commit: str | None = None,
-           ablations: list[str] | None = None) -> Scorecard:
+def replay(tree: Path, corpus_path: Path, *, code_root: bool = False, commit: str | None = None) -> Scorecard:
     tree = tree.resolve()
     raw = corpus_path.read_bytes()
     corpus = Corpus.model_validate(yaml.safe_load(raw))
-    check = WriteCheck(tree, code_root=code_root, ablations=ablations or [])
+    check = WriteCheck(tree, code_root=code_root)
     rules = check.wc.parse_http_write_rules(corpus.rule)
     results: list[CellResult] = []
     questions = 0
@@ -319,7 +323,7 @@ def replay(tree: Path, corpus_path: Path, *, code_root: bool = False, commit: st
         results.extend(chat_results)
         questions = chat_results[-1].turn + 1
     return _score(results, tree=str(tree), commit=_commit_of(tree, commit), signature=check.signature,
-                  code_root=code_root, ablations=ablations or [], corpus_sha256=hashlib.sha256(raw).hexdigest(),
+                  code_root=code_root, corpus_sha256=hashlib.sha256(raw).hexdigest(),
                   questions=questions)
 
 
@@ -352,10 +356,29 @@ def _score(results: list[CellResult], *, questions: int, **identity) -> Scorecar
 # ── the bar ─────────────────────────────────────────────────────────────────
 
 
+class Accepted(BaseModel):
+    """Cells that write nothing and may newly ask, each with the reason it must."""
+
+    no_write_cards: dict[str, str]
+
+    @field_validator("no_write_cards")
+    @classmethod
+    def _every_cell_has_a_reason(cls, cells: dict[str, str]) -> dict[str, str]:
+        missing = sorted(cell for cell, why in cells.items() if not why.strip())
+        if missing:
+            raise ValueError(f"accepted cells with no reason: {missing}")
+        return cells
+
+
+def read_accepted(path: Path) -> Accepted:
+    return Accepted.model_validate(yaml.safe_load(path.read_text()))
+
+
 class Verdict(BaseModel):
     passed: bool
     lost_holds: list[str]
     new_no_write_cards: list[str]
+    accepted_no_write_cards: list[str]
     no_write_cards: tuple[int, int]
     # Shown, not failed on: a cell that runs unread code may go free when the check reads that
     # code, and a pair the base already broke isn't this run's doing.
@@ -363,28 +386,35 @@ class Verdict(BaseModel):
     broken_pairs: list[str]
 
 
-def compare(base: Scorecard, head: Scorecard) -> Verdict:
+def compare(base: Scorecard, head: Scorecard, accepted: Accepted | None = None) -> Verdict:
     """Hold `head` to `base`: no real write `base` carded may lose its card,
-    and cards on cells that write nothing may not rise. Both must come from
-    the same corpus, or the comparison means nothing."""
+    and cards on cells that write nothing may not rise, except on cells
+    `accepted` names. Both must come from the same corpus, or the comparison
+    means nothing."""
     if base.corpus_sha256 != head.corpus_sha256:
         _refuse("the two scorecards replayed different corpora")
     base_by_key = {r.key: r for r in base.results}
+    allowed = set(accepted.no_write_cards) if accepted else set()
+    no_write_ids = {r.key for r in head.results if not r.real_write and not r.runs_unread}
+    if allowed - no_write_ids:
+        _refuse(f"accepted cells that aren't cells writing nothing: {sorted(allowed - no_write_ids)}")
     lost = [r.key for r in head.results if r.real_write and not r.card and base_by_key[r.key].card]
-    new = [r.key for r in head.results
-           if r.card and not r.real_write and not r.runs_unread and not base_by_key[r.key].card]
+    gained = [r.key for r in head.results
+              if r.card and not r.real_write and not r.runs_unread and not base_by_key[r.key].card]
+    new = [key for key in gained if key not in allowed]
+    taken = [key for key in gained if key in allowed]
     counts = (base.no_write.carded, head.no_write.carded)
     freed = [r.key for r in head.results
              if r.runs_unread and not r.real_write and not r.card and base_by_key[r.key].card]
     broken = [p.pair for p in head.pairs if p.holds.carded < p.holds.cells or p.frees.carded]
-    return Verdict(passed=not lost and counts[1] <= counts[0], lost_holds=lost, new_no_write_cards=new,
-                   no_write_cards=counts, freed_unread_cells=freed, broken_pairs=broken)
+    return Verdict(passed=not lost and counts[1] - len(taken) <= counts[0], lost_holds=lost,
+                   new_no_write_cards=new, accepted_no_write_cards=taken, no_write_cards=counts,
+                   freed_unread_cells=freed, broken_pairs=broken)
 
 
 def _summary(card: Scorecard) -> str:
     lines = [
-        f"{card.commit[:12]} ({card.signature}{', code_root' if card.code_root else ''}"
-        f"{', ablated ' + ' '.join(card.ablations) if card.ablations else ''}): "
+        f"{card.commit[:12]} ({card.signature}{', code_root' if card.code_root else ''}): "
         f"{card.cards} cards in {card.cells} cells and {card.questions} questions = "
         f"{card.per_100_cells} per 100 cells, {card.per_100_questions} per 100 questions; crashes {card.crashes}",
         f"  by kind per 100 cells: {card.by_kind_per_100_cells}",
@@ -408,24 +438,27 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     ap.add_argument("--out", type=Path, help="where to write the scorecard JSON")
     ap.add_argument("--compare", type=Path, help="a base scorecard to hold this run to")
+    ap.add_argument("--accept", type=Path,
+                    help="a YAML file whose no_write_cards maps each cell that may newly ask to its reason")
     ap.add_argument("--code-root", action="store_true", help="read helpers a cell runs by path, as a local pad does")
     ap.add_argument("--commit", help="the tree's commit, when it isn't a git checkout")
-    ap.add_argument("--ablate", action="append", default=[], metavar="FUNCTION=EMPTY",
-                    help=f"switch one write_check function off; EMPTY is one of {', '.join(EMPTY_VALUES)}")
     ns = ap.parse_args(argv)
-    card = replay(ns.tree, ns.corpus, code_root=ns.code_root, commit=ns.commit, ablations=ns.ablate)
+    accepted = read_accepted(ns.accept) if ns.accept else None
+    card = replay(ns.tree, ns.corpus, code_root=ns.code_root, commit=ns.commit)
     if ns.out:
         ns.out.write_text(card.model_dump_json(indent=1))
     print(_summary(card))
     if not ns.compare:
         return 0
-    verdict = compare(Scorecard.model_validate_json(ns.compare.read_text()), card)
+    verdict = compare(Scorecard.model_validate_json(ns.compare.read_text()), card, accepted)
     print(f"against {ns.compare.name}: cards on cells that write nothing {verdict.no_write_cards[0]} -> "
           f"{verdict.no_write_cards[1]}; {len(verdict.lost_holds)} real writes lost their card")
     for key in verdict.lost_holds:
         print(f"  lost hold: {key}")
     for key in verdict.new_no_write_cards:
         print(f"  new card on a cell that writes nothing: {key}")
+    for key in verdict.accepted_no_write_cards:
+        print(f"  accepted new card on a cell that writes nothing: {key} ({accepted.no_write_cards[key]})")
     for key in verdict.freed_unread_cells:
         print(f"  freed a cell that runs code the check can't read (check it reads that code): {key}")
     if verdict.broken_pairs:
