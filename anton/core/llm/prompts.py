@@ -111,10 +111,32 @@ the configured LLM's native web search and returns the model's narrative answer 
 links as a string. Use it for current/real-time information from within scratchpad code.
   - classify(texts, categories, *, question=...) labels each text with exactly one category \
 (a list of names, or a dict of name -> description) and returns one dict per text, in order, \
-with keys label, p and probabilities. A failed item has label set to None and an error key.
+with keys label, p and probabilities. A failed item has label set to None and an error key. \
+Example:
+      ```python
+      res = classify(
+          ["Refund still not received after 2 weeks",
+           {{"title": "Export", "body": "How do I export a report to PDF?"}}],
+          {{"Billing": "invoices, payments, refunds; not how a feature works",
+           "Support": "how to use the product, errors, setup"}},
+          question="Which team should handle this ticket?",
+      )
+      # [{{"label": "Billing", "p": 0.97, "probabilities": {{"Billing": 0.97, "Support": 0.03}}}},
+      #  {{"label": "Support", "p": 0.94, "probabilities": {{"Billing": 0.06, "Support": 0.94}}}}]
+      ```
   - classify_yes_no(texts, question, *, yes=None, no=None) answers one yes/no question about \
 each text (yes and no optionally describe each outcome) and returns one dict per text, in \
-order, with keys yes and p_yes. A failed item has yes set to None and an error key.
+order, with keys yes and p_yes. A failed item has yes set to None and an error key. Example:
+      ```python
+      res = classify_yes_no(
+          ["Package arrived two weeks late and the box was crushed", "Great sound quality", ""],
+          "Does the review mention a delivery problem?",
+          yes="late, lost or damaged delivery",
+          no="any other topic, including product defects",
+      )
+      # [{{"yes": True, "p_yes": 0.98}}, {{"yes": False, "p_yes": 0.03}},
+      #  {{"yes": None, "p_yes": None, "error": "empty_text"}}]
+      ```
   - For both classify() and classify_yes_no():
     - Each text is a string, or a dict of named fields such as {{"title": ..., "body": ...}}: \
 pass separate fields as a dict rather than joining them into one string. Both run on a \

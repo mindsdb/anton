@@ -63,9 +63,12 @@ def test_the_prompt_without_classify_names_no_classify_helper(internet_research)
     on, off = build(True), build(False)
     assert "classify(texts, categories, *, question=...)" in on and "classify_yes_no" in on
     assert "classify" not in off.replace("classified", "")
-    # Everything else is kept: the only removed lines are the classify ones.
-    removed = set(on.splitlines()) - set(off.splitlines())
-    assert all("classify" in line or "categor" in line or "label" in line for line in removed)
+    # Everything else is kept: only the classify items, from their first line to the
+    # next top-level bullet, are removed.
+    lines = on.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("  - classify("))
+    end = next(i for i in range(start, len(lines)) if lines[i].startswith("- "))
+    assert lines[:start] + lines[end:] == off.splitlines()
 
 
 @pytest.mark.parametrize("internet_research", [True, False])
