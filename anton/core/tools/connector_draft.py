@@ -340,11 +340,11 @@ def _parse_check(data: Any, auth: ConnectorDraftAuth) -> ConnectorDraftCheck | N
     _check_keys(data, _CHECK_KEYS, "check")
     try:
         path = _check_path(data.get("path"))
-        if rules.query_collides(auth.to_dict(), rules.query_names(urlsplit(path).query)):
-            raise ConnectorDraftError("check.path may carry only plain parameter names, none of them one auth places.")
-        return ConnectorDraftCheck(path=path)
     except ConnectorDraftError as e:
         raise ConnectorCheckError(str(e)) from e
+    if rules.query_collides(auth.to_dict(), rules.query_names(urlsplit(path).query)):
+        raise ConnectorDraftError("check.path may carry only plain parameter names, none of them one auth places.")
+    return ConnectorDraftCheck(path=path)
 
 
 def _parse_field(data: Any, index: int) -> ConnectorDraftField:
@@ -500,7 +500,7 @@ _INPUT_SCHEMA = {
                 "the credentials, including any key parameter auth places in the URL, so leave out "
                 "auth headers, key parameters, keys and the API's address. No values. The user types "
                 "only the host, so every path starts at the host and includes any version, "
-                "e.g. /v2/eod?symbols=AAPL."
+                "with its parameters apart, e.g. path /v2/eod with query {'symbols': 'AAPL'}."
             ),
         },
         "fields": {
@@ -579,8 +579,7 @@ _INPUT_SCHEMA["properties"]["check"] = {
 
 
 _CHECK_REQUIRED = (
-    "A connector needs a check: one GET that answers only with valid credentials, "
-    "sent with the template's auth. " + _NO_CONNECTOR_CASES
+    "A connector needs a check: the path of one GET that answers only with valid credentials."
 )
 
 
@@ -592,7 +591,7 @@ def connector_draft_tool(box: ConnectorDraftBox) -> ToolDef:
         try:
             draft = parse_connector_draft(tc_input)
         except ConnectorCheckError as e:
-            # An API with no key, or one in the URL, fails here first: say what to do instead.
+            # A refused check path: say when no connector is needed at all.
             return ToolOutcome(content=json.dumps({"error": f"{e} {_NO_CONNECTOR_CASES}"}), ok=False, reason="invalid_draft")
         except ConnectorDraftError as e:
             return ToolOutcome(content=json.dumps({"error": str(e)}), ok=False, reason="invalid_draft")

@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -412,16 +413,16 @@ def test_the_tool_refuses_a_template_without_a_check_and_says_what_to_do(check):
 
     assert outcome.ok is False and outcome.reason == "invalid_draft"
     error = json.loads(outcome.content)["error"]
-    assert "call it directly from code" in error and "cannot be a custom connector yet" in error
+    assert "needs a check" in error and "path of one GET" in error
     assert box.drain() == []
 
 
 @pytest.mark.parametrize("check", [
-    {"path": "https://api.acme.example/v1/me"},
-    {"path": ""},
-], ids=["path-with-host", "empty-path"])
-def test_the_tool_says_what_to_do_when_a_check_is_unusable(check):
-    """A template whose check cannot be sent is told when to skip the connector."""
+    {"path": "/v1/me?key={api_key}"},
+    {"path": "v1/me"},
+], ids=["placeholder-in-path", "no-leading-slash"])
+def test_the_tool_says_what_to_do_when_a_check_path_is_refused(check):
+    """A refused check path also says when to skip the connector."""
     box = ConnectorDraftBox()
 
     outcome = asyncio.run(connector_draft_tool(box).handler(None, _tool_draft(check=check)))
@@ -787,7 +788,19 @@ def test_the_tool_says_every_path_starts_at_the_host_with_its_version():
         assert "/v2/" in text, where
         assert "includ" in text and "version" in text, where
     assert "(/v2/exchanges, not /exchanges)" in texts["description"]
-    assert "/v2/eod?symbols=AAPL" in texts["usage_notes"]
+    assert "path /v2/eod with query {'symbols': 'AAPL'}" in texts["usage_notes"]
+
+
+def test_no_example_path_for_a_call_carries_its_query():
+    """call_minds_api takes parameters apart from the path; a check path may still carry a query."""
+    tool = connector_draft_tool(ConnectorDraftBox())
+    texts = {
+        "description": tool.description,
+        "usage_notes": tool.input_schema["properties"]["usage_notes"]["description"],
+    }
+
+    for where, text in texts.items():
+        assert re.findall(r"/[A-Za-z0-9_./-]*\?", text) == [], where
 
 
 def test_a_check_path_with_a_host_is_refused_with_a_versioned_example():
