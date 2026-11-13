@@ -846,15 +846,18 @@ async def test_a_hosts_password_field_refusal_reads_as_a_secret_field():
 
 
 async def test_the_prompt_the_skill_and_each_secret_field_refusal_name_a_payment_card_and_not_any_card():
-    """Both hosts take a field for a card's secret only when it names a
-    payment card: a field whose name, id, aria-label or placeholder names a
-    gift, loyalty or library card's number is an ordinary field, read and
-    typed into for the person (page.json's card_field_exempt). A field named
-    cardNumber is still a payment card's, even where its label or aria-label
-    says gift card, so the hosts refuse a type into it. The prompt and the
-    skill say such a field is usually ordinary, and to hand it over when the
-    browser refuses it. Both refusals of a type into a secret field say the
-    browser took the card number for a payment card's, not that it is one."""
+    """Both hosts take a field for a card's secret only when it may name a
+    payment card: a field whose name, id, aria-label and placeholder name
+    only a gift, loyalty, library or ID card's number, with no payment word,
+    is an ordinary field, read and typed into for the person (page.json's
+    card_field_exempt and card_field_payment). A field named cardNumber is
+    still a payment card's, even where its aria-label says gift card, and so
+    is one labeled for a credit or gift card, or for a benefits card's
+    number, so the hosts refuse a type into it. The prompt and the skill say
+    a gift, loyalty or library card's field is usually ordinary, and to hand
+    it over when the browser refuses it. Both refusals of a type into a
+    secret field say the browser took the card number for a payment card's,
+    not that it is one."""
     from pathlib import Path
 
     prompt = " ".join(browser_tool.BROWSER_TOOL_PROMPT.split())
