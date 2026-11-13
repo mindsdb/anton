@@ -867,7 +867,7 @@ def _scrolled_in_place(before: list[_FrameSpot], now: list[_FrameSpot], scrolled
 
 
 #: How many pixels apart two reads may put a frame's at or size, or a
-#: frame fixed to the view's at against the page's scroll: each host rounds
+#: stuck sticky frame's at against the page's scroll: each host rounds
 #: them from fractional parts on its own.
 _PLACE_ROUNDING_PX = 1
 
@@ -898,10 +898,12 @@ def _same_place(was: _FramePlace, now: _FramePlace) -> bool:
     )
 
 
-def _fixed_to_view(was: _FramePlace, now: _FramePlace, scrolled: int) -> bool:
-    """Whether ``now`` is ``was`` fixed to the view (a chat widget, a sticky
-    ad): the same address and screenshot box, with an at that moved down its
-    document by the page's scroll, a pixel of rounding apart."""
+def _stuck_to_view(was: _FramePlace, now: _FramePlace, scrolled: int) -> bool:
+    """Whether ``now`` is ``was`` held stuck to the view by a sticky element
+    (a sticky ad): the same address and screenshot box, with an at that
+    moved down its document by the page's scroll, a pixel of rounding apart.
+    A frame fixed to the view (a chat widget) keeps its at, so it is in its
+    place by ``_same_place``."""
     return (
         now.url == was.url
         and now.box == was.box
@@ -931,14 +933,16 @@ def _frames_moved(seen: Page, current: Page) -> bool:
     changed address, size or place on the page.
 
     When every placed frame of both reads carries at, which no scroll moves,
-    the page's or an inner column's, the frames are compared as a multiset
+    the page's or an inner column's, for a frame that scrolls with the
+    content or one fixed to the view, the frames are compared as a multiset
     keyed by address, at and size, a pixel of rounding apart
-    (``_same_place``). A frame fixed to the view keeps its screenshot box
-    while its at moves down the page by the page's scroll, and is in its
-    place too (``_fixed_to_view``); it is paired only after the frames that
-    kept their at, so a scroll that puts it exactly where another frame of
-    its address sits pairs each with its own. Otherwise the place on the
-    page is inferred from the boxes and the page's scroll, as follows.
+    (``_same_place``). A frame a sticky element holds stuck to the view
+    keeps its screenshot box while its at moves down the page by the page's
+    scroll, and is in its place too (``_stuck_to_view``); it is paired only
+    after the frames that kept their at, so a scroll that puts it exactly
+    where another frame of its address sits pairs each with its own.
+    Otherwise the place on the page is inferred from the boxes and the
+    page's scroll, as follows.
 
     The boxes are in screenshot pixels and the list goes on-screen first, so
     a scroll moves every box and may reorder the list. The frames are
@@ -971,7 +975,7 @@ def _frames_moved(seen: Page, current: Page) -> bool:
     places, places_now = _frame_places(seen.frames), _frame_places(current.frames)
     if places is not None and places_now is not None:
         places, places_now = _unpaired(places, places_now, _same_place)
-        places, places_now = _unpaired(places, places_now, lambda was, now: _fixed_to_view(was, now, scrolled))
+        places, places_now = _unpaired(places, places_now, lambda was, now: _stuck_to_view(was, now, scrolled))
         return bool(places or places_now)
     if _scrolled_in_place(before, now, scrolled):
         return False

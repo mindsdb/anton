@@ -111,11 +111,15 @@ class Frame(_Answer):
     read: bool = False
     #: None when the host can't place the frame on the screenshot.
     box: FrameBox | None = None
-    #: The frame element's top-left in its document: its top-left in the
-    #: viewport plus the page's scroll plus the scroll offset of every
-    #: scrolling element it sits in, so no scroll, the page's or an inner
-    #: column's, moves it. Both hosts send it with every frame that has a box;
-    #: None for a frame with no box, and from a host that predates it.
+    #: The top-left of the frame element's content box in its document, in
+    #: whole CSS pixels: its top-left in the viewport plus the scroll offset
+    #: of each element in its containing-block chain, plus its document's
+    #: scroll unless that chain ends fixed to the view. So no scroll, the
+    #: page's or an inner column's, moves a frame that scrolls with the
+    #: content. A frame fixed to the view keeps its at; one a sticky element
+    #: holds stuck to the view moves it by the scroll. Both hosts send it with
+    #: every frame that has a box; None for a frame with no box, and from a
+    #: host that predates it.
     at: PagePoint | None = None
     offscreen: bool = False
     elements: list[FrameElement] = []

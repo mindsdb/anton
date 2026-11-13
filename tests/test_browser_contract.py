@@ -608,19 +608,38 @@ def test_the_page_fixture_lets_a_host_list_the_frames_inside_a_frame_it_read():
     ) in description
 
 
+#: page.json's definition of a frame's at, which both hosts compute: the
+#: scrolls of the frame's containing-block chain, so a frame fixed to the view
+#: keeps its at whatever scrolls, and only a frame a sticky element holds
+#: stuck to the view moves it by the scroll.
+FRAME_AT = (
+    "A host sends at with every frame whose box isn't null: the top-left {x, y} of the frame element's content box "
+    "(the box that box gives in screenshot pixels) in its document's content coordinates, in CSS pixels rounded "
+    "to whole ones. That is the "
+    "box's top-left in the viewport plus the scroll offset of each element in the frame element's containing-block "
+    "chain, plus its document's scroll unless that chain ends at an element fixed to the view. The chain holds the "
+    "elements whose scroll moves it: an element in flow (static, relative or sticky) moves with its parent's "
+    "scroll, and an absolute or fixed one with its containing block's as CSS defines it (an absolute one's nearest "
+    "positioned ancestor, a fixed one's nearest ancestor with a transform, a filter or the like, else none), and so "
+    "on up from each. So no scroll, its document's or an inner column's, changes the at of a frame that scrolls with "
+    "the content, or of one fixed to the view. A frame that a sticky element holds stuck to the view keeps its box "
+    "as its document scrolls, so its at moves by the scroll."
+)
+
+
 def test_the_page_fixture_places_each_frame_on_its_page_whatever_scrolls():
     """A frame's box is where it is on the screenshot, so the page's scroll
     and an inner column's both move it. at is where the frame element sits in
     its document, so neither does, and it tells a frame that moved on the
-    page from one that only scrolled. A host sends it with every frame it
-    places, in whole CSS pixels, and a frame with no box carries none."""
+    page from one that only scrolled. Only the scrolls that move the frame
+    count, those of its containing-block chain, so a frame fixed to the view
+    keeps its at too, inside a scrolling column as well, and a frame stuck to
+    the view by a sticky element moves it by the scroll. A host sends it with
+    every frame it places, in whole CSS pixels, and a frame with no box
+    carries none."""
     fixture = _load("page")
-    assert (
-        "A host sends at with every frame whose box isn't null: the frame element's top-left {x, y} in its "
-        "document's content coordinates, in CSS pixels rounded to whole ones, which is its top-left in the viewport "
-        "plus the page's scroll plus the scroll offset of every scrolling element it sits in, so no scroll, the "
-        "page's or an inner column's, changes it."
-    ) in fixture.description
+    assert "plus the page's scroll plus the scroll offset of every scrolling element it sits in" not in fixture.description
+    assert FRAME_AT in fixture.description
     placed = 0
     for name, example in fixture.examples.items():
         for frame in example.body.get("frames", []) if example.kind == "response" else []:
@@ -650,6 +669,22 @@ def test_the_page_model_says_what_the_page_fixture_says_of_its_frames():
         "The page's rendered child frames, on-screen first, and after them a host may list, unread, the frames "
         "inside a frame it read."
     ) in source
+
+
+def test_the_frame_model_says_which_scrolls_page_json_adds_to_a_frame_s_at():
+    """Frame.at says what page.json's FRAME_AT says: the scrolls of the
+    frame's containing-block chain, and its document's scroll unless that
+    chain ends fixed to the view, so a frame fixed to the view keeps its at
+    and a frame stuck to the view by a sticky element moves it."""
+    import inspect
+
+    source = " ".join(line.strip().removeprefix("#:").strip() for line in inspect.getsource(Frame).splitlines())
+    assert "plus the page's scroll plus the scroll offset of every scrolling element it sits in" not in source
+    assert (
+        "plus the scroll offset of each element in its containing-block chain, plus its document's scroll unless "
+        "that chain ends fixed to the view."
+    ) in source
+    assert "A frame fixed to the view keeps its at; one a sticky element holds stuck to the view moves it by the scroll." in source
 
 
 def test_the_control_fixture_tells_done_by_the_person_from_any_other_agent_record():

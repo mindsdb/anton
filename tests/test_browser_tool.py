@@ -1355,13 +1355,15 @@ async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place
     waits, which moves a frame on the screenshot while the page's scroll
     stays put, runs the step, on the desktop's shrunk and outward-rounded
     screenshot and on the pod's alike. A frame fixed to the view (a chat
-    widget, a sticky ad) keeps its box while its at moves down the page by
-    the page's scroll, and is in its place too. A frame that moved within
-    the column's content, even by exactly the column's scroll so its box
-    stayed put, or came, went, or changed address or size, refuses the
-    step. A read without at falls back to comparing boxes against the
-    page's scroll, which reads an inner column's scroll as a frame that
-    moved."""
+    widget) keeps its box and its at, inside a scrolling column too, since
+    only the scrolls of its containing-block chain count. A frame a sticky
+    element holds stuck to the view (a sticky ad) keeps its box while its at
+    moves down the page by the page's scroll, and is in its place too. A
+    frame that moved within the column's content, even by exactly the
+    column's scroll so its box stayed put, or came, went, or changed
+    address or size, refuses the step. A read without at falls back to
+    comparing boxes against the page's scroll, which reads an inner
+    column's scroll as a frame that moved."""
     desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
     # The desktop's screenshot at 0.8 of the view, edges rounded outward.
     form = {**FRAMED["frames"][0], "box": {"x": 112, "y": 300, "width": 448, "height": 144}, "at": {"x": 140, "y": 375}}
@@ -1396,6 +1398,9 @@ async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place
         "a frame that came while the column scrolled": (at(0, form), at(0, moved(form, y=180), chat)),
         "a frame that went while the column scrolled": (at(0, form, chat), at(0, chat)),
         "a frame fixed to the view that moved on the screen": (
+            at(0, form, chat), at(200, moved(form, y=140), moved(chat, y=560, on_page={"y": 700})),
+        ),
+        "a frame whose at moved by the scroll while its box moved on the screen": (
             at(0, form, chat), at(200, moved(form, y=140), moved(chat, y=560, on_page={"y": 950})),
         ),
         "an inner column's scroll on reads that carry no at": (at(0, bare(form)), at(0, bare(moved(form, y=180)))),
@@ -1409,7 +1414,11 @@ async def test_on_the_desktop_a_step_to_the_focus_compares_frames_by_their_place
         "the page's scroll and an inner column's together": (
             at(0, form, video), at(200, moved(form, y=20), moved(video, y=740)),
         ),
-        "the page's scroll beside a frame fixed to the view": (
+        "the page's scroll beside a frame fixed to the view": (at(0, form, chat), at(200, moved(form, y=140), chat)),
+        "an inner column's scroll beside a frame fixed to the view in that column": (
+            at(0, form, chat), at(0, moved(form, y=180), chat),
+        ),
+        "the page's scroll beside a frame a sticky element holds stuck to the view": (
             at(0, form, chat), at(200, moved(form, y=140), moved(chat, on_page={"y": 950})),
         ),
         "the page's scroll beside a sticky ad at the address of ads that scroll": (
