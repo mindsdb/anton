@@ -591,7 +591,7 @@ def connector_draft_tool(box: ConnectorDraftBox) -> ToolDef:
         try:
             draft = parse_connector_draft(tc_input)
         except ConnectorCheckError as e:
-            # An API with no key fails here first: say what to do instead.
+            # A refused check path: say when no connector is needed at all.
             return ToolOutcome(content=json.dumps({"error": f"{e} {_NO_CONNECTOR_CASES}"}), ok=False, reason="invalid_draft")
         except ConnectorDraftError as e:
             return ToolOutcome(content=json.dumps({"error": str(e)}), ok=False, reason="invalid_draft")

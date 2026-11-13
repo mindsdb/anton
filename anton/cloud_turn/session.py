@@ -272,42 +272,6 @@ def _cloud_turn_workspace_env(request: TurnRequestV1, settings: AntonSettings) -
             }
         )
     return overlay
-    llm = request.llm or {}
-    base = (settings.openai_base_url or "").rstrip("/")
-    parsed = urlsplit(base)
-    if (
-        llm.get("provider") != "minds-cloud"
-        or not isinstance(llm.get("api_key"), str)
-        or not llm["api_key"]
-        or not hmac.compare_digest(settings.openai_api_key or "", llm["api_key"])
-        or base != str(llm.get("base_url") or "").rstrip("/")
-        or parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path != "/v1"
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError("the turn's inference connection cannot carry datasource reads")
-    if not request.correlation_id:
-        raise ValueError("datasource turn credentials are unavailable")
-    overlay.update(
-        {
-            _DATASOURCE_CORRELATION_ENV: request.correlation_id,
-            _DATASOURCE_CONNECTIONS_ENV: json.dumps(
-                [
-                    {
-                        "connection_id": ref.connection_id,
-                        "credential_version": ref.credential_version,
-                    }
-                    for ref in request.datasource.connections
-                ],
-                separators=(",", ":"),
-            ),
-        }
-    )
-    return overlay
 
 
 def _safe_skill_file(skill_dir: Path, rel: str) -> Path | None:

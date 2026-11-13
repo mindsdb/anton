@@ -1259,7 +1259,11 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_CUSTOM_API_CONNECTIONS"):
                 if isinstance(value, str):
                     pairs.append([name, value])
                 elif isinstance(value, (int, float)):
-                    pairs.append([name, str(value)])
+                    try:
+                        pairs.append([name, str(value)])
+                    except ValueError:
+                        # An int past Python's digit limit has no text form to send.
+                        return None
                 else:
                     return None
             return pairs
@@ -1292,10 +1296,10 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_CUSTOM_API_CONNECTIONS"):
             """The gateway's own code (and part) from a refusal body; any other body is an outage."""
             try:
                 error = json.loads(body.decode("utf-8")) if len(body) <= 65_536 else None
-            except ValueError:
+            except (ValueError, RecursionError):
                 return _custom_error("custom_api_unavailable")
             code = error.get("code") if isinstance(error, dict) else None
-            if code not in _custom_gateway_codes:
+            if not isinstance(code, str) or code not in _custom_gateway_codes:
                 return _custom_error("custom_api_unavailable")
             detail = error.get("detail")
             part = _custom_refused_parts.get(detail) if code == "invalid_request" and isinstance(detail, str) else None
@@ -1306,7 +1310,7 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_CUSTOM_API_CONNECTIONS"):
             invalid = _custom_error("invalid_custom_api_response")
             try:
                 answer = json.loads(body.decode("utf-8"))
-            except ValueError:
+            except (ValueError, RecursionError):
                 return invalid
             if not isinstance(answer, dict) or set(answer) != _custom_answer_keys:
                 return invalid
@@ -1324,7 +1328,9 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_CUSTOM_API_CONNECTIONS"):
                 return invalid
             if not isinstance(headers, dict) or set(headers) - {"content-type"}:
                 return invalid
-            if headers and headers["content-type"] not in _custom_media_types:
+            if headers and (
+                not isinstance(headers["content-type"], str) or headers["content-type"] not in _custom_media_types
+            ):
                 return invalid
             if not isinstance(body_text, str) or encoding not in ("text", "base64"):
                 return invalid

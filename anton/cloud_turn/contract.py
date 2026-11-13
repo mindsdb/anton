@@ -301,6 +301,7 @@ class CustomApiBlockV1:
 
 
 def _positive_int(value: object) -> bool:
+    """Whether ``value`` is an int of 1 or more, booleans excluded."""
     return not isinstance(value, bool) and isinstance(value, int) and value >= 1
 
 

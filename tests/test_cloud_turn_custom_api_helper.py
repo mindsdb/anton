@@ -15,17 +15,20 @@ import ssl
 import subprocess
 import sys
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from anton.core.backends.wire import (
-    CELL_DELIM,
-    INJECTED_HELPER_NAMES,
-    RESULT_END,
-    RESULT_START,
+from anton.core.backends.wire import CELL_DELIM, RESULT_END, RESULT_START
+from anton.core.utils.write_check import (
+    EarlierCell,
+    find_cell_writes,
+    parse_http_write_rules,
+    snapshot_project_files,
 )
+from tests.test_write_check import _UNREAD_CODE_RULE
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -112,6 +115,7 @@ import http.client, json, os
 SCENARIOS = json.loads({scenarios!r})
 sent = []
 answers = []
+reads = []
 
 def _body(spec):
     if spec is None:
@@ -127,6 +131,7 @@ class Response:
         self.status = status
         self._body = body
     def read(self, amt=None):
+        reads.append(amt)
         return self._body if amt is None else self._body[:amt]
 
 class Connection:
@@ -152,10 +157,13 @@ http.client.HTTPSConnection = Connection
 results = []
 for scenario in SCENARIOS:
     sent.clear()
+    reads.clear()
     answers[:] = [tuple(a) for a in scenario.get("answers", [])]
     result = call_minds_api(*scenario["args"], **scenario.get("kwargs", {{}}))
     key_in_result = os.environ["OPENAI_API_KEY"] in json.dumps(result)
-    results.append({{"result": result, "sent": list(sent), "key_in_result": key_in_result}})
+    results.append({{
+        "result": result, "sent": list(sent), "reads": list(reads), "key_in_result": key_in_result,
+    }})
 print(json.dumps(results))
 """
 
@@ -244,6 +252,20 @@ def test_a_dict_query_and_numbers_are_sent_as_string_pairs(tmp_path):
     }
 
 
+def test_an_int_too_long_to_write_is_refused_before_sending(tmp_path):
+    cell = _HARNESS.format(scenarios="[]") + (
+        "\nr = call_minds_api(ID, '/v2/eod', query={'a': 10**5000})\n"
+        "print(json.dumps({'result': r, 'sent': len(sent)}))\n"
+    )
+    record = _run_cell(f"ID = {_ID}\n" + cell, tmp_path, _env())
+
+    last = json.loads(record["stdout"].strip().splitlines()[-1])
+    assert last == {
+        "result": {"type": "error", "error_code": "invalid_custom_api_request"},
+        "sent": 0,
+    }
+
+
 def test_nan_and_large_floats_are_sent_as_python_writes_them(tmp_path):
     cell = _HARNESS.format(scenarios="[]") + (
         "\nanswers[:] = [(200, {'json': SAMPLE})]\n"
@@ -294,6 +316,9 @@ def test_any_status_the_gateway_can_pass_through_is_accepted(tmp_path, status):
         {"credential_version": _EXAMPLE["credential_version"] + 1},
         {"protocol_version": 2},
         {"connection_id": str(_ID)},
+        {"connection_id": True},
+        {"protocol_version": 1.0},
+        {"headers": {"content-type": ["application/json"]}},
         {"headers": {"content-type": "image/png"}},
         {"headers": {"content-type": "application/json", "set-cookie": "a=b"}},
         {"headers": {"Content-Type": "application/json"}},
@@ -311,6 +336,9 @@ def test_any_status_the_gateway_can_pass_through_is_accepted(tmp_path, status):
         "other-version",
         "other-protocol",
         "id-as-text",
+        "id-as-bool",
+        "protocol-as-float",
+        "media-type-as-list",
         "unlisted-media-type",
         "extra-header",
         "header-case",
@@ -332,8 +360,8 @@ def test_an_answer_outside_the_contract_is_refused(tmp_path, change):
 
 @pytest.mark.parametrize(
     "body",
-    [{"text": "not json"}, {"json": ["a list"]}],
-    ids=["not-json", "not-an-object"],
+    [{"text": "not json"}, {"json": ["a list"]}, {"repeat": ["[", 200_000]}],
+    ids=["not-json", "not-an-object", "nested-past-the-recursion-limit"],
 )
 def test_an_unreadable_answer_is_refused(tmp_path, body):
     outcome = _call(tmp_path, [_ID, "/v2/quote"], answers=[[200, body]])
@@ -350,6 +378,8 @@ def test_an_answer_past_the_read_cap_is_too_large(tmp_path):
     )
 
     assert outcome["result"] == {"type": "error", "error_code": "response_too_large"}
+    # The helper never reads more than one byte past the cap.
+    assert outcome["reads"] == [8_388_609]
 
 
 @pytest.mark.parametrize("error", _CONTRACT["errors"], ids=lambda e: e["code"])
@@ -406,6 +436,20 @@ def test_a_part_comes_only_with_invalid_request(tmp_path):
     assert outcome["result"] == {"type": "error", "error_code": "invalid_connection"}
 
 
+def _refusal_of_size(size: int) -> dict:
+    """A valid ``timed_out`` refusal whose JSON text is exactly ``size`` bytes."""
+    padding = size - len(json.dumps({"code": "timed_out", "pad": ""}))
+    return {"code": "timed_out", "pad": "x" * padding}
+
+
+def test_a_refusal_at_the_64_kib_parse_limit_is_still_read(tmp_path):
+    refusal = _refusal_of_size(65_536)
+    assert len(json.dumps(refusal)) == 65_536
+    outcome = _call(tmp_path, [_ID, "/v2/quote"], answers=[[503, {"json": refusal}]])
+
+    assert outcome["result"] == {"type": "error", "error_code": "timed_out"}
+
+
 @pytest.mark.parametrize(
     "answer",
     [
@@ -415,6 +459,10 @@ def test_a_part_comes_only_with_invalid_request(tmp_path):
         [302, {"text": ""}],
         [503, {"repeat": ["a", 70_000]}],
         [None, None],
+        [503, {"json": {"code": ["x"]}}],
+        [422, {"json": {"code": {"a": 1}, "detail": "x"}}],
+        [503, {"repeat": ["[", 60_000]}],
+        [503, {"json": _refusal_of_size(65_537)}],
     ],
     ids=[
         "unknown-code",
@@ -423,6 +471,10 @@ def test_a_part_comes_only_with_invalid_request(tmp_path):
         "redirect",
         "huge-error-body",
         "connection-reset",
+        "code-as-list",
+        "code-as-object",
+        "nested-refusal-past-the-recursion-limit",
+        "refusal-past-64-kib",
     ],
 )
 def test_anything_else_is_the_custom_api_being_unavailable(tmp_path, answer):
@@ -477,6 +529,7 @@ def test_an_argument_the_helper_refuses_sends_nothing(tmp_path, args, kwargs):
     assert outcome == {
         "result": {"type": "error", "error_code": "invalid_custom_api_request"},
         "sent": [],
+        "reads": [],
     }
 
 
@@ -504,6 +557,7 @@ def test_a_base_the_bearer_cannot_go_to_sends_nothing(tmp_path, base_url):
     assert outcome == {
         "result": {"type": "error", "error_code": "gateway_unavailable"},
         "sent": [],
+        "reads": [],
     }
 
 
@@ -538,10 +592,45 @@ def test_no_result_or_stderr_line_carries_the_turn_key(tmp_path):
     assert _TURN_KEY not in record["child_stderr"]
 
 
-def test_the_helper_codes_are_one_closed_list():
-    assert len(_GATEWAY_CODES) == 12
-    assert len(set(_GATEWAY_CODES) | set(_HELPER_CODES)) == 16
-    assert "response_too_large" in _GATEWAY_CODES
+def test_every_error_the_helper_returns_is_one_of_sixteen_codes(tmp_path):
+    """Driven through the helper: a sweep of refusals, answers, arguments and outages
+    reaches all sixteen codes, and nothing else."""
+    refusals = [
+        [error.get("leaves_as", error["status"]), {"json": {"code": error["code"]}}]
+        for error in _CONTRACT["errors"]
+    ]
+    oddities = [
+        [503, {"json": {"code": "made_up_code"}}],
+        [503, {"json": {"code": ["x"]}}],
+        [404, {"text": "Not Found"}],
+        [302, {"text": ""}],
+        [None, None],
+        [200, {"text": "not json"}],
+        [200, {"repeat": ["[", 200_000]}],
+        [200, {"json": {**_CONTRACT["response"], "status": 1000}}],
+        [200, {"repeat": ["a", 8_388_609]}],
+    ]
+    scenarios = [
+        *(
+            {"args": [_ID, "/v2/quote"], "answers": [answer]}
+            for answer in refusals + oddities
+        ),
+        {"args": [_ID + 1, "/v2/quote"]},
+        {"args": [_ID, "/v2/quote"], "kwargs": {"query": {"a": True}}},
+    ]
+    # In chunks: one cell's printed output is capped, and each outcome carries its request.
+    outcomes = [
+        outcome
+        for start in range(0, len(scenarios), 5)
+        for outcome in _calls(tmp_path, scenarios[start : start + 5])
+    ]
+    (unsent,) = _calls(
+        tmp_path, [{"args": [_ID, "/v2/quote"]}], OPENAI_BASE_URL="http://x/v1"
+    )
+
+    codes = {outcome["result"]["error_code"] for outcome in [*outcomes, unsent]}
+    assert codes == set(_GATEWAY_CODES) | set(_HELPER_CODES)
+    assert len(codes) == 16
 
 
 @pytest.mark.parametrize(
@@ -568,8 +657,28 @@ def test_malformed_references_inject_nothing_and_say_why(tmp_path):
     assert "custom API helper not injected" in record["child_stderr"]
 
 
-def test_the_write_check_knows_the_helper():
-    assert "call_minds_api" in INJECTED_HELPER_NAMES
+def test_the_write_check_reads_a_helper_call_as_bound(tmp_path, monkeypatch):
+    """After a cell ran code the check cannot read, a call to an unknown name could be
+    anything and gets the card; a call to the pad's own helper does not."""
+    (tmp_path / "stock.csv").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(
+        root=tmp_path, label="project", taken_at=time.time() + 60
+    )
+    earlier = [
+        EarlierCell(code="import subprocess\nsubprocess.run(['python3', 'job.py'])")
+    ]
+
+    def writes(code: str):
+        return find_cell_writes(
+            code=code,
+            earlier=earlier,
+            snapshots=(snap,),
+            http_rules=parse_http_write_rules(_UNREAD_CODE_RULE),
+        )
+
+    assert not writes("r = call_minds_api(1, '/a')").needs_approval()
+    assert writes("r = call_other_api(1, '/a')").unchecked
 
 
 def _self_signed(tmp_path: Path) -> tuple[Path, Path]:
@@ -610,7 +719,9 @@ def _self_signed(tmp_path: Path) -> tuple[Path, Path]:
     return cert_path, key_path
 
 
-def test_the_wire_request_reaches_a_tls_gateway_as_the_contract_says(tmp_path):
+@pytest.fixture
+def tls_gateway(tmp_path):
+    """A local TLS server answering the contract's response; yields (base URL, cert path, requests seen)."""
     pytest.importorskip("cryptography")
     cert_path, key_path = _self_signed(tmp_path)
     seen: list[dict] = []
@@ -636,27 +747,43 @@ def test_the_wire_request_reaches_a_tls_gateway_as_the_contract_says(tmp_path):
         def log_message(self, *args):
             pass
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), Gateway)
+    class QuietServer(http.server.HTTPServer):
+        def handle_error(self, request, client_address):
+            """A refused handshake is the expected outcome of one test, not noise."""
+
+    server = QuietServer(("127.0.0.1", 0), Gateway)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert_path, key_path)
-    server.socket = context.wrap_socket(server.socket, server_side=True)
+    server.socket = context.wrap_socket(
+        server.socket, server_side=True, do_handshake_on_connect=False
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        call = _EXAMPLE["request"]
-        cell = (
-            "import json\n"
-            f"r = call_minds_api({_ID}, {call['path']!r}, query={call['query']!r}, headers={call['headers']!r})\n"
-            "print(json.dumps(r))\n"
-        )
-        env = _env(
-            OPENAI_BASE_URL=f"https://localhost:{server.server_address[1]}/v1",
-            SSL_CERT_FILE=str(cert_path),
-        )
-        record = _run_cell(cell, tmp_path, env)
+        yield f"https://localhost:{server.server_address[1]}/v1", cert_path, seen
     finally:
         server.shutdown()
         server.server_close()
+
+
+_WIRE_CELL = (
+    "import json\n"
+    f"r = call_minds_api({_ID}, {_EXAMPLE['request']['path']!r}, "
+    f"query={_EXAMPLE['request']['query']!r}, headers={_EXAMPLE['request']['headers']!r})\n"
+    "print(json.dumps(r))\n"
+)
+
+
+def test_the_wire_request_reaches_a_tls_gateway_as_the_contract_says(
+    tmp_path, tls_gateway
+):
+    base_url, cert_path, seen = tls_gateway
+
+    record = _run_cell(
+        _WIRE_CELL,
+        tmp_path,
+        _env(OPENAI_BASE_URL=base_url, SSL_CERT_FILE=str(cert_path)),
+    )
 
     assert seen == [
         {
@@ -667,3 +794,19 @@ def test_the_wire_request_reaches_a_tls_gateway_as_the_contract_says(tmp_path):
         }
     ]
     assert json.loads(record["stdout"])["type"] == "response"
+
+
+def test_a_gateway_whose_certificate_is_not_trusted_gets_nothing(tmp_path, tls_gateway):
+    """The same server without its certificate trusted: the handshake fails, so no bearer is sent."""
+    base_url, _cert_path, seen = tls_gateway
+    env = _env(OPENAI_BASE_URL=base_url)
+    for name in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+        env.pop(name, None)
+
+    record = _run_cell(_WIRE_CELL, tmp_path, env)
+
+    assert seen == []
+    assert json.loads(record["stdout"]) == {
+        "type": "error",
+        "error_code": "custom_api_unavailable",
+    }
