@@ -62,7 +62,7 @@ class ContractFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: str
-    limits: dict[str, int | list[str]] = {}
+    limits: dict[str, int | str | list[str]] = {}
     examples: dict[str, ContractExample]
 
 
@@ -107,6 +107,17 @@ def test_every_host_keeps_this_folder_byte_for_byte_readme_included():
     assert "Each host's tests keep a copy of these files" not in readme
     assert "Each host's tests keep a byte-for-byte copy of this folder, this README included" in readme
     assert "a host keeps its own notes outside its copy" in readme
+
+
+def test_the_readme_describes_the_card_field_rule_s_limits_and_examples():
+    readme = " ".join((FIXTURES / "README.md").read_text().split())
+    assert (
+        "a number, such as `saved_tabs_per_project`, a regular expression's source, such as `card_field_name`, which "
+        "a host compares with its own pattern's source and reads ignoring case, or a list, such as "
+        "`payment_frame_hosts`."
+    ) in readme
+    assert "or a field's attribute values, and whether they name the field for a card" in readme
+    assert "`frames` for child frames, and the card-field rule both hosts hold" in readme
 
 
 # ── answers ────────────────────────────────────────────────────────────────
@@ -201,14 +212,75 @@ def test_the_model_reads_as_much_of_a_frame_as_a_host_sends():
 
 def test_the_page_fixture_names_every_frame_limit_the_hosts_hold():
     """Each host pins its frame constants against these, the time a host
-    gives a read's frames included."""
+    gives a read's frames included, and the card-field rule that keeps a
+    frame unread and a focused type out of a field."""
     limits = _load("page").limits
     assert set(limits) == {
         "frames_read", "elements_per_frame", "text_per_frame", "frame_min_read_px", "frames_phase_ms",
-        "payment_frame_hosts", "sign_in_frame_hosts",
+        "payment_frame_hosts", "sign_in_frame_hosts", "card_field_name", "card_field_attributes",
     }
     assert limits["frames_phase_ms"] == 2000
     assert "frames_phase_ms" in _load("page").description
+
+
+#: The one card-field rule both hosts hold, character for character: a field
+#: is named for a card when this, ignoring case, matches its attributes'
+#: values joined with spaces.
+CARD_FIELD_NAME = (
+    r"(^|[^a-z0-9]|card|cc)(cvc|cvv2?|csc)([^a-z0-9]|$)|card[\s._-]*(number|num|no)(?![a-z])"
+    r"|(^|[^a-z0-9])cc[\s._-]*(number|num)(?![a-z])|security[\s._-]*code"
+)
+#: The attributes both hosts read a field's name from, in the order they join them.
+CARD_FIELD_ATTRIBUTES = ["name", "id", "aria-label", "placeholder"]
+#: Names that must stay named for a card (a focused type answers 403
+#: password_field, and a frame holding one is never read) and names that
+#: must not, so a host types into them.
+CARD_NAMED = [
+    "cardnumber", "card_number", "card.number", "cardNo", "card_no", "cc_num", "cc-number", "cvc", "CVC", "cvv2",
+    "card_cvc", "cardCvc", "cc_cvv", "billing_cvv2", "cvv_code", "csc", "security_code", "Card number", "Security code",
+]
+NOT_CARD_NAMED = [
+    "name", "email", "acc_number", "account_number", "cardholder_name", "card_type", "cardnotes", "discount_code",
+    "promo_code", "postal_code", "recv_count", "Name on card",
+]
+
+
+def _card_named(attributes: dict[str, str]) -> bool:
+    """The rule as page.json gives it: the pattern, ignoring case, on the
+    attributes' values joined in order with a space, a missing one empty."""
+    limits = _load("page").limits
+    joined = " ".join(attributes.get(name, "") for name in limits["card_field_attributes"])
+    return re.search(limits["card_field_name"], joined, re.IGNORECASE) is not None
+
+
+def test_the_page_fixture_pins_the_one_card_field_rule_both_hosts_hold():
+    """Both hosts refuse a focused type into a field named for a card and
+    never read a frame that holds one, by this one rule, so a name gets the
+    same answer on either host. Each value is named for a card, or not, in
+    any of the attributes alone, and one field is named only by two
+    attributes together, which pins the join."""
+    page = _load("page")
+    assert page.limits["card_field_name"] == CARD_FIELD_NAME
+    assert page.limits["card_field_attributes"] == CARD_FIELD_ATTRIBUTES
+    assert (
+        "A field is card-named when card_field_name, ignoring case, matches the values of its card_field_attributes "
+        "(name, id, aria-label and placeholder) joined in that order with a space, a missing one as empty."
+    ) in page.description
+    named = page.examples["values that name a field for a card"]
+    unnamed = page.examples["values that don't name a field for a card"]
+    for example, card_named, required in ((named, True, CARD_NAMED), (unnamed, False, NOT_CARD_NAMED)):
+        assert (example.kind, example.where) == ("classification", "a field's name, id, aria-label or placeholder")
+        assert example.body["card_named"] is card_named
+        values = example.body["values"]
+        assert set(required) <= set(values) and len(set(values)) == len(values)
+        for value in values:
+            for attribute in CARD_FIELD_ATTRIBUTES:
+                assert _card_named({attribute: value}) is card_named, (attribute, value)
+    together = page.examples["a field named for a card only by two of its attributes together"]
+    assert together.body["card_named"] is True
+    attributes = together.body["attributes"]
+    assert _card_named(attributes)
+    assert not any(_card_named({name: value}) for name, value in attributes.items())
 
 
 def test_the_page_fixture_gives_the_element_order_both_hosts_use():
@@ -304,6 +376,25 @@ def test_the_action_fixture_says_how_a_focused_type_reaches_a_field_in_a_frame()
     assert held == {"type into the focused field": None, "type into the focused field and submit": "commit"}
 
 
+def test_a_focused_type_whose_focus_leaves_the_field_mid_type_answers_stale_element():
+    """Both hosts read the focus again before each key and before submit's
+    Enter, and stop when it has left the field the type began in: 409
+    stale_element, or 403 password_field when it is now on a secret or
+    card-named field."""
+    sentence = (
+        "Before each key, and before the Enter submit adds, the host reads the focus again: when it has left that "
+        "field the host stops typing, keeps what it typed, and answers 409 stale_element, or 403 password_field when "
+        "the focus is now on a secret, card or password field."
+    )
+    assert sentence in _load("action").description
+    errors = _load("error")
+    assert errors.examples["stale_element"].status == 409
+    assert (
+        "One whose focus leaves that field before the text and its Enter are all typed stops there and answers "
+        "stale_element, or password_field when the focus moved onto a secret, card or password field."
+    ) in errors.description
+
+
 def test_the_page_fixture_says_a_frame_left_unread_takes_none_of_frames_read():
     """Both hosts count the frames they read after their refusals, so a
     sign-in or covered frame on-screen first never costs a plain one its read."""
@@ -314,6 +405,22 @@ def test_the_page_fixture_says_a_frame_left_unread_takes_none_of_frames_read():
         "any of these reasons takes none of them."
     ) in description
     assert "and a host leaves unread a frame it finds the person can't see." in description
+
+
+def test_the_page_fixture_lets_a_host_list_the_frames_inside_a_frame_it_read():
+    """A host that reads a same-origin frame may list the frames inside it
+    after the page's own, unread, so a step by position knows a frame lies
+    there."""
+    description = _load("page").description
+    assert "frames lists the page's rendered child frames, on-screen first:" not in description
+    assert (
+        "frames lists the page's rendered child frames, on-screen first, and a host may list after them, unread, the "
+        "frames inside a frame it read."
+    ) in description
+    assert (
+        "Each frame has url (origin and path for http and https, about:blank or about:srcdoc, otherwise the scheme "
+        "alone), read, box"
+    ) in description
 
 
 def test_the_control_fixture_tells_done_by_the_person_from_any_other_agent_record():
@@ -496,9 +603,44 @@ def test_every_accepted_request_is_one_the_client_sends(monkeypatch):
         assert asyncio.run(_approved_in_app(step, monkeypatch)) == _load("action").examples[name].body, name
 
 
+#: The focused types and presses both hosts answer 400 bad_request, each
+#: for one field the accepted focused type lacks or has otherwise.
+REFUSED_STEPS = {
+    "a focused type that names an element": {"element": 1},
+    "a focused type at a point": {"x": 200, "y": 350, "coords": "screenshot"},
+    "a focused type that clears the field first": {"clear": True},
+    "a type with focused false": {"focused": False, "element": 1},
+}
+
+
+def test_the_action_fixture_names_the_focused_steps_both_hosts_refuse_and_the_tool_never_sends():
+    """A focused type types at the caret of whatever has the focus, so it
+    names no element or point and clears nothing; focused is true or absent,
+    and only a type step carries it. Both hosts answer each of these 400
+    bad_request, and the tool refuses each step before it sends it."""
+    actions = _load("action")
+    refused = {name: e for name, e in actions.examples.items() if e.refused}
+    assert set(refused) == {*REFUSED_STEPS, "a press with focused"}
+    accepted = actions.examples["type into the focused field"].body
+    for name, change in REFUSED_STEPS.items():
+        assert refused[name].where == "POST /sessions/{id}/action" and refused[name].kind == "request"
+        assert refused[name].body == {**accepted, **change}, name
+    press = {"action": "press", "focused": True, "key": "a", "include_page": True}
+    assert refused["a press with focused"].body == press
+    assert (
+        "A type with focused true that also names an element or a point, or clear other than false, a type with "
+        "focused other than true, and focused on any other action are refused with 400 bad_request."
+    ) in actions.description
+    for example in refused.values():
+        step = {k: v for k, v in example.body.items() if k not in ("include_page", "coords")}
+        with pytest.raises(ValueError):
+            browser_tool._step_body({"step": step})
+
+
 def test_the_client_never_sends_a_refused_request():
     refused = [e.body for _, _, e in _examples("request") if e.refused]
-    assert refused == [{"holder": "agent", "reason": ""}]
+    assert [e.body for e in _load("control").examples.values() if e.refused] == [{"holder": "agent", "reason": ""}]
+    assert {b.get("action") for b in refused} == {None, "type", "press"}
     recorder = _Recorder()
     asyncio.run(_every_client_call(_client(recorder)))
     assert len(recorder.sent) == 16

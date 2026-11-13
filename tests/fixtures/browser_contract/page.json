@@ -1,5 +1,5 @@
 {
-  "description": "GET /sessions/{id}/page: the active tab as numbered elements and text. Secret fields (password, one-time code, card) carry value_hidden and never their value. challenges lists only check frames the person can see: a non-empty box in the viewport, not hidden. An element may carry context (the names of up to two containers around it, innermost last, joined by ' › ') and in_dialog (true inside an open dialog). elements never lists a frame. Past the cap it lists the on-screen elements ahead of the off-screen ones, each group in page order, and truncated says more elements exist than are listed; when every shown element fits, a host may keep page order or use the same order. A host may list an open dialog's elements (in_dialog) ahead of both groups. text is the page's text cut at max_text when the page isn't scrolled or the text fits; otherwise it starts at the top of the view after a leading '…', and the start of the text above the view follows when the budget allows. A secret editor's text is never in text or in any name, and max_text 0 gives ''. frames lists the page's rendered child frames, on-screen first: url (origin and path for http and https, about:blank or about:srcdoc, otherwise the scheme alone), read, box (the frame's content box in screenshot pixels, null when the host can't place it), offscreen (true when it is out of view), and for a read frame its elements, text and truncated. Frame elements are read-only: no id and no field value (a select keeps its value and options), so a step reaches them only by position, and a type with focused true reaches the field the focus is in. A frame is never read when it is a human check, a consent page, on a payment_frame_hosts or sign_in_frame_hosts host or under one, holds a secret, card-named or sign-in field, or is under frame_min_read_px either way, and a host leaves unread a frame it finds the person can't see. A host reads at most frames_read frames, in the order frames lists them, and a frame it leaves unread for any of these reasons takes none of them. A read frame lists at most elements_per_frame elements and text_per_frame characters of text. A host that places and reads frames apart from the page's own read gives them at most frames_phase_ms from the read's start; a frame that doesn't answer in time is listed unread, with box null.",
+  "description": "GET /sessions/{id}/page: the active tab as numbered elements and text. Secret fields (password, one-time code, card) carry value_hidden and never their value. challenges lists only check frames the person can see: a non-empty box in the viewport, not hidden. An element may carry context (the names of up to two containers around it, innermost last, joined by ' › ') and in_dialog (true inside an open dialog). elements never lists a frame. Past the cap it lists the on-screen elements ahead of the off-screen ones, each group in page order, and truncated says more elements exist than are listed; when every shown element fits, a host may keep page order or use the same order. A host may list an open dialog's elements (in_dialog) ahead of both groups. text is the page's text cut at max_text when the page isn't scrolled or the text fits; otherwise it starts at the top of the view after a leading '…', and the start of the text above the view follows when the budget allows. A secret editor's text is never in text or in any name, and max_text 0 gives ''. frames lists the page's rendered child frames, on-screen first, and a host may list after them, unread, the frames inside a frame it read. Each frame has url (origin and path for http and https, about:blank or about:srcdoc, otherwise the scheme alone), read, box (the frame's content box in screenshot pixels, null when the host can't place it), offscreen (true when it is out of view), and for a read frame its elements, text and truncated. Frame elements are read-only: no id and no field value (a select keeps its value and options), so a step reaches them only by position, and a type with focused true reaches the field the focus is in. A frame is never read when it is a human check, a consent page, on a payment_frame_hosts or sign_in_frame_hosts host or under one, holds a secret, card-named or sign-in field, or is under frame_min_read_px either way, and a host leaves unread a frame it finds the person can't see. A host reads at most frames_read frames, in the order frames lists them, and a frame it leaves unread for any of these reasons takes none of them. A field is card-named when card_field_name, ignoring case, matches the values of its card_field_attributes (name, id, aria-label and placeholder) joined in that order with a space, a missing one as empty. A type with focused true never types into a card-named field (403 password_field). A read frame lists at most elements_per_frame elements and text_per_frame characters of text. A host that places and reads frames apart from the page's own read gives them at most frames_phase_ms from the read's start; a frame that doesn't answer in time is listed unread, with box null.",
   "limits": {
     "frames_read": 5,
     "elements_per_frame": 50,
@@ -36,6 +36,13 @@
       "login.microsoftonline.com",
       "login.live.com",
       "facebook.com"
+    ],
+    "card_field_name": "(^|[^a-z0-9]|card|cc)(cvc|cvv2?|csc)([^a-z0-9]|$)|card[\\s._-]*(number|num|no)(?![a-z])|(^|[^a-z0-9])cc[\\s._-]*(number|num)(?![a-z])|security[\\s._-]*code",
+    "card_field_attributes": [
+      "name",
+      "id",
+      "aria-label",
+      "placeholder"
     ]
   },
   "examples": {
@@ -241,6 +248,93 @@
             "box": null
           }
         ]
+      }
+    },
+    "values that name a field for a card": {
+      "where": "a field's name, id, aria-label or placeholder",
+      "kind": "classification",
+      "body": {
+        "card_named": true,
+        "values": [
+          "cardnumber",
+          "card_number",
+          "card-number",
+          "card.number",
+          "CardNumber",
+          "card number",
+          "cardnum",
+          "card_num",
+          "cardNo",
+          "card_no",
+          "ccnum",
+          "cc_num",
+          "cc-num",
+          "cc_number",
+          "cc-number",
+          "cvc",
+          "CVC",
+          "cvv",
+          "CVV",
+          "cvv2",
+          "card_cvc",
+          "cardCvc",
+          "card-cvv",
+          "cc_cvv",
+          "cc-csc",
+          "billing_cvv2",
+          "cvv_code",
+          "csc",
+          "security_code",
+          "securityCode",
+          "Card number",
+          "Card Number",
+          "Security code",
+          "CVC / CVV"
+        ]
+      }
+    },
+    "values that don't name a field for a card": {
+      "where": "a field's name, id, aria-label or placeholder",
+      "kind": "classification",
+      "body": {
+        "card_named": false,
+        "values": [
+          "name",
+          "email",
+          "acc_number",
+          "account_number",
+          "account_no",
+          "access_code",
+          "cardholder_name",
+          "cardholder",
+          "card_type",
+          "cardnotes",
+          "gift_card_message",
+          "discount_code",
+          "promo_code",
+          "postal_code",
+          "zip_code",
+          "phone_number",
+          "order_number",
+          "invoice_no",
+          "recv_count",
+          "success_count",
+          "security_question",
+          "Name on card",
+          "Card holder name",
+          "Cc"
+        ]
+      }
+    },
+    "a field named for a card only by two of its attributes together": {
+      "where": "a field's name, id, aria-label or placeholder",
+      "kind": "classification",
+      "body": {
+        "card_named": true,
+        "attributes": {
+          "id": "card",
+          "aria-label": "Number"
+        }
       }
     }
   }
