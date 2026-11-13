@@ -1218,22 +1218,61 @@ async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_a_frame_change
     focus into another frame, or navigate the focused frame, so the
     approved Enter would land on a control the card never showed. So after
     the Approve the tool reads the page again and refuses the step when a
-    frame has another address or box, or a frame came or went, as it
-    refuses an element number that names another element now. Text that
-    changes inside the same frame (a clock) changes no frame, and the step
-    runs."""
+    frame has another address, size or place on the page, or a frame came
+    or went, as it refuses an element number that names another element
+    now. Text that changes inside the same frame (a clock) changes no frame,
+    and the step runs.
+
+    The boxes are in screenshot pixels and the list goes on-screen first,
+    so the person scrolling the page to look at what the card asks about
+    moves every box and may reorder the list. A frame that moved with the
+    scroll, at the screenshot's scale and a pixel of rounding apart, or
+    stayed where it was on screen (a chat widget fixed to the view), is in
+    its place, and the step runs."""
     desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
     frame = FRAMED["frames"][0]
+    chat = {"url": "https://chat.example.test/widget", "read": False, "box": {"x": 700, "y": 600, "width": 300, "height": 180}}
+    video = {"url": "https://video.example.test/embed", "read": False, "box": {"x": 112, "y": 900, "width": 560, "height": 315}}
+
+    def at(scroll_y: int, *frames: dict) -> dict:
+        return {**FRAMED, "scroll": {"y": scroll_y, "height": 2400, "viewport": 800}, "frames": list(frames)}
+
+    def moved(placed: dict, **box: int) -> dict:
+        return {**placed, "box": {**placed["box"], **box}}
+
     changed = {
-        "a frame with another address": {**FRAMED, "frames": [{**frame, "url": "https://ads.example.test/slot"}]},
-        "a frame with another box": {**FRAMED, "frames": [{**frame, "box": {**frame["box"], "y": 320}}]},
-        "a frame that came": {**FRAMED, "frames": [frame, {"url": "https://forms.example.test/pay", "read": False, "box": None}]},
-        "a frame that went": {**FRAMED, "frames": []},
+        "a frame with another address": (FRAMED, {**FRAMED, "frames": [{**frame, "url": "https://ads.example.test/slot"}]}),
+        "a frame with another box": (FRAMED, {**FRAMED, "frames": [moved(frame, y=320)]}),
+        "a frame two pixels lower with no scroll": (at(120, frame), at(120, moved(frame, y=302))),
+        "a frame that came": (FRAMED, {**FRAMED, "frames": [frame, {"url": "https://forms.example.test/pay", "read": False, "box": None}]}),
+        "a frame that went": (FRAMED, {**FRAMED, "frames": []}),
+        "a frame that moved on the page while it scrolled": (
+            at(0, frame, video), at(120, moved(frame, y=180), moved(video, y=840)),
+        ),
+        "a frame that moved farther than the scroll": (at(0, frame), at(120, moved(frame, y=100))),
+        "a frame that moved against the scroll": (at(0, frame), at(120, moved(frame, y=420))),
+        "a frame that grew while it scrolled": (at(0, frame), at(120, moved(frame, y=180, height=240))),
+        "a frame that moved sideways while it scrolled": (at(0, frame), at(120, moved(frame, y=180, x=140))),
+        "a frame with another address after a scroll": (
+            at(0, frame), at(120, {**moved(frame, y=180), "url": "https://ads.example.test/slot"}),
+        ),
+        "a frame that came after a scroll": (at(0, frame), at(120, moved(frame, y=180), chat)),
     }
-    ticking = {**FRAMED, "frames": [{**frame, "text": "Get the weekly digest. 12:01"}]}
+    unchanged = {
+        "text that changed inside the frame": (FRAMED, {**FRAMED, "frames": [{**frame, "text": "Get the weekly digest. 12:01"}]}),
+        "a scroll": (at(0, frame), at(120, moved(frame, y=180))),
+        "a scroll that put another frame on screen first": (
+            at(0, frame, video), at(600, moved(video, y=300), moved(frame, y=-300)),
+        ),
+        "a scroll on a wide view's smaller screenshot": (at(0, frame, video), at(200, moved(frame, y=140), moved(video, y=740))),
+        "a scroll that rounds a frame a pixel apart": (
+            at(0, frame, video), at(120, moved(frame, y=179, height=181), moved(video, y=780)),
+        ),
+        "a scroll beside a frame fixed to the view": (at(0, frame, chat), at(120, moved(frame, y=180), chat)),
+    }
     for step in ({"action": "press", "key": "Enter"}, {"action": "type", "focused": True, "text": "ada@example.test", "submit": True}):
-        for what, after in changed.items():
-            host = FakeHost(pages=[FRAMED, after])
+        for what, (seen, after) in changed.items():
+            host = FakeHost(pages=[seen, after])
             session = make_session(host, elicitor=FakeElicitor(), config=desktop)
             elicit_answers.answers.append("approve")
             before = len(elicit_answers.requests)
@@ -1242,12 +1281,13 @@ async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_a_frame_change
             assert "so the focus may now be on a control the card didn't show. Nothing was done." in result.content, (step, what)
             assert len(elicit_answers.requests) == before + 1, (step, what)
             assert host.posted("/action") == [], (step, what)
-        host = FakeHost(pages=[FRAMED, ticking])
-        session = make_session(host, elicitor=FakeElicitor(), config=desktop)
-        elicit_answers.answers.append("approve")
-        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
-        assert result.ok is True and result.content.startswith("Done:"), step
-        assert host.posted("/action") == [{**browser_tool._step_body({"step": step}), "into_frame": False}], step
+        for what, (seen, after) in unchanged.items():
+            host = FakeHost(pages=[seen, after])
+            session = make_session(host, elicitor=FakeElicitor(), config=desktop)
+            elicit_answers.answers.append("approve")
+            result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+            assert result.ok is True and result.content.startswith("Done:"), (step, what, result.content)
+            assert host.posted("/action") == [{**browser_tool._step_body({"step": step}), "into_frame": False}], (step, what)
 
 
 async def test_on_the_desktop_a_page_that_moves_on_while_any_card_waits_is_asked_about_again_or_refused(elicit_answers):

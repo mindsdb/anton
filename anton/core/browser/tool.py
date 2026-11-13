@@ -58,6 +58,7 @@ from anton.core.browser.models import (
     ActionResult,
     Element,
     FocusedType,
+    Frame,
     FrameBox,
     FrameElement,
     HeldStep,
@@ -811,10 +812,75 @@ def _moved_element(*, seen: Page | None, current: Page, body: dict) -> str | Non
     return None
 
 
-def _frame_places(page: Page) -> tuple[_FrameAt, ...] | None:
-    """Each frame's address and box, in the order the page lists them; None
-    from a host that sends no ``frames``."""
-    return None if page.frames is None else tuple(_FrameAt(frame.url, frame.box) for frame in page.frames)
+#: How many screenshot pixels apart two reads may put a frame that only
+#: scrolled, or frames that scrolled together: each host rounds a box's edges
+#: and the scroll position on its own, the router's pod to the nearest pixel
+#: and the desktop app's outward.
+_FRAME_ROUNDING_PX = 2
+
+
+class _FrameSpot(NamedTuple):
+    """A placed frame as two reads of one page compare it, in screenshot
+    pixels. In this field order, sorting puts a page's frames by address,
+    then left to right, then from the top: an order a scroll leaves alone."""
+
+    url: str
+    x: int
+    width: int
+    y: int
+    height: int
+
+
+def _frame_spots(frames: list[Frame]) -> tuple[list[str], list[_FrameSpot]]:
+    """The addresses of the frames the host couldn't place, and the placed
+    frames, each sorted (``_FrameSpot``)."""
+    unplaced = sorted(frame.url for frame in frames if frame.box is None)
+    placed = sorted(
+        _FrameSpot(frame.url, frame.box.x, frame.box.width, frame.box.y, frame.box.height)
+        for frame in frames if frame.box is not None
+    )
+    return unplaced, placed
+
+
+def _frames_moved(seen: Page, current: Page) -> bool:
+    """Whether, between two reads of one page, a frame came or went, or
+    changed address, size or place on the page.
+
+    The boxes are in screenshot pixels and the list goes on-screen first, so
+    a scroll moves every box and may reorder the list. The frames are
+    compared as a multiset keyed by address, each matched in the sorted
+    order ``_FrameSpot`` gives. A frame is in its place when its box is where
+    it was on screen (no scroll, or a frame fixed to the view, such as a chat
+    widget), or when it moved with the scroll: up the screenshot as the page
+    scrolled down, or down as it scrolled up, no farther than the scroll,
+    since a host shrinks a wide view's screenshot and never grows it, and by
+    the same rows as every other frame that moved. The page read doesn't say
+    how much the screenshot is shrunk, so frames that all moved together by
+    less than the scroll read as scrolled; a lone frame that moved down the
+    page by exactly the scroll reads as fixed to the view. A host that sends
+    no ``frames`` on one read and frames on the other moved them."""
+    if seen.frames is None or current.frames is None:
+        return (seen.frames is None) != (current.frames is None)
+    unplaced, before = _frame_spots(seen.frames)
+    unplaced_now, now = _frame_spots(current.frames)
+    if unplaced != unplaced_now or len(before) != len(now):
+        return True
+    scrolled = current.scroll.y - seen.scroll.y if seen.scroll is not None and current.scroll is not None else 0
+    shifts: list[int] = []
+    for was, spot in zip(before, now):
+        if spot == was:
+            continue
+        shift = spot.y - was.y
+        if (
+            not scrolled
+            or (spot.url, spot.x, spot.width) != (was.url, was.x, was.width)
+            or abs(spot.height - was.height) > 1
+            or shift * scrolled > 0
+            or abs(shift) > abs(scrolled) + _FRAME_ROUNDING_PX
+        ):
+            return True
+        shifts.append(shift)
+    return bool(shifts) and max(shifts) - min(shifts) > _FRAME_ROUNDING_PX
 
 
 def _moved_focus(*, seen: Page, current: Page, body: dict) -> str | None:
@@ -823,11 +889,12 @@ def _moved_focus(*, seen: Page, current: Page, body: dict) -> str | None:
 
     A press with no element and a focused type go wherever the focus is when
     the step starts. Neither host's page read says where the focus is, so a
-    frame with another address or box, or a frame that came or went, says a
-    page or a frame may have moved the focus, or the focused frame navigated.
-    Text that changes inside the same frame (a clock) says nothing."""
+    frame that came or went, or changed address, size or place on the page
+    (``_frames_moved``), says a page or a frame may have moved the focus, or
+    the focused frame navigated. A scroll alone, and text that changes
+    inside the same frame (a clock), say nothing."""
     to_focus = body.get("focused") is True or (body.get("action") == "press" and body.get("element") is None)
-    if not to_focus or _frame_places(current) == _frame_places(seen):
+    if not to_focus or not _frames_moved(seen, current):
         return None
     return "The page's frames changed while the card waited, so the focus may now be on a control the card didn't show."
 
@@ -1296,9 +1363,10 @@ async def _gate(
     the tool reads the page again. An element the step names that now has
     another role or name refuses the step (``_moved_element``), as act
     refuses one before the card. So does, for a step that goes to the focus
-    (a press with no element, a focused type), a frame with another address
-    or box, or a frame that came or went, on the same address
-    (``_moved_focus``). A page that went to another address, or,
+    (a press with no element, a focused type), a frame that came or went, or
+    changed address, size or place on the page, on the same address
+    (``_moved_focus``); a scroll alone moves no frame there. A page that
+    went to another address, or,
     after a card for a point that may land in a frame, a frame under the
     point with another address or box, is asked about again on the new read
     (``changed``), once; a page that changes again refuses the step. The
