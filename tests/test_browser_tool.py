@@ -965,10 +965,12 @@ def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_fra
     submits, on both hosts. Keys pressed one at a time go wherever the focus
     is, and each host holds a different set of them: the desktop app's
     browser, which can't see the focus, holds every key that types, deletes,
-    presses or may pick a commit option; the web's browser reads the focus,
-    in a frame too, and holds one only where it may commit something. The
-    text says that, not that typing goes key by key or that the arrows
-    always run at once."""
+    presses or may pick a commit option, or may pick in a list it cut short;
+    the web's browser reads the focus, in a frame too, and holds one only
+    where it may commit something: a key that types or deletes into a
+    frame's text field runs at once there, Enter and Space wait, and so does
+    a chord with Tab before another key. The text says that, not that typing
+    goes key by key or that the arrows always run at once."""
     from pathlib import Path
 
     prompt = " ".join(browser_tool.BROWSER_TOOL_PROMPT.split())
@@ -978,6 +980,7 @@ def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_fra
         assert "A secret, card or sign-in field there is the user's" not in text
         assert "type into it with press steps" not in text and "one key each" not in text
         assert "Tab, the arrows and other keys run at once" not in text
+        assert "any radio in a list it cut short" not in text
         for sentence in (
             'To fill an ordinary field inside a frame, click it by pixel (one Approve), then type into it with '
             '{"action":"type","focused":true,"text":"…"}, which types at the caret of the field that has the focus, '
@@ -986,9 +989,12 @@ def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_fra
             "A press step with no element goes wherever the focus is: Tab runs at once.",
             "In the desktop app's browser, Enter, Space and a key that types or deletes each wait for the user's "
             "Approve, and so does an arrow, Home, End, PageUp or PageDown while the page or a frame lists a radio or "
-            "select option that commits something, or any radio in a list it cut short, or a frame wasn't read; the "
+            "select option that commits something, or the browser cut a list short, or a frame wasn't read; the "
             "web's browser reads the focused "
             "control, even in a frame, and holds such a key only where it may commit something.",
+            "In the web's browser a key that types or deletes into a frame's text field runs at once, Enter and Space "
+            "there wait, and so does a chord with Tab before another key (Tab+ArrowDown), which the desktop app's "
+            "browser refuses.",
             "The browser refuses keys and typing into a secret field there, as anywhere, and a sign-in, two-factor "
             "code or payment in a frame is the user's to do",
         ):
