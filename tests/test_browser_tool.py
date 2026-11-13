@@ -998,8 +998,8 @@ def test_the_prompt_and_the_skill_say_how_to_fill_an_ordinary_field_inside_a_fra
             "A press step with no element goes wherever the focus is: Tab runs at once.",
             "In the desktop app's browser, Enter, Space and a key that types or deletes each wait for the user's "
             "Approve, and so does an arrow, Home, End, PageUp or PageDown while the page or a frame lists a radio or "
-            "select option that commits something, or the browser cut a list short, or a frame wasn't read; the "
-            "web's browser reads the focused "
+            "select option that commits something, or the browser cut a list short, or a frame wasn't read, or the "
+            "page lists a secret select; the web's browser reads the focused "
             "control, even in a frame, and holds such a key only where it may commit something.",
             "In the web's browser a key that types or deletes into a frame's text field runs at once, Enter and Space "
             "there wait, and so does a chord with Tab before a key that picks or edits (Tab+ArrowDown, Tab+a), which "
