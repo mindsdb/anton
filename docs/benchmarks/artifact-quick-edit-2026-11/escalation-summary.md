@@ -1,0 +1,34 @@
+Agent-labelled messages run straight through the editor: 32 runs (0 harness errors excluded). escalate 30, noop 1, applied 1, failed 0. Median 4.1 s, p90 6.7 s; folders left unchanged when not applied: 31/31.
+
+- applied: "add last quarter's numbers" → Added last-quarter revenue, orders, gross margin dollars, and gross margin percentage; figures follow the selected region filter and use the latest quarter in t
+- escalate: "use live exchange rates from an API instead of the fixed ones" → Live exchange rates require connecting to an external rates API, which this artifact does not currently use.
+- escalate: "add the Mexican peso" → Adding MXN to this converter requires an exchange rate, but the artifact contains no Mexican-peso rate and I can’t invent one.
+- escalate: "what was the EUR rate a year ago?" → The artifact contains only a fixed synthetic rate table with no historical rates or date-series data, so it cannot determine the EUR rate one year ago.
+- escalate: "include the responses from the Q3 survey too" → The artifact only contains the current survey data, not Q3 survey responses; those must be provided or queried from a data source.
+- escalate: "summarize the main complaints from the free-text comments" → The embedded survey data contains ratings and score counts, but no free-text comments to summarize.
+- escalate: "what's our overall NPS?" → The embedded survey has 1–5 rating counts and averages, not a Net Promoter Score metric or 0–10 recommendation ratings, so the overall NPS cannot be calculated 
+- escalate: "add a filter by customer segment" → The embedded survey records do not include a customer-segment field, so adding a segment filter requires data that is not present in this artifact.
+- escalate: "join this with the customer table and show the average score per account size" → The artifact contains survey results but no customer table or account-size field to join on; the customer data is needed to calculate average scores per account
+- escalate: "how many focus sessions did I do last week?" → The artifact contains only a client-side timer with no recorded session history or dated data to determine how many sessions occurred last week.
+- escalate: "pull in current stock levels from the warehouse system" → The artifact only contains a static inventory snapshot; pulling current stock levels requires access to the warehouse system or refreshed inventory data that is
+- escalate: "add supplier lead times for each item" → The embedded inventory data has no supplier lead-time field, so I can’t add accurate per-item lead times without a data source that provides them.
+- escalate: "which items should I reorder this week, and how many of each?" → This asks for a recommendation and quantities; the inventory snapshot contains on-hand and reorder-point values but no lead times, demand, or replenishment rule
+- escalate: "clean up the duplicate SKUs in the source CSV and rebuild this" → The source CSV is not among the artifact files; only the page and embedded snapshot are available, so I can’t remove duplicate SKUs from the source or rebuild f
+- escalate: "hi" → You greeted me, but did not request a change to the inventory page.
+- escalate: "compare this with current mortgage rates from my bank's website" → The artifact contains no bank name or current mortgage-rate data, so I can’t compare against your bank’s website from these files.
+- escalate: "is a 15-year loan better for me than a 30-year one?" → The calculator has no information about your financial situation or goals, so it cannot determine whether a 15-year or 30-year loan is better for you.
+- escalate: "can you explain how the monthly payment is calculated?" → This asks for an explanation rather than a change to the calculator files.
+- escalate: "sync the milestones with our Jira project" → The artifact contains only the embedded milestone snapshot; syncing with Jira requires access to the Jira project and refreshed data not present in these files.
+- escalate: "add the marketing team's milestones from the launch plan doc" → The launch plan document and its marketing milestones are not included in the artifact files, so I can’t add them without the source data.
+- escalate: "add 2025 so I can compare year over year" → The embedded dataset contains only 2026 records; adding a 2025 comparison requires 2025 source data that is not present in the artifact.
+- escalate: "refresh this with the latest data from the sales database" → The embedded artifact only contains a fixed local CSV snapshot; refreshing it requires querying the sales database, which is not available in these files.
+- escalate: "why did revenue drop in the West in June?" → This asks for an explanation of a sales trend; the dashboard data shows sales figures but not the causes of the West's June revenue drop.
+- escalate: "forecast next quarter's revenue for each region" → The artifact contains historical 2026 sales data only; forecasting next-quarter revenue requires analysis beyond the existing page data.
+- escalate: "break revenue down by product category" → The embedded sales records have no product-category field, so a category breakdown requires data not present in the artifact.
+- escalate: "which region is growing fastest?" → This asks for an analysis answer, not an artifact change; it requires comparing regional growth across the embedded monthly data.
+- escalate: "add the West region's orders from the CRM" → The embedded dashboard contains sales records but no CRM data, so I can’t add West-region CRM orders without access to that source.
+- escalate: "check these totals against the database, they look off" → I can recompute totals from the embedded CSV data, but checking them against the database requires a database query/source not present in the artifact.
+- escalate: "make me a new dashboard for marketing spend" → The artifact only contains regional sales data, not marketing spend; a marketing-spend dashboard needs a data source or spend records that are not in these file
+- escalate: "share this with the finance team" → I can’t share the dashboard with the finance team from this artifact; that requires an external sharing action and recipient details.
+- escalate: "export this as a PDF and email it to me every Monday" → This static HTML app has no PDF export, email, or scheduling service, and no email address was provided; I can’t send or schedule recurring emails from its file
+- noop: "log my sessions to a Google Sheet every day" → I can’t connect the timer to a Google Sheet with the information in the artifact: it has no Google account authorization or target sheet. To set this up, I’d ne

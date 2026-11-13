@@ -1,0 +1,508 @@
+[
+ {
+  "id": "bar-regional-sales-dashboard-cosmetic",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "edit",
+  "message": "make the monthly revenue line purple (#7B3FA0) instead of teal",
+  "task_id": "regional-sales-dashboard-cosmetic"
+ },
+ {
+  "id": "bar-regional-sales-dashboard-content",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "edit",
+  "message": "rename the 'Total orders' KPI to 'Orders placed' and change the subtitle to '2026 sales performance (synthetic data)'",
+  "task_id": "regional-sales-dashboard-content"
+ },
+ {
+  "id": "bar-regional-sales-dashboard-behaviour",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "edit",
+  "message": "add a table below the charts that lists each month with its revenue and orders for the selected region",
+  "task_id": "regional-sales-dashboard-behaviour"
+ },
+ {
+  "id": "bar-regional-sales-dashboard-bugfix",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "edit",
+  "message": "when I pick a region in the Region selector every KPI and both charts drop to zero, fix it",
+  "task_id": "regional-sales-dashboard-bugfix"
+ },
+ {
+  "id": "bar-customer-survey-results-cosmetic",
+  "slug": "customer-survey-results-e0635509",
+  "label": "edit",
+  "message": "change the score colors so score 1 is red #B22222 and score 5 is dark blue #1F4E99",
+  "task_id": "customer-survey-results-cosmetic"
+ },
+ {
+  "id": "bar-customer-survey-results-content",
+  "slug": "customer-survey-results-e0635509",
+  "label": "edit",
+  "message": "rename the 'Lowest-rated question' card to 'Needs attention'",
+  "task_id": "customer-survey-results-content"
+ },
+ {
+  "id": "bar-customer-survey-results-behaviour",
+  "slug": "customer-survey-results-e0635509",
+  "label": "edit",
+  "message": "add an 'All teams' option to the Team selector that combines the responses of every team",
+  "task_id": "customer-survey-results-behaviour"
+ },
+ {
+  "id": "bar-customer-survey-results-bugfix",
+  "slug": "customer-survey-results-e0635509",
+  "label": "edit",
+  "message": "nothing shows up under the Team selector anymore, no cards, no chart. can you fix it?",
+  "task_id": "customer-survey-results-bugfix"
+ },
+ {
+  "id": "bar-product-launch-timeline-cosmetic",
+  "slug": "product-launch-timeline-07de78c8",
+  "label": "edit",
+  "message": "show the status filter as a dropdown instead of tabs",
+  "task_id": "product-launch-timeline-cosmetic"
+ },
+ {
+  "id": "bar-product-launch-timeline-content",
+  "slug": "product-launch-timeline-07de78c8",
+  "label": "edit",
+  "message": "change the overview sentence to 'Eight milestones take the product from kickoff to post-launch review.'",
+  "task_id": "product-launch-timeline-content"
+ },
+ {
+  "id": "bar-product-launch-timeline-behaviour",
+  "slug": "product-launch-timeline-07de78c8",
+  "label": "edit",
+  "message": "add a filter for the owner team next to the status filter",
+  "task_id": "product-launch-timeline-behaviour"
+ },
+ {
+  "id": "bar-product-launch-timeline-bugfix",
+  "slug": "product-launch-timeline-07de78c8",
+  "label": "edit",
+  "message": "clicking Done, In progress or Planned shows no milestones at all, only 'All milestones' works. please fix",
+  "task_id": "product-launch-timeline-bugfix"
+ },
+ {
+  "id": "bar-inventory-browser-cosmetic",
+  "slug": "inventory-browser-8e710cda",
+  "label": "edit",
+  "message": "change the green accent color to dark blue #1d4ed8",
+  "task_id": "inventory-browser-cosmetic"
+ },
+ {
+  "id": "bar-inventory-browser-content",
+  "slug": "inventory-browser-8e710cda",
+  "label": "edit",
+  "message": "change the heading 'Stock overview' to 'Warehouse stock' and make the empty-result message say 'Nothing matches your filters.'",
+  "task_id": "inventory-browser-content"
+ },
+ {
+  "id": "bar-inventory-browser-behaviour",
+  "slug": "inventory-browser-8e710cda",
+  "label": "edit",
+  "message": "add a Location dropdown filter (Warehouse A, B, C) next to the category filter",
+  "task_id": "inventory-browser-behaviour"
+ },
+ {
+  "id": "bar-inventory-browser-bugfix",
+  "slug": "inventory-browser-8e710cda",
+  "label": "edit",
+  "message": "the table is empty and typing in the search box does nothing",
+  "task_id": "inventory-browser-bugfix"
+ },
+ {
+  "id": "bar-loan-payment-calculator-cosmetic",
+  "slug": "loan-payment-calculator-684cf670",
+  "label": "edit",
+  "message": "make the Calculate button green (#2ea043) instead of blue",
+  "task_id": "loan-payment-calculator-cosmetic"
+ },
+ {
+  "id": "bar-loan-payment-calculator-content",
+  "slug": "loan-payment-calculator-684cf670",
+  "label": "edit",
+  "message": "rename 'Total interest' to 'Total interest paid' and change the page heading to 'Mortgage payment calculator'",
+  "task_id": "loan-payment-calculator-content"
+ },
+ {
+  "id": "bar-loan-payment-calculator-behaviour",
+  "slug": "loan-payment-calculator-684cf670",
+  "label": "edit",
+  "message": "add a 'Total cost' result next to the monthly payment and total interest, showing the loan amount plus total interest",
+  "task_id": "loan-payment-calculator-behaviour"
+ },
+ {
+  "id": "bar-loan-payment-calculator-bugfix",
+  "slug": "loan-payment-calculator-684cf670",
+  "label": "edit",
+  "message": "pressing Calculate does nothing and the monthly payment never updates",
+  "task_id": "loan-payment-calculator-bugfix"
+ },
+ {
+  "id": "bar-focus-timer-cosmetic",
+  "slug": "focus-timer-9008a47d",
+  "label": "edit",
+  "message": "make the Start button orange, using the orange already in the page (#d98b60)",
+  "task_id": "focus-timer-cosmetic"
+ },
+ {
+  "id": "bar-focus-timer-content",
+  "slug": "focus-timer-9008a47d",
+  "label": "edit",
+  "message": "change the big heading 'One thing at a time.' to 'Deep work, one block at a time.' and the footer to 'Stretch, sip some water, then go again.'",
+  "task_id": "focus-timer-content"
+ },
+ {
+  "id": "bar-focus-timer-behaviour",
+  "slug": "focus-timer-9008a47d",
+  "label": "edit",
+  "message": "add a third mode 'Long break · 15 min' next to Focus and Break",
+  "task_id": "focus-timer-behaviour"
+ },
+ {
+  "id": "bar-focus-timer-bugfix",
+  "slug": "focus-timer-9008a47d",
+  "label": "edit",
+  "message": "the Start button does nothing when I click it",
+  "task_id": "focus-timer-bugfix"
+ },
+ {
+  "id": "bar-currency-converter-cosmetic",
+  "slug": "currency-converter-01f791d8",
+  "label": "edit",
+  "message": "make the Convert button green (#238636)",
+  "task_id": "currency-converter-cosmetic"
+ },
+ {
+  "id": "bar-currency-converter-content",
+  "slug": "currency-converter-01f791d8",
+  "label": "edit",
+  "message": "change the main heading to 'Exchange Rate Converter' and the rates table heading to 'Today's rates (per 1 USD)'",
+  "task_id": "currency-converter-content"
+ },
+ {
+  "id": "bar-currency-converter-behaviour",
+  "slug": "currency-converter-01f791d8",
+  "label": "edit",
+  "message": "add a button that swaps the From and To currencies",
+  "task_id": "currency-converter-behaviour"
+ },
+ {
+  "id": "bar-currency-converter-bugfix",
+  "slug": "currency-converter-01f791d8",
+  "label": "edit",
+  "message": "converting 100 USD to EUR returns 100 instead of 92, fix it",
+  "task_id": "currency-converter-bugfix"
+ },
+ {
+  "id": "ib-edit-29",
+  "slug": "inventory-browser-8e710cda",
+  "label": "edit",
+  "message": "sort the table by on-hand quantity, highest first",
+  "note": "sorting data already in the page"
+ },
+ {
+  "id": "rs-edit-30",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "edit",
+  "message": "add a gross margin chart by month",
+  "note": "gross_margin_usd is in the embedded data"
+ },
+ {
+  "id": "rs-edit-31",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "edit",
+  "message": "show revenue in thousands, like $120k"
+ },
+ {
+  "id": "rs-edit-32",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "edit",
+  "message": "show each region's share of total revenue as a percentage on the bar chart",
+  "note": "computed from data in the page"
+ },
+ {
+  "id": "cs-edit-33",
+  "slug": "customer-survey-results-e0635509",
+  "label": "edit",
+  "message": "show the number of responses next to each question's average",
+  "note": "score counts are in the data"
+ },
+ {
+  "id": "ib-edit-34",
+  "slug": "inventory-browser-8e710cda",
+  "label": "edit",
+  "message": "add a total stock value at the bottom of the table",
+  "note": "on_hand x unit_cost, both in the data"
+ },
+ {
+  "id": "pl-edit-35",
+  "slug": "product-launch-timeline-07de78c8",
+  "label": "edit",
+  "message": "highlight milestones whose date has passed but are not done in red"
+ },
+ {
+  "id": "ft-edit-36",
+  "slug": "focus-timer-9008a47d",
+  "label": "edit",
+  "message": "make the focus session 50 minutes instead of 25"
+ },
+ {
+  "id": "cc-edit-37",
+  "slug": "currency-converter-01f791d8",
+  "label": "edit",
+  "message": "add a dark mode toggle"
+ },
+ {
+  "id": "lp-edit-38",
+  "slug": "loan-payment-calculator-684cf670",
+  "label": "edit",
+  "message": "the amortization table is too long, collapse it by default with a show more button"
+ },
+ {
+  "id": "rs-edit-39",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "edit",
+  "message": "bigger",
+  "note": "follow-up",
+  "history": [
+   {
+    "role": "user",
+    "text": "make the KPI numbers bold"
+   },
+   {
+    "role": "assistant",
+    "text": "The KPI numbers are bold now."
+   }
+  ]
+ },
+ {
+  "id": "rs-edit-40",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "edit",
+  "message": "undo that, put it back to teal",
+  "note": "follow-up",
+  "history": [
+   {
+    "role": "user",
+    "text": "make the monthly revenue line purple"
+   },
+   {
+    "role": "assistant",
+    "text": "The revenue line is purple now."
+   }
+  ]
+ },
+ {
+  "id": "rs-agent-41",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "agent",
+  "message": "add last quarter's numbers",
+  "note": "data the page does not have"
+ },
+ {
+  "id": "rs-agent-42",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "agent",
+  "message": "add 2025 so I can compare year over year",
+  "note": "another period"
+ },
+ {
+  "id": "rs-agent-43",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "agent",
+  "message": "refresh this with the latest data from the sales database"
+ },
+ {
+  "id": "rs-agent-44",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "agent",
+  "message": "why did revenue drop in the West in June?",
+  "note": "analysis question"
+ },
+ {
+  "id": "rs-agent-45",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "agent",
+  "message": "forecast next quarter's revenue for each region"
+ },
+ {
+  "id": "rs-agent-46",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "agent",
+  "message": "break revenue down by product category",
+  "note": "no product field in the data"
+ },
+ {
+  "id": "rs-agent-47",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "agent",
+  "message": "which region is growing fastest?",
+  "note": "question"
+ },
+ {
+  "id": "rs-agent-48",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "agent",
+  "message": "add the West region's orders from the CRM"
+ },
+ {
+  "id": "rs-agent-49",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "agent",
+  "message": "check these totals against the database, they look off"
+ },
+ {
+  "id": "cs-agent-50",
+  "slug": "customer-survey-results-e0635509",
+  "label": "agent",
+  "message": "include the responses from the Q3 survey too"
+ },
+ {
+  "id": "cs-agent-51",
+  "slug": "customer-survey-results-e0635509",
+  "label": "agent",
+  "message": "summarize the main complaints from the free-text comments",
+  "note": "no comments in the data"
+ },
+ {
+  "id": "cs-agent-52",
+  "slug": "customer-survey-results-e0635509",
+  "label": "agent",
+  "message": "what's our overall NPS?",
+  "note": "question"
+ },
+ {
+  "id": "cs-agent-53",
+  "slug": "customer-survey-results-e0635509",
+  "label": "agent",
+  "message": "add a filter by customer segment",
+  "note": "no segment field in the data"
+ },
+ {
+  "id": "ib-agent-54",
+  "slug": "inventory-browser-8e710cda",
+  "label": "agent",
+  "message": "pull in current stock levels from the warehouse system"
+ },
+ {
+  "id": "ib-agent-55",
+  "slug": "inventory-browser-8e710cda",
+  "label": "agent",
+  "message": "add supplier lead times for each item",
+  "note": "not in the data"
+ },
+ {
+  "id": "ib-agent-56",
+  "slug": "inventory-browser-8e710cda",
+  "label": "agent",
+  "message": "which items should I reorder this week, and how many of each?",
+  "note": "analysis question"
+ },
+ {
+  "id": "ib-agent-57",
+  "slug": "inventory-browser-8e710cda",
+  "label": "agent",
+  "message": "clean up the duplicate SKUs in the source CSV and rebuild this",
+  "note": "data prep"
+ },
+ {
+  "id": "lp-agent-58",
+  "slug": "loan-payment-calculator-684cf670",
+  "label": "agent",
+  "message": "compare this with current mortgage rates from my bank's website"
+ },
+ {
+  "id": "lp-agent-59",
+  "slug": "loan-payment-calculator-684cf670",
+  "label": "agent",
+  "message": "is a 15-year loan better for me than a 30-year one?",
+  "note": "question"
+ },
+ {
+  "id": "lp-agent-60",
+  "slug": "loan-payment-calculator-684cf670",
+  "label": "agent",
+  "message": "can you explain how the monthly payment is calculated?",
+  "note": "question"
+ },
+ {
+  "id": "pl-agent-61",
+  "slug": "product-launch-timeline-07de78c8",
+  "label": "agent",
+  "message": "sync the milestones with our Jira project"
+ },
+ {
+  "id": "pl-agent-62",
+  "slug": "product-launch-timeline-07de78c8",
+  "label": "agent",
+  "message": "add the marketing team's milestones from the launch plan doc"
+ },
+ {
+  "id": "ft-agent-63",
+  "slug": "focus-timer-9008a47d",
+  "label": "agent",
+  "message": "how many focus sessions did I do last week?",
+  "note": "question"
+ },
+ {
+  "id": "ft-agent-64",
+  "slug": "focus-timer-9008a47d",
+  "label": "agent",
+  "message": "log my sessions to a Google Sheet every day"
+ },
+ {
+  "id": "cc-agent-65",
+  "slug": "currency-converter-01f791d8",
+  "label": "agent",
+  "message": "use live exchange rates from an API instead of the fixed ones",
+  "note": "new data source"
+ },
+ {
+  "id": "cc-agent-66",
+  "slug": "currency-converter-01f791d8",
+  "label": "agent",
+  "message": "add the Mexican peso",
+  "note": "MXN rate is not in the data"
+ },
+ {
+  "id": "cc-agent-67",
+  "slug": "currency-converter-01f791d8",
+  "label": "agent",
+  "message": "what was the EUR rate a year ago?",
+  "note": "question"
+ },
+ {
+  "id": "rs-agent-68",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "agent",
+  "message": "make me a new dashboard for marketing spend",
+  "note": "different artifact"
+ },
+ {
+  "id": "rs-agent-69",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "agent",
+  "message": "share this with the finance team"
+ },
+ {
+  "id": "rs-agent-70",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "label": "agent",
+  "message": "export this as a PDF and email it to me every Monday"
+ },
+ {
+  "id": "cs-agent-71",
+  "slug": "customer-survey-results-e0635509",
+  "label": "agent",
+  "message": "join this with the customer table and show the average score per account size"
+ },
+ {
+  "id": "ib-agent-72",
+  "slug": "inventory-browser-8e710cda",
+  "label": "agent",
+  "message": "hi",
+  "note": "not a change"
+ }
+]
