@@ -845,6 +845,45 @@ async def test_a_hosts_password_field_refusal_reads_as_a_secret_field():
     assert "MindsHub" not in result.content
 
 
+async def test_the_prompt_the_skill_and_each_secret_field_refusal_name_a_payment_card_and_not_any_card():
+    """Both hosts take a field for a card's secret only when it names a
+    payment card: a gift, loyalty or library card's number is an ordinary
+    field, read and typed into for the person (page.json's
+    card_field_exempt). The prompt, the skill and both refusals of a type
+    into a secret field say a payment card number, so the model fills such a
+    field instead of handing it over."""
+    from pathlib import Path
+
+    prompt = " ".join(browser_tool.BROWSER_TOOL_PROMPT.split())
+    skill = " ".join((Path(browser_tool.__file__).parents[1] / "memory" / "builtin_skills" / "browser" / "SKILL.md").read_text().split())
+    assert "Never ask for, read out, or type a password, one-time code, or card number;" not in prompt
+    assert (
+        "Never ask for, read out, or type a password, one-time code, or payment card number (a gift, loyalty or "
+        "library card's number is an ordinary field); the tool refuses to type into a secret field."
+    ) in prompt
+    assert "two-factor codes, card details and" not in skill
+    assert (
+        "Sign-ins, CAPTCHAs, two-factor codes, payment card details (a gift, loyalty or library card's number is an "
+        "ordinary field) and anything else secret are the user's to do."
+    ) in skill
+
+    host = FakeHost(pages=[CHECKOUT])
+    session = make_session(host)
+    ours = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 8, "text": "4111"}})
+    original = host.handler
+
+    def handler(request):
+        if request.url.path.endswith("/action"):
+            return httpx.Response(403, json={"error": "password_field", "message": "element 1 is a secret field"})
+        return original(request)
+
+    answer_with(session, handler)
+    theirs = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 9, "text": "x"}})
+    for result in (ours, theirs):
+        assert result.reason == "browser_secret_field"
+        assert "a secret field (a password, a code or a payment card number)" in " ".join(result.content.split())
+
+
 async def test_on_the_desktop_a_commit_click_waits_for_approve(elicit_answers):
     host = FakeHost(pages=[CHECKOUT])
     session = make_session(host, elicitor=FakeElicitor(), config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))

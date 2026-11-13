@@ -50,7 +50,7 @@ class _ElementFields(_Answer):
     name: str
     value: str | None = None
     #: The host withheld this field's value because it is secret (a password,
-    #: a one-time code, a card number). The agent must never type into it.
+    #: a one-time code, a payment card number). The agent must never type into it.
     value_hidden: bool = False
     type: str = ""
     checked: bool | None = None
