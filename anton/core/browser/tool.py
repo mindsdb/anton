@@ -1394,8 +1394,8 @@ def _step_words(body: dict, element: Element | None, held: HeldStep | None = Non
 def _secret_field(element_id: object) -> ToolOutcome:
     return ToolOutcome(
         content=(
-            f"Not done: element [{element_id}] is a secret field (a password, a code or a payment card number). "
-            "Only the user fills those: call action=hand_to_user with a one-line reason."
+            f"Not done: element [{element_id}] is a secret field (a password, a code, or a card number the browser "
+            "takes for a payment card's). Only the user fills those: call action=hand_to_user with a one-line reason."
         ),
         ok=False,
         reason="browser_secret_field",
@@ -2302,8 +2302,9 @@ def _refused(session: "ChatSession", exc: BrowserError) -> ToolOutcome:
     if code == "password_field":
         return ToolOutcome(
             content=(
-                "Not typed: the browser refused to type into a secret field (a password, a code or a payment "
-                "card number). Only the user fills those: call action=hand_to_user with a one-line reason."
+                "Not typed: the browser refused to type into a secret field (a password, a code, or a card number "
+                "the browser takes for a payment card's). Only the user fills those: call action=hand_to_user with a "
+                "one-line reason."
             ),
             ok=False, reason="browser_secret_field",
         )
@@ -2584,7 +2585,7 @@ BROWSER: you and the user share a real browser. The user sees it beside this cha
 - Otherwise start with action=run, a goal, and every value it will need in `inputs` (dates as YYYY-MM-DD). run takes the steps it is sure of quickly, keeps what pages on its way show that the goal needs, and hands back with them and the page when it isn't sure; then continue with action=act.
 - To act yourself, use action=act with a step: {"action":"click","element":17}, {"action":"type","element":4,"text":"…","submit":true}, {"action":"select","element":9,"value":"Blue"}, {"action":"scroll","direction":"down"}, {"action":"press","element":4,"key":"Enter"}, {"action":"back"}, {"action":"navigate","url":"…"}. Element numbers come from the latest page.
 - Where the page list has nothing to point at (a canvas, a drawing, a map), use pixels from your latest screenshot: {"action":"click","x":412,"y":230}. Clicks also take "button":"right" and "clicks":2. Drag with {"action":"drag","from":{"element":5} or {"x":…,"y":…},"to":{…}}; that's how shapes get drawn, sliders moved and items reordered. Controls inside a frame have no number: click them by pixel from your latest screenshot; each such step waits for the user's Approve. To fill an ordinary field inside a frame, click it by pixel (one Approve), then type into it with {"action":"type","focused":true,"text":"…"}, which types at the caret of the field that has the focus, at once and with no card; with "submit":true it also presses Enter, and waits for the user's Approve. The browser refuses it when the focus isn't on an ordinary text field. A press step with no element goes wherever the focus is: Tab runs at once. In the desktop app's browser, Enter, Space and a key that types or deletes each wait for the user's Approve, and so does an arrow, Home, End, PageUp or PageDown while the page or a frame lists a radio or select option that commits something, or the browser cut a list short, or a frame wasn't read, or the page lists a secret select; the web's browser reads the focused control, even in a frame, and holds such a key only where it may commit something. In the web's browser a key that types or deletes into a frame's text field runs at once, Enter and Space there wait, and so does a chord with Tab before a key that picks or edits (Tab+ArrowDown, Tab+a), which the desktop app's browser refuses. The browser refuses keys and typing into a secret field there, as anywhere, and a sign-in, two-factor code or payment in a frame is the user's to do (hand_to_user).
-- Never ask for, read out, or type a password, one-time code, or payment card number (a gift, loyalty or library card's number is an ordinary field); the tool refuses to type into a secret field. For sign-ins, CAPTCHAs, two-factor codes and payments, call action=hand_to_user with a short reason and let the user do it in the browser.
+- Never ask for, read out, or type a password, one-time code, or payment card number; the tool refuses to type into a secret field. A field for a gift, loyalty or library card's number is usually an ordinary field; if the browser refuses it as a secret field, hand it over. For sign-ins, CAPTCHAs, two-factor codes and payments, call action=hand_to_user with a short reason and let the user do it in the browser.
 - Never tick, agree to or affirm a policy, consent, terms or "I've read and understood" box for the user, and never make a choice only they can make; those are theirs, through hand_to_user too.
 - hand_to_user is only for those. Never use it to hand over work you found hard; if you can't do something with these actions, stop and say so in the chat, with what you tried and another way to get it done.
 - When the user must act on the page, don't end your turn asking them to do it and tell you: call hand_to_user with a one-line reason they'll see ("Check United's unaccompanied-minor policy box") and wait_for naming what to watch: {"element": N, "state": "checked"} for that checkbox, radio or toggle, {"element": N, "state": "filled"} for a field, or {"page": "changes"} for a sign-in, a check or anything that moves the page on. The call waits while they do it and returns, with the page, a few seconds after it's done or when they click Done; then carry on.
