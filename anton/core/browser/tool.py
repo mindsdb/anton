@@ -40,6 +40,7 @@ import json
 import logging
 import re
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 from urllib.parse import parse_qs, urlparse
@@ -842,30 +843,10 @@ def _frame_spots(frames: list[Frame]) -> tuple[list[str], list[_FrameSpot]]:
     return unplaced, placed
 
 
-def _frames_moved(seen: Page, current: Page) -> bool:
-    """Whether, between two reads of one page, a frame came or went, or
-    changed address, size or place on the page.
-
-    The boxes are in screenshot pixels and the list goes on-screen first, so
-    a scroll moves every box and may reorder the list. The frames are
-    compared as a multiset keyed by address, each matched in the sorted
-    order ``_FrameSpot`` gives. A frame is in its place when its box is where
-    it was on screen (no scroll, or a frame fixed to the view, such as a chat
-    widget), or when it moved with the scroll: up the screenshot as the page
-    scrolled down, or down as it scrolled up, no farther than the scroll,
-    since a host shrinks a wide view's screenshot and never grows it, and by
-    the same rows as every other frame that moved. The page read doesn't say
-    how much the screenshot is shrunk, so frames that all moved together by
-    less than the scroll read as scrolled; a lone frame that moved down the
-    page by exactly the scroll reads as fixed to the view. A host that sends
-    no ``frames`` on one read and frames on the other moved them."""
-    if seen.frames is None or current.frames is None:
-        return (seen.frames is None) != (current.frames is None)
-    unplaced, before = _frame_spots(seen.frames)
-    unplaced_now, now = _frame_spots(current.frames)
-    if unplaced != unplaced_now or len(before) != len(now):
-        return True
-    scrolled = current.scroll.y - seen.scroll.y if seen.scroll is not None and current.scroll is not None else 0
+def _scrolled_in_place(before: list[_FrameSpot], now: list[_FrameSpot], scrolled: int) -> bool:
+    """Whether each placed frame of ``before`` is in its place at the same
+    index of ``now`` (``_frames_moved``): where it was on screen, or moved
+    with the scroll by the same rows as every other frame that moved."""
     shifts: list[int] = []
     for was, spot in zip(before, now):
         if spot == was:
@@ -878,9 +859,48 @@ def _frames_moved(seen: Page, current: Page) -> bool:
             or shift * scrolled > 0
             or abs(shift) > abs(scrolled) + _FRAME_ROUNDING_PX
         ):
-            return True
+            return False
         shifts.append(shift)
-    return bool(shifts) and max(shifts) - min(shifts) > _FRAME_ROUNDING_PX
+    return not shifts or max(shifts) - min(shifts) <= _FRAME_ROUNDING_PX
+
+
+def _frames_moved(seen: Page, current: Page) -> bool:
+    """Whether, between two reads of one page, a frame came or went, or
+    changed address, size or place on the page.
+
+    The boxes are in screenshot pixels and the list goes on-screen first, so
+    a scroll moves every box and may reorder the list. The frames are
+    compared as a multiset keyed by address, each matched in the sorted
+    order ``_FrameSpot`` gives. A frame is in its place when its box is where
+    it was on screen (no scroll, or a frame fixed to the view, such as a chat
+    widget), or when it moved with the scroll: up the screenshot as the page
+    scrolled down, or down as it scrolled up, no farther than the scroll,
+    since a host shrinks a wide view's screenshot and never grows it, and by
+    the same rows as every other frame that moved (``_scrolled_in_place``).
+    A frame fixed to the view (a sticky ad) can share its address, left edge
+    and width with frames that scroll, and then the sorted order may pair it
+    with one of them; so when that order doesn't put every frame in its
+    place, the spots equal in both reads are taken out as fixed and the rest
+    matched again. Both pairings are tried, because a scroll can also put a
+    frame exactly where another of its address was, and then taking that
+    spot out pairs the wrong ones. The page read doesn't say how much the
+    screenshot is shrunk, so frames that all moved together by less than the
+    scroll read as scrolled; a lone frame that moved down the page by
+    exactly the scroll reads as fixed to the view. A host that sends no
+    ``frames`` on one read and frames on the other moved them."""
+    if seen.frames is None or current.frames is None:
+        return (seen.frames is None) != (current.frames is None)
+    unplaced, before = _frame_spots(seen.frames)
+    unplaced_now, now = _frame_spots(current.frames)
+    if unplaced != unplaced_now or len(before) != len(now):
+        return True
+    scrolled = current.scroll.y - seen.scroll.y if seen.scroll is not None and current.scroll is not None else 0
+    if _scrolled_in_place(before, now, scrolled):
+        return False
+    stayed = Counter(before) & Counter(now)
+    return not _scrolled_in_place(
+        sorted((Counter(before) - stayed).elements()), sorted((Counter(now) - stayed).elements()), scrolled,
+    )
 
 
 def _moved_focus(*, seen: Page, current: Page, body: dict) -> str | None:

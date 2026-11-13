@@ -1235,11 +1235,14 @@ async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_a_frame_change
     moves every box and may reorder the list. A frame that moved with the
     scroll, at the screenshot's scale and a pixel of rounding apart, or
     stayed where it was on screen (a chat widget fixed to the view), is in
-    its place, and the step runs."""
+    its place, and the step runs. That holds when a sticky ad shares its
+    address and width with ads that scroll, and when a scroll puts an ad
+    exactly where another ad of its address was."""
     desktop = BrowserConfig(base_url=LOOPBACK, profile=SID, token="k")
     frame = FRAMED["frames"][0]
     chat = {"url": "https://chat.example.test/widget", "read": False, "box": {"x": 700, "y": 600, "width": 300, "height": 180}}
     video = {"url": "https://video.example.test/embed", "read": False, "box": {"x": 112, "y": 900, "width": 560, "height": 315}}
+    ad = {"url": "https://ads.example.test/slot", "read": False, "box": {"x": 20, "y": 100, "width": 300, "height": 250}}
 
     def at(scroll_y: int, *frames: dict) -> dict:
         return {**FRAMED, "scroll": {"y": scroll_y, "height": 2400, "viewport": 800}, "frames": list(frames)}
@@ -1264,6 +1267,9 @@ async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_a_frame_change
             at(0, frame), at(120, {**moved(frame, y=180), "url": "https://ads.example.test/slot"}),
         ),
         "a frame that came after a scroll": (at(0, frame), at(120, moved(frame, y=180), chat)),
+        "an ad that moved on the page beside a sticky ad at its address": (
+            at(0, ad, moved(ad, y=600), moved(ad, y=900)), at(500, moved(ad, y=-400), moved(ad, y=600), moved(ad, y=600)),
+        ),
     }
     unchanged = {
         "text that changed inside the frame": (FRAMED, {**FRAMED, "frames": [{**frame, "text": "Get the weekly digest. 12:01"}]}),
@@ -1276,6 +1282,10 @@ async def test_on_the_desktop_a_step_to_the_focus_is_refused_when_a_frame_change
             at(0, frame, video), at(120, moved(frame, y=179, height=181), moved(video, y=780)),
         ),
         "a scroll beside a frame fixed to the view": (at(0, frame, chat), at(120, moved(frame, y=180), chat)),
+        "a scroll beside a sticky ad at the address of ads that scroll": (
+            at(0, ad, moved(ad, y=600), moved(ad, y=900)), at(500, moved(ad, y=-400), moved(ad, y=600), moved(ad, y=400)),
+        ),
+        "a scroll that puts an ad where another ad at its address was": (at(0, ad, moved(ad, y=600)), at(500, moved(ad, y=-400), ad)),
     }
     for step in ({"action": "press", "key": "Enter"}, {"action": "type", "focused": True, "text": "ada@example.test", "submit": True}):
         for what, (seen, after) in changed.items():
