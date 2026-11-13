@@ -46,7 +46,7 @@ async def test_classify_is_offered_only_on_mindshub_when_on(tmp_path, monkeypatc
     tools = {tool["name"]: tool for tool in kwargs["tools"]}
 
     assert session._classify_enabled is offered
-    assert ("classify(texts, categories)" in kwargs["system"]) is offered
+    assert ("classify(texts, categories, *, question=...)" in kwargs["system"]) is offered
     assert ("classify(texts, categories)" in tools["scratchpad"]["description"]) is offered
     assert session._scratchpads._classify_enabled is offered
 
@@ -61,7 +61,7 @@ def test_the_prompt_without_classify_names_no_classify_helper(internet_research)
         )
 
     on, off = build(True), build(False)
-    assert "classify(texts, categories)" in on and "classify_yes_no" in on
+    assert "classify(texts, categories, *, question=...)" in on and "classify_yes_no" in on
     assert "classify" not in off.replace("classified", "")
     # Everything else is kept: the only removed lines are the classify ones.
     removed = set(on.splitlines()) - set(off.splitlines())

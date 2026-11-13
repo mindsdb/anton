@@ -96,46 +96,48 @@ scratchpad tool instead of guessing or doing it in your head.
 was cut: a truncation flag, a next-page token or cursor, or a row count equal to the page or \
 row limit. If it was, page or split the query until you have every row, or say the figure is \
 partial.
-- get_llm() returns a pre-configured LLM client — use llm.complete(system=..., messages=[...]) \
-for AI-powered computation within scratchpad code. The call is synchronous.
-- llm.generate_object(MyModel, system=..., messages=[...]) extracts structured data into \
+- The scratchpad has built-in helper functions. They are always available as globals, so \
+do not import them; use them freely in scratchpad code. All of them are synchronous.
+  - get_llm() returns a pre-configured LLM client — use llm.complete(system=..., messages=[...]) \
+for AI-powered computation within scratchpad code.
+  - llm.generate_object(MyModel, system=..., messages=[...]) extracts structured data into \
 Pydantic models. Define a class with BaseModel, and the LLM fills it. Supports list[Model] too.
-- agentic_loop(system=..., user_message=..., tools=[...], handle_tool=fn) runs an LLM \
+  - agentic_loop(system=..., user_message=..., tools=[...], handle_tool=fn) runs an LLM \
 tool-call loop inside scratchpad code. The LLM reasons and calls your tools iteratively. \
 handle_tool(name, inputs) is a plain sync function returning a string result. Use this for \
 multi-step AI workflows like extraction or analysis with structured outputs.
-- web_search(query) answers a natural-language query (e.g. "latest SpaceX IPO news") using \
+  - web_search(query) answers a natural-language query (e.g. "latest SpaceX IPO news") using \
 the configured LLM's native web search and returns the model's narrative answer with source \
-links as a string. Use it for current/real-time information from within scratchpad code. The \
-call is synchronous.
-- classify(texts, categories) labels each text with exactly one category (a list of names, \
-or a dict of name -> description) and returns one dict per text, in order, with keys \
-label, p and probabilities. classify_yes_no(texts, question) answers one yes/no question \
-about each text and returns one dict per text with keys yes and p_yes. A text is a string, \
-or a dict of named fields such as {{"title": ..., "body": ...}}: pass separate fields as a \
-dict rather than joining them into one string. A failed item has label or yes set to None \
-and an error key. Both run on a dedicated decision model, judge \
-each text on its own, are synchronous, and label thousands of texts a minute: set \
-estimated_execution_time_seconds to about 30 + texts / 50, and pass all the texts in one \
-call rather than looping over them.
-- To sort texts into known categories or test each text against a yes/no condition, use \
+links as a string. Use it for current/real-time information from within scratchpad code.
+  - classify(texts, categories, *, question=...) labels each text with exactly one category \
+(a list of names, or a dict of name -> description) and returns one dict per text, in order, \
+with keys label, p and probabilities. classify_yes_no(texts, question, *, yes=None, no=None) \
+answers one yes/no question about each text (yes and no optionally describe each outcome) and \
+returns one dict per text with keys yes and p_yes. A text is a string, or a dict of named \
+fields such as {{"title": ..., "body": ...}}: pass separate fields as a dict rather than \
+joining them into one string. A failed item has label or yes set to None and an error key. \
+Both run on a dedicated decision model, judge each text on its own, and label thousands of \
+texts a minute: set estimated_execution_time_seconds to about 30 + texts / 50, and pass all \
+the texts in one call rather than looping over them.
+    - To sort texts into known categories or test each text against a yes/no condition, use \
 classify() or classify_yes_no(), not get_llm() or agentic_loop(). Use classify() when every \
 text belongs to one of several categories (add a fallback such as "Other" if the list may \
-not cover every text), and classify_yes_no() when only one condition matters. Labels \
-follow the descriptions much more closely than bare names, so pass categories as a dict and \
-describe each one, or the yes and no outcomes: what belongs there, typical examples, and \
-which nearby cases belong elsewhere, e.g. {{"Billing": "invoices, payments, refunds; not \
-questions about how a feature works", ...}}. When the categories come from a source (the \
-user's definitions, a data dictionary, a known taxonomy), describe them the way that source \
-does. Settle the descriptions before labelling and label every text with the same ones: do \
+not cover every text), and classify_yes_no() when only one condition matters.
+    - Labels follow the descriptions much more closely than bare names, so pass categories as \
+a dict and describe each one, or the yes and no outcomes: what belongs there, typical \
+examples, and which nearby cases belong elsewhere, e.g. {{"Billing": "invoices, payments, \
+refunds; not questions about how a feature works", ...}}. When the categories come from a \
+source (the user's definitions, a data dictionary, a known taxonomy), describe them the way \
+that source does.
+    - Settle the descriptions before labelling and label every text with the same ones: do \
 not change them midway and re-label only part of the texts. Narrow the texts with the data \
-first, so you label only the ones the answer needs. Take the labels as the result: \
-do not label the same texts again with get_llm() or another classify() run to confirm them. \
-A p below about 0.9 marks a borderline text; if the borderline texts could change the \
-answer, you may re-check only those with get_llm(), many per generate_object call. If they raise because the decision model is unavailable, label with \
-get_llm() instead, many texts per generate_object call.
-- get_llm, agentic_loop, classify, classify_yes_no, and web_search are already available \
-as globals inside scratchpad code — do not import them.
+first, so you label only the ones the answer needs.
+    - Take the labels as the result: do not label the same texts again with get_llm() or \
+another classify() run to confirm them. A p below about 0.9 marks a borderline text; if the \
+borderline texts could change the answer, you may re-check only those with get_llm(), many \
+per generate_object call.
+    - If they raise because the decision model is unavailable, label with get_llm() instead, \
+many texts per generate_object call.
 - All .anton/.env variables are available as environment variables (os.environ).
 - Connected data source credentials are injected as namespaced environment \
 variables in the form DS_<ENGINE>_<NAME>__<FIELD> \
@@ -720,12 +722,7 @@ NO_INTERNET_CHAT_SYSTEM_PROMPT = cut_spans(
     # Up to SCRATCHPAD, so the follow-up suggestions about public datasets go too.
     ("INTERNET & LIVE INFORMATION:\n", "SCRATCHPAD:\n", NO_INTERNET_DATA_SOURCES),
     ("web scraping, ", "plotting", ""),
-    ("- web_search(query) answers", "- classify(texts, categories) labels", ""),
-    (
-        "- get_llm, agentic_loop, classify, classify_yes_no, and web_search are already available",
-        " as globals",
-        "- get_llm, agentic_loop, classify, and classify_yes_no are already available",
-    ),
+    ("- web_search(query) answers", "- classify(texts, categories", ""),
     ("(HTTP 403, import error", ", pause", "(an error, a timeout, an empty result, etc.)"),
     (
         "- Try creative workarounds first:",
@@ -741,15 +738,8 @@ def without_classify(prompt: str) -> str:
     For a session where they are off, or whose coding model is not on MindsHub.
     Works on the full and the no-internet chat prompt alike.
     """
-    prompt = cut_spans(prompt, ("- classify(texts, categories) labels", "- get_llm, agentic_loop", ""))
-    for named, without in (
-        ("- get_llm, agentic_loop, classify, classify_yes_no, and web_search are",
-         "- get_llm, agentic_loop, and web_search are"),
-        ("- get_llm, agentic_loop, classify, and classify_yes_no are", "- get_llm and agentic_loop are"),
-    ):
-        if prompt.count(named) == 1:
-            return prompt.replace(named, without)
-    raise ValueError("the scratchpad globals line no longer names classify()")
+    # The classify item and its sub-items are the last helpers before the .env bullet.
+    return cut_spans(prompt, ("  - classify(texts, categories", "- All .anton/.env", ""))
 
 
 NO_CLASSIFY_CHAT_SYSTEM_PROMPT = without_classify(CHAT_SYSTEM_PROMPT)
