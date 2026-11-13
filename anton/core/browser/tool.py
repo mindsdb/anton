@@ -1253,9 +1253,60 @@ def _page_host(url: str | None) -> str | None:
     return urlparse(url or "").hostname
 
 
-async def _hand_over(session: "ChatSession", *, reason: str) -> str | None:
+#: The roles whose "checked" a hand-over can wait for.
+_CHECKABLE_ROLES = frozenset({"checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"})
+_WAIT_STATES = ("checked", "filled")
+
+
+def _wait_for(state: _BrowserState, raw: object) -> dict | None:
+    """``hand_to_user``'s ``wait_for`` as the host takes it, checked against
+    the latest page the model read; None when the hand-over names nothing.
+    Raises ValueError, which the model reads, for one the host couldn't
+    watch."""
+    if raw is None or raw == {}:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError('wait_for must be {"element": N, "state": "checked" or "filled"} or {"page": "changes"}.')
+    if "page" in raw:
+        if raw.get("page") != "changes" or len(raw) != 1:
+            raise ValueError('wait_for for the page is {"page": "changes"}.')
+        return {"page": "changes"}
+    element_id, wanted = raw.get("element"), raw.get("state")
+    if not _is_id(element_id) or wanted not in _WAIT_STATES or set(raw) != {"element", "state"}:
+        raise ValueError('wait_for must be {"element": N, "state": "checked" or "filled"} or {"page": "changes"}.')
+    el = _element(state.page, element_id) if state.page is not None else None
+    if el is None:
+        raise ValueError(f"wait_for: element [{element_id}] isn't on the latest page you read. Read the page, then hand over.")
+    if wanted == "checked" and el.role not in _CHECKABLE_ROLES and el.checked is None:
+        raise ValueError(f'wait_for: element [{element_id}] is {_named(el)}, which can\'t be checked. Use "filled" for a field, or {{"page": "changes"}}.')
+    if wanted == "filled" and not (_is_text_entry(el) or el.secret):
+        raise ValueError(f'wait_for: element [{element_id}] is {_named(el)}, not a field. Use "checked" for a checkbox, or {{"page": "changes"}}.')
+    return {"element": element_id, "state": wanted}
+
+
+def _waited_for(wait_for: dict | None, page: Page) -> str:
+    """What the page shows of what the hand-over waited for, never a value."""
+    if not wait_for or "element" not in wait_for:
+        return ""
+    el = _element(page, wait_for["element"])
+    if el is None:
+        return f"Element [{wait_for['element']}] isn't on the page now: the user moved on from it."
+    if wait_for["state"] == "checked":
+        return f"Element [{el.id}] ({_named(el)}) is {'checked' if el.checked else 'not checked'} now."
+    return f"Element [{el.id}] ({_named(el)}) is {'filled in' if (el.value or el.value_hidden) else 'still empty'} now."
+
+
+def _no_wait_for(exc: BrowserError) -> bool:
+    """A host that doesn't know ``wait_for`` yet refused the hand-over for it."""
+    return exc.status == 400 and "wait_for" in f"{exc.code} {exc.message}"
+
+
+async def _hand_over(session: "ChatSession", *, reason: str, wait_for: dict | None = None) -> str | None:
     """Give the person the browser. Only they hand it back, with Done in the
-    browser; the agent never takes it back.
+    browser; the agent never takes it back. With ``wait_for``, a host that
+    watches for it hands back by itself, as their Done, once they did it and
+    left the page alone for a few seconds; a host that doesn't takes the
+    hand-over without it, and only Done ends it.
 
     The browser shows it's their turn (and refuses the agent's actions and
     page reads) while the chat shows a Finish later / Stop card. Returns
@@ -1276,7 +1327,13 @@ async def _hand_over(session: "ChatSession", *, reason: str) -> str | None:
     # One line and as long as the browser's own banner, so a reason a page
     # steered can't print a host line of its own under this one.
     reason = cut_reason(" ".join(reason.split()))
-    handed = await state.client.hand_to_person(session_id=state.session_id, reason=reason)
+    try:
+        handed = await state.client.hand_to_person(session_id=state.session_id, reason=reason, wait_for=wait_for)
+    except BrowserError as exc:
+        if wait_for is None or not _no_wait_for(exc):
+            raise
+        wait_for = None
+        handed = await state.client.hand_to_person(session_id=state.session_id, reason=reason)
 
     async def done_in_the_browser() -> str | None:
         control = await state.client.control(session_id=state.session_id)
@@ -1289,7 +1346,11 @@ async def _hand_over(session: "ChatSession", *, reason: str) -> str | None:
     return await _ask(
         session,
         f"{f'Your turn on {host}' if host else 'Your turn on a page with no web address'}: {reason}\n\n"
-        "Use the browser beside the chat, and click Done in the browser when you're finished.",
+        + (
+            "Use the browser beside the chat. I'll carry on by myself once that's done, or click Done in the browser."
+            if wait_for is not None
+            else "Use the browser beside the chat, and click Done in the browser when you're finished."
+        ),
         [("later", "Finish later"), ("stop", "Stop")],
         answered_elsewhere=done_in_the_browser,
     )
@@ -1305,7 +1366,9 @@ _ENDED_WITHOUT_DONE = {
 }
 
 
-async def _after_hand_over(session: "ChatSession", answer: str | None, *, lead: str = "The user finished in the browser.") -> str:
+async def _after_hand_over(
+    session: "ChatSession", answer: str | None, *, lead: str = "The user finished in the browser.", wait_for: dict | None = None,
+) -> str:
     state = _state(session)
     if answer is None:
         return (
@@ -1322,6 +1385,9 @@ async def _after_hand_over(session: "ChatSession", answer: str | None, *, lead: 
         return f"{ended} {_STAYS} End your turn and wait for them."
     page = await state.client.page(session_id=state.session_id)
     lines = [lead]
+    waited = _waited_for(wait_for, page)
+    if waited:
+        lines.append(waited)
     if human_check(page) and page.url not in state.checked_urls:
         lines.append("The page still shows a human check. Ask the user whether it went through; do not click it yourself.")
     noted = await _maybe_note_login(session, page)
@@ -1332,7 +1398,11 @@ async def _after_hand_over(session: "ChatSession", answer: str | None, *, lead: 
 
 async def _do_hand_to_user(session: "ChatSession", tc_input: dict) -> str:
     reason = (tc_input.get("reason") or "").strip() or "This step needs you."
-    return await _after_hand_over(session, await _hand_over(session, reason=reason))
+    wait_for = _wait_for(_state(session), tc_input.get("wait_for"))
+    if wait_for is not None:
+        _track(session, "browser_hand_over_waits", on=next(iter(wait_for)), state=wait_for.get("state", "changes"))
+    answer = await _hand_over(session, reason=reason, wait_for=wait_for)
+    return await _after_hand_over(session, answer, wait_for=wait_for)
 
 
 async def _unless_human_check(session: "ChatSession", page: Page) -> str | None:
@@ -1348,6 +1418,8 @@ async def _unless_human_check(session: "ChatSession", page: Page) -> str | None:
     answer = await _hand_over(
         session,
         reason=f"{site} wants to confirm you're a person ({kind}). Complete the check in the browser.",
+        # Most checks move on to the site once solved: the browser comes back then.
+        wait_for={"page": "changes"},
     )
     if answer == "done":
         # A solved check widget can stay on the page; without this, every
@@ -2013,8 +2085,10 @@ BROWSER: you and the user share a real browser. The user sees it beside this cha
 - To act yourself, use action=act with a step: {"action":"click","element":17}, {"action":"type","element":4,"text":"…","submit":true}, {"action":"select","element":9,"value":"Blue"}, {"action":"scroll","direction":"down"}, {"action":"press","element":4,"key":"Enter"}, {"action":"back"}, {"action":"navigate","url":"…"}. Element numbers come from the latest page.
 - Where the page list has nothing to point at (a canvas, a drawing, a map), use pixels from your latest screenshot: {"action":"click","x":412,"y":230}. Clicks also take "button":"right" and "clicks":2. Drag with {"action":"drag","from":{"element":5} or {"x":…,"y":…},"to":{…}}; that's how shapes get drawn, sliders moved and items reordered.
 - Never ask for, read out, or type a password, one-time code, or card number; the tool refuses to type into a secret field. For sign-ins, CAPTCHAs, two-factor codes and payments, call action=hand_to_user with a short reason and let the user do it in the browser.
+- Never tick, agree to or affirm a policy, consent, terms or "I've read and understood" box for the user, and never make a choice only they can make; those are theirs, through hand_to_user too.
 - hand_to_user is only for those. Never use it to hand over work you found hard; if you can't do something with these actions, stop and say so in the chat, with what you tried and another way to get it done.
-- Only the user hands the browser back, with Done in the browser. Until then you can't act in it or read the page: say what you need in chat and end your turn.
+- When the user must act on the page, don't end your turn asking them to do it and tell you: call hand_to_user with a one-line reason they'll see ("Check United's unaccompanied-minor policy box") and wait_for naming what to watch: {"element": N, "state": "checked"} for that checkbox, radio or toggle, {"element": N, "state": "filled"} for a field, or {"page": "changes"} for a sign-in, a check or anything that moves the page on. The call waits while they do it and returns, with the page, a few seconds after it's done or when they click Done; then carry on.
+- Only the user hands the browser back: with Done, or by doing what wait_for named. If the hand-over ends another way (Finish later, Stop, no answer), you can't act in it or read the page: say what you need in chat and end your turn.
 - Never click or try to solve a "verify you are human" check (Cloudflare, reCAPTCHA, hCaptcha). The tool hands those to the user by itself; wait for them.
 - After the user signs in to a site, call action=note_login with the site (and an account hint they'd recognize, never a secret). The browser keeps that record, and action=open lists it in later conversations.
 - Work in one tab: go back to a page by its address when you need it again. Before filling a form, list what it needs, gather it first and keep it in your notes, then fill it in one pass. A task keeps at most a few tabs (action=tabs says how many): open a second (action=new_tab) only to check something while a half-done form can't be left, and close it (action=close_tab) when done. action=tabs also lists tabs from before that were closed; reopen one with new_tab and its url. When the user will want a page again in this project, save it with action=save_tab (action=saved_tabs lists them).
@@ -2033,7 +2107,7 @@ BROWSER_TOOL_SCHEMA = {
                 "open: open the browser (optionally at url) and list signed-in sites. "
                 "run: work toward a goal, taking the steps that are clear. "
                 "page: read the current page. act: take one step. screenshot: see the page, e.g. when stuck. "
-                "hand_to_user: let the user take over (sign-in, CAPTCHA, payment). "
+                "hand_to_user: let the user do what only they may (sign-in, CAPTCHA, payment, a policy or consent box), and wait until it's done. "
                 "note_login: record in the browser that the user is signed in to a site. "
                 "tabs: list open tabs. new_tab: open a tab (optionally at url) and switch to it. "
                 "switch_tab / close_tab: by tab id. save_tab: save a page to this project's tabs. "
@@ -2051,7 +2125,15 @@ BROWSER_TOOL_SCHEMA = {
             "description": "run: values run may type or select, by a short name, e.g. {\"search\": \"MacBook Air\"}. Never secrets.",
         },
         "step": {"type": "object", "description": "act: one step, e.g. {\"action\": \"click\", \"element\": 17}, {\"action\": \"click\", \"x\": 412, \"y\": 230}, or {\"action\": \"drag\", \"from\": {\"element\": 5}, \"to\": {\"x\": 600, \"y\": 300}}."},
-        "reason": {"type": "string", "description": "hand_to_user: what the user needs to do (sign in, CAPTCHA, payment), in one line."},
+        "reason": {"type": "string", "description": "hand_to_user: what the user needs to do (sign in, CAPTCHA, payment, check a policy box), in one line they'll see."},
+        "wait_for": {
+            "type": "object",
+            "description": (
+                "hand_to_user: what to watch, so the browser comes back by itself once the user did it: "
+                "{\"element\": N, \"state\": \"checked\"} (checkbox, radio, toggle), {\"element\": N, \"state\": \"filled\"} (a field), "
+                "or {\"page\": \"changes\"} (a sign-in, a check, a choice that moves the page on). Element numbers from the latest page."
+            ),
+        },
         "site": {"type": "string", "description": "note_login: the site, e.g. salesforce.com."},
         "account_hint": {"type": "string", "description": "note_login: which account, e.g. jorge@acme. Never a secret."},
         "annotate": {"type": "boolean", "description": "screenshot: draw element numbers (default true)."},

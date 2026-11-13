@@ -1640,6 +1640,174 @@ async def test_hand_to_user_without_an_elicitor_tells_the_model_to_wait():
     assert host.control_changes == ["human"]
 
 
+
+
+# ── hand-overs that wait for what the user does ────────────────────────────
+
+POLICY = {
+    "url": "https://www.united.com/en/us/fsr/choose-flights",
+    "title": "Unaccompanied minor policy",
+    "elements": [
+        {"id": 12, "role": "checkbox", "name": "I've read and understood the unaccompanied minor policy", "checked": False},
+        {"id": 13, "role": "button", "name": "Continue"},
+        {"id": 14, "role": "textbox", "name": "Guardian's phone"},
+        {"id": 15, "role": "textbox", "name": "Security code", "value_hidden": True},
+    ],
+    "text": "Unaccompanied minor service",
+}
+CHECKED = {**POLICY, "elements": [{**POLICY["elements"][0], "checked": True}, *POLICY["elements"][1:]]}
+
+
+def handed_back_after(host: FakeHost, session, polls: int, *, then: dict | None = None) -> dict:
+    """The host hands the browser back on its own, as the person's Done, at
+    the ``polls``-th read of the session (as the pod does once what the
+    hand-over waits for happened and the person left the page alone)."""
+    seen = {"n": 0}
+    original = host.handler
+
+    def handler(request):
+        if request.url.path == f"/browser/sessions/{SID}" and request.method == "GET" and host.control["holder"] == "human":
+            seen["n"] += 1
+            if seen["n"] == polls:
+                if then is not None:
+                    host.pages = [then]
+                host.set_control("agent", "", "person")
+        return original(request)
+
+    answer_with(session, handler)
+    return seen
+
+
+async def read(session, host: FakeHost, page: dict) -> None:
+    host.pages = [page]
+    await browser_tool.handle_browser(session, {"action": "page"})
+
+
+async def test_a_hand_over_waiting_for_a_checkbox_continues_once_the_browser_comes_back(done_in_the_browser, sent_events):
+    host = FakeHost(pages=[POLICY])
+    session = make_session(host, elicitor=FakeElicitor())
+    seen = handed_back_after(host, session, 3, then=CHECKED)
+    await read(session, host, POLICY)
+    result = await browser_tool.handle_browser(session, {
+        "action": "hand_to_user", "reason": "Check United's unaccompanied-minor policy box",
+        "wait_for": {"element": 12, "state": "checked"},
+    })
+    assert result.ok is True and seen["n"] == 3
+    assert host.posted("/control") == [{
+        "holder": "human", "reason": "Check United's unaccompanied-minor policy box",
+        "wait_for": {"element": 12, "state": "checked"},
+    }]
+    prompt = done_in_the_browser.requests[0].prompt
+    assert prompt.startswith("Your turn on www.united.com: Check United's unaccompanied-minor policy box\n\n")
+    assert "I'll carry on by myself once that's done, or click Done in the browser." in prompt
+    assert "The user finished in the browser." in result.content
+    assert "is checked now" in result.content
+    # The card is retired with Done's answer, and the turn goes on.
+    retired = [e for e in session.events if isinstance(e, StreamAskUserAnswered)]
+    assert len(retired) == 1 and retired[0].answer.values == ("done",)
+    assert ("browser_hand_over_waits", {"on": "element", "state": "checked"}) in sent_events
+
+
+async def test_done_before_the_box_is_checked_still_hands_back(done_in_the_browser):
+    host = FakeHost(pages=[POLICY])
+    session = make_session(host, elicitor=FakeElicitor())
+    handed_back_after(host, session, 1)
+    await read(session, host, POLICY)
+    result = await browser_tool.handle_browser(session, {
+        "action": "hand_to_user", "reason": "Check the policy box", "wait_for": {"element": 12, "state": "checked"},
+    })
+    assert "The user finished in the browser." in result.content
+    assert "is not checked now" in result.content
+
+
+@pytest.mark.parametrize("ending", ["later", "stop", AskAnswer(status="timeout")])
+async def test_a_waiting_hand_over_that_ends_without_done_leaves_the_browser_with_the_user(elicit_answers, ending):
+    host = FakeHost(pages=[POLICY])
+    session = make_session(host, elicitor=FakeElicitor())
+    await read(session, host, POLICY)
+    elicit_answers.answers.append(ending)
+    result = await browser_tool.handle_browser(session, {
+        "action": "hand_to_user", "reason": "Check the policy box", "wait_for": {"element": 12, "state": "checked"},
+    })
+    assert "stays with the user" in result.content
+    assert host.posted("/page") == [] and [b["holder"] for b in host.posted("/control")] == ["human"]
+
+
+async def test_a_hand_over_can_wait_for_the_page_to_change(done_in_the_browser):
+    host = FakeHost(pages=[POLICY])
+    session = make_session(host, elicitor=FakeElicitor())
+    handed_back_after(host, session, 2, then={**PAGE, "url": "https://www.united.com/en/us/fsr/review"})
+    result = await browser_tool.handle_browser(session, {
+        "action": "hand_to_user", "reason": "Sign in to United", "wait_for": {"page": "changes"},
+    })
+    assert host.posted("/control")[0]["wait_for"] == {"page": "changes"}
+    assert "I'll carry on by myself" in done_in_the_browser.requests[0].prompt
+    assert "The user finished in the browser." in result.content and "fsr/review" in result.content
+
+
+async def test_a_human_check_waits_for_the_page_to_change(fake_jev, done_in_the_browser):
+    host = FakeHost(pages=[CHALLENGE, PAGE])
+    host.done_after_hand_over = True
+    session = make_session(host, elicitor=FakeElicitor())
+    await browser_tool.handle_browser(session, {"action": "page"})
+    assert host.posted("/control")[0]["wait_for"] == {"page": "changes"}
+
+
+async def test_a_field_hand_over_never_carries_or_reports_the_value(done_in_the_browser, sent_events):
+    filled = {**POLICY, "elements": [*POLICY["elements"][:3], {**POLICY["elements"][3], "value_hidden": True}]}
+    host = FakeHost(pages=[POLICY])
+    session = make_session(host, elicitor=FakeElicitor())
+    handed_back_after(host, session, 2, then=filled)
+    await read(session, host, POLICY)
+    result = await browser_tool.handle_browser(session, {
+        "action": "hand_to_user", "reason": "Enter the security code", "wait_for": {"element": 15, "state": "filled"},
+    })
+    assert host.posted("/control")[0]["wait_for"] == {"element": 15, "state": "filled"}
+    assert "is filled in now" in result.content
+    assert "value" not in json.dumps(host.posted("/control"))
+    assert all("value" not in json.dumps(props) for _, props in sent_events)
+
+
+@pytest.mark.parametrize(("wait_for", "says"), [
+    ({"element": 13, "state": "checked"}, "can't be checked"),
+    ({"element": 12, "state": "filled"}, "not a field"),
+    ({"element": 99, "state": "checked"}, "isn't on the latest page"),
+    ({"element": 12, "state": "ticked"}, "wait_for must be"),
+    ({"page": "loads"}, '{"page": "changes"}'),
+    ("the box", "wait_for must be"),
+])
+async def test_a_wait_for_the_host_could_not_watch_is_refused_before_the_hand_over(done_in_the_browser, wait_for, says):
+    host = FakeHost(pages=[POLICY])
+    session = make_session(host, elicitor=FakeElicitor())
+    await read(session, host, POLICY)
+    result = await browser_tool.handle_browser(session, {"action": "hand_to_user", "reason": "Check it", "wait_for": wait_for})
+    assert result.ok is False and result.reason == "browser_bad_input" and says in result.content
+    assert host.posted("/control") == []
+
+
+async def test_a_host_without_wait_for_still_takes_the_hand_over(done_in_the_browser):
+    host = FakeHost(pages=[POLICY])
+    host.done_after_hand_over = True
+    session = make_session(host, elicitor=FakeElicitor())
+    original = host.handler
+
+    def handler(request):
+        body = json.loads(request.content) if request.content else {}
+        if request.url.path.endswith("/control") and "wait_for" in body:
+            host.calls.append((request.method, "/refused-control", body, ""))
+            return httpx.Response(400, json={"error": "bad_request", "message": "unknown key wait_for"})
+        return original(request)
+
+    answer_with(session, handler)
+    await read(session, host, POLICY)
+    result = await browser_tool.handle_browser(session, {
+        "action": "hand_to_user", "reason": "Check it", "wait_for": {"element": 12, "state": "checked"},
+    })
+    assert "The user finished in the browser." in result.content
+    assert host.posted("/control") == [{"holder": "human", "reason": "Check it"}]
+    assert "click Done in the browser when you're finished" in done_in_the_browser.requests[0].prompt
+
+
 # ── human checks ───────────────────────────────────────────────────────────
 
 

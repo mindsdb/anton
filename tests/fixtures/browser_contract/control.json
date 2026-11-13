@@ -1,5 +1,5 @@
 {
-  "description": "Who holds the browser. seq rises by one with every change, and by says who made it. The agent hands the browser to the person with POST /sessions/{id}/control holder \"human\". Only the person hands it back, with Done in the browser, which records holder \"agent\" by \"person\". The API refuses holder \"agent\" with 403 person_only. GET /sessions/{id} answers even while the person holds control. since is epoch milliseconds. The session record also carries the active tab's title and url; url is null before a page loads. GET /sessions/{id} also says the most tabs the agent may open for the task (max_tabs) and the tabs a recycled session noted (parked_tabs: url and title), which reopen only when asked for.",
+  "description": "Who holds the browser. seq rises by one with every change, and by says who made it. The agent hands the browser to the person with POST /sessions/{id}/control holder \"human\". Only the person hands it back, with Done in the browser, which records holder \"agent\" by \"person\". The API refuses holder \"agent\" with 403 person_only. A hand-over may name what it waits for, wait_for: {element, state \"checked\" or \"filled\"} or {page: \"changes\"}; a host that watches for it hands the browser back by itself once the person did it and left the page alone for a few seconds, recorded as their Done (holder \"agent\" by \"person\"). A host that does not know wait_for answers 400, and the agent hands over again without it. It never carries a value. GET /sessions/{id} answers even while the person holds control. since is epoch milliseconds. The session record also carries the active tab's title and url; url is null before a page loads. GET /sessions/{id} also says the most tabs the agent may open for the task (max_tabs) and the tabs a recycled session noted (parked_tabs: url and title), which reopen only when asked for.",
   "examples": {
     "a session the agent holds": {
       "where": "GET /sessions/{id}",
@@ -58,6 +58,29 @@
       "body": {
         "holder": "human",
         "reason": "Please sign in to Example Shop"
+      }
+    },
+    "hand to the person, waiting for a box they check": {
+      "where": "POST /sessions/{id}/control",
+      "kind": "request",
+      "body": {
+        "holder": "human",
+        "reason": "Check the unaccompanied-minor policy box",
+        "wait_for": {
+          "element": 12,
+          "state": "checked"
+        }
+      }
+    },
+    "hand to the person, waiting for the page to change": {
+      "where": "POST /sessions/{id}/control",
+      "kind": "request",
+      "body": {
+        "holder": "human",
+        "reason": "Please sign in to Example Shop",
+        "wait_for": {
+          "page": "changes"
+        }
       }
     },
     "handed to the person": {

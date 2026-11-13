@@ -259,6 +259,12 @@ async def _every_client_call(client: BrowserClient) -> None:
 REQUESTS = {
     ("sessions", "open a session"): lambda c: c.open_session(session_id=PROFILE, url="https://shop.example.test/"),
     ("control", "hand to the person"): lambda c: c.hand_to_person(session_id=PROFILE, reason="Please sign in to Example Shop"),
+    ("control", "hand to the person, waiting for a box they check"): lambda c: c.hand_to_person(
+        session_id=PROFILE, reason="Check the unaccompanied-minor policy box", wait_for={"element": 12, "state": "checked"},
+    ),
+    ("control", "hand to the person, waiting for the page to change"): lambda c: c.hand_to_person(
+        session_id=PROFILE, reason="Please sign in to Example Shop", wait_for={"page": "changes"},
+    ),
     ("tabs", "open a tab"): lambda c: c.new_tab(session_id=PROFILE, url="https://docs.example.test/"),
     ("sites", "note a site"): lambda c: c.note_site(session_id=PROFILE, site="github.com", account_hint="ada"),
     ("saved_tabs", "save a tab"): lambda c: c.save_tab(
