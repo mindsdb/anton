@@ -2539,14 +2539,20 @@ async def test_on_the_desktop_a_type_or_press_on_a_commit_control_holds_as_its_c
     assert host.posted("/action") == []
 
 
-async def test_on_the_desktop_typed_text_that_tabs_and_then_types_a_space_holds(elicit_answers):
-    host = FakeHost(pages=[CHECKOUT])
+async def test_on_the_desktop_typed_text_with_a_tab_and_then_a_space_runs_at_once(elicit_answers):
+    """Each host inserts a typed tab as text and never presses the Tab key,
+    so a tab keeps the focus in its field and a space after it types a
+    space there: a pasted table row or tab-indented text into a named field
+    or into a frame's focused field runs with no card."""
+    host = FakeHost(pages=[{**CHECKOUT, "frames": FRAMED["frames"]}])
     session = _desktop(host)
-    elicit_answers.answers.append("cancel")
-    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 5, "text": "a\t "}})
-    assert result.reason == "browser_step_not_approved" and host.posted("/action") == []
-    plain = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "type", "element": 5, "text": "a b"}})
-    assert plain.ok is True and not plain.reason
+    for step in (
+        {"action": "type", "element": 9, "text": "a\t b"},
+        {"action": "type", "focused": True, "text": "Ada\tLovelace 1815"},
+    ):
+        result = await browser_tool.handle_browser(session, {"action": "act", "step": step})
+        assert result.ok is True and not result.reason, step
+    assert elicit_answers.requests == [] and len(host.posted("/action")) == 2
 
 
 def test_the_commit_list_reads_names_as_the_pod_folds_them():

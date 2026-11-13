@@ -990,8 +990,7 @@ def _classify(step: dict, *, url: str, requested: str | None = None, element: El
     A focused type reaches whatever has the focus, which the tool can't see,
     so its element is None; each host types it only into a text entry that
     isn't secret and refuses it anywhere else, so it holds only when it
-    submits, types a line break, or tabs on and types a space, as a type into
-    a named text field does."""
+    submits or types a line break, as a type into a named text field does."""
     consent = _consent_page(url) or (requested is not None and _consent_page(requested))
     commit_control = element is not None and _commit_name(element.name)
     action = step.get("action")
@@ -1004,13 +1003,12 @@ def _classify(step: dict, *, url: str, requested: str | None = None, element: El
     clicks_it = step.get("element") is not None and not _is_text_entry(element) and (consent or commit_control)
     if action == "type":
         text = str(step.get("text", ""))
-        # A line break typed key by key presses Enter too.
+        # A line break typed key by key presses Enter too. Both hosts' typeText
+        # (the pod host's browser/src/input.js, the desktop app's
+        # src/main/browser-input.ts) insert a tab as text and never press the
+        # Tab key, so a typed tab keeps the focus in its field.
         sends = step.get("submit") is True or "\n" in text or "\r" in text
-        # Typed key by key, a Tab moves the focus, and a space after it presses
-        # the control it lands on.
-        tab = text.find("\t")
-        tabs_on = tab >= 0 and " " in text[tab:]
-        return "commit" if (sends and not _is_search(element)) or tabs_on or clicks_it else None
+        return "commit" if (sends and not _is_search(element)) or clicks_it else None
     if action == "press":
         keys = _chord_keys(step.get("key"))
         enter = "Enter" in keys
