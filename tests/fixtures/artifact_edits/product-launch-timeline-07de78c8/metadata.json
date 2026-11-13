@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "07de78c8b7ab45e09aa3ef7b4059e3aa",
+  "slug": "product-launch-timeline-07de78c8",
+  "createdAt": "2026-11-12T08:36:29+00:00",
+  "updatedAt": "2026-11-12T08:36:52+00:00",
+  "name": "Product Launch Timeline",
+  "description": "Create a self-contained HTML app named Product Launch Timeline with the eight provided milestones on a vertical timeline and buttons to filter milestones by done, in progress, or planned status.",
+  "type": "html-app",
+  "primary": "index.html",
+  "datasources": [],
+  "files": [],
+  "provenance": [
+    {
+      "conversation": "gen-ws_timeline",
+      "title": null,
+      "turns": [
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:36:29+00:00",
+          "summary": "Created artifact: Product Launch Timeline",
+          "files_touched": []
+        },
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:36:52+00:00",
+          "summary": "Generated artifact files",
+          "files_touched": []
+        }
+      ]
+    }
+  ]
+}

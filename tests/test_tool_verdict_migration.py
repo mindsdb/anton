@@ -430,6 +430,7 @@ _ALL_HANDLERS = frozenset({
     "handle_ask_user",
     "handle_create_artifact",
     "handle_create_skill_draft",
+    "handle_edit_artifact",
     "handle_generate_artifact",
     "handle_launch_backend",
     "handle_list_artifacts",
@@ -457,6 +458,10 @@ _VERDICT_DECLARING_HANDLERS = frozenset({
     # pipeline), tier 2 on a pipeline failure — `ok=False, reason="pipeline"`,
     # deliberately mapped to `unclassified` in root_cause.py because the string
     # the FSM returns names the node it stopped at, not the cause.
+    # Streaming, like generate_artifact: tier 1 when the edit landed (or the
+    # editor answered without editing), tier 2 when it put every file back
+    # (`edit_not_applied` / `edit_check_failed`) or its arguments were wrong.
+    "handle_edit_artifact",
     "handle_generate_artifact",
     "handle_list_artifacts",
     "handle_memorize",

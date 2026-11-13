@@ -1,0 +1,561 @@
+[
+  {
+    "id": "regional-sales-dashboard-cosmetic",
+    "slug": "regional-sales-dashboard-58f1c05b",
+    "category": "cosmetic",
+    "task": "In the Regional Sales Dashboard artifact, make the monthly revenue line purple (#7B3FA0) instead of teal.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "(?i)#7B3FA0"
+      },
+      {
+        "file": "index.html",
+        "type": "not_regex",
+        "value": "(?i)#247A78"
+      }
+    ]
+  },
+  {
+    "id": "regional-sales-dashboard-content",
+    "slug": "regional-sales-dashboard-58f1c05b",
+    "category": "content",
+    "task": "In the Regional Sales Dashboard, rename the 'Total orders' KPI to 'Orders placed' and change the subtitle to '2026 sales performance (synthetic data)'.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "Orders placed"
+      },
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "2026 sales performance (synthetic data)"
+      },
+      {
+        "file": "index.html",
+        "type": "not_contains",
+        "value": "label: \"Total orders\""
+      }
+    ]
+  },
+  {
+    "id": "regional-sales-dashboard-behaviour",
+    "slug": "regional-sales-dashboard-58f1c05b",
+    "category": "behaviour",
+    "task": "In the Regional Sales Dashboard, add a table below the charts that lists each month with its revenue and orders for the selected region.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "type:\\s*[\\\"']table[\\\"']"
+      }
+    ]
+  },
+  {
+    "id": "regional-sales-dashboard-bugfix",
+    "slug": "regional-sales-dashboard-58f1c05b",
+    "category": "bugfix",
+    "task": "The Regional Sales Dashboard is broken: when I pick a region in the Region selector, every KPI and both charts drop to zero. Please fix it.",
+    "seed": [
+      {
+        "file": "index.html",
+        "find": "row.region === region",
+        "replace": "row.regoin === region"
+      },
+      {
+        "file": "presentation-program.js",
+        "find": "row.region === region",
+        "replace": "row.regoin === region"
+      }
+    ],
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "not_contains",
+        "value": "row.regoin"
+      },
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "row.region"
+      }
+    ]
+  },
+  {
+    "id": "customer-survey-results-cosmetic",
+    "slug": "customer-survey-results-e0635509",
+    "category": "cosmetic",
+    "task": "In the Customer Survey Results report, change the score colors so that score 1 is red #B22222 and score 5 is dark blue #1F4E99.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "(?i)#B22222"
+      },
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "(?i)#1F4E99"
+      }
+    ]
+  },
+  {
+    "id": "customer-survey-results-content",
+    "slug": "customer-survey-results-e0635509",
+    "category": "content",
+    "task": "In the Customer Survey Results report, rename the 'Lowest-rated question' card to 'Needs attention'.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "Needs attention"
+      },
+      {
+        "file": "index.html",
+        "type": "not_contains",
+        "value": "label: \"Lowest-rated question\""
+      }
+    ]
+  },
+  {
+    "id": "customer-survey-results-behaviour",
+    "slug": "customer-survey-results-e0635509",
+    "category": "behaviour",
+    "task": "In the Customer Survey Results report, add an 'All teams' option to the Team selector that combines the responses of every team.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "(?i)all teams"
+      }
+    ]
+  },
+  {
+    "id": "customer-survey-results-bugfix",
+    "slug": "customer-survey-results-e0635509",
+    "category": "bugfix",
+    "task": "The Customer Survey Results page stopped working: nothing shows up under the Team selector anymore, no cards, no chart. Can you fix it?",
+    "seed": [
+      {
+        "file": "index.html",
+        "find": "const summary = data.team_summaries[selectedTeam];",
+        "replace": "const summary = data.team_summary[selectedTeam];"
+      },
+      {
+        "file": "presentation-program.js",
+        "find": "const summary = data.team_summaries[selectedTeam];",
+        "replace": "const summary = data.team_summary[selectedTeam];"
+      }
+    ],
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "not_contains",
+        "value": "data.team_summary["
+      },
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "team_summaries"
+      }
+    ]
+  },
+  {
+    "id": "product-launch-timeline-cosmetic",
+    "slug": "product-launch-timeline-07de78c8",
+    "category": "cosmetic",
+    "task": "In the Product Launch Timeline, show the status filter as a dropdown instead of tabs.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "id:\\s*[\\\"']status[\\\"'][\\s\\S]{0,120}type:\\s*[\\\"']select[\\\"']"
+      }
+    ]
+  },
+  {
+    "id": "product-launch-timeline-content",
+    "slug": "product-launch-timeline-07de78c8",
+    "category": "content",
+    "task": "In the Product Launch Timeline, change the overview sentence to 'Eight milestones take the product from kickoff to post-launch review.'",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "Eight milestones take the product from kickoff to post-launch review."
+      }
+    ]
+  },
+  {
+    "id": "product-launch-timeline-behaviour",
+    "slug": "product-launch-timeline-07de78c8",
+    "category": "behaviour",
+    "task": "In the Product Launch Timeline, add a filter for the owner team next to the status filter.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "(?i)id:\\s*[\\\"'](owner|team|owner_?team|ownerTeam)[\\\"']"
+      }
+    ]
+  },
+  {
+    "id": "product-launch-timeline-bugfix",
+    "slug": "product-launch-timeline-07de78c8",
+    "category": "bugfix",
+    "task": "The Product Launch Timeline has a bug: clicking Done, In progress or Planned shows no milestones at all. Only 'All milestones' works. Please fix it.",
+    "seed": [
+      {
+        "file": "index.html",
+        "find": "milestone.status === status",
+        "replace": "milestone.state === status"
+      },
+      {
+        "file": "presentation-program.js",
+        "find": "milestone.status === status",
+        "replace": "milestone.state === status"
+      }
+    ],
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "not_contains",
+        "value": "milestone.state "
+      },
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "milestone.status"
+      }
+    ]
+  },
+  {
+    "id": "inventory-browser-cosmetic",
+    "slug": "inventory-browser-8e710cda",
+    "category": "cosmetic",
+    "task": "In the Inventory Browser, change the green accent color to dark blue #1d4ed8.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "(?i)#1d4ed8"
+      }
+    ]
+  },
+  {
+    "id": "inventory-browser-content",
+    "slug": "inventory-browser-8e710cda",
+    "category": "content",
+    "task": "In the Inventory Browser, change the heading 'Stock overview' to 'Warehouse stock' and make the empty-result message say 'Nothing matches your filters.'",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "Warehouse stock"
+      },
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "Nothing matches your filters."
+      },
+      {
+        "file": "index.html",
+        "type": "not_contains",
+        "value": "<h1>Stock overview</h1>"
+      }
+    ]
+  },
+  {
+    "id": "inventory-browser-behaviour",
+    "slug": "inventory-browser-8e710cda",
+    "category": "behaviour",
+    "task": "In the Inventory Browser, add a Location dropdown filter (Warehouse A, B, C) next to the category filter.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "(?i)<select[^>]*id=[\\\"'][^\\\"']*location"
+      },
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "row\\.location\\s*===|===\\s*row\\.location|row\\.location\\s*!==|!==\\s*row\\.location"
+      }
+    ]
+  },
+  {
+    "id": "inventory-browser-bugfix",
+    "slug": "inventory-browser-8e710cda",
+    "category": "bugfix",
+    "task": "The Inventory Browser is broken: the table is empty and typing in the search box does nothing. Please fix it.",
+    "seed": [
+      {
+        "file": "index.html",
+        "find": "$(\"search\").addEventListener(\"input\", render);",
+        "replace": "$(\"serach\").addEventListener(\"input\", render);"
+      }
+    ],
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "not_contains",
+        "value": "serach"
+      },
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "\\$\\(\\\"search\\\"\\)\\.addEventListener"
+      }
+    ]
+  },
+  {
+    "id": "loan-payment-calculator-cosmetic",
+    "slug": "loan-payment-calculator-684cf670",
+    "category": "cosmetic",
+    "task": "In the Loan Payment Calculator, make the Calculate button green (#2ea043) instead of blue.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "(?i)#2ea043"
+      }
+    ]
+  },
+  {
+    "id": "loan-payment-calculator-content",
+    "slug": "loan-payment-calculator-684cf670",
+    "category": "content",
+    "task": "In the Loan Payment Calculator, rename 'Total interest' to 'Total interest paid' and change the page heading to 'Mortgage payment calculator'.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "Total interest paid"
+      },
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "Mortgage payment calculator"
+      }
+    ]
+  },
+  {
+    "id": "loan-payment-calculator-behaviour",
+    "slug": "loan-payment-calculator-684cf670",
+    "category": "behaviour",
+    "task": "In the Loan Payment Calculator, add a 'Total cost' result next to the monthly payment and total interest, showing the loan amount plus total interest.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "(?i)total cost"
+      },
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "(?i)id=[\\\"'][^\\\"']*total-?cost"
+      }
+    ]
+  },
+  {
+    "id": "loan-payment-calculator-bugfix",
+    "slug": "loan-payment-calculator-684cf670",
+    "category": "bugfix",
+    "task": "The Loan Payment Calculator is broken: pressing Calculate does nothing and the monthly payment never updates. Please fix it.",
+    "seed": [
+      {
+        "file": "index.html",
+        "find": "usdFormatter.format(result.monthlyPayment)",
+        "replace": "usdFormater.format(result.monthlyPayment)"
+      }
+    ],
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "not_contains",
+        "value": "usdFormater."
+      },
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "usdFormatter\\.format\\(result\\.monthlyPayment\\)"
+      }
+    ]
+  },
+  {
+    "id": "focus-timer-cosmetic",
+    "slug": "focus-timer-9008a47d",
+    "category": "cosmetic",
+    "task": "In the Focus Timer, make the Start button orange, using the orange already in the page (#d98b60).",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "(?i)\\.primary[^{]*\\{[^}]*background(-color)?:\\s*(var\\(--orange\\)|#d98b60)"
+      }
+    ]
+  },
+  {
+    "id": "focus-timer-content",
+    "slug": "focus-timer-9008a47d",
+    "category": "content",
+    "task": "In the Focus Timer, change the big heading 'One thing at a time.' to 'Deep work, one block at a time.' and the footer to 'Stretch, sip some water, then go again.'",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "Deep work, one block at a time."
+      },
+      {
+        "file": "index.html",
+        "type": "contains",
+        "value": "Stretch, sip some water, then go again."
+      },
+      {
+        "file": "index.html",
+        "type": "not_contains",
+        "value": "One thing at a time."
+      }
+    ]
+  },
+  {
+    "id": "focus-timer-behaviour",
+    "slug": "focus-timer-9008a47d",
+    "category": "behaviour",
+    "task": "In the Focus Timer, add a third mode 'Long break · 15 min' next to Focus and Break.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "(?i)long\\s*break"
+      },
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "15\\s*\\*\\s*60|\\b900\\b"
+      }
+    ]
+  },
+  {
+    "id": "focus-timer-bugfix",
+    "slug": "focus-timer-9008a47d",
+    "category": "bugfix",
+    "task": "The Focus Timer doesn't work: the Start button does nothing when I click it. Please fix it.",
+    "seed": [
+      {
+        "file": "index.html",
+        "find": "startButton.addEventListener('click', start);",
+        "replace": "startButton.addEventListener('click', strat);"
+      }
+    ],
+    "assert": [
+      {
+        "file": "index.html",
+        "type": "not_contains",
+        "value": "'click', strat)"
+      },
+      {
+        "file": "index.html",
+        "type": "regex",
+        "value": "startButton\\.addEventListener\\(\\s*'click'"
+      }
+    ]
+  },
+  {
+    "id": "currency-converter-cosmetic",
+    "slug": "currency-converter-01f791d8",
+    "category": "cosmetic",
+    "task": "In the Currency Converter app, make the Convert button green (#238636).",
+    "seed": null,
+    "assert": [
+      {
+        "file": "static/index.html",
+        "type": "regex",
+        "value": "(?i)#238636"
+      }
+    ]
+  },
+  {
+    "id": "currency-converter-content",
+    "slug": "currency-converter-01f791d8",
+    "category": "content",
+    "task": "In the Currency Converter app, change the main heading to 'Exchange Rate Converter' and the rates table heading to 'Today's rates (per 1 USD)'.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "static/index.html",
+        "type": "contains",
+        "value": "Exchange Rate Converter"
+      },
+      {
+        "file": "static/index.html",
+        "type": "regex",
+        "value": "(?i)today(&#39;|&rsquo;|'|’)s rates"
+      }
+    ]
+  },
+  {
+    "id": "currency-converter-behaviour",
+    "slug": "currency-converter-01f791d8",
+    "category": "behaviour",
+    "task": "In the Currency Converter app, add a button that swaps the From and To currencies.",
+    "seed": null,
+    "assert": [
+      {
+        "file": "static/index.html",
+        "type": "regex",
+        "value": "(?i)swap"
+      },
+      {
+        "file": "static/index.html",
+        "type": "regex",
+        "value": "fromSelect\\.value\\s*=\\s*toSelect\\.value|\\[\\s*fromSelect\\.value\\s*,\\s*toSelect\\.value\\s*\\]\\s*="
+      }
+    ]
+  },
+  {
+    "id": "currency-converter-bugfix",
+    "slug": "currency-converter-01f791d8",
+    "category": "bugfix",
+    "task": "The Currency Converter app gives wrong answers: converting 100 USD to EUR returns 100 instead of 92. Please fix it.",
+    "seed": [
+      {
+        "file": "backend.py",
+        "find": "amount / RATES[from_currency] * RATES[to_currency]",
+        "replace": "amount / RATES[from_currency] * RATES[from_currency]"
+      }
+    ],
+    "assert": [
+      {
+        "file": "backend.py",
+        "type": "regex",
+        "value": "\\*\\s*RATES\\[to_currency\\]"
+      },
+      {
+        "file": "backend.py",
+        "type": "not_regex",
+        "value": "\\*\\s*RATES\\[from_currency\\]"
+      }
+    ]
+  }
+]

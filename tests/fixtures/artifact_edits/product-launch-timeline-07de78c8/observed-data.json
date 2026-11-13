@@ -1,0 +1,71 @@
+{
+  "source": "User-provided request",
+  "filters": "No filters; all eight milestones included.",
+  "time_scope": {
+    "start": "2026-01-15",
+    "end": "2026-07-01",
+    "note": "Dates are milestone dates; complete list runs from earliest to latest provided date."
+  },
+  "units": {
+    "date": "ISO 8601 calendar date",
+    "records": "milestones"
+  },
+  "milestones": [
+    {
+      "date": "2026-01-15",
+      "title": "Kickoff",
+      "owner_team": "Product",
+      "status": "done"
+    },
+    {
+      "date": "2026-02-10",
+      "title": "Requirements frozen",
+      "owner_team": "Product",
+      "status": "done"
+    },
+    {
+      "date": "2026-03-20",
+      "title": "Beta build",
+      "owner_team": "Engineering",
+      "status": "done"
+    },
+    {
+      "date": "2026-04-05",
+      "title": "Security review",
+      "owner_team": "Security",
+      "status": "in progress"
+    },
+    {
+      "date": "2026-05-01",
+      "title": "Pricing approved",
+      "owner_team": "Finance",
+      "status": "in progress"
+    },
+    {
+      "date": "2026-05-20",
+      "title": "Marketing site live",
+      "owner_team": "Marketing",
+      "status": "planned"
+    },
+    {
+      "date": "2026-06-03",
+      "title": "Public launch",
+      "owner_team": "All teams",
+      "status": "planned"
+    },
+    {
+      "date": "2026-07-01",
+      "title": "Post-launch review",
+      "owner_team": "Product",
+      "status": "planned"
+    }
+  ],
+  "aggregates": {
+    "total_milestones": 8,
+    "count_by_status": {
+      "done": 3,
+      "in progress": 2,
+      "planned": 3
+    }
+  }
+}

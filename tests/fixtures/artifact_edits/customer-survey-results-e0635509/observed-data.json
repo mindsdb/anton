@@ -1,0 +1,307 @@
+{
+  "source": "/workspace/survey.csv",
+  "filters": null,
+  "time_scope": null,
+  "units": {
+    "score": "rating points on a 1–5 scale",
+    "score_counts": "number of responses",
+    "average_score": "rating points, weighted by response counts"
+  },
+  "schema": [
+    "team",
+    "question",
+    "score_1",
+    "score_2",
+    "score_3",
+    "score_4",
+    "score_5"
+  ],
+  "teams": [
+    "Team Alpha",
+    "Team Beta",
+    "Team Gamma"
+  ],
+  "questions": [
+    "Documentation",
+    "Ease of setup",
+    "Performance",
+    "Support response",
+    "Value for money",
+    "Would recommend"
+  ],
+  "record_count": 18,
+  "records": [
+    {
+      "team": "Team Alpha",
+      "question": "Ease of setup",
+      "score_counts": {
+        "1": 26,
+        "2": 26,
+        "3": 25,
+        "4": 28,
+        "5": 7
+      },
+      "response_count": 112,
+      "average_score": 2.6785714285714284
+    },
+    {
+      "team": "Team Alpha",
+      "question": "Documentation",
+      "score_counts": {
+        "1": 26,
+        "2": 8,
+        "3": 27,
+        "4": 13,
+        "5": 24
+      },
+      "response_count": 98,
+      "average_score": 3.010204081632653
+    },
+    {
+      "team": "Team Alpha",
+      "question": "Performance",
+      "score_counts": {
+        "1": 26,
+        "2": 8,
+        "3": 7,
+        "4": 17,
+        "5": 16
+      },
+      "response_count": 74,
+      "average_score": 2.8513513513513513
+    },
+    {
+      "team": "Team Alpha",
+      "question": "Support response",
+      "score_counts": {
+        "1": 12,
+        "2": 24,
+        "3": 1,
+        "4": 1,
+        "5": 26
+      },
+      "response_count": 64,
+      "average_score": 3.078125
+    },
+    {
+      "team": "Team Alpha",
+      "question": "Value for money",
+      "score_counts": {
+        "1": 9,
+        "2": 16,
+        "3": 9,
+        "4": 7,
+        "5": 23
+      },
+      "response_count": 64,
+      "average_score": 3.296875
+    },
+    {
+      "team": "Team Alpha",
+      "question": "Would recommend",
+      "score_counts": {
+        "1": 20,
+        "2": 12,
+        "3": 15,
+        "4": 26,
+        "5": 30
+      },
+      "response_count": 103,
+      "average_score": 3.3300970873786406
+    },
+    {
+      "team": "Team Beta",
+      "question": "Ease of setup",
+      "score_counts": {
+        "1": 24,
+        "2": 12,
+        "3": 12,
+        "4": 3,
+        "5": 8
+      },
+      "response_count": 59,
+      "average_score": 2.305084745762712
+    },
+    {
+      "team": "Team Beta",
+      "question": "Documentation",
+      "score_counts": {
+        "1": 4,
+        "2": 8,
+        "3": 16,
+        "4": 7,
+        "5": 11
+      },
+      "response_count": 46,
+      "average_score": 3.282608695652174
+    },
+    {
+      "team": "Team Beta",
+      "question": "Performance",
+      "score_counts": {
+        "1": 7,
+        "2": 16,
+        "3": 20,
+        "4": 29,
+        "5": 20
+      },
+      "response_count": 92,
+      "average_score": 3.4239130434782608
+    },
+    {
+      "team": "Team Beta",
+      "question": "Support response",
+      "score_counts": {
+        "1": 27,
+        "2": 1,
+        "3": 16,
+        "4": 30,
+        "5": 21
+      },
+      "response_count": 95,
+      "average_score": 3.1789473684210527
+    },
+    {
+      "team": "Team Beta",
+      "question": "Value for money",
+      "score_counts": {
+        "1": 12,
+        "2": 26,
+        "3": 21,
+        "4": 3,
+        "5": 27
+      },
+      "response_count": 89,
+      "average_score": 3.0786516853932584
+    },
+    {
+      "team": "Team Beta",
+      "question": "Would recommend",
+      "score_counts": {
+        "1": 22,
+        "2": 4,
+        "3": 30,
+        "4": 13,
+        "5": 26
+      },
+      "response_count": 95,
+      "average_score": 3.1789473684210527
+    },
+    {
+      "team": "Team Gamma",
+      "question": "Ease of setup",
+      "score_counts": {
+        "1": 23,
+        "2": 25,
+        "3": 7,
+        "4": 16,
+        "5": 29
+      },
+      "response_count": 100,
+      "average_score": 3.03
+    },
+    {
+      "team": "Team Gamma",
+      "question": "Documentation",
+      "score_counts": {
+        "1": 6,
+        "2": 14,
+        "3": 26,
+        "4": 21,
+        "5": 11
+      },
+      "response_count": 78,
+      "average_score": 3.217948717948718
+    },
+    {
+      "team": "Team Gamma",
+      "question": "Performance",
+      "score_counts": {
+        "1": 3,
+        "2": 26,
+        "3": 24,
+        "4": 13,
+        "5": 15
+      },
+      "response_count": 81,
+      "average_score": 3.1358024691358026
+    },
+    {
+      "team": "Team Gamma",
+      "question": "Support response",
+      "score_counts": {
+        "1": 13,
+        "2": 24,
+        "3": 3,
+        "4": 24,
+        "5": 6
+      },
+      "response_count": 70,
+      "average_score": 2.8
+    },
+    {
+      "team": "Team Gamma",
+      "question": "Value for money",
+      "score_counts": {
+        "1": 6,
+        "2": 5,
+        "3": 1,
+        "4": 5,
+        "5": 19
+      },
+      "response_count": 36,
+      "average_score": 3.7222222222222223
+    },
+    {
+      "team": "Team Gamma",
+      "question": "Would recommend",
+      "score_counts": {
+        "1": 29,
+        "2": 15,
+        "3": 26,
+        "4": 21,
+        "5": 5
+      },
+      "response_count": 96,
+      "average_score": 2.5625
+    }
+  ],
+  "team_summaries": {
+    "Team Alpha": {
+      "question_count": 6,
+      "response_count": 515,
+      "best_questions": [
+        "Would recommend"
+      ],
+      "best_average": 3.3300970873786406,
+      "worst_questions": [
+        "Ease of setup"
+      ],
+      "worst_average": 2.6785714285714284
+    },
+    "Team Beta": {
+      "question_count": 6,
+      "response_count": 476,
+      "best_questions": [
+        "Performance"
+      ],
+      "best_average": 3.4239130434782608,
+      "worst_questions": [
+        "Ease of setup"
+      ],
+      "worst_average": 2.305084745762712
+    },
+    "Team Gamma": {
+      "question_count": 6,
+      "response_count": 461,
+      "best_questions": [
+        "Value for money"
+      ],
+      "best_average": 3.7222222222222223,
+      "worst_questions": [
+        "Would recommend"
+      ],
+      "worst_average": 2.5625
+    }
+  }
+}
