@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -42,6 +42,10 @@ class Cell:
     """
 
     code: str
+    # The SHA-256 of each `.py` file its write check read for exec(), by
+    # path, so a later check (another turn's too) reads only that same text.
+    # Right after `code`, so a host that cuts a long saved result keeps it.
+    code_files: dict[str, str] = field(default_factory=dict, kw_only=True)
     stdout: str
     stderr: str
     error: str | None
@@ -62,6 +66,7 @@ class CompactedCell:
     errored: bool
     stopped_at: int | None = None
     ended_process: bool = False
+    code_files: dict[str, str] = field(default_factory=dict, hash=False, compare=False)
 
 
 def stopped_line(value: object) -> int | None:
@@ -203,8 +208,26 @@ class ScratchpadRuntime(ABC):
         output.
         """
         scrubbed = scrub_cell(cell)
+        pending = getattr(self, "_pending_code_files", None)
+        if pending is not None and pending[0] == scrubbed.code:
+            self._pending_code_files = None
+            scrubbed.code_files = dict(pending[1])
         self.cells.append(scrubbed)
         return scrubbed
+
+    def expect_code_files(self, code: str, files: dict[str, str], run_code: str | None = None) -> None:
+        """What the write check read for the cell about to run `code`
+        (`Cell.code_files`), kept on that cell when it is recorded, and the
+        code to run in its place with those texts swapped in, if any."""
+        self._pending_code_files = (code, files, run_code)
+
+    def _code_to_run(self, code: str) -> str:
+        """`code` as the pad runs it: with the texts its write check read in
+        place of the reads, when the check gave them for this code."""
+        pending = getattr(self, "_pending_code_files", None)
+        if pending is not None and pending[0] == code and pending[2] is not None:
+            return pending[2]
+        return code
 
     def set_scratchpad_ds_env(self, ds_env: dict[str, str] | None) -> None:
         """Override this pad's DS_* env for its next start()/reset(); no-op unless a backend supports it."""
@@ -347,7 +370,7 @@ class ScratchpadRuntime(ABC):
         self.compacted_cells = (
             *self.compacted_cells,
             *(CompactedCell(code=cell.code, errored=bool(cell.error), stopped_at=cell.stopped_at,
-                            ended_process=cell.ended_process)
+                            ended_process=cell.ended_process, code_files=cell.code_files)
               for cell in to_compact if cell.code != _COMPACTED_CELL_CODE),
         )
         summary_cell = Cell(

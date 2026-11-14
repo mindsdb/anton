@@ -50,6 +50,12 @@ PG = (
 UPD = "f\"UPDATE suppliers SET lead_time_days = {d} WHERE supplier_id = '{s}'\""
 
 
+def _sha256(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 @pytest.fixture
 def snap(tmp_path: Path, monkeypatch):
     for rel in ("report.pdf", "stock.csv", "summary.md", "output/old.png",
@@ -497,8 +503,11 @@ class _UnreadCase(BaseModel):
     not_kinds: list[str] = []
 
     def earlier_cells(self) -> list[EarlierCell]:
-        """The row's earlier cells, oldest first."""
-        return [EarlierCell(code=cell) if isinstance(cell, str) else cell for cell in self.earlier]
+        """The row's earlier cells, oldest first, each `code_files` text as
+        the SHA-256 a cell records of it."""
+        return [EarlierCell(code=cell) if isinstance(cell, str) else cell.model_copy(update={
+            "code_files": {path: _sha256(text) for path, text in cell.code_files.items()}})
+            for cell in self.earlier]
 
 
 _UNREAD_CODE = yaml.safe_load(
@@ -521,7 +530,7 @@ def test_cells_that_run_code_the_check_cant_read(case: "_UnreadCase", tmp_path, 
     snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
     writes = find_cell_writes(
         code=case.code, earlier=case.earlier_cells(), snapshots=(snap,),
-        http_rules=parse_http_write_rules(_UNREAD_CODE_RULE))
+        http_rules=parse_http_write_rules(_UNREAD_CODE_RULE), code_root=tmp_path.resolve())
     if case.card == "none":
         assert not writes.needs_approval()
     elif case.card == "unchecked":
@@ -533,6 +542,60 @@ def test_cells_that_run_code_the_check_cant_read(case: "_UnreadCase", tmp_path, 
         assert kind in writes.kinds()
     for kind in case.not_kinds:
         assert kind not in writes.kinds()
+
+
+def _unchecked_card(code: str, earlier: Sequence[str] = ()) -> str:
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(),
+                              http_rules=parse_http_write_rules(_UNREAD_CODE_RULE))
+    assert writes.unchecked
+    return _card_prompt(writes)
+
+
+def test_the_card_names_what_a_step_uses_and_the_earlier_line_that_made_it():
+    card = _unchecked_card("print(orders.mean())", earlier=(
+        "SCRIPT = open('job.txt').read()", "exec(SCRIPT)", "orders = load_orders()",
+    ))
+    assert ("It uses `orders`, which code an earlier step ran may have set. The check couldn't read that code:"
+            "\n\n```\nexec(SCRIPT)\n```") in card
+
+
+def test_the_card_quotes_the_line_that_runs_code_the_check_cant_read():
+    card = _unchecked_card("import runpy\nrunpy.run_path('job.py')")
+    assert "It runs code the check can't read:\n\n```\nrunpy.run_path('job.py')\n```" in card
+    # Inside literal code a step hands exec(), the step's own line is quoted.
+    card = _unchecked_card('exec("import runpy\\nrunpy.run_path(\'job.py\')")')
+    assert "```\nexec(\"import runpy\\nrunpy.run_path('job.py')\")\n```" in card
+
+
+def test_the_card_says_a_file_the_step_runs_may_change_first(tmp_path):
+    (tmp_path / "h.py").write_text("x = 1\n")
+    code = "open('h.py', 'a').write('y = 2\\n')\nexec(open('h.py').read())"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(), code_root=tmp_path)
+    assert writes.unchecked and [c.kind for c in writes.causes] == ["changed"]
+    assert f"```\n{code}\n```" in _card_prompt(writes, code)
+
+
+def test_a_step_too_deep_to_parse_says_so():
+    writes = find_cell_writes(code="-" * 200_000 + "1", earlier=(), snapshots=())
+    assert writes.unchecked and [c.kind for c in writes.causes] == ["limit"]
+
+
+def test_the_card_gives_at_most_three_reasons_once_each():
+    card = _unchecked_card("\n".join(["import runpy", *(f"runpy.run_path('job{i}.py')" for i in range(5)),
+                                      "runpy.run_path('job0.py')"]))
+    assert card.count("It runs code the check can't read:") == 3
+
+
+def test_the_card_scrubs_a_credential_in_the_steps_code():
+    code = 'exec(fetch("https://x", token="sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"))'
+    writes = find_cell_writes(code=code, earlier=(), snapshots=())
+    card = _card_prompt(writes, code)
+    assert "sk-ant-api03" not in card and "[REDACTED_API_KEY]" in card
+
+
+def test_the_card_scrubs_a_credential_in_a_line_it_quotes():
+    card = _unchecked_card('exec(fetch("https://x", token="sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"))')
+    assert "sk-ant-api03" not in card and "[REDACTED_API_KEY]" in card
 
 
 class _EverydayContext(BaseModel):
@@ -2052,7 +2115,7 @@ async def test_the_gate_passes_each_earlier_cells_error_to_the_check(office, mon
     """Compacting a failed cell cannot turn its unexecuted write into ownership."""
     asked: list[CellWrites] = []
 
-    async def cancel(_session, writes):
+    async def cancel(_session, writes, _code):
         asked.append(writes)
         return "cancelled"
 
@@ -2085,7 +2148,7 @@ async def test_the_gate_holds_the_first_cell_after_the_pad_starts_a_new_process_
     nothing new."""
     asked: list[CellWrites] = []
 
-    async def cancel(_session, writes):
+    async def cancel(_session, writes, _code):
         asked.append(writes)
         return "cancelled"
 
@@ -2099,6 +2162,7 @@ async def test_the_gate_holds_the_first_cell_after_the_pad_starts_a_new_process_
     pad = SimpleNamespace(compacted_cells=(), cells=[hook, died])
     assert await scratchpad.hold_unapproved_write(session, pad=pad, code="print(1)") is not None
     assert asked[0].unchecked
+    assert [c.kind for c in asked[0].causes] == ["restart"]
     compacted = SimpleNamespace(compacted_cells=(
         CompactedCell(code=hook.code, errored=False),
         CompactedCell(code=died.code, errored=True, stopped_at=1, ended_process=True),
@@ -3697,6 +3761,102 @@ def test_a_decoded_literal_that_is_no_write_stays_free(code, snap):
 
 
 # ── SQL read from a file ────────────────────────────────────────────────────
+
+@pytest.fixture
+def helpers(tmp_path: Path, monkeypatch):
+    (tmp_path / "helpers.py").write_text("def load():\n    return 1\n")
+    (tmp_path / "big.py").write_text("x = 1\n" * 20_000)
+    monkeypatch.chdir(tmp_path)
+    return snapshot_project_files(root=tmp_path.resolve(), label="project", taken_at=time.time() + 60)
+
+
+def test_an_exec_of_a_py_file_returns_the_hash_of_what_it_read(helpers):
+    absolute = (helpers.root / "helpers.py").as_posix()
+    for code in ("exec(open('helpers.py').read())", f"exec(open({absolute!r}).read())"):
+        writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
+        assert not writes.needs_approval()
+        assert writes.code_files == {"helpers.py": _sha256("def load():\n    return 1\n")}
+
+
+def test_a_py_file_is_read_only_from_the_folder_the_pad_runs_in(helpers):
+    writes = find_cell_writes(code="exec(open('helpers.py').read())", earlier=(), snapshots=(helpers,))
+    assert writes.unchecked and writes.code_files == {}
+
+
+def test_a_py_file_the_cell_may_change_first_is_not_kept(helpers):
+    code = "open('helpers.py', 'w').write('x = 1')\nexec(open('helpers.py').read())"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
+    assert writes.unchecked and writes.code_files == {}
+
+
+def test_the_pad_runs_only_the_text_the_check_read_in_place_of_the_read(helpers):
+    """What runs is what was checked: a change to the file after the check,
+    by anything, doesn't reach the cell."""
+    code = "x = 0\nexec(open(\n    'helpers.py'\n).read())\ny = load()"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
+    assert not writes.needs_approval() and writes.run_code is not None
+    assert writes.run_code.count("\n") == code.count("\n"), "a traceback's lines still match the cell's"
+    (helpers.root / "helpers.py").write_text("def load():\n    return 'changed'\n")
+    namespace: dict = {}
+    exec(writes.run_code, namespace)
+    assert namespace["y"] == 1
+
+
+def test_a_cell_that_catches_errors_around_the_exec_still_runs_the_checked_text(helpers):
+    """No check runs in place of the read, so there is no error a `try` can
+    swallow to skip the exec the check took to have run."""
+    (helpers.root / "safe.py").write_text("def go():\n    print('safe')\n")
+    earlier = ["def go():\n    open('data.csv', 'w').write('CLOBBERED')"]
+    code = "try:\n    exec(open('safe.py').read())\nexcept Exception:\n    pass\ngo()"
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(helpers,), code_root=helpers.root)
+    assert not writes.needs_approval() and writes.run_code is not None
+    (helpers.root / "safe.py").unlink()
+    namespace: dict = {}
+    exec(earlier[0], namespace)
+    exec(writes.run_code, namespace)
+    assert not (helpers.root / "data.csv").exists()
+
+
+def test_a_program_started_before_the_read_leaves_the_cell_unchecked(helpers):
+    """It may regenerate the file, and the cell would run the old text."""
+    code = "import subprocess\nsubprocess.run(['sh', 'gen.sh'])\nexec(open('helpers.py').read())"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
+    assert writes.unchecked and writes.run_code is None
+
+
+def test_the_pad_runs_only_the_script_the_check_built_from_pieces(helpers):
+    earlier = ["P = []", "P.append('z = 41\\n')", "P.append('z += 1\\n')"]
+    writes = find_cell_writes(code="exec(''.join(P))", earlier=_earlier(earlier), snapshots=(helpers,),
+                              code_root=helpers.root)
+    assert writes.run_code == "exec(('z = 41\\nz += 1\\n'))"
+    assert list(writes.code_files) == ["@1:5"]
+
+
+def test_a_script_doubled_past_the_cap_is_not_built(helpers):
+    earlier = ["S = 'ab'", "\n".join(["S += S"] * 40)]
+    writes = find_cell_writes(code="exec(S)", earlier=_earlier(earlier), snapshots=(helpers,), code_root=helpers.root)
+    assert writes.unchecked and writes.run_code is None
+
+
+def test_a_cell_the_check_cant_read_runs_as_written(helpers):
+    code = "import runpy\nrunpy.run_path('other.py')\nexec(open('helpers.py').read())"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
+    assert writes.unchecked and writes.run_code is None
+
+
+def test_a_cell_that_runs_code_the_check_cant_read_keeps_no_hash(helpers):
+    """Unread code may change the file after the read, so a later cell
+    mustn't trust what this one read."""
+    code = "import runpy\nrunpy.run_path('other.py')\nexec(open('helpers.py').read())"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(helpers,), code_root=helpers.root)
+    assert writes.unchecked and writes.code_files == {}
+
+
+def test_a_py_file_past_the_cap_is_unchecked(helpers):
+    writes = find_cell_writes(code="exec(open('big.py').read())", earlier=(), snapshots=(helpers,),
+                              code_root=helpers.root)
+    assert writes.unchecked and writes.code_files == {}
+
 
 @pytest.fixture
 def sql_files(tmp_path: Path, monkeypatch):

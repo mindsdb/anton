@@ -78,10 +78,19 @@ What it finds:
   runs**: a str or bytes literal handed to ``exec``, ``eval`` or
   ``compile``, bytes decoded by their coding comment as Python decodes them,
   a literal statement handed to ``timeit``, ``cProfile.run``,
-  ``profile.run``, ``pdb.run`` or ``pdb.runeval``, and the literal after
-  ``python -c``, each read like one more cell, placed where the call that
-  runs it runs, with its own imports; and in a function a literal exec in
-  an earlier cell defined, where this cell calls it. A program's or
+  ``profile.run``, ``pdb.run`` or ``pdb.runeval``, the literal after
+  ``python -c``, and, for a local pad, a ``.py`` file that ``exec``,
+  ``eval`` or ``compile`` at a cell's top level gets as
+  ``open('x.py').read()`` or ``Path('x.py').read_text()``, and a script
+  built only from literal pieces over the cells (assigned, ``+=``,
+  appended, stored by key, joined or base64-decoded). The pad runs the text
+  the check read in place of such a source (``CellWrites.run_code``), so
+  nothing that changes the file or the pieces first changes what runs, and
+  a later check reads it only while it still gives that text (its SHA-256
+  on the cell); each read like one more
+  cell, placed where the call that runs it runs, with its own imports; and
+  in a function a literal exec in an earlier cell defined, where this cell
+  calls it. A program's or
   module's name, or a package pip installs, held in a name bound only to
   literal text, or in a list built from such text or grown in place with
   it, reads as that text.
@@ -89,9 +98,10 @@ What it finds:
   ends "This step can't be checked before it runs." That is ``exec``,
   ``eval`` or ``compile`` reached through the builtins however the code
   names them (a builtin function's ``__self__`` and a frame's
-  ``f_builtins`` among them) and handed anything but a literal (a name, a
-  file read, a decode, a join) or a literal too long to read, or passed or stored as a
-  value; code the pad's own process runs through ``runpy``, ``importlib``
+  ``f_builtins`` among them) and handed anything but a literal, a ``.py``
+  file read or a script of literal pieces as above (another name, file
+  read, decode or join) or a literal too long to read, or passed or stored
+  as a value; code the pad's own process runs through ``runpy``, ``importlib``
   (``reload``, a spec or a loader from a file, an import by a name the code
   picks when it runs), ``zipimport``, ``site`` (the ``.pth`` files it reads),
   a code object, or one a function is given as its ``__code__``, an
@@ -188,6 +198,7 @@ import ast
 import bisect
 import builtins
 import copy
+import dataclasses
 import errno
 import fnmatch
 import importlib.machinery
@@ -217,7 +228,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any, Generic, Literal, NamedTuple, Protocol, TypeVar, overload
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from anton.core.backends.wire import (
     BOOT_IMPORTS,
@@ -397,6 +408,23 @@ def parse_http_write_rules(text: str) -> tuple[HttpWriteRule, ...]:
     return tuple(rules)
 
 
+class UncheckedCause(BaseModel):
+    """Why the check couldn't read all of a step, for its card: it runs code
+    the check can't read (`runs`, the line in `code`); uses `name`, which
+    code an earlier step ran that the check couldn't read may have made
+    (`uses`, that step's line in `earlier`); the pad starts again before it
+    once a step may have written a startup hook (`restart`); a depth limit
+    stopped the read (`limit`); a file it runs may change first
+    (`changed`); or the check failed (`failed`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["runs", "uses", "restart", "limit", "changed", "failed"]
+    code: str = ""
+    name: str = ""
+    earlier: str = ""
+
+
 class CellWrites(BaseModel):
     """What a cell would change. ``unchecked`` means the check couldn't read
     all the code the cell runs: code it hands ``exec`` or a runner, a module
@@ -413,6 +441,15 @@ class CellWrites(BaseModel):
     files: tuple[FileChange, ...] = ()
     http: tuple[HttpWrite, ...] = ()
     unchecked: bool = False
+    # The SHA-256 of each text the cell's exec() sources gave (a `.py` file by
+    # its path, a script of literal pieces by its place); the cell keeps it
+    # for later checks (`EarlierCell.code_files`).
+    code_files: dict[str, str] = Field(default_factory=dict)
+    # The cell with each of those sources replaced by the text the check read,
+    # for a local pad to run in its place, so what runs is what was checked.
+    run_code: str | None = None
+    # Why it is `unchecked`, where the check can say: at most `_CAUSES_SHOWN`.
+    causes: tuple[UncheckedCause, ...] = ()
 
     @property
     def held_files(self) -> tuple[FileChange, ...]:
@@ -454,6 +491,9 @@ class EarlierCell(BaseModel):
     errored: bool = False
     stopped_at: int | None = None
     ended_process: bool = False
+    # The SHA-256 of each `.py` file its own check read for exec()
+    # (`CellWrites.code_files`), so a later check reads only that same text.
+    code_files: dict[str, str] = Field(default_factory=dict)
 
 
 # What one check read from disk under folders the walk didn't walk: the
@@ -3422,12 +3462,13 @@ class _Cell:
     def hands_literal_code(self) -> bool:
         """Whether the cell may hand literal code to something that runs it:
         a call spelled as exec(), eval(), compile() or a runner of text
-        (`_spelled_exec`, `_STRING_RUNNER_NAMES`) given a literal or a call,
+        (`_spelled_exec`, `_STRING_RUNNER_NAMES`) given a literal, a call, a
+        name, an index or a `+`,
         or a string with `-c` in it, as `python -c` takes code. A cell with
         none gives `_exec_cells` nothing to read at its own top level."""
         return self.signs.names_dash_c or any(
             (_spelled_exec(c.func) or _last_name(c.func) in _STRING_RUNNER_NAMES) and any(
-                _literal_source(a) is not None or isinstance(a, ast.Call)
+                _literal_source(a) is not None or isinstance(a, (ast.Call, ast.Name, ast.BinOp, ast.Subscript))
                 for a in (*c.args, *(k.value for k in c.keywords))
             )
             for c in self.calls
@@ -4307,10 +4348,15 @@ class _Reader:
         self, cells: list[_Cell], *, current: _Cell, project_root: Path | None = None,
         errored: frozenset[int] = frozenset(), errored_paths: Literal["any", "unknown"] = "any",
         stopped_early: frozenset[int] = frozenset(), stopped_at: Mapping[int, int] | None = None,
-        tainted_contexts: frozenset[str] = frozenset(),
+        tainted_contexts: frozenset[str] = frozenset(), code_files: _CodeFiles | None = None,
     ) -> None:
         self.cells = cells
         self.current = current
+        # The `.py` files exec() is handed by a literal path, shared by each
+        # reader of one check (`_CodeFiles`).
+        self.code_files = _CodeFiles() if code_files is None else code_files
+        # Literal code cells `read_too` added to what this reader reads.
+        self.read_cells: list[_Cell] = []
         # What each name holds where a node reads it, by the name, the node's
         # id and `partly_run`, read once per check (`bindings_of`).
         self._bindings_read: dict[tuple[str, int, bool], tuple[_Binding, ...]] = {}
@@ -4492,6 +4538,7 @@ class _Reader:
         such cell with a reader of its own."""
         self._cells_by_node[cell.tree] = cell
         self._cells_by_node.update(dict.fromkeys(cell.parents, cell))
+        self.read_cells.append(cell)
         self.imports.update(cell.imports)
         self.bound_names.update(cell.bindings)
 
@@ -8791,10 +8838,12 @@ class _OwnedFiles:
 
     def __init__(
         self, earlier: list[_Cell], snapshots: Sequence[ProjectSnapshot], *, errored: frozenset[int] = frozenset(),
+        code_files: _CodeFiles | None = None,
     ) -> None:
         self._earlier = earlier
         self._snapshots = snapshots
         self._errored = errored
+        self._code_files = code_files
         # The files the earlier cells overwrote: read whole, read with each
         # errored cell as never run, and read with a path through a name an
         # errored cell binds as one the check can't place. Each is read the
@@ -8845,11 +8894,12 @@ class _OwnedFiles:
         # functions count as earlier ones (`_Reader.earlier_function`).
         after = _Cell(ast.Module(body=[], type_ignores=[]), "", len(earlier))
         cells = [*earlier, after]
-        reader = _Reader(cells, current=after, errored=errored, errored_paths="unknown")
+        reader = _Reader(cells, current=after, errored=errored, errored_paths="unknown", code_files=self._code_files)
         unerrored = [c for c in earlier if c.index not in self._errored]
         exec_read = _exec_cells(reader, unerrored, ran_only=True)
         if exec_read.cells:
-            reader = _Reader([*cells, *exec_read.cells], current=after, errored=errored, errored_paths="unknown")
+            reader = _Reader([*cells, *exec_read.cells], current=after, errored=errored, errored_paths="unknown",
+                             code_files=self._code_files)
         changes: list[FileChange] = []
 
         def read_function(callee: _Callee, *, cell: _Cell, at: ast.AST, chain: tuple[int, ...]) -> None:
@@ -11773,6 +11823,675 @@ def _decoded_source(value: bytes) -> str | None:
     return ""
 
 
+@dataclass(eq=False)
+class _CodeFiles:
+    """The `.py` files exec(), eval() or compile() is handed by a plain read
+    of a literal path (`_code_file_path`), and the scripts built from
+    literal pieces (`_stitched_text`), each read as literal code, for a
+    local pad, whose folder is `root` (None reads none). The checked cell's
+    are read now, and the pad runs each text in place of its source
+    (`subs`, `CellWrites.run_code`), so nothing that changes a file or a
+    name before the cell gets there changes what runs. An earlier cell's
+    are read only while they give the text that cell ran (`recorded`, a
+    SHA-256 by path or place, by the cell's index). `read` and `reads` hold
+    the checked cell's file reads, and `by_source` each file's text by the
+    id of the read that gives it. Only a cell's own top level counts."""
+
+    root: Path | None = None
+    recorded: Mapping[int, Mapping[str, str]] = dataclasses.field(default_factory=dict)
+    read: dict[str, str] = dataclasses.field(default_factory=dict)
+    reads: list[tuple[ast.Call, ast.AST, str]] = dataclasses.field(default_factory=list)
+    by_source: dict[int, str] = dataclasses.field(default_factory=dict)
+    # Each source of the checked cell the check read, with its text and how the cell records it.
+    subs: dict[int, tuple[ast.AST, str, str]] = dataclasses.field(default_factory=dict)
+    # What `_stitched_text` read of each source, by its id and the cells counted as stopped early.
+    stitched: dict[tuple[int, frozenset[int]], str | None] = dataclasses.field(default_factory=dict)
+    # Where one replay of the cells stood before each, by the cells counted as stopped early (`_stitch_before`).
+    stitch_states: dict[frozenset[int], dict[int, tuple[dict, set[str], bool]]] = dataclasses.field(
+        default_factory=dict)
+    # Whether the checked cell may read from disk now (`_may_read_now`), once asked.
+    may_read: bool | None = None
+
+    def hashes(self) -> dict[str, str]:
+        """The SHA-256 of each text the checked cell's sources gave, by path or
+        place (`CellWrites.code_files`)."""
+        return {key: _sha256(text) for _source, text, key in self.subs.values()}
+
+    def substitute(self, source: ast.AST, text: str, key: str) -> None:
+        """Runs `text` in place of `source`, a source of the checked cell: a
+        file read or a script of pieces (`CellWrites.run_code`)."""
+        self.subs[id(source)] = (source, text, key)
+
+    def text(self, source: ast.AST, reader: _Reader) -> str | None:
+        """The text the read `source` hands exec(); None when it isn't one
+        this reads, or an earlier cell's file no longer holds what its
+        check read."""
+        if id(source) in self.by_source:
+            return self.by_source[id(source)]
+        path = _code_file_path(source, reader)
+        cell = reader.cell_of(source)
+        if path is None or cell.scope_of(source) is not None or cell.host >= reader.current.index:
+            return None
+        want = self.recorded.get(cell.host, {}).get(path)
+        text = None if want is None else _read_code_file(path, self.root)
+        return text if text is not None and _sha256(text) == want else None
+
+    def read_now(self, call: ast.Call, source: ast.AST, reader: _Reader) -> str | None:
+        """The text the checked cell's read `source` hands exec(), from disk;
+        `_stale_code_files` drops it later if code may change the file first."""
+        path = _code_file_path(source, reader)
+        cell = reader.cell_of(source)
+        if path is None or cell.scope_of(source) is not None or cell.host != reader.current.index:
+            return None
+        if self.may_read is None:
+            self.may_read = _may_read_now(reader)
+        if not self.may_read or not posixpath.isabs(path) and reader.cwds != ["."] or cell.index != cell.host:
+            return None
+        if _in_fstring(source, cell):
+            return None
+        text = self.read[path] if path in self.read else _read_code_file(path, self.root)
+        if text is None:
+            return None
+        self.read[path] = text
+        self.reads.append((call, source, path))
+        self.by_source[id(source)] = text
+        self.substitute(source, text, path)
+        return text
+
+
+def _sha256(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _code_file_key(path: str, root: Path | None) -> str:
+    """`path` as `_CodeFiles` keys it: POSIX, normalised, and relative to
+    `root` when it lies inside it."""
+    key = posixpath.normpath(path.replace("\\", "/"))
+    if root is not None and posixpath.isabs(key):
+        rel = posixpath.relpath(key, root.as_posix())
+        if not rel.startswith(".."):
+            return rel
+    return key
+
+
+# The modes `open` may read in, and the encodings it may name, for a plain read.
+_PLAIN_READ_MODES = frozenset({"r", "rt", "tr"})
+_UTF8_NAMES = frozenset({"utf-8", "utf8", "UTF-8", "UTF8"})
+
+
+def _utf8_keyword(keyword: ast.keyword) -> bool:
+    """Whether a read's keyword argument is `encoding` naming UTF-8, as the check decodes."""
+    return keyword.arg == "encoding" and isinstance(keyword.value, ast.Constant) and keyword.value.value in _UTF8_NAMES
+
+
+def _code_file_path(source: ast.AST, reader: _Reader) -> str | None:
+    """The `.py` file a source handed to exec() reads by a plain read of a
+    literal path: `open('x.py').read()` (or with mode `'r'`) through the
+    builtin `open`, or `Path('x.py').read_text()` through `pathlib.Path`,
+    with no argument but a UTF-8 `encoding`, so the text is the file's as
+    UTF-8. No `..`: past a link it climbs from where the link points. None
+    for any other source."""
+    if not (isinstance(source, ast.Call) and isinstance(source.func, ast.Attribute)
+            and not source.args and not source.keywords):
+        return None
+    opened = source.func.value
+    if not (isinstance(opened, ast.Call) and opened.args and all(_utf8_keyword(k) for k in opened.keywords)
+            and isinstance(opened.args[0], ast.Constant) and isinstance(opened.args[0].value, str)):
+        return None
+    func = opened.func
+    if source.func.attr == "read" and isinstance(func, ast.Name) and func.id == "open":
+        mode = opened.args[1] if len(opened.args) == 2 else None
+        if len(opened.args) > 2 or mode is not None and not (
+            isinstance(mode, ast.Constant) and mode.value in _PLAIN_READ_MODES
+        ):
+            return None
+        if reader.binds(func):
+            return None
+    elif source.func.attr == "read_text" and len(opened.args) == 1:
+        if reader.dotted(func) != "pathlib.Path":
+            return None
+    else:
+        return None
+    path = opened.args[0].value
+    # `..` after a link climbs from where the link points, not where its name sits.
+    if not path.endswith(".py") or ".." in path.replace("\\", "/").split("/"):
+        return None
+    return _code_file_key(path, reader.code_files.root)
+
+
+def _may_read_now(reader: _Reader) -> bool:
+    """Whether a relative path the checked cell reads names the file it
+    names in the pad's folder: no cell, or literal code one runs, changes
+    the working folder (`chdir`, `fchdir`) under any name the check sees.
+    The pad runs the text the check read in place of the read
+    (`CellWrites.run_code`), so this keeps it the file the cell meant."""
+    return not any(
+        isinstance(node, ast.Name) and node.id in _FOLDER_CHANGES
+        or isinstance(node, ast.Attribute) and node.attr in _FOLDER_CHANGES
+        for cell in _all_cells(reader) for node in cell.walked
+    )
+
+
+_FOLDER_CHANGES = frozenset({"chdir", "fchdir"})
+
+
+def _all_cells(reader: _Reader) -> list[_Cell]:
+    """The cells `reader` reads, with the literal code they run it has read so far."""
+    return list(dict.fromkeys([*reader.cells, *reader.read_cells]))
+
+
+def _read_code_file(path: str, root: Path | None) -> str | None:
+    """The text of the file at `path`, a `_code_file_key` against `root`, as
+    UTF-8; None when there is no root, or the file is missing, past
+    `_LITERAL_CODE_LIMIT` or doesn't decode."""
+    if root is None:
+        return None
+    full = Path(path) if posixpath.isabs(path) else root / path
+    try:
+        # A path that resolves outside the pad's folder may name another file in the pad's process.
+        if not full.resolve().is_relative_to(root.resolve()):
+            return None
+        if not full.is_file() or full.stat().st_size > 4 * _LITERAL_CODE_LIMIT:
+            return None
+        text = full.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return text if len(text) <= _LITERAL_CODE_LIMIT else None
+
+
+def _source_text(source: ast.AST, reader: _Reader) -> str | None:
+    """The code a source handed to exec() runs, read now: a literal
+    (`_literal_source`), a `.py` file read by a literal path
+    (`_CodeFiles`), or a script built from literal pieces
+    (`_stitched_text`); None for any other."""
+    text = _literal_source(source)
+    if text is None:
+        text = reader.code_files.text(source, reader)
+    return text if text is not None else _stitched_text(source, reader)
+
+
+# Builtins that read a list or dict they're handed and leave it as it is.
+_STITCH_READERS = frozenset({
+    "len", "sorted", "list", "tuple", "print", "repr", "str", "enumerate", "reversed", "range", "min", "max",
+    "sum", "isinstance", "type", "iter",
+})
+# A list's or a dict's methods that read it.
+_STITCH_READ_METHODS = frozenset({"keys", "values", "items", "get", "copy", "count", "index"})
+_STITCH_DECODERS = {
+    "base64.b64decode": "b64decode", "base64.standard_b64decode": "standard_b64decode",
+    "base64.urlsafe_b64decode": "urlsafe_b64decode", "base64.b32decode": "b32decode",
+    "base64.b16decode": "b16decode",
+}
+# Names through which code reaches the cell namespace itself.
+_NAMESPACE_NAMES = frozenset({"globals", "vars", "locals", "__builtins__", "builtins", "__main__"})
+# A frame's parts and the calls that hand one over, which reach a namespace.
+_FRAME_PARTS = frozenset({
+    "__dict__", "__globals__", "__code__", "f_globals", "f_locals", "f_builtins", "f_back", "gi_frame",
+    "cr_frame", "ag_frame", "tb_frame",
+})
+_FRAME_CALLS = frozenset({"_getframe", "currentframe", "stack", "setattr", "delattr"})
+_STITCH_RANGE_LIMIT = 10_000
+# Names the replay trusts as the builtin or module it reads through; a cell that rebinds one ends it.
+_STITCH_TRUSTED = frozenset({*_STITCH_READERS, "bytes", "base64", "join", "decode", "encode"})
+
+_Stitched = str | bytes | int | list | dict
+
+
+def _stitched_text(source: ast.AST, reader: _Reader) -> str | None:
+    """The script a source handed to exec() holds when it's built only from
+    literal pieces, as `SCRIPT = "".join(PARTS)` after `PARTS[2] = r"..."`
+    over several cells, or a base64 decode of joined pieces. Read by
+    replaying the conversation's top-level statements in order
+    (`_Stitch`); None when the source sits anywhere but a cell's own top
+    level, or anything it reads may hold more than the replay follows."""
+    # Each reader of a check may count other cells as stopped early.
+    errored = reader.stopped_early | reader.errored
+    cache = reader.code_files.stitched
+    key = (id(source), errored)
+    if key in cache:
+        return cache[key]
+    cache[key] = None
+    cell = reader.cell_of(source)
+    stmt = _top_statement(source, cell)
+    files = reader.code_files
+    # Only a local pad runs the text the check read in place of the source (`CellWrites.run_code`).
+    if files.root is None or cell.index != cell.host or stmt is None:
+        return None
+    if cell.scope_of(source) is not None or _in_fstring(source, cell):
+        return None
+    want = None
+    if cell.host < reader.current.index:
+        # An earlier cell ran the text its own check read only when it recorded it.
+        want = files.recorded.get(cell.host, {}).get(_script_key(source))
+        if want is None:
+            return None
+    elif cell.host != reader.current.index:
+        return None
+    replay = _stitch_before(reader, cell, errored)
+    if replay is None:
+        return None
+    replay.run(cell, cell.tree.body[: cell.tree.body.index(stmt)], errored=False)
+    if replay.dead or replay.unsafe_in(cell, stmt, source):
+        return None
+    value = replay.value(source)
+    text = value if isinstance(value, str) else _decoded_source(value) if isinstance(value, bytes) else None
+    if text is not None and len(text) > _LITERAL_CODE_LIMIT:
+        text = None
+    if text is not None and want is not None and _sha256(text) != want:
+        text = None
+    if text is not None and cell.host == reader.current.index:
+        files.substitute(source, text, _script_key(source))
+    cache[key] = text
+    return text
+
+
+def _script_key(source: ast.AST) -> str:
+    """How a cell records the script one of its exec() sources held: by where the source sits."""
+    return f"@{source.lineno}:{source.col_offset}"
+
+
+def _stitch_before(reader: _Reader, cell: _Cell, errored: frozenset[int]) -> _Stitch | None:
+    """A replay of every cell before `cell`, from one pass over the cells per
+    check that keeps where it stood before each (`_CodeFiles.stitch_states`)."""
+    states = reader.code_files.stitch_states.get(errored)
+    if states is None:
+        states = {}
+        replay = _Stitch(reader)
+        for each in sorted((c for c in reader.cells if c.index == c.host), key=lambda c: c.index):
+            # Only a cell that hands exec() code may hold a stitched source.
+            if each.hands_literal_code or each.index == reader.current.index:
+                states[each.index] = replay.state()
+            replay.run(each, each.tree.body, errored=each.index in errored)
+        reader.code_files.stitch_states[errored] = states
+    state = states.get(cell.index)
+    return None if state is None else _Stitch(reader, state=state)
+
+
+def _top_statement(node: ast.AST, cell: _Cell) -> ast.stmt | None:
+    """The top-level statement of `cell` that holds `node`, when no
+    statement between them holds it; None otherwise."""
+    child, parent = node, cell.parents.get(node)
+    while parent is not None and not isinstance(parent, ast.Module):
+        if isinstance(child, ast.stmt):
+            return None
+        child, parent = parent, cell.parents.get(parent)
+    return child if isinstance(child, ast.stmt) and parent is not None else None
+
+
+class _Stitch:
+    """A replay of top-level statements for `_stitched_text`: each name's
+    value where it is a literal text, bytes, number, or a list or dict of
+    them (`env`). A name a statement may change in a way the replay doesn't
+    follow is `poisoned` for good; once code runs that may set any name
+    (exec, a runner, the cell namespace), the replay is `dead`."""
+
+    def __init__(self, reader: _Reader, *, state: tuple[dict, set[str], bool] | None = None) -> None:
+        self.reader = reader
+        self.env: dict[str, _Stitched] = copy.deepcopy(state[0]) if state else {}
+        self.poisoned: set[str] = set(state[1]) if state else set()
+        self.dead = state[2] if state else False
+        self.imported = frozenset(name for cell in reader.cells for name in cell.imports)
+
+    def state(self) -> tuple[dict, set[str], bool]:
+        """Where the replay stands, for a later replay to start from."""
+        return copy.deepcopy(self.env), set(self.poisoned), self.dead
+
+    def run(self, cell: _Cell, stmts: Sequence[ast.stmt], *, errored: bool) -> None:
+        for stmt in stmts:
+            if self.dead:
+                return
+            if self._runs_code(stmt):
+                self.dead = True
+                return
+            consumed: set[int] = set()
+            if errored or not self._apply(stmt, consumed):
+                self._poison_stores(stmt)
+            elif any(isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and id(n) not in consumed
+                     for n in ast.walk(stmt)):
+                self._poison_stores(stmt, skip=consumed)
+            self._poison_unsafe_uses(cell, stmt, consumed)
+
+    def unsafe_in(self, cell: _Cell, stmt: ast.stmt, source: ast.AST) -> bool:
+        """Whether the statement that runs `source` may run other code, or
+        set a name `source` reads."""
+        # The source itself, and the exec() or compile() calls that hand it on.
+        skip = {id(n) for n in ast.walk(source)}
+        parent = cell.parents.get(source)
+        while parent is not None and parent is not stmt:
+            skip.add(id(parent))
+            if isinstance(parent, ast.Call):
+                skip.update(id(n) for n in ast.walk(parent.func))
+            parent = cell.parents.get(parent)
+        if self._runs_code(stmt, skip=skip):
+            return True
+        names = {n.id for n in ast.walk(source) if isinstance(n, ast.Name)}
+        stored = {n.id for n in ast.walk(stmt) if isinstance(n, ast.Name) and not isinstance(n.ctx, ast.Load)}
+        return bool(names & stored)
+
+    def _runs_code(self, stmt: ast.AST, *, skip: AbstractSet[int] = frozenset()) -> bool:
+        """Whether `stmt` may run code that sets names the replay can't see,
+        or swap what a name it trusts does: exec or a runner however it is
+        reached, the cell namespace or a frame's, `setattr`, a star import,
+        a store to a module's attribute, or a rebinding of a builtin the
+        replay reads through (`_STITCH_TRUSTED`)."""
+        reader = self.reader
+        for node in ast.walk(stmt):
+            if id(node) in skip:
+                continue
+            if isinstance(node, ast.Call):
+                if (_spelled_exec(node.func) or _last_name(node.func) in _STRING_RUNNER_NAMES
+                        or reader.exec_builtin(node.func) is not None or reader.dotted(node.func) in _CODE_RUNNERS
+                        or _last_name(node.func) in _FRAME_CALLS):
+                    return True
+            elif isinstance(node, ast.Name):
+                if node.id in _NAMESPACE_NAMES or node.id in _EXEC_CALLS:
+                    return True
+                if not isinstance(node.ctx, ast.Load) and node.id in _STITCH_TRUSTED:
+                    return True
+            elif isinstance(node, ast.Attribute):
+                if node.attr in _FRAME_PARTS:
+                    return True
+                root = _root_of(node)
+                if not isinstance(node.ctx, ast.Load) and isinstance(root, ast.Name) and root.id in self.imported:
+                    return True
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in _NAMESPACE_NAMES:
+                    return True
+                for alias in node.names:
+                    bound = alias.asname or alias.name.split(".")[0]
+                    if alias.name == "*" or alias.name.split(".")[0] in _NAMESPACE_NAMES or (
+                        bound in _STITCH_TRUSTED and bound != alias.name
+                    ):
+                        return True
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and (
+                node.name in _STITCH_TRUSTED
+            ):
+                return True
+        return False
+
+    def _apply(self, stmt: ast.stmt, consumed: set[int]) -> bool:
+        """Applies a statement the replay follows, noting each name it
+        stores through in `consumed`; False for any other."""
+        env = self.env
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            if len(targets) != 1:
+                return False
+            target = targets[0]
+            if isinstance(target, ast.Name):
+                consumed.add(id(target))
+                self._set(target.id, self.value(stmt.value, fresh=True))
+                return True
+            if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                held = env.get(target.value.id) if target.value.id not in self.poisoned else None
+                key = self.value(target.slice)
+                item = self.value(stmt.value)
+                consumed.add(id(target.value))
+                if isinstance(held, dict) and isinstance(key, (str, int)) and isinstance(item, (str, bytes)):
+                    held[key] = item
+                    return True
+                if (isinstance(held, list) and isinstance(key, int) and -len(held) <= key < len(held)
+                        and isinstance(item, (str, bytes))):
+                    held[key] = item
+                    return True
+                self._poison(target.value.id)
+                return True
+            return False
+        if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name) and isinstance(stmt.op, ast.Add):
+            consumed.add(id(stmt.target))
+            name = stmt.target.id
+            held = env.get(name) if name not in self.poisoned else None
+            more = self.value(stmt.value, fresh=True)
+            if (isinstance(held, str) and isinstance(more, str) or isinstance(held, bytes) and isinstance(more, bytes)) and (
+                len(held) + len(more) <= _LITERAL_CODE_LIMIT
+            ):
+                env[name] = held + more
+            elif isinstance(held, list) and isinstance(more, list) and len(held) + len(more) <= _STITCH_RANGE_LIMIT:
+                held.extend(more)
+            else:
+                self._poison(name)
+            return True
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            call = stmt.value
+            func = call.func
+            if (isinstance(func, ast.Attribute) and func.attr in ("append", "extend")
+                    and isinstance(func.value, ast.Name) and len(call.args) == 1 and not call.keywords):
+                name = func.value.id
+                held = env.get(name) if name not in self.poisoned else None
+                consumed.add(id(func.value))
+                more = self.value(call.args[0], fresh=True)
+                room = isinstance(held, list) and len(held) + (len(more) if isinstance(more, list) else 1) <= (
+                    _STITCH_RANGE_LIMIT)
+                if room and func.attr == "append" and isinstance(more, (str, bytes)):
+                    held.append(more)
+                elif room and func.attr == "extend" and isinstance(more, list):
+                    held.extend(more)
+                elif name in env:
+                    self._poison(name)
+                return True
+            return True
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            for alias in stmt.names:
+                self.env.pop((alias.asname or alias.name).split(".")[0], None)
+            return True
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            self.env.pop(stmt.name, None)
+            # Its body's own names are its locals, unless declared global.
+            for node in ast.walk(stmt):
+                if isinstance(node, (ast.Global, ast.Nonlocal)):
+                    for name in node.names:
+                        self._poison(name)
+            # A walrus in a default or a decorator binds in the cell, as the def runs.
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+                    self._poison(node.target.id)
+            consumed.update(id(n) for n in ast.walk(stmt) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+            return True
+        return isinstance(stmt, ast.Pass)
+
+    def _set(self, name: str, value: _Stitched | None) -> None:
+        if value is None or name in self.poisoned:
+            self.env.pop(name, None)
+        else:
+            self.env[name] = value
+
+    def _poison(self, name: str) -> None:
+        self.poisoned.add(name)
+        self.env.pop(name, None)
+
+    def _poison_stores(self, stmt: ast.AST, *, skip: AbstractSet[int] = frozenset()) -> None:
+        """Poisons each name `stmt` may set or change in place."""
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load) and id(node) not in skip:
+                self._poison(node.id)
+            elif isinstance(node, (ast.Global, ast.Nonlocal)):
+                for name in node.names:
+                    self._poison(name)
+            elif isinstance(node, (ast.MatchAs, ast.MatchStar, ast.ExceptHandler)) and node.name:
+                self._poison(node.name)
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                self._poison(node.rest)
+            elif isinstance(node, (ast.Subscript, ast.Attribute)) and not isinstance(node.ctx, ast.Load):
+                root = _root_of(node)
+                if isinstance(root, ast.Name) and id(root) not in skip:
+                    self._poison(root.id)
+
+    def _poison_unsafe_uses(self, cell: _Cell, stmt: ast.AST, consumed: set[int]) -> None:
+        """Poisons each list or dict `stmt` reads anywhere but where reading
+        leaves it as it is, since it may be changed in place or aliased."""
+        for node in ast.walk(stmt):
+            if not (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and id(node) not in consumed):
+                continue
+            if _reads_only(node, cell):
+                continue
+            # A function runs later, when the name may hold a list; text can't change in place.
+            later = isinstance(cell.scope_of(node), (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+            if later or not isinstance(self.env.get(node.id), (str, bytes, int)):
+                self._poison(node.id)
+
+    def value(self, node: ast.AST, *, fresh: bool = False, local: Mapping[str, _Stitched] | None = None,
+              whole: bool = False) -> _Stitched | None:
+        """What `node` evaluates to in the replay; None when it can't tell. A
+        list or dict a name holds comes back only with `whole`, read in
+        place; with `fresh`, a new one the statement builds may."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes, int)) and not isinstance(
+            node.value, bool
+        ):
+            return node.value
+        if isinstance(node, ast.JoinedStr) and all(isinstance(v, ast.Constant) for v in node.values):
+            return "".join(str(v.value) for v in node.values)
+        if isinstance(node, ast.Name):
+            if local is not None and node.id in local:
+                return local[node.id]
+            held = self.env.get(node.id) if node.id not in self.poisoned else None
+            return held if whole or not isinstance(held, (list, dict)) else None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = self.value(node.left, local=local)
+            right = self.value(node.right, local=local)
+            if (isinstance(left, str) and isinstance(right, str) or isinstance(left, bytes) and isinstance(right, bytes)) and (
+                len(left) + len(right) <= _LITERAL_CODE_LIMIT
+            ):
+                return left + right
+            return None
+        if isinstance(node, (ast.List, ast.Tuple)) and fresh:
+            items = [self.value(e, local=local) for e in node.elts]
+            return items if all(isinstance(i, (str, bytes)) for i in items) else None
+        if isinstance(node, ast.Dict) and fresh:
+            if None in node.keys:
+                return None
+            keys = [self.value(k, local=local) for k in node.keys if k is not None]
+            values = [self.value(v, local=local) for v in node.values]
+            if all(isinstance(k, (str, int)) for k in keys) and all(isinstance(v, (str, bytes)) for v in values):
+                return dict(zip(keys, values, strict=True))
+            return None
+        if isinstance(node, ast.Subscript):
+            held = self.value(node.value, local=local, whole=True)
+            key = self.value(node.slice, local=local)
+            if isinstance(held, dict) and isinstance(key, (str, int)) and key in held:
+                return held[key]
+            if isinstance(held, list) and isinstance(key, int) and -len(held) <= key < len(held):
+                return held[key]
+            return None
+        if isinstance(node, ast.Call):
+            return self._call_value(node, local=local)
+        return None
+
+    def _call_value(self, node: ast.Call, *, local: Mapping[str, _Stitched] | None) -> _Stitched | None:
+        func = node.func
+        if node.keywords:
+            return None
+        if isinstance(func, ast.Attribute) and func.attr == "join" and len(node.args) == 1:
+            sep = self.value(func.value, local=local)
+            items = self._items(node.args[0], local=local)
+            if items is None or not isinstance(sep, (str, bytes)):
+                return None
+            if not all(type(i) is type(sep) for i in items) or sum(map(len, items)) > _LITERAL_CODE_LIMIT:
+                return None
+            return sep.join(items)  # type: ignore[arg-type]
+        if isinstance(func, ast.Attribute) and func.attr in ("decode", "encode") and len(node.args) <= 1:
+            held = self.value(func.value, local=local)
+            codec = self.value(node.args[0], local=local) if node.args else "utf-8"
+            if not isinstance(codec, str) or codec.lower().replace("-", "") != "utf8":
+                return None
+            try:
+                if func.attr == "decode" and isinstance(held, bytes):
+                    return held.decode("utf-8")
+                if func.attr == "encode" and isinstance(held, str):
+                    return held.encode("utf-8")
+            except UnicodeError:
+                return None
+            return None
+        name = self.reader.dotted(func)
+        if name in _STITCH_DECODERS and len(node.args) == 1:
+            import base64
+
+            held = self.value(node.args[0], local=local)
+            if not isinstance(held, (str, bytes)):
+                return None
+            try:
+                return getattr(base64, _STITCH_DECODERS[name])(held)
+            except (ValueError, TypeError):
+                return None
+        if name == "str" and len(node.args) == 1:
+            held = self.value(node.args[0], local=local)
+            return held if isinstance(held, str) else None
+        if name == "len" and len(node.args) == 1:
+            held = self.value(node.args[0], local=local, whole=True)
+            return len(held) if isinstance(held, (str, bytes, list, dict)) else None
+        return None
+
+    def _items(self, node: ast.AST, *, local: Mapping[str, _Stitched] | None) -> list[_Stitched] | None:
+        """The items a join walks: a list or dict as it is, a range, `sorted`,
+        `.keys()` or `.values()` of one, or a comprehension over those."""
+        if isinstance(node, (ast.GeneratorExp, ast.ListComp)):
+            if len(node.generators) != 1:
+                return None
+            gen = node.generators[0]
+            if gen.ifs or gen.is_async or not isinstance(gen.target, ast.Name):
+                return None
+            walked = self._items(gen.iter, local=local)
+            if walked is None:
+                return None
+            out: list[_Stitched] = []
+            for item in walked:
+                got = self.value(node.elt, local={**(local or {}), gen.target.id: item})
+                if got is None:
+                    return None
+                out.append(got)
+            return out
+        if isinstance(node, ast.Call) and not node.keywords:
+            name = self.reader.dotted(node.func)
+            if name == "range" and 1 <= len(node.args) <= 2:
+                bounds = [self.value(a, local=local) for a in node.args]
+                if not all(isinstance(b, int) for b in bounds):
+                    return None
+                start, stop = (0, bounds[0]) if len(bounds) == 1 else bounds
+                if stop - start > _STITCH_RANGE_LIMIT:  # type: ignore[operator]
+                    return None
+                return list(range(start, stop))  # type: ignore[arg-type]
+            if name in ("sorted", "list") and len(node.args) == 1:
+                walked = self._items(node.args[0], local=local)
+                if walked is None or name == "list":
+                    return walked
+                try:
+                    return sorted(walked)  # type: ignore[type-var]
+                except TypeError:
+                    return None
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr in ("keys", "values") and not node.args:
+                held = self.value(func.value, local=local, whole=True)
+                if isinstance(held, dict):
+                    return list(held.keys() if func.attr == "keys" else held.values())
+                return None
+        held = self.value(node, local=local, whole=True)
+        if isinstance(held, dict):
+            return list(held)
+        return list(held) if isinstance(held, list) else None
+
+
+def _reads_only(node: ast.Name, cell: _Cell) -> bool:
+    """Whether the name `node` loads is only read where it sits: indexed,
+    walked by a loop or comprehension, joined, handed to a builtin that
+    reads it (`_STITCH_READERS`), or a method that does
+    (`_STITCH_READ_METHODS`) called on it."""
+    parent = cell.parents.get(node)
+    if isinstance(parent, ast.Subscript) and parent.value is node:
+        return isinstance(parent.ctx, ast.Load)
+    if isinstance(parent, (ast.comprehension, ast.For, ast.AsyncFor)) and parent.iter is node:
+        return True
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        call = cell.parents.get(parent)
+        return parent.attr in _STITCH_READ_METHODS and isinstance(call, ast.Call) and call.func is parent
+    if isinstance(parent, ast.Call) and node in parent.args:
+        func = parent.func
+        if isinstance(func, ast.Name) and func.id in _STITCH_READERS:
+            return True
+        return isinstance(func, ast.Attribute) and func.attr == "join"
+    return False
+
+
 @dataclass(frozen=True, eq=False)
 class _Code:
     """Code the check reads, and the cell it is in: a cell's whole tree, or
@@ -11911,6 +12630,15 @@ class _ExecReading:
                     given = () if runner is None else runner.sources
                     launch = None if runner is not None else _python_launch(node, reader)
                 texts = [t for t in map(_literal_source, given) if t is not None]
+                if builtin and not texts and given and reader.exec_builtin(node.func):
+                    # A `.py` file read by a literal path, as `open('helpers.py').read()`.
+                    text = reader.code_files.text(given[0], reader)
+                    if text is None and host == reader.current.index:
+                        text = reader.code_files.read_now(node, given[0], reader)
+                    if text is None:
+                        # A script built from literal pieces, as `exec("".join(PARTS))`.
+                        text = _stitched_text(given[0], reader)
+                    texts = [] if text is None else [text]
                 if launch is not None:
                     texts = list(launch.sources)
                 elif not builtin and len(texts) > 1:
@@ -12438,7 +13166,9 @@ def _made_file(call: ast.Call, reader: _Reader) -> ast.AST | None:
     return None if where is None else where.given(call)
 
 
-def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules:
+def _written_modules(
+    reader: _Reader, cells: Sequence[_Cell], *, only: Callable[[_Cell, ast.Call], bool] | None = None,
+) -> _WrittenModules:
     """The modules the pad's cells write: each Python file a write, copy or
     move of a file reaches (`_written_target`), a call that writes the file
     one argument names (`_FILE_MAKERS`), or a file an archive is given by
@@ -12449,7 +13179,7 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
     module, and each Python file the cell names in a string; the folder it
     unpacks into, or a `git clone` clones into, is kept too. An empty file
     `.touch()` makes counts, as a package's `__init__.py`. Read from
-    `cells`."""
+    `cells`, and with `only`, from the calls it keeps alone."""
     paths: set[str] = set()
     names: set[str] = set()
     unpacked: set[str] = set()
@@ -12459,6 +13189,8 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
     for cell in cells:
         unplaced = False
         for call in cell.writer_calls:
+            if only is not None and not only(cell, call):
+                continue
             last = _last_name(call.func)
             if last in _WRITER_METHODS and _literal_non_module_args(call):
                 # A frame or a chart saved to a file a literal names, not a module.
@@ -15088,7 +15820,7 @@ def _from_unread(value: ast.AST, at: _Unread) -> bool:
     builtin = reader.exec_builtin(func)
     if builtin is not None:
         source = _exec_source(value, builtin)
-        if source is None or _literal_source(source) is not None:
+        if source is None or _source_text(source, reader) is not None:
             return False
         compiled = isinstance(source, ast.Call) and reader.exec_builtin(source.func) == "compile"
         return _from_unread(source, at) if compiled else True
@@ -15417,7 +16149,8 @@ def _filled_names(node: ast.AST, at: _Unread) -> set[str]:
         source = _exec_source(node, "exec")
         namespace = node.args[1] if len(node.args) > 1 else _keyword(node, "globals")
         root = _namespace_root(namespace)
-        return {root} if source is not None and _literal_source(source) is None and root is not None else set()
+        unread = source is not None and _source_text(source, at.reader) is None
+        return {root} if unread and root is not None else set()
     # A function given code the check can't read, as `run.__code__ = co`.
     swapped = {t.value.id for t in node.targets if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name)
                and _swaps_in_unread_code(t, at.cell)} if isinstance(node, ast.Assign) else set()
@@ -15739,9 +16472,10 @@ def _namespace_at(namespaces: Sequence[_Cell], name: str, *, at: tuple[int, ...]
 
 
 def _is_literal_eval(value: ast.AST, reader: _Reader) -> bool:
-    """Whether `value` is a call to the builtin eval on a literal source."""
+    """Whether `value` is a call to the builtin eval on a source the check
+    reads (`_source_text`)."""
     return (isinstance(value, ast.Call) and reader.exec_builtin(value.func) == "eval"
-            and (source := _exec_source(value, "eval")) is not None and _literal_source(source) is not None)
+            and (source := _exec_source(value, "eval")) is not None and _source_text(source, reader) is not None)
 
 
 def _global_fills(cell: _Cell) -> list[_NameValue]:
@@ -15778,7 +16512,7 @@ def _poisons_namespace(node: ast.AST, reader: _Reader) -> bool:
             source = _exec_source(node, builtin)
             if isinstance(source, ast.Call) and reader.exec_builtin(source.func) == "compile":
                 source = _exec_source(source, "compile")
-            literal = source is not None and _literal_source(source) is not None
+            literal = source is not None and _source_text(source, reader) is not None
             return not literal and any(_cell_namespace(a, reader) for a in args)
     return False
 
@@ -16122,12 +16856,98 @@ class _CellRead:
         return any(v.func == visit.func for v in chain) and self._reread.get(visit.func, 0) >= _REREAD_LIMIT
 
 
+_LOOPS = (ast.For, ast.AsyncFor, ast.While)
+
+
+def _stale_code_files(reader: _Reader) -> bool:
+    """Whether code may change a `.py` file the checked cell reads from disk
+    (`_CodeFiles.reads`) before that read runs: a write the cell, or code it
+    runs, makes ahead of the read, or anywhere in it when a loop may run the
+    read again, or one in a function an earlier cell defined, which the cell
+    may call first. A write the check can't place counts too."""
+    files = reader.code_files
+    current = reader.current
+    if files.reads and not _may_read_now(reader):
+        # Read again over every cell, literal code the cell runs among them.
+        return True
+    for call, _source, path in files.reads:
+        at = reader.position(call)
+        looped = _in_loop(call, reader)
+
+        def first(cell: _Cell, node: ast.Call, *, at: tuple[int, ...] = at, looped: bool = looped) -> bool:
+            if cell.host < current.index:
+                return cell.scope_of(node) is not None
+            return looped or reader.position(node) < at
+
+        written = _written_modules(reader, reader.cells, only=first)
+        # Case may not tell two names apart where the file system folds it.
+        if written.anywhere or path.casefold() in {_code_file_key(p, files.root).casefold() for p in written.paths}:
+            return True
+        if _imports_local_code_before(at, reader) or _launches_before(at, reader):
+            return True
+    return False
+
+
+def _launches_before(at: tuple[int, ...], reader: _Reader) -> bool:
+    """Whether the checked cell, or code it runs, starts a program or edits a
+    file in place (`fileinput`) before `at`: either may regenerate the file,
+    and the cell would then run the text the check read, not the new one."""
+    for cell in _all_cells(reader):
+        if cell.host != reader.current.index:
+            continue
+        for node in cell.calls:
+            if reader.position(node) >= at:
+                continue
+            name = reader.module_member(node.func) or reader.dotted(node.func)
+            if _last_name(node.func) in _LAUNCH_NAMES or name.startswith("fileinput."):
+                return True
+    return False
+
+
+def _imports_local_code_before(at: tuple[int, ...], reader: _Reader) -> bool:
+    """Whether the checked cell, or code it runs, imports a module from the
+    pad's own folder before `at`: its code runs then, and may write unseen."""
+    root = reader.code_files.root
+    if root is None:
+        return False
+    for cell in reader.cells:
+        if cell.host != reader.current.index:
+            continue
+        for node in cell.walked:
+            if not isinstance(node, (ast.Import, ast.ImportFrom)) or reader.position(node) >= at:
+                continue
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            for name in names:
+                top = name.split(".")[0]
+                if node.__class__ is ast.ImportFrom and node.level or top and (
+                    (root / f"{top}.py").exists() or (root / top).is_dir()
+                ):
+                    return True
+    return False
+
+
+def _in_loop(node: ast.AST, reader: _Reader) -> bool:
+    """Whether a loop may run `node` more than once: one around it in its
+    cell or, for literal code a cell runs, any loop in that cell."""
+    cell = reader.cell_of(node)
+    if cell.index != cell.host:
+        host = next((c for c in reader.cells if c.index == cell.host), None)
+        return host is None or any(isinstance(n, _LOOPS) for n in ast.walk(host.tree))
+    parent = cell.parents.get(node)
+    while parent is not None:
+        if isinstance(parent, _LOOPS):
+            return True
+        parent = cell.parents.get(parent)
+    return False
+
+
 def find_cell_writes(
     *,
     code: str,
     earlier: Sequence[EarlierCell],
     snapshots: Sequence[ProjectSnapshot],
     http_rules: Sequence[HttpWriteRule] = (),
+    code_root: Path | None = None,
 ) -> CellWrites:
     """What `code` would change, read against the conversation's `earlier` cells.
 
@@ -16169,18 +16989,22 @@ def find_cell_writes(
         tree = _parse(code)
     except (SyntaxError, ValueError):
         if earlier and earlier[-1].ended_process:
-            return find_cell_writes(code="", earlier=earlier, snapshots=snapshots, http_rules=http_rules)
+            return find_cell_writes(code="", earlier=earlier, snapshots=snapshots, http_rules=http_rules,
+                                    code_root=code_root)
         return CellWrites()
     except (RecursionError, MemoryError):
         # Too deep for this Python's parser, and the pad may run another Python (remote backend): hold it.
-        return CellWrites(unchecked=True)
+        return CellWrites(unchecked=True, causes=(UncheckedCause(kind="limit"),))
     cells: list[_Cell] = []
     errored: set[int] = set()
     stopped_at: dict[int, int] = {}
+    recorded: dict[int, Mapping[str, str]] = {}
     for given in earlier:
         parsed = _EARLIER_CELLS.get(code=given.code, index=len(cells))
         if parsed is None:
             continue
+        if given.code_files:
+            recorded[parsed.index] = given.code_files
         if given.errored:
             errored.add(parsed.index)
             line = given.stopped_at
@@ -16194,8 +17018,9 @@ def find_cell_writes(
     cells.append(current)
     project = next((s for s in snapshots if s.label == "project"), None)
     project_root = project.root if project is not None else None
+    code_files = _CodeFiles(root=code_root, recorded=recorded)
     reader = _Reader(cells, current=current, project_root=project_root, stopped_early=frozenset(errored),
-                     stopped_at=stopped_at)
+                     stopped_at=stopped_at, code_files=code_files)
     # A literal exec in an earlier cell is read as more cells, placed right
     # after the cell that ran it, so a later call to what it defined is read.
     # Then the literal code the cell runs through exec() and its kin is read
@@ -16221,7 +17046,7 @@ def find_cell_writes(
             return old
         new = _Reader([*old.cells, *read.cells], current=current, project_root=project_root,
                       stopped_early=frozenset(errored), stopped_at=stopped_at,
-                      tainted_contexts=old.tainted_contexts | tainted)
+                      tainted_contexts=old.tainted_contexts | tainted, code_files=code_files)
         new.stopped = old.stopped
         new.made = old.made
         return new
@@ -16232,11 +17057,14 @@ def find_cell_writes(
     errored.update(c.index for c in earlier_exec.cells if c.host in errored)
     exec_read = _exec_cells(reader, [current])
     reader = with_cells(reader, exec_read)
+    # A `.py` file read from disk that code may change before the read
+    # holds the cell unchecked, and isn't kept for later checks.
+    stale_files = _stale_code_files(reader)
     literal_code = _ExecRead.joined([earlier_exec, exec_read])
     ran = exec_read.of(current.tree)
     if any(not s.complete for s in snapshots):
         reader.made = _made(reader=reader)
-    owned = _OwnedFiles(earlier_cells, snapshots, errored=frozenset(errored))
+    owned = _OwnedFiles(earlier_cells, snapshots, errored=frozenset(errored), code_files=code_files)
     conversation = [*earlier_cells, current]
     everything = [*conversation, *literal_code.cells]
     while True:
@@ -16279,6 +17107,7 @@ def find_cell_writes(
     files = read.files
     # Where the cell runs code the check can't read (`_unread_code`).
     unread = read.unread
+    runs = list(read.unread)
     if _errored_names_read(reader.cells, errored=frozenset(errored)):
         # Read again with each errored cell as maybe stopped anywhere, for
         # the files only that reading holds. Nothing else is taken from it:
@@ -16286,21 +17115,34 @@ def find_cell_writes(
         # `_PATH_LIMIT` paths for one value it gives up, and the first read
         # stands alone.
         wide = _Reader(reader.cells, current=current, project_root=project_root, errored=frozenset(errored),
-                       tainted_contexts=reader.tainted_contexts)
+                       tainted_contexts=reader.tainted_contexts, code_files=code_files)
         wide.made = reader.made
         maybe = _CellRead(wide, inputs=inputs, files_only=True)
         maybe.run()
         if not wide.past_limit:
             files += _added_holds(found=files, maybe=maybe.files)
             unread += maybe.past_cap
+            runs += maybe.past_cap
     # A call that reaches what code the check couldn't read may have defined
     # holds the cell only when such code ran.
     if first_unread is not None:
         unread += read.reaches_defined
-    if earlier and earlier[-1].ended_process and modules.hooks_may_run:
+    restarts = bool(earlier) and earlier[-1].ended_process and modules.hooks_may_run
+    if restarts:
         # The pad starts a new process before this cell runs, and that start
         # runs the startup hooks a cell wrote, which the check doesn't read.
         unread.append(current.tree)
+    causes = [UncheckedCause(kind="runs", code=_quoted(node, reader)) for node in runs]
+    if first_unread is not None and read.reaches_defined:
+        earlier_sites = _unread_code(reader, first_unread.tree, first_unread, read=literal_code, modules=modules,
+                                     spelled_only=True)
+        earlier_line = _quoted(earlier_sites[0], reader) if earlier_sites else ""
+        causes += [UncheckedCause(kind="uses", code=_quoted(site, reader), name=_used_name(site),
+                                  earlier=earlier_line) for site in read.reaches_defined]
+    # Reasons about the whole step go first, so the cap on reasons never drops them.
+    whole = [UncheckedCause(kind=kind) for kind, applies in (
+        ("restart", restarts), ("limit", reader.stopped), ("changed", stale_files),
+    ) if applies]
     return CellWrites(
         sql=tuple(sorted(read.sql, key=lambda w: w.line)),
         calls=tuple(sorted(read.calls, key=lambda c: c.line)),
@@ -16308,5 +17150,63 @@ def find_cell_writes(
         http=tuple(sorted(read.http, key=lambda w: w.line)),
         # A depth limit that may have stopped a read short of a write
         # (`_Reader.stopped`) leaves the cell unchecked too.
-        unchecked=bool(unread) or reader.stopped,
+        unchecked=bool(unread) or reader.stopped or stale_files,
+        # A cell that runs code the check can't read runs as written, the read texts not swapped in.
+        code_files={} if stale_files or unread or reader.stopped else code_files.hashes(),
+        run_code=None if stale_files or unread or reader.stopped else _with_texts(code, code_files),
+        causes=(*whole, *dict.fromkeys(c for c in causes if c.code or c.name))[:_CAUSES_SHOWN],
     )
+
+
+def _with_texts(code: str, files: _CodeFiles) -> str | None:
+    """`code` with each source the check read replaced by its text, as a
+    literal that keeps the lines it spanned, so exec() can get nothing but
+    the checked text, whatever ran before it; None when it read none. No
+    check runs in its place: an error there could be caught and the exec
+    skipped, which the check took to have run."""
+    if not files.subs:
+        return None
+    raw = code.encode("utf-8")
+    starts = [0]
+    for line in raw.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    spans = sorted(((starts[n.lineno - 1] + n.col_offset, starts[n.end_lineno - 1] + n.end_col_offset, n, text)
+                    for n, text, _key in files.subs.values()), key=lambda span: span[0], reverse=True)
+    for start, end, node, text in spans:
+        literal = "(" + repr(text) + "\n" * (node.end_lineno - node.lineno) + ")"
+        raw = raw[:start] + literal.encode("utf-8") + raw[end:]
+    return raw.decode("utf-8")
+
+
+def _in_fstring(node: ast.AST, cell: _Cell) -> bool:
+    """Whether `node` sits in an f-string, where a backslash may not go before Python 3.12."""
+    parent = cell.parents.get(node)
+    while parent is not None:
+        if isinstance(parent, ast.JoinedStr):
+            return True
+        parent = cell.parents.get(parent)
+    return False
+
+
+# How many reasons a card gives for a step the check couldn't read.
+_CAUSES_SHOWN = 3
+
+
+def _quoted(node: ast.AST, reader: _Reader) -> str:
+    """The line of a step `node` sits on, for the card, credentials
+    scrubbed: for code a step hands exec(), the step's own line that runs
+    it. Empty for a whole cell."""
+    cell = reader.cell_of(node)
+    if isinstance(node, ast.Module):
+        return ""
+    if cell.index != cell.host and cell.host_line is not None:
+        host = next((c for c in reader.cells if c.index == cell.host), None)
+        if host is not None and 0 < cell.host_line <= len(host.lines):
+            return scrub_output(host.lines[cell.host_line - 1].strip())
+    return scrub_output(cell.source(node).strip())
+
+
+def _used_name(site: ast.AST) -> str:
+    """The name a use of what unread code made starts from: `orders` in `orders.mean()`."""
+    head = _root_of(site.func if isinstance(site, ast.Call) else site)
+    return head.id if isinstance(head, ast.Name) else ""

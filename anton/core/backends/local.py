@@ -1542,7 +1542,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._salvage_dropped = False
 
         await self._refresh_credential()
-        payload = code + "\n" + CELL_DELIM + "\n"
+        payload = self._code_to_run(code) + "\n" + CELL_DELIM + "\n"
         trace = get_trace_context()
         if trace is not None:
             payload = f"{CELL_TRACE_MARKER} {trace_context_to_json(trace)}\n" + payload

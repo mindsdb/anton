@@ -16,6 +16,9 @@
 #                          true for a cell whose process died, was killed
 #                          or never ran it, so the pad starts a new one
 #                          before the next cell.
+#              code_files  what its own check read of each .py file it
+#                          exec'd, {path: text}; the test records each
+#                          text's SHA-256, as a cell does.
 #   code     the cell the check runs before it runs for real.
 #   files    project files that exist when the turn begins, {path: text}
 #            (optional). The snapshot holds stock.csv besides these.
@@ -74,20 +77,23 @@ cases:
       - 'SCRIPT = ''import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})'''
     code: |-
       exec(compile(SCRIPT, "job", "exec"))
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: exec of a script joined from two literals in the same cell
     code: |-
       SCRIPT = 'import requests\n' + 'requests.post("https://erp.example.test/api/orders", json={"qty": 1})'
       exec(SCRIPT)
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: eval compile of a script
     earlier:
       - 'SCRIPT = ''import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})'''
     code: |-
       eval(compile(SCRIPT, "job", "exec"))
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: writes job.py then runs it with runpy
     code: |-
@@ -118,7 +124,8 @@ cases:
     code: |-
       SCRIPT = "".join(PARTS[i] for i in sorted(PARTS))
       exec(compile(SCRIPT, "job", "exec"), {"__name__": "__main__"})
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: base64 pieces appended to a list then decoded and exec compiled
     earlier:
@@ -129,7 +136,8 @@ cases:
       import base64
       SCRIPT = base64.b64decode("".join(CHUNKS)).decode()
       exec(compile(SCRIPT, "job", "exec"))
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: a cursor delete inside exec of a script
     earlier:
@@ -139,7 +147,8 @@ cases:
       conn = psycopg2.connect(host=os.environ['DS_POSTGRES_QA__HOST'])
       cur = conn.cursor()
       exec(SCRIPT)
-    card: unchecked
+    card: read
+    kinds: [sql]
 
   - name: a ninth literal exec holding the request after eight harmless ones
     code: |-
@@ -236,18 +245,20 @@ cases:
       formula = "a * 2"
       a = 3
       print(eval(formula))
-    card: unchecked
+    card: none
 
   - name: exec of a joined string
     code: |-
       PARTS = ['import requests\n', 'requests.post("https://erp.example.test/api/orders", json={"qty": 1})']
       exec("".join(PARTS))
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: exec of two concatenated literals
     code: |-
       exec('import requests\n' + 'requests.post("https://erp.example.test/api/orders", json={"qty": 1})')
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: exec of an f-string with a filled hole
     code: |-
@@ -260,15 +271,607 @@ cases:
       exec('import requests\nrequests.post("https://{}/api/orders", json={{"qty": 1}})'.format("erp.example.test"))
     card: unchecked
 
-  - name: exec of a file read
+  - name: exec of a py file read by a literal path is read like a literal
     files:
       job.py: |
         import requests
         requests.post("https://erp.example.test/api/orders", json={"qty": 1})
     code: |-
       exec(open("job.py").read())
+    card: read
+    kinds: [http]
+
+  - name: exec of a py file with no write runs with no card
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      exec(open('helpers.py').read())
+    card: none
+
+  - name: exec of a py file through Path read_text runs with no card
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      from pathlib import Path
+      exec(Path('helpers.py').read_text())
+    card: none
+
+  - name: exec of a compile of a py file runs with no card
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      exec(compile(open('helpers.py').read(), 'helpers.py', 'exec'))
+    card: none
+
+  - name: a read of what a py file an earlier exec read made runs with no card
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    earlier:
+      - code: exec(open('helpers.py').read())
+        code_files:
+          helpers.py: |
+            import pandas as pd
+            def load_orders():
+                return pd.DataFrame({"qty": [1, 2]})
+      - orders = load_orders()
+    code: |-
+      print(orders.mean())
+      print(orders["qty"].sum())
+    card: none
+
+  - name: a copy of what a py file an earlier exec read made runs with no card
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    earlier:
+      - import pandas as pd
+      - code: exec(open('helpers.py').read())
+        code_files:
+          helpers.py: |
+            import pandas as pd
+            def load_orders():
+                return pd.DataFrame({"qty": [1, 2]})
+      - df = load_orders()
+    code: |-
+      print(pd.DataFrame(df).describe())
+    card: none
+
+  - name: a call to a write a py file an earlier exec read defined is held
+    files:
+      push.py: |
+        import requests
+        def push():
+            requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    earlier:
+      - code: exec(open('push.py').read())
+        code_files:
+          push.py: |
+            import requests
+            def push():
+                requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    code: |-
+      push()
+    card: read
+    kinds: [http]
+
+  - name: an earlier exec of a py file whose file changed since leaves what it made unread
+    files:
+      push.py: |
+        def push():
+            pass
+    earlier:
+      - code: exec(open('push.py').read())
+        code_files:
+          push.py: |
+            import requests
+            def push():
+                requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+    code: |-
+      push()
     card: unchecked
 
+  - name: an earlier exec of a py file its own check didn't read leaves what it made unread
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    earlier:
+      - exec(open('helpers.py').read())
+      - orders = load_orders()
+    code: |-
+      print(orders.mean())
+    card: unchecked
+
+  - name: exec of a py file the cell overwrites first is unchecked
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      open('helpers.py', 'w').write('x = 1')
+      exec(open('helpers.py').read())
+    card: unchecked
+
+  - name: exec of a py file in a loop that overwrites it is unchecked
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      for i in range(2):
+          exec(open('helpers.py').read())
+          open('helpers.py', 'w').write('x = 1')
+    card: unchecked
+
+  - name: exec of a py file after a call to an earlier function that writes it is unchecked
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    earlier:
+      - |-
+        def save(text):
+            open('helpers.py', 'w').write(text)
+    code: |-
+      save('x = 1')
+      exec(open('helpers.py').read())
+    card: unchecked
+
+  - name: exec of a py file after a write the check can't place is unchecked
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      import sys
+      open(sys.argv[0], 'w').write('x = 1')
+      exec(open('helpers.py').read())
+    card: unchecked
+
+  - name: exec of a py file by a relative path once a cell changed folder is unchecked
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+      sub/helpers.py: x = 1
+    earlier:
+      - import os; os.chdir('sub')
+    code: |-
+      exec(open('helpers.py').read())
+    card: unchecked
+
+  - name: exec of a py file that isn't there is unchecked
+    code: |-
+      exec(open('missing.py').read())
+    card: unchecked
+
+  - name: exec of a file that isn't a py file is unchecked
+    files:
+      job.txt: x = 1
+    code: |-
+      exec(open('job.txt').read())
+    card: unchecked
+
+  - name: exec of a py file inside a function is unchecked
+    files:
+      helpers.py: |
+        import pandas as pd
+        def load_orders():
+            return pd.DataFrame({"qty": [1, 2]})
+    code: |-
+      def setup():
+          exec(open('helpers.py').read())
+      setup()
+    card: unchecked
+
+
+  - name: exec of a py file opened with another encoding is unchecked
+    files:
+      h.py: x = 1
+    code: |-
+      exec(open('h.py', encoding='utf-7').read())
+    card: unchecked
+
+  - name: exec of a py file opened in binary is unchecked
+    files:
+      h.py: x = 1
+    code: |-
+      exec(open('h.py', 'rb').read())
+    card: unchecked
+
+  - name: exec of a py file opened through an opener is unchecked
+    files:
+      h.py: x = 1
+    code: |-
+      import os
+      exec(open('h.py', opener=lambda p, f: os.open('other.py', f)).read())
+    card: unchecked
+
+  - name: exec of a py file after an earlier cell rebound open is unchecked
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        import io
+        open = lambda *a, **k: io.StringIO("")
+    code: |-
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after literal code rebound open runs the text the check read
+    files:
+      h.py: x = 1
+    code: |-
+      exec("open = lambda *a: None")
+      exec(open('h.py').read())
+    card: none
+
+  - name: exec of a py file read through a rebound Path runs the text the check read
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        from pathlib import Path
+        Path.read_text = lambda self: ""
+    code: |-
+      exec(Path('h.py').read_text())
+    card: none
+
+  - name: exec of a py file after an import of a module in the pad's folder is unchecked
+    files:
+      h.py: x = 1
+      w.py: x = 2
+    code: |-
+      import w
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after a cell changed folder by descriptor is unchecked
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        import os
+        os.fchdir(os.open('/tmp', os.O_RDONLY))
+    code: |-
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after a cell started a background process runs the text the check read
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        import subprocess
+        subprocess.Popen('sleep 5; cp other.py h.py', shell=True)
+    code: |-
+      exec(open('h.py').read())
+    card: none
+
+  - name: pieces a function defined before the list adds are unchecked
+    earlier:
+      - "def more():\n    PARTS.append('import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n')"
+      - "PARTS = ['x = 1\\n']"
+      - more()
+    code: |-
+      exec("".join(PARTS))
+    card: unchecked
+
+  - name: pieces added through a frame's globals are unchecked
+    earlier:
+      - "PARTS = ['x = 1\\n']"
+    code: |-
+      import sys
+      sys._getframe().f_globals['PARTS'].append('import requests\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\n')
+      exec("".join(PARTS))
+    card: unchecked
+
+  - name: a script read through a rebound builtin is unchecked
+    earlier:
+      - "str = lambda x: 'import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'"
+    code: |-
+      exec(str('x = 1'))
+    card: unchecked
+
+  - name: a script decoded through a patched module is unchecked
+    earlier:
+      - import base64
+      - "base64.b64decode = lambda s: b'import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'"
+    code: |-
+      exec(base64.b64decode('eCA9IDE='))
+    card: unchecked
+
+  - name: a script after a star import is unchecked
+    earlier:
+      - "PARTS = ['x = 1\\n']"
+      - from string import *
+    code: |-
+      exec("".join(PARTS))
+    card: unchecked
+
+  - name: a script after literal code run through an alias of exec is unchecked
+    earlier:
+      - "PARTS = ['x = 1\\n']"
+      - e = exec
+    code: |-
+      exec("".join(PARTS))
+    card: unchecked
+
+  - name: exec of a py file after an earlier import of an installed package runs with no card
+    files:
+      h.py: x = 1
+    earlier:
+      - import pandas as pd
+    code: |-
+      exec(open('h.py').read())
+    card: none
+
+  - name: exec of a py file after an earlier literal exec runs with no card
+    files:
+      h.py: x = 1
+    earlier:
+      - exec('z = 3')
+    code: |-
+      exec(open('h.py').read())
+    card: none
+
+  - name: exec of a py file after a literal import of a module in the pad's folder runs the text the check read
+    files:
+      h.py: x = 1
+      w.py: x = 2
+    code: |-
+      import importlib
+      importlib.import_module('w')
+      exec(open('h.py').read())
+    card: none
+
+  - name: exec of a py file after a call into a module in the pad's folder runs the text the check read
+    files:
+      h.py: x = 1
+      w.py: "def g():\n    pass\n"
+    earlier:
+      - import w
+    code: |-
+      w.g()
+      exec(open('h.py').read())
+    card: none
+
+  - name: exec of a py file after a folder change through an alias is unchecked
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        import os
+        f = os.chdir
+        f('/tmp')
+    code: |-
+      exec(open('h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after a lookup by a computed name runs the text the check read
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        import os
+        getattr(os, 'ch' + 'dir')('/tmp')
+    code: |-
+      exec(open('h.py').read())
+    card: none
+
+  - name: exec of a py file by a path that climbs out of a folder is unchecked
+    files:
+      h.py: x = 1
+      sub/k.py: x = 2
+    code: |-
+      exec(open('sub/../h.py').read())
+    card: unchecked
+
+  - name: exec of a py file after a thread started through an alias runs the text the check read
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        import threading
+        T = threading.Thread
+        T(target=print).start()
+    code: |-
+      exec(open('h.py').read())
+    card: none
+
+  - name: pieces the garbage collector reaches run as the check read them
+    earlier:
+      - "PARTS = ['x = 1\\n']"
+      - |-
+        import gc
+        [o for o in gc.get_objects() if o == ['x = 1\n']][0].append('import requests\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\n')
+    code: |-
+      exec("".join(PARTS))
+    card: none
+
+  - name: pieces after a call into a module in the pad's folder run as the check read them
+    files:
+      w.py: "def g():\n    pass\n"
+    earlier:
+      - "PARTS = ['x = 1\\n']"
+      - import w
+    code: |-
+      w.g()
+      exec("".join(PARTS))
+    card: none
+
+  - name: exec of a py file after imports and literal assignments in the cell runs with no card
+    files:
+      h.py: x = 1
+    code: |-
+      import pandas as pd
+      LIMIT = 10
+      exec(open('h.py').read())
+    card: none
+
+  - name: exec of a py file after any other statement in the cell runs the text the check read
+    files:
+      h.py: x = 1
+    code: |-
+      import logging
+      logging.basicConfig(filename='h.py', filemode='w', format='%(message)s')
+      exec(open('h.py').read())
+    card: none
+
+  - name: exec of a py file after an earlier cell patched open through mock runs the text the check read
+    files:
+      h.py: x = 1
+    earlier:
+      - |-
+        from unittest import mock
+        mock.patch('builtins.open', mock.mock_open(read_data='x = 2')).start()
+    code: |-
+      exec(open('h.py').read())
+    card: none
+
+  - name: exec of a py file by an absolute path outside the pad's folder is unchecked
+    code: |-
+      exec(open('/etc/hosts.py').read())
+    card: unchecked
+
+  - name: pieces reached through a function's globals run as the check read them
+    earlier:
+      - "PARTS = ['x = 1\\n']\ndef f():\n    return None.PARTS"
+      - "import inspect\ninspect.getclosurevars(f).globals['PARTS'].append('import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n')"
+    code: |-
+      exec("".join(PARTS))
+    card: none
+
+  - name: a script of harmless pieces joined over cells runs with no card
+    earlier:
+      - PARTS = {}
+      - "PARTS[0] = 'import pandas as pd\\n'"
+      - "PARTS[1] = 'def load_orders():\\n    return pd.DataFrame({\"qty\": [1, 2]})\\n'"
+      - SCRIPT = "".join(PARTS[i] for i in range(len(PARTS)))
+    code: |-
+      exec(compile(SCRIPT, "job", "exec"))
+    card: none
+
+  - name: a read of what a script of harmless pieces made runs with no card
+    earlier:
+      - P = []
+      - "P.append('import pandas as pd\\n')"
+      - "P.append('def load_orders():\\n    return pd.DataFrame({\"qty\": [1, 2]})\\n')"
+      - code: exec("".join(P))
+        code_files:
+          "@1:5": "import pandas as pd\ndef load_orders():\n    return pd.DataFrame({\"qty\": [1, 2]})\n"
+      - orders = load_orders()
+    code: |-
+      print(orders.mean())
+    card: none
+
+  - name: a script built up with += over cells is read whole
+    earlier:
+      - "S = 'x = 1\\n'"
+      - "S += 'import requests\\n'"
+      - "S += 'requests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'"
+    code: |-
+      exec(S)
+    card: read
+    kinds: [http]
+
+  - name: a script added to under an if is unchecked
+    earlier:
+      - "S = 'x = 1\\n'"
+      - "if x_ready:\n    S += 'import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'"
+    code: |-
+      exec(S)
+    card: unchecked
+
+  - name: a script built in a loop is unchecked
+    code: |-
+      S = ''
+      for piece in PIECES:
+          S += piece
+      exec(S)
+    card: unchecked
+
+  - name: pieces added through another name for the list are unchecked
+    earlier:
+      - P = []
+      - "P.append('x = 1\\n')"
+      - Q = P
+      - "Q.append('import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n')"
+    code: |-
+      exec("".join(P))
+    card: unchecked
+
+  - name: pieces a function adds to the list are unchecked
+    earlier:
+      - P = []
+      - "def more():\n    P.append('import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n')"
+      - more()
+    code: |-
+      exec("".join(P))
+    card: unchecked
+
+  - name: a script a function rebinds through global is unchecked
+    earlier:
+      - "S = 'x = 1\\n'"
+      - "def swap():\n    global S\n    S = 'import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'"
+      - swap()
+    code: |-
+      exec(S)
+    card: unchecked
+
+  - name: a script the cell namespace rebinds is unchecked
+    earlier:
+      - "S = 'x = 1\\n'"
+      - "globals()['S'] = 'import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'"
+    code: |-
+      exec(S)
+    card: unchecked
+
+  - name: a script after code the check can't read ran is unchecked
+    earlier:
+      - "S = 'x = 1\\n'"
+      - exec(open('job.txt').read())
+    code: |-
+      exec(S)
+    card: unchecked
+
+  - name: a script an errored cell may have rebound is unchecked
+    earlier:
+      - "S = 'x = 1\\n'"
+      - code: "S = 'import requests\\nrequests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\\n'\nraise ValueError('stopped')"
+        errored: true
+        stopped_at: 2
+    code: |-
+      exec(S)
+    card: unchecked
+
+  - name: a script handed to exec inside an if is unchecked
+    earlier:
+      - "S = 'x = 1\\n'"
+    code: |-
+      if S:
+          exec(S)
+    card: unchecked
   - name: exec of a code object bound in an earlier cell
     earlier:
       - 'code = compile(''import requests\nrequests.post("https://erp.example.test/api/orders", json={"qty": 1})'', "job", "exec")'
@@ -281,7 +884,8 @@ cases:
       - 'E = ''__import__("requests").post("https://erp.example.test/api/orders", json={"qty": 1})'''
     code: |-
       eval(E)
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: exec of a function parameter in this cell
     code: |-
@@ -303,7 +907,8 @@ cases:
     code: |-
       import base64
       exec(base64.b64decode("aW1wb3J0IHJlcXVlc3RzCnJlcXVlc3RzLnBvc3QoImh0dHBzOi8vZXJwLmV4YW1wbGUudGVzdC9hcGkvb3JkZXJzIiwganNvbj17InF0eSI6IDF9KQ=="))
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: exec held in a dict then called
     earlier:
@@ -423,7 +1028,8 @@ cases:
           def eval(self):
               return self
       eval(E)
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: a sort keyed by eval
     code: |-
@@ -6555,7 +7161,7 @@ cases:
 
   - name: call to a name a non-literal exec defined
     earlier:
-      - 'SCRIPT = ''import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       push()
@@ -6565,16 +7171,19 @@ cases:
     earlier:
       - 'P1 = ''import requests\n'''
       - 'P2 = ''def push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
-      - |-
-        SCRIPT = P1 + P2
-        exec(compile(SCRIPT, "job", "exec"))
+      - code: |-
+          SCRIPT = P1 + P2
+          exec(compile(SCRIPT, "job", "exec"))
+        code_files:
+          "@2:13": "import requests\ndef push():\n    requests.post(\"https://erp.example.test/api/orders\", json={\"qty\": 1})\n"
     code: |-
       push()
-    card: unchecked
+    card: read
+    kinds: [http]
 
   - name: call through a namespace a non-literal exec filled
     earlier:
-      - 'SCRIPT = ''import requests\ndef f():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - |-
         ns = {}
         exec(SCRIPT, ns)
@@ -6627,7 +7236,7 @@ cases:
 
   - name: call after setattr from an unread namespace
     earlier:
-      - 'SCRIPT = ''import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - |-
         import sys
         ns = {}
@@ -6639,7 +7248,7 @@ cases:
 
   - name: call through the globals dict after an unread exec
     earlier:
-      - 'SCRIPT = ''import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       globals()["push"]()
@@ -6647,7 +7256,7 @@ cases:
 
   - name: instantiate a class a non-literal exec defined
     earlier:
-      - 'SCRIPT = ''import requests\nclass Pusher:\n    def __init__(self):\n        requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       Pusher()
@@ -6655,7 +7264,7 @@ cases:
 
   - name: method call on an instance of an unread class
     earlier:
-      - 'SCRIPT = ''import requests\nclass Pusher:\n    def go(self):\n        requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
         p = Pusher()
@@ -6665,7 +7274,7 @@ cases:
 
   - name: alias then call of an unread function
     earlier:
-      - 'SCRIPT = ''import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       f = push
@@ -6674,7 +7283,7 @@ cases:
 
   - name: an unread function passed as a callback
     earlier:
-      - 'SCRIPT = ''import requests\ndef push(r):\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
         import pandas as pd
@@ -6685,7 +7294,7 @@ cases:
 
   - name: an unread name called inside a lambda
     earlier:
-      - 'SCRIPT = ''import requests\ndef push(r):\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
         import pandas as pd
@@ -6699,7 +7308,7 @@ cases:
       - |-
         def main():
             push()
-      - 'SCRIPT = ''import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       main()
@@ -6707,7 +7316,7 @@ cases:
 
   - name: an attribute call on an unread root object
     earlier:
-      - 'SCRIPT = ''import requests\nclient = requests.Session()\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       client.post("https://erp.example.test/api/orders", json={"qty": 1})
@@ -6715,7 +7324,7 @@ cases:
 
   - name: a function decorated by an unread decorator
     earlier:
-      - 'SCRIPT = ''import requests\ndef track(f):\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n    return f\n'''
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       @track
@@ -6819,8 +7428,7 @@ cases:
 
   - name: call to a name an eval of unread code bound earlier
     earlier:
-      - |-
-        SRC = 'lambda: __import__("requests").post("https://erp.example.test/api/orders")'
+      - "SRC = open('job.txt').read()"
       - |-
         push = eval(SRC)
     code: |-
@@ -7702,8 +8310,7 @@ cases:
 
   - name: a call in a function run before a later star import
     earlier:
-      - |-
-        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
     code: |-
@@ -7715,8 +8322,7 @@ cases:
 
   - name: a call in a lambda run before a later star import
     earlier:
-      - |-
-        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
     code: |-
@@ -7727,8 +8333,7 @@ cases:
 
   - name: a call in a comprehension before a later star import
     earlier:
-      - |-
-        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
     code: |-
@@ -7738,8 +8343,7 @@ cases:
 
   - name: a call in a class body before a later star import
     earlier:
-      - |-
-        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
     code: |-
@@ -7750,8 +8354,7 @@ cases:
 
   - name: a call in a function before a star import that never runs
     earlier:
-      - |-
-        SCRIPT = 'import requests\ndef push():\n    requests.post("https://erp.example.test/api/orders", json={"qty": 1})\n'
+      - "SCRIPT = open('job.txt').read()"
       - |-
         exec(SCRIPT)
     code: |-
@@ -12150,7 +12753,7 @@ cases:
 
   - name: an overwrite after a non-literal exec in an earlier cell is read
     earlier:
-      - 'SCRIPT = "open(''stock.csv'', ''w'').write(''y'')"'
+      - "SCRIPT = open('job.txt').read()"
       - 'exec(SCRIPT)'
     code: |-
       open("stock.csv", "w").write("z")

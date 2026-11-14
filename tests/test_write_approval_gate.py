@@ -47,6 +47,7 @@ from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 from anton.core.settings import CoreSettings
 from anton.core.tools.generate_artifact.discovery.engine import _exec_ran
 from anton.core.tools.registry import ToolOutcome
+from anton.core.utils.write_check import parse_http_write_rules
 from tests.conftest import make_mock_llm
 
 UPDATE_CELL = (
@@ -88,10 +89,18 @@ class _Pad:
     """A scratchpad runtime with no subprocess. Records each cell it runs and
     each package install it is asked for."""
 
-    def __init__(self) -> None:
+    def __init__(self, workspace: Path | None = None) -> None:
         self.ran: list[str] = []
         self.installed: list[list[str]] = []
         self.cells: list[Cell] = []
+        # The folder a local pad runs cells in, where the check reads exec'd files.
+        self._explicit_workspace_path = workspace
+        self._expected: tuple[str, dict[str, str], str | None] | None = None
+        # The code each cell ran, with the texts its check read swapped in.
+        self.ran_as: list[str] = []
+
+    def expect_code_files(self, code: str, files: dict[str, str], run_code: str | None = None) -> None:
+        self._expected = (code, files, run_code)
 
     async def install_packages(self, packages: list[str]) -> str:
         self.installed.append(list(packages))
@@ -99,7 +108,10 @@ class _Pad:
 
     async def execute_streaming(self, code: str, **kwargs: object):
         self.ran.append(code)
-        cell = Cell(code=code, stdout="done", stderr="", error=None)
+        matched = self._expected if self._expected and self._expected[0] == code else None
+        files = matched[1] if matched else {}
+        self.ran_as.append(matched[2] if matched and matched[2] is not None else code)
+        cell = Cell(code=code, stdout="done", stderr="", error=None, code_files=dict(files))
         self.cells.append(cell)
         yield cell
 
@@ -242,7 +254,7 @@ def _session(
             write_relay_url="http://write-relay:8090" if relay_hosts else None,
         ),
     ))
-    pad = _Pad()
+    pad = _Pad(project)
     session._scratchpads.get_or_create = AsyncMock(return_value=pad)
     elicitor = _GatedElicitor()
     session.elicitor = elicitor
@@ -681,6 +693,7 @@ async def test_a_cell_that_runs_code_the_check_cant_read_waits_and_says_so(proje
     seen = await _run(harness=harness, answers=[answer])
     assert len(seen.cards) == 1 and seen.ran_before == [1]
     assert "This step can't be checked before it runs." in seen.cards[0].request.prompt
+    assert f"```\n{EXEC_SCRIPT_CELL}\n```" in seen.cards[0].request.prompt, "the card shows the step's code"
     assert harness.pad.ran == ([SCRIPT_CELL, EXEC_SCRIPT_CELL] if answer == APPROVE else [SCRIPT_CELL])
     if answer != APPROVE:
         assert "Not run: this step would run code the check couldn't read." in _history_text(harness.session)
@@ -690,6 +703,84 @@ async def test_a_cell_that_runs_code_the_check_cant_read_waits_and_says_so(proje
     snap = snapshot_project_files(root=project, label="project", taken_at=10**10)
     writes = find_cell_writes(code=EXEC_SCRIPT_CELL, earlier=[EarlierCell(code=SCRIPT_CELL)], snapshots=(snap,))
     assert writes.unchecked and writes.needs_approval()
+
+
+EXEC_HELPERS = "exec(open('helpers.py').read())\n"
+HELPERS = "import pandas as pd\ndef load_orders():\n    return pd.DataFrame({'qty': [1, 2]})\n"
+PUSH_HELPERS = (
+    "import requests\n"
+    "def push():\n    requests.post('https://planner.example.com/api/v2/orders/9', json={'qty': 5})\n"
+)
+
+
+async def test_reads_of_what_a_helpers_file_made_raise_no_card(project):
+    """The check reads a `.py` file a cell execs by a literal path, so the
+    exec and the reads after it of what the file made run with no card."""
+    (project / "helpers.py").write_text(HELPERS)
+    cells = (EXEC_HELPERS, "orders = load_orders()\n", "print(orders.mean())\n")
+    harness = _session(project, *cells, http=PLANNER_RULE)
+    seen = await _run(harness=harness, answers=[])
+    assert seen.cards == []
+    assert harness.pad.ran == list(cells)
+
+
+async def test_the_pad_runs_the_helpers_text_the_check_read(project):
+    (project / "helpers.py").write_text(HELPERS)
+    harness = _session(project, EXEC_HELPERS, http=PLANNER_RULE)
+    assert (await _run(harness=harness, answers=[])).cards == []
+    assert harness.pad.ran == [EXEC_HELPERS], "the cell keeps the code the agent wrote"
+    assert "open('helpers.py')" not in harness.pad.ran_as[0] and "def load_orders" in harness.pad.ran_as[0]
+
+
+async def test_a_write_a_helpers_file_defines_is_named_where_it_is_defined_and_where_it_runs(project):
+    """As for a def written in the cell: the exec and the call each wait on a
+    card that names the request, not one that says it can't be checked."""
+    (project / "helpers.py").write_text(PUSH_HELPERS)
+    harness = _session(project, EXEC_HELPERS, "push()\n", http=PLANNER_RULE)
+    seen = await _run(harness=harness, answers=[APPROVE, CANCEL])
+    assert len(seen.cards) == 2 and seen.ran_before == [0, 1]
+    for card in seen.cards:
+        assert "This step can't be checked before it runs." not in card.request.prompt
+        assert "planner.example.com" in card.request.prompt
+
+
+async def test_a_later_turn_reads_a_helpers_file_only_while_it_holds_what_the_exec_ran(project):
+    """Each turn builds a new session, so what the exec's check read rides on
+    its cell: a later turn reads the file while it still holds that text,
+    and holds a use of what it made once the file changed."""
+    (project / "helpers.py").write_text(HELPERS)
+    first = _session(project, EXEC_HELPERS, "orders = load_orders()\n", http=PLANNER_RULE)
+    assert (await _run(harness=first, answers=[])).cards == []
+    assert first.pad.cells[0].code_files, "the exec's cell keeps what its check read"
+    for helpers, held in ((HELPERS, False), (HELPERS + "x = 2\n", True)):
+        (project / "helpers.py").write_text(helpers)
+        later = _session(project, "print(orders.mean())\n", http=PLANNER_RULE)
+        later.pad.cells = list(first.pad.cells)
+        seen = await _run(harness=later, answers=[CANCEL])
+        assert bool(seen.cards) is held
+        if held:
+            assert "It uses `orders`, which code an earlier step ran may have set" in seen.cards[0].request.prompt
+
+
+async def test_compaction_keeps_what_a_cells_check_read_of_a_helpers_file(project):
+    (project / "helpers.py").write_text(HELPERS)
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.http_rules = parse_http_write_rules(PLANNER_RULE)
+    pad = _runtime(project)
+    assert await _hold()(session, pad=pad, code=EXEC_HELPERS) is None
+    pad._record_cell(Cell(code=EXEC_HELPERS, stdout="", stderr="", error=None))
+    pad_record = dict(pad.cells[0].code_files)
+    assert pad_record, "the recorded cell keeps what its check read"
+    pad.cells += _runtime(project, "orders = load_orders()", *_FILLERS).cells
+    assert pad._compact_cells()
+    assert pad.compacted_cells[0].code_files == pad_record
+    assert await _hold()(session, pad=pad, code="print(orders.mean())") is None
+    # A cell whose check read nothing of the file leaves what it made unread.
+    bare = _runtime(project, EXEC_HELPERS, "orders = load_orders()", *_FILLERS)
+    assert bare._compact_cells()
+    assert await _hold()(session, pad=bare, code="print(orders.mean())") is not None
+    assert elicitor.asked == 1
 
 
 @pytest.mark.parametrize("answer", [APPROVE, CANCEL], ids=["approve", "cancel"])
@@ -710,7 +801,8 @@ async def test_a_cell_the_check_cant_read_that_posts_to_a_relayed_host_raises_on
     assert len(seen.cards) == 1 and seen.ran_before == [1]
     prompt = seen.cards[0].request.prompt
     assert "This step can't be checked before it runs." in prompt
-    assert RELAYED not in prompt, "the relay holds the request, so the card leaves it out"
+    assert "would send" not in prompt, "the relay holds the request, so the card lists no request"
+    assert f"```\n{exec_cell}\n```" in prompt, "the card shows the step's code"
     assert harness.pad.ran == ([SCRIPT_CELL, exec_cell] if answer == APPROVE else [SCRIPT_CELL])
 
 
@@ -897,6 +989,7 @@ async def test_a_check_that_fails_asks_instead_of_clearing_the_cell(project, mon
     with caplog.at_level(logging.WARNING, logger=GATE_LOG):
         outcome = await _hold()(session, pad=_Pad(), code="print('hello')")
     assert elicitor.asked == 1
+    assert "The check failed on this step." in elicitor.prompts[0]
     assert outcome is not None and "the check couldn't read" in outcome.content
     failed = [r for r in caplog.records if r.name == GATE_LOG and "the check failed" in r.getMessage()]
     assert [r.getMessage() for r in failed] == ["write approval: the check failed (RecursionError)"]
