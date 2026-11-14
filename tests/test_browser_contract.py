@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -230,6 +231,8 @@ def test_the_page_fixture_names_every_frame_limit_the_hosts_hold():
     assert "frames_phase_ms" in _load("page").description
 
 
+#: The words for a card's number after card: number, num, no or # ('Card #').
+_NUMBER = r"(numbers?|num|no|#)"
 #: The one card-field rule both hosts hold, character for character: a field
 #: is named for a card when this, ignoring case, matches its attributes'
 #: values joined with spaces, or their split forms joined so, once
@@ -237,8 +240,8 @@ def test_the_page_fixture_names_every_frame_limit_the_hosts_hold():
 #: those CARD_FIELD_CONJUNCTION keeps), unless CARD_FIELD_PAYMENT matches one
 #: of them.
 CARD_FIELD_NAME = (
-    r"(^|[^a-z0-9]|card|cc)(cvc|cvv2?|csc)([^a-z0-9]|$)|card[\s._-]*(numbers?|num|no)(?![a-z])"
-    r"|(^|[^a-z0-9])cc[\s._-]*(numbers?|num)(?![a-z])|security[\s._-]*code"
+    r"(^|[^a-z0-9]|card|cc)(cvc|cvv2?|csc)([^a-z0-9]|$)|card[\s._-]*" + _NUMBER + r"(?![a-z])"
+    r"|(^|[^a-z0-9])cc[\s._-]*(numbers?|num|#)(?![a-z])|security[\s._-]*code"
 )
 #: CARD_FIELD_EXEMPT's qualifiers: the words that name a card that isn't a
 #: payment card. A qualifier needs no word boundary, so none may occur in a
@@ -249,17 +252,19 @@ CARD_FIELD_NAME = (
 #: match starts at that e and the e of 'the gift card' is never taken. resident
 #: covers a permanent resident card. green is a green card's: Green Dot's card
 #: holds no match (Dot sits between), and a label that names Amex's Green Card
-#: holds amex, a payment word.
+#: holds amex, a payment word. pan is India's PAN card, a tax identity card,
+#: and counts only with no letter or digit right before it, so Japan's never
+#: does.
 _EXEMPT_QUALIFIERS = (
     r"(((?<![a-z0-9])e[\s._-]*)?gift|loyalty|rewards?|library|members?(hip)?|insurance|health|medicare|medicaid"
     r"|student|transit|sim|national[\s._-]*id|identity|identification|(?<![a-z0-9])id|green|residen(t|ce|cy)"
-    r"|social[\s._-]*security|aadhaa?r|citizen(ship)?|voter)"
+    r"|social[\s._-]*security|aadhaa?r|(?<![a-z0-9])pan|citizen(ship)?|voter)"
 )
 #: The number of a card that isn't a payment card (a gift, loyalty, library,
 #: insurance or identity card), read ignoring case. Each match is replaced with
 #: a space in each value and its split form before the join, so a card's CVV,
 #: or a card number in another attribute, still names the field.
-CARD_FIELD_EXEMPT = _EXEMPT_QUALIFIERS + r"[\s._-]*card[\s._-]*(numbers?|num|no)(?![a-z])"
+CARD_FIELD_EXEMPT = _EXEMPT_QUALIFIERS + r"[\s._-]*card[\s._-]*" + _NUMBER + r"(?![a-z])"
 #: Names of things that aren't payment cards, which a form joins to an
 #: ordinary card's number: an ID document (passport, license or licence,
 #: permit, DL), a contact (phone, telephone, mobile, email, username) or a
@@ -271,9 +276,9 @@ _OTHER_NAMES = (
     r"(passport|licen[cs]e|permit|dl|(tele)?phone|mobile|e[\s._-]*mail|user[\s._-]*name|promo(tion(al)?)?|coupon"
     r"|voucher|discount|certificate)"
 )
-#: A conjunction: or or and with no letter or digit right before it, &, +, /
-#: or a comma.
-_CONJUNCTION = r"((?<![a-z0-9])(or|and)|[&+/,])"
+#: A conjunction: or or and with no letter or digit right before or after it,
+#: &, +, / or a comma.
+_CONJUNCTION = r"((?<![a-z0-9])(or|and)(?![a-z0-9])|[&+/,])"
 #: An article or possessive with no letter or digit right before it.
 _ARTICLE = r"(?<![a-z0-9])(a|an|the|your|any)"
 #: A join: one or more conjunctions, each followed only by spaces or
@@ -285,26 +290,29 @@ _JOIN = r"(" + _CONJUNCTION + r"[\s._-]*)+(" + _ARTICLE + r"[\s._-]+)?"
 #: address, then by a number (number, num, no or #) or not.
 _EXEMPT_NAME = (
     r"(?<![a-z0-9])(" + _EXEMPT_QUALIFIERS + "|" + _OTHER_NAMES + r")([\s._-]*(card|code|address))?"
-    r"([\s._-]*(numbers?|num|no|#))?"
+    r"([\s._-]*" + _NUMBER + r")?"
 )
-#: Text that doesn't end in a conjunction or an article ends in a character
-#: that isn't a conjunction or a separator, and not in or, and, or an article.
-_NOT_A_CONJUNCTION_END = r"[^&+/,\s._-](?<!(?<![a-z0-9])or)(?<!(?<![a-z0-9])and)"
-_NOT_AN_ARTICLE_END = (
-    r"(?<!(?<![a-z0-9])a)(?<!(?<![a-z0-9])an)(?<!(?<![a-z0-9])the)(?<!(?<![a-z0-9])your)(?<!(?<![a-z0-9])any)"
+#: Text that holds no conjunction.
+_NO_CONJUNCTION = r"((?!" + _CONJUNCTION + r")[\s\S])*"
+#: A name that ends in an exempt name, then the run of conjunctions after it:
+#: text that starts with no space or separator and holds no conjunction, whose
+#: last words are an exempt name followed only by spaces or separators. The
+#: lookahead finds the exempt name, and a lookahead never gives back what it
+#: matched, so each name is read one way and a long list takes time in step
+#: with its length.
+_NAME_ENDING_IN_AN_EXEMPT_NAME = (
+    r"(?![\s._-])(?=" + _NO_CONJUNCTION + _EXEMPT_NAME + r"[\s._-]*" + _CONJUNCTION + r")" + _NO_CONJUNCTION
+    + r"(" + _CONJUNCTION + r"[\s._-]*)+"
 )
-#: Exempt names, each followed by a join, after at most one article.
-_EXEMPT_NAMES_JOINED = r"(" + _ARTICLE + r"[\s._-]+)?(" + _EXEMPT_NAME + r"[\s._-]*" + _JOIN + r")+"
 #: The text before an exempt match that keeps it, read ignoring case: text
-#: that ends in a join, unless it reads as text that doesn't end in a
-#: conjunction or an article, then exempt names, each followed by a join. So
-#: 'Card or gift card number' keeps its card number, and 'Gift or loyalty card
-#: number' and "Driver's license or ID card number" drop it. Python's re takes
-#: only a fixed-width lookbehind, so the pattern is anchored at both ends of
-#: the text before the match and looks ahead.
+#: that ends in a join, unless each name its conjunctions separate ends in an
+#: exempt name. So 'Card or gift card number' and 'Card or gift certificate or
+#: gift card number' keep their card number, and 'Gift or loyalty card number'
+#: and 'Passport, residence permit or ID card number' drop it. Python's re
+#: takes only a fixed-width lookbehind, so the pattern is anchored at both ends
+#: of the text before the match and looks ahead.
 CARD_FIELD_CONJUNCTION = (
-    r"^(?!([\s\S]*" + _NOT_A_CONJUNCTION_END + _NOT_AN_ARTICLE_END + r")?[\s._-]*" + _EXEMPT_NAMES_JOINED
-    + r"$)[\s\S]*" + _JOIN + r"$"
+    r"^(?![\s._-]*(" + _NAME_ENDING_IN_AN_EXEMPT_NAME + r")+(" + _ARTICLE + r"[\s._-]+)?$)[\s\S]*" + _JOIN + r"$"
 )
 #: A word for a payment card with no letter right before or after it, read
 #: ignoring case. When it matches any of a field's values or their split
@@ -329,6 +337,14 @@ PAYMENT_WORDS = [
 CARD_FIELD_WORD_BREAKS = [r"([a-z0-9])(?=[A-Z])", r"([A-Z])(?=[A-Z][a-z])"]
 #: The attributes both hosts read a field's name from, in the order they join them.
 CARD_FIELD_ATTRIBUTES = ["name", "id", "aria-label", "placeholder"]
+#: A card's number written with # ('Card #'): the card pattern takes # after
+#: card and cc, as an exempt name does.
+HASH_CARD_NUMBERS = ["Card #", "Card#", "Credit card #", "CC #", "cc#"]
+#: A gift, loyalty or library card's number written with #, which the exempt
+#: pattern takes as it takes number.
+HASH_ORDINARY_CARD_NUMBERS = ["Gift card #", "Loyalty card #", "Library card#"]
+#: India's PAN card, a tax identity card, whose number a KYC form asks for.
+PAN_CARD_NUMBERS = ["PAN card number", "panCardNumber", "pan_card_number", "PAN Card No."]
 #: Names that must stay named for a card (on the page its value is hidden and
 #: a type, select or editing key answers 403 password_field, a focused type
 #: answers the same, and a frame holding one is never read) and names that
@@ -337,7 +353,7 @@ CARD_NAMED = [
     "cardnumber", "card_number", "card.number", "cardNo", "card_no", "cc_num", "cc-number", "cvc", "CVC", "cvv2",
     "card_cvc", "cardCvc", "cc_cvv", "billing_cvv2", "cvv_code", "csc", "security_code", "Card number", "Security code",
     "cardNumberInput", "CardNumberTextBox", "ctl00_Main_CardNumberTextBox", "ccNumberInput", "creditCardNumberInput",
-    "cardNumberField", "cardNumbers", "cvvInput", "txtCVV", "CVVCode", "CCNumber",
+    "cardNumberField", "cardNumbers", "cvvInput", "txtCVV", "CVVCode", "CCNumber", *HASH_CARD_NUMBERS,
 ]
 #: Payment cards' names, each card-named on both hosts. None holds a match of
 #: CARD_FIELD_EXEMPT in either form: its qualifiers need no word boundary, so a
@@ -392,6 +408,7 @@ CONJOINED_CARD_LABELS = [
     "Card or your gift card number", "Card or the gift card number", "Card or any gift card number",
     "cardOrAGiftCardNumber",
     "Card or a gift or loyalty card number", "Card and/or gift card number", "Card or license or ID card number",
+    "Card / gift card #",
 ]
 #: A member ID card's number that stays card-named: a letter sits right before
 #: its Id, so the exempt pattern takes nothing out of the value itself, which
@@ -418,6 +435,7 @@ ORDINARY_CARD_NUMBERS = [
     "Voter card number", "voterCardNo", "Voter ID card number", "eGift card number", "e-gift card number",
     "E-Gift Card No.", "eGiftCardNumber", "egift_card_number", "Identification card number",
     "State identification card number", "identificationCardNumber", "identification_card_number",
+    *PAN_CARD_NUMBERS, *HASH_ORDINARY_CARD_NUMBERS,
 ]
 #: Ordinary cards' numbers whose labels hold a payment word with a letter
 #: right after it (Visalia) or right before it (Rediscover), which isn't one.
@@ -440,7 +458,7 @@ EXEMPT_CARD_LISTS = [
     "Gift card, or loyalty card number", "Gift card, loyalty card, or rewards card number",
     "Student ID number or library card number", "Member number or rewards card number", "Gift card / eGift card number",
     "Gift card or eGift card number", "eGift or loyalty card number", "Gift or a loyalty card number",
-    "Enter a gift or loyalty card number",
+    "Enter a gift or loyalty card number", "PAN or Aadhaar card number", "Oregon ID or library card number",
 ]
 #: Ordinary cards' numbers joined only to names of things that aren't payment
 #: cards and that the exempt pattern doesn't take (_OTHER_NAMES): an ID
@@ -458,6 +476,31 @@ OTHER_NAME_LISTS = [
     "Coupon or gift card number", "Gift certificate or gift card number", "Voucher code or gift card number",
     "Telephone or loyalty card number", "Promotional code or gift card number", "Discount code or gift card number",
 ]
+#: Ordinary cards' numbers joined to names that end in an exempt name after
+#: other words ('residence permit', "driver's license", 'mobile phone', 'gift
+#: certificate'), in any name of the list. Each is ordinary.
+WORDED_NAME_LISTS = [
+    "Passport, residence permit or ID card number", "Passport number, driver's license or ID card number",
+    "Gift card, mobile phone or loyalty card number", "Email, mobile phone number or loyalty card number",
+    "Promo code, gift certificate or gift card number", "Gift card or gift certificate or gift card number",
+    "Enter your gift, loyalty or rewards card number",
+]
+#: A payment card named first, then names that end in an exempt name after
+#: another word ('gift certificate', 'mobile phone', 'store loyalty'). The
+#: first name doesn't end in an exempt name, so each keeps its card number.
+CARD_FIRST_LISTS = [
+    "Card or gift certificate or gift card number", "Card, gift certificate or gift card number",
+    "Card, gift voucher or gift card number", "Card or gift voucher or gift card number",
+    "Card, gift voucher, or gift card number", "Bank card, gift certificate or gift card number",
+    "Store card, gift certificate or gift card number", "Card, e-voucher or gift card number",
+    "Card or mobile phone or gift card number", "Card or store loyalty or gift card number",
+    "Card or student ID or library card number", "Card, gift certificate, or eGift card number",
+    "cardOrGiftCertificateOrGiftCardNumber",
+]
+#: Card numbers whose labels hold pan inside a longer word (Japan, Span,
+#: Company) or name a payment card's PAN, not a PAN card, so each is
+#: card-named.
+PAN_LOOKALIKES = ["Japan card number", "Span card number", "Company card number", "Card number (PAN)"]
 #: Ordinary cards' numbers after a word that ends in or or and, which isn't a
 #: conjunction.
 CONJUNCTION_LOOKALIKES = ["Vendor gift card number", "Brand gift card number"]
@@ -569,26 +612,29 @@ CARD_RULE = (
     "and its split forms joined the same way, and the field is card-named when card_field_name, ignoring case, "
     "matches either name form. The exempt pattern matches the number of a card that isn't a payment card, such as a "
     "gift or e-gift, loyalty, library or insurance card or an identity card (an ID, identification, green, "
-    "residence, Social Security, Aadhaar, citizen or voter card). The conjunction pattern matches text that ends in "
-    "a join: one or more conjunctions (or, and, &, +, / or a comma), each followed only by spaces or separators "
-    "(. _ -), then at most one article (a, an, the, your or any) followed by spaces or separators. It doesn't match "
-    "text that reads as text that doesn't end in a conjunction or an article, then at most one article, then exempt "
-    "names, each followed by a join. An exempt name is one of the exempt pattern's qualifiers or the name of an ID "
-    "document (passport, license, licence, permit or DL), a contact (phone, telephone, mobile, email or username) "
-    "or a checkout code (promo, promotional, coupon, voucher, discount or certificate), alone or followed by card, "
-    "code or address, and then by a number (number, num, no or #) or not. Or, and, an article and an exempt name "
-    "count only with no letter or digit right before them. So the card number stays when a conjunction before it "
-    "joins it to a name that isn't an exempt name: it stays in 'Card or gift card number', 'Card or eGift card "
-    "number', 'Card or a gift card number', 'Payment or rewards card number' and 'Card, gift or loyalty card "
-    "number', and not in 'Gift or loyalty card number', 'Gift, loyalty, or rewards card number', 'Gift card or "
-    "library card number', 'Driver license or ID card number', 'Phone number or loyalty card number' or 'Gift card "
-    "number and PIN'. The payment pattern matches a word for a payment card with no letter right before or after it: "
+    "residence, Social Security, Aadhaar, PAN, citizen or voter card). The conjunction pattern matches text that "
+    "ends in a join: one or more conjunctions (or, and, &, +, / or a comma), each followed only by spaces or "
+    "separators (. _ -), then at most one article (a, an, the, your or any) followed by spaces or separators. The "
+    "text's names are its text before its first join and between one join and the next, and the pattern doesn't "
+    "match when each name ends in an exempt name followed only by spaces or separators. An exempt name is one of "
+    "the exempt pattern's qualifiers or the name of an ID document (passport, license, licence, permit or DL), a "
+    "contact (phone, telephone, mobile, email or username) or a checkout code (promo, promotional, coupon, voucher, "
+    "discount or certificate), alone or followed by card, code or address, and then by a number (number, num, no "
+    "or #) or not. Or and and count only with no letter or digit right before or after them, and an article and an "
+    "exempt name only with none right before them. So the card number stays when a conjunction before it joins it "
+    "to a name that doesn't end in an exempt name: it stays in 'Card or gift card number', 'Card or eGift card "
+    "number', 'Card or a gift card number', 'Payment or rewards card number', 'Card, gift or loyalty card number' "
+    "and 'Card or gift certificate or gift card number', and not in 'Gift or loyalty card number', 'Gift, loyalty, "
+    "or rewards card number', 'Gift card or library card number', 'Driver license or ID card number', 'Passport, "
+    "residence permit or ID card number', 'Phone number or loyalty card number' or 'Gift card number and PIN'. "
+    "The payment pattern matches a word for a payment card with no letter right before or after it: "
     "credit, debit, prepaid, CC, ATM, EBT, HSA or FSA, or one of the card networks Visa, Mastercard, Amex, American "
     "Express, Discover, Diners, JCB, UnionPay, Maestro, RuPay and Interac. Payment, bank and charge aren't payment "
     "words, since they also name a checkout's section. So a field that names a card number is ordinary only when "
     "the exempt pattern takes out each card number its values name and no value holds a payment word: "
-    "giftCardNumber, payment[gift_card_number], 'Library card number', 'ID card number' and 'Green card number' are "
-    "ordinary fields, while giftCardCvv, a benefits card's number, 'Credit card or gift card number', "
+    "giftCardNumber, payment[gift_card_number], 'Library card number', 'Gift card #', 'ID card number', 'PAN card "
+    "number' and 'Green card number' are ordinary fields, while giftCardCvv, 'Card #', a benefits card's number, "
+    "'Japan card number', 'Credit card or gift card number', "
     "creditOrGiftCardNumber, 'Visa gift card number', 'Green Dot card number', a field named giftCardNumber with the "
     "placeholder 'Card number', one named cardNumber with the aria-label 'Gift card number' and one with the id "
     "member and the placeholder 'Card number' stay card-named. A select labeled 'Credit or debit card' names no card "
@@ -628,6 +674,8 @@ def test_the_page_fixture_pins_the_one_card_field_rule_both_hosts_hold():
         "credit, debit, prepaid, payment, bank, charge, EBT, HSA or FSA",
         "where it joins an ordinary card to one the exempt pattern doesn't name",
         "An exempt card's name is one of the exempt pattern's qualifiers, alone or followed by card or a card number",
+        "It doesn't match text that reads as text that doesn't end in a conjunction or an article",
+        "Or, and, an article and an exempt name count only with no letter or digit right before them.",
     ):
         assert gone not in page.description, gone
     assert CARD_RULE in page.description
@@ -639,9 +687,9 @@ def test_the_page_fixture_pins_the_one_card_field_rule_both_hosts_hold():
     unnamed = page.examples["values that don't name a field for a card"]
     for example, card_named, required in (
         (named, True, CARD_NAMED + PAYMENT_CARD_NAMES + PAYMENT_GIFT_CARD_LABELS + COMBINED_PAYMENT_LABELS
-         + CONJOINED_CARD_LABELS + [MEMBER_ID_CARD_NO]),
+         + CONJOINED_CARD_LABELS + CARD_FIRST_LISTS + PAN_LOOKALIKES + [MEMBER_ID_CARD_NO]),
         (unnamed, False, NOT_CARD_NAMED + ORDINARY_CARD_NUMBERS + PAYMENT_WORD_LOOKALIKES + PAYMENT_SECTION_GIFT_CARDS
-         + EXEMPT_CARD_LISTS + OTHER_NAME_LISTS + CONJUNCTION_LOOKALIKES),
+         + EXEMPT_CARD_LISTS + OTHER_NAME_LISTS + WORDED_NAME_LISTS + CONJUNCTION_LOOKALIKES),
     ):
         assert (example.kind, example.where) == ("classification", "a field's name, id, aria-label or placeholder")
         assert example.body["card_named"] is card_named
@@ -674,7 +722,8 @@ def test_the_exempt_pattern_takes_out_only_an_ordinary_card_s_number_and_never_a
     page = _load("page")
     exempt = page.limits["card_field_exempt"]
     named_despite_an_exempt_match = (
-        PAYMENT_GIFT_CARD_LABELS + COMBINED_PAYMENT_LABELS + CONJOINED_CARD_LABELS + [MEMBER_ID_CARD_NO]
+        PAYMENT_GIFT_CARD_LABELS + COMBINED_PAYMENT_LABELS + CONJOINED_CARD_LABELS + CARD_FIRST_LISTS
+        + [MEMBER_ID_CARD_NO]
     )
     for value in page.examples["values that name a field for a card"].body["values"]:
         if value in named_despite_an_exempt_match:
@@ -840,16 +889,15 @@ def test_the_card_rule_lists_each_payment_word_its_pattern_holds_and_no_other():
 
 def _kept_as_worded(before: str) -> bool:
     """The conjunction rule as page.json words it, read plainly: the text
-    before an exempt match keeps it when it ends in a join and doesn't read as
-    text that doesn't end in a conjunction or an article, then exempt names,
-    each followed by a join, after at most one article."""
-    ends_in_a_join = re.compile(_JOIN + r"$", re.IGNORECASE)
-    ends_in_a_conjunction_or_article = re.compile(r"(" + _CONJUNCTION + "|" + _ARTICLE + r")[\s._-]*$", re.IGNORECASE)
-    names = re.compile(r"[\s._-]*" + _EXEMPT_NAMES_JOINED, re.IGNORECASE)
-    return ends_in_a_join.search(before) is not None and not any(
-        names.fullmatch(before, start) and not ends_in_a_conjunction_or_article.search(before[:start])
-        for start in range(len(before))
-    )
+    before an exempt match keeps it when its last join ends it, unless each of
+    its names (the text before its first join and between one join and the
+    next) ends in an exempt name followed only by spaces or separators."""
+    joins = list(re.finditer(_JOIN, before, re.IGNORECASE))
+    if not joins or joins[-1].end() != len(before):
+        return False
+    ends_in_an_exempt_name = re.compile(_EXEMPT_NAME + r"[\s._-]*$", re.IGNORECASE)
+    names = zip([0] + [join.end() for join in joins], [join.start() for join in joins])
+    return not all(ends_in_an_exempt_name.search(before, start, end) for start, end in names)
 
 
 def _card_named_keeping(attributes: dict[str, str], keeps: Callable[[str], bool], exempt: str | None = None) -> bool:
@@ -880,9 +928,11 @@ def test_a_conjunction_keeps_an_ordinary_card_s_number_joined_to_a_name_that_isn
     or loyalty card number' as card-named; one that looks only at the word
     right before the last conjunction reads 'Card, gift or loyalty card number'
     as ordinary and 'Gift card or library card number' as card-named; one that
-    reads or and and inside a longer word reads 'Vendor gift card number' as
-    card-named; and one that reads the text before a match after the earlier
-    matches are taken out reads 'Gift card number or loyalty card number' so."""
+    reads or and and at the end of a longer word reads 'Vendor gift card
+    number' as card-named, and one that reads them at its start reads 'Oregon
+    ID or library card number' so, taking the Or of Oregon for a conjunction;
+    and one that reads the text before a match after the earlier matches are
+    taken out reads 'Gift card number or loyalty card number' so."""
     limits = _load("page").limits
     conjunction = limits["card_field_conjunction"]
     assert CARD_FIELD_EXEMPT.startswith(_EXEMPT_QUALIFIERS)
@@ -915,6 +965,10 @@ def test_a_conjunction_keeps_an_ordinary_card_s_number_joined_to_a_name_that_isn
     assert inside_words != conjunction
     for label in CONJUNCTION_LOOKALIKES:
         assert _card_named_keeping({"aria-label": label}, _keeping_by(inside_words))
+    word_starts = conjunction.replace("(or|and)(?![a-z0-9])", "(or|and)")
+    assert word_starts != conjunction
+    assert not _card_named({"aria-label": "Oregon ID or library card number"})
+    assert _card_named_keeping({"aria-label": "Oregon ID or library card number"}, _keeping_by(word_starts))
 
     def taken_out_in_turn(form: str) -> str:
         exempt = re.compile(limits["card_field_exempt"], re.IGNORECASE)
@@ -959,11 +1013,11 @@ def test_an_e_gift_card_s_match_starts_at_its_e_so_the_conjunction_before_it_kee
     letter or digit right before it: a host that takes any e starts the match
     in 'Card or the gift card number' at the e of the, and reads the field as
     ordinary. An exempt name in the conjunction pattern starts a word too, so
-    the text before 'loyalty card number' in 'Card or eGift or loyalty card
-    number' doesn't read as 'Card or e' followed by the exempt name Gift: a
-    host whose names needn't start a word reads it so, and the field as
-    ordinary. The cost is a qualifier glued to the word before it ('MyGift or
-    loyalty card number'), which reads as card-named."""
+    a qualifier inside a longer word names no exempt card: 'Cardmember or gift
+    card number' keeps its card number, where a host whose names needn't start
+    a word reads Cardmember as ending in the exempt name member, and the field
+    as ordinary. The cost is a qualifier glued to the word before it ('MyGift
+    or loyalty card number'), which reads as card-named."""
     limits = _load("page").limits
     exempt, conjunction = limits["card_field_exempt"], limits["card_field_conjunction"]
     for value in ("eGift card number", "e-gift card number", "E-Gift Card No.", "Enter your eGift card number"):
@@ -984,11 +1038,12 @@ def test_an_e_gift_card_s_match_starts_at_its_e_so_the_conjunction_before_it_kee
 
     mid_word = conjunction.replace(r"(?<![a-z0-9])(" + _EXEMPT_QUALIFIERS, "(" + _EXEMPT_QUALIFIERS)
     assert mid_word != conjunction
-    for label in ("Card or eGift or loyalty card number", "Card, eGift or loyalty card number"):
+    for label in ("Cardmember or gift card number", "MyGift or loyalty card number"):
         assert _card_named({"aria-label": label}), label
         assert not _card_named_keeping({"aria-label": label}, _keeping_by(mid_word)), label
+    for label in ("Card or eGift or loyalty card number", "Card, eGift or loyalty card number"):
+        assert _card_named({"aria-label": label}), label
     assert not _card_named({"aria-label": "eGift or loyalty card number"})
-    assert _card_named({"aria-label": "MyGift or loyalty card number"})
 
 
 def test_a_join_holds_a_run_of_conjunctions_and_may_end_in_an_article():
@@ -998,12 +1053,10 @@ def test_a_join_holds_a_run_of_conjunctions_and_may_end_in_an_article():
     loyalty card number' join only exempt names and are ordinary, where a host
     that takes one conjunction per join reads them as card-named. 'Card or a
     gift card number' keeps its card number, where a host that takes no
-    article reads it as ordinary. The text before the exempt names may not
-    end in an article: a host that lets it reads 'Card or a gift or loyalty
-    card number' as 'Card or a' followed by the exempt name gift, and the field
-    as ordinary. An article may come before the first exempt name, so 'Enter a
-    gift or loyalty card number' stays ordinary, where a host that takes none
-    there reads it as card-named."""
+    article reads it as ordinary. Before an exempt name, an article is a word
+    like any other, so 'Enter a gift or loyalty card number' stays ordinary.
+    'Card or a gift or loyalty card number' keeps its card number, since its
+    first name, Card, doesn't end in an exempt name."""
     runs = ("Gift, loyalty, or rewards card number", "Gift and/or loyalty card number")
     articles = ("Card or a gift card number", "Card or an eGift card number", "Card or your gift card number")
     for label in runs:
@@ -1018,17 +1071,11 @@ def test_a_join_holds_a_run_of_conjunctions_and_may_end_in_an_article():
     conjunction = _load("page").limits["card_field_conjunction"]
     one_conjunction = conjunction.replace("(" + _CONJUNCTION + r"[\s._-]*)+", _CONJUNCTION + r"[\s._-]*")
     no_article = conjunction.replace("(" + _ARTICLE + r"[\s._-]+)?", "")
-    article_end = conjunction.replace(_NOT_AN_ARTICLE_END, "")
-    no_leading_article = conjunction.replace(
-        _EXEMPT_NAMES_JOINED, _EXEMPT_NAMES_JOINED.removeprefix("(" + _ARTICLE + r"[\s._-]+)?"),
-    )
-    assert len({conjunction, one_conjunction, no_article, article_end, no_leading_article}) == 5
+    assert len({conjunction, one_conjunction, no_article}) == 3
     for label in runs:
         assert _card_named_keeping({"aria-label": label}, _keeping_by(one_conjunction)), label
     for label in articles:
         assert not _card_named_keeping({"aria-label": label}, _keeping_by(no_article)), label
-    assert not _card_named_keeping({"aria-label": "Card or a gift or loyalty card number"}, _keeping_by(article_end))
-    assert _card_named_keeping({"aria-label": "Enter a gift or loyalty card number"}, _keeping_by(no_leading_article))
 
 
 def test_a_card_number_joined_to_an_id_document_a_contact_or_a_checkout_code_is_ordinary():
@@ -1143,6 +1190,99 @@ def test_an_identity_card_s_number_is_ordinary_and_no_qualifier_takes_a_payment_
     for value in ("Amex Green Card number", "Passport, visa or ID card number"):
         assert re.search(exempt, value, re.IGNORECASE) and _holds_payment_word(_value_forms({"name": value})[0])
         assert _card_named({"placeholder": value}), value
+
+
+def test_a_conjunction_keeps_the_card_number_unless_each_name_it_joins_ends_in_an_exempt_name():
+    """A list that names a payment card first and an exempt card's number
+    last takes the person's payment card, whatever names stand between:
+    'Card or gift certificate or gift card number'. So the conjunction pattern
+    reads the names the text's joins separate, and drops the match only when
+    each of them ends in an exempt name; a name holds no conjunction. A host
+    whose first name may hold one reads 'Card or gift' as that name and
+    'certificate or' as the next, and the field as ordinary. Words may come
+    before the exempt name in any name of the list, so 'Passport, residence
+    permit or ID card number' and 'Gift card, mobile phone or loyalty card
+    number' stay ordinary: a host that takes words only before the first
+    name's exempt name reads them as card-named, and one that takes none reads
+    'Student ID or library card number' and 'Enter a gift or loyalty card
+    number' so. A name never starts with a space or separator, and a lookahead
+    never gives back what it matched, so each name is read one way and the
+    pattern answers a long list at once: with a name that may start with a
+    space, 'national ID or ' 18 times and then 'x or ' took 7 s in Python's re,
+    four times as long per two more names."""
+    for label in CARD_FIRST_LISTS + ["Card or a gift or loyalty card number"]:
+        for attribute in CARD_FIELD_ATTRIBUTES:
+            assert _card_named({attribute: label}), (attribute, label)
+            assert not any(_holds_payment_word(pair) for pair in _value_forms({attribute: label})), (attribute, label)
+    worded = WORDED_NAME_LISTS + ["Enter a gift or loyalty card number", "Student ID or library card number"]
+    for label in worded:
+        for attribute in CARD_FIELD_ATTRIBUTES:
+            assert not _card_named({attribute: label}), (attribute, label)
+
+    conjunction = _load("page").limits["card_field_conjunction"]
+    one_way = "(" + _NAME_ENDING_IN_AN_EXEMPT_NAME + ")+"
+    holding_a_conjunction = conjunction.replace("(?=" + _NO_CONJUNCTION, r"(?=[\s\S]*", 1)
+    names_alone = _NAME_ENDING_IN_AN_EXEMPT_NAME.replace("(?=" + _NO_CONJUNCTION, "(?=", 1)
+    words_first_only = conjunction.replace(one_way, _NAME_ENDING_IN_AN_EXEMPT_NAME + "(" + names_alone + ")*")
+    no_words = conjunction.replace(one_way, "(" + names_alone + ")+")
+    assert one_way in conjunction
+    assert len({conjunction, holding_a_conjunction, words_first_only, no_words}) == 4
+    for label in ("Card or gift certificate or gift card number", "Card or a gift or loyalty card number"):
+        assert not _card_named_keeping({"aria-label": label}, _keeping_by(holding_a_conjunction)), label
+    for label in WORDED_NAME_LISTS[:3]:
+        assert _card_named_keeping({"aria-label": label}, _keeping_by(words_first_only)), label
+    for label in worded[-2:]:
+        assert _card_named_keeping({"aria-label": label}, _keeping_by(no_words)), label
+
+    for text in ("national ID or " * 18 + "x or ", "e-gift or " * 2000 + "x or ", "-" * 5000 + "or"):
+        started = time.perf_counter()
+        assert _kept_by_a_conjunction(text)
+        assert time.perf_counter() - started < 1, text[:20]
+
+
+def test_a_pan_card_s_number_is_an_identity_card_s_and_pan_counts_only_at_a_word_s_start():
+    """India's PAN card is a tax identity card, and a KYC form asks for its
+    number ('PAN card number', panCardNumber, 'PAN or Aadhaar card number'), so
+    it is ordinary on both hosts. Pan counts only with no letter or digit right
+    before it, so 'Japan card number' and 'Span card number' keep their card
+    number, where a host whose pan needs no word start reads them as ordinary.
+    A PAN is also a payment card's number, but the card pattern names no PAN
+    alone, so 'Card number (PAN)' is card-named by its card number, and 'PAN or
+    gift card number' reads as ordinary, as 'PAN' does."""
+    for value in PAN_CARD_NUMBERS + ["PAN or Aadhaar card number"]:
+        for attribute in CARD_FIELD_ATTRIBUTES:
+            assert not _card_named({attribute: value}), (attribute, value)
+    for value in PAN_LOOKALIKES:
+        for attribute in CARD_FIELD_ATTRIBUTES:
+            assert _card_named({attribute: value}), (attribute, value)
+    exempt = _load("page").limits["card_field_exempt"]
+    unbounded = exempt.replace("|(?<![a-z0-9])pan|", "|pan|")
+    assert unbounded != exempt
+    for value in ("Japan card number", "Span card number"):
+        assert not _card_named_keeping({"aria-label": value}, _kept_by_a_conjunction, exempt=unbounded), value
+    assert not _card_named({"aria-label": "PAN or gift card number"}) and not _card_named({"aria-label": "PAN"})
+
+
+def test_a_hash_after_card_names_a_card_s_number():
+    """A form writes a card's number as 'Card #' ('Credit card #', 'CC #'), so
+    # is a number word in the card pattern after card and cc, as in an exempt
+    name, where a host without it types into 'Card #'. The exempt pattern takes
+    # too, so 'Gift card #' is ordinary, where a host whose exempt pattern
+    lacks it reads it as card-named, and 'Card / gift card #' keeps its card
+    number by the conjunction."""
+    for value in HASH_CARD_NUMBERS + ["Card / gift card #"]:
+        for attribute in CARD_FIELD_ATTRIBUTES:
+            assert _card_named({attribute: value}), (attribute, value)
+    for value in HASH_ORDINARY_CARD_NUMBERS:
+        for attribute in CARD_FIELD_ATTRIBUTES:
+            assert not _card_named({attribute: value}), (attribute, value)
+    limits = _load("page").limits
+    name, exempt = limits["card_field_name"], limits["card_field_exempt"]
+    assert name.count("|#)") == 2 and exempt.count("|#)") == 1
+    for value in HASH_CARD_NUMBERS:
+        assert re.search(name.replace("|#)", ")"), value, re.IGNORECASE) is None, value
+    for value in HASH_ORDINARY_CARD_NUMBERS:
+        assert _card_named_keeping({"placeholder": value}, _kept_by_a_conjunction, exempt=exempt.replace("|#)", ")"))
 
 
 def test_a_card_named_field_on_the_page_is_a_secret_field():
