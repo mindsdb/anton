@@ -45,6 +45,7 @@ from anton.core.memory.base import (
 )
 from anton.core.memory.hippocampus import (
     Hippocampus,
+    holds_entries,
     normalize_entry_text,
     normalize_prompt_line,
 )
@@ -499,19 +500,47 @@ _LEARNED_PREFERENCE_HEADING = re.compile(
     r"## (?:Your|Shared) Memory — (Identity|Global Rules|Project Rules)"
 )
 
+#: A rule kind's subheading in a rules section, as _format_rules_engrams
+#: renders it.
+_RULE_KIND_HEADING = re.compile("## (?:" + "|".join(s.capitalize() for s in _RULE_SECTIONS) + ")")
+
 
 def drop_forgotten_lines(preferences: str, matches: list[MemoryMatch]) -> str:
     """`preferences` (Cortex.prompt_preferences) without the lines that show `matches`.
 
     A line goes only from a section of its match's own tier. The operator's
     sections and the other tier's keep a line with the same text, since
-    those entries are still saved.
+    those entries are still saved. A learned section left with headings
+    alone goes too, as build_memory_context leaves out a tier with nothing
+    saved, and so does a rule kind's subheading whose rules all went.
     """
     dropped = {(match.tier, normalize_entry_text(match.entry.text)) for match in matches}
     kept: list[str] = []
     tier: str | None = None
+    # Where the current learned section starts in `kept`, or None outside one.
+    start: int | None = None
+
+    def close_section() -> None:
+        if start is None:
+            return
+        section = kept[start:]
+        if not holds_entries("\n".join(section)):
+            del kept[start:]
+            return
+        kept[start:] = [
+            line
+            for k, line in enumerate(section)
+            if not (
+                _RULE_KIND_HEADING.fullmatch(line.strip())
+                and next((rest for rest in section[k + 1 :] if rest.strip()), "#").lstrip().startswith("#")
+            )
+        ]
+
     for line in preferences.splitlines():
         heading = _LEARNED_PREFERENCE_HEADING.fullmatch(line.strip())
+        if heading or line.startswith("## Operator Memory"):
+            close_section()
+            start = len(kept) if heading else None
         if heading:
             tier = "project" if heading.group(1) == "Project Rules" else "global"
         elif line.startswith("## Operator Memory"):
@@ -519,7 +548,8 @@ def drop_forgotten_lines(preferences: str, matches: list[MemoryMatch]) -> str:
         elif tier is not None and (tier, normalize_prompt_line(line)) in dropped:
             continue
         kept.append(line)
-    return "\n".join(kept)
+    close_section()
+    return "\n".join(kept).rstrip()
 
 
 class Cortex:
@@ -703,6 +733,10 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         # operator's sections. Its lines are counted here too, before the
         # await gives another turn the chance to rewrite profile.md.
         identity = self.global_hc.recall_identities() if read_learned else ""
+        if not holds_entries(identity):
+            # A profile left with its heading alone, as forgetting its last
+            # fact leaves it, recalls nothing.
+            identity = ""
         profile_lines = len(self.global_hc.get_identities()) if identity else 0
 
         # Rules (with smart retrieval) for the operator's layer, then global,

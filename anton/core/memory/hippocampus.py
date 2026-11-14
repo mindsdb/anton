@@ -129,6 +129,16 @@ def normalize_prompt_line(line: str) -> str:
     return normalize_entry_text(" ".join(words))
 
 
+def holds_entries(text: str) -> bool:
+    """Whether `text`, a memory file or a prompt section rendered from one,
+    holds an entry: a line that is neither blank nor a ``#`` heading.
+
+    profile.md keeps its ``# Profile`` heading after its last fact is
+    removed, and that heading alone recalls nothing.
+    """
+    return any(line.strip() and not line.lstrip().startswith("#") for line in text.splitlines())
+
+
 # The metadata keys an entry line carries in its trailing comment, besides `ts`.
 _META_KEYS = ("confidence", "source", "topic")
 
@@ -279,10 +289,7 @@ class Hippocampus:
                     if path.is_symlink():
                         return "unavailable"
                     continue
-                present |= any(
-                    line.strip() and not line.lstrip().startswith("#")
-                    for line in content.splitlines()
-                )
+                present |= holds_entries(content)
         except (OSError, UnicodeDecodeError):
             return "unavailable"
         return "present" if present else "empty"

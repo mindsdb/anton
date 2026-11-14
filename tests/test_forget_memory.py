@@ -419,6 +419,96 @@ async def test_after_a_removal_no_later_prompt_recalls_the_rule(tmp_path, memory
     assert "Answer in English" in other.recalled_preferences()
 
 
+_COLOR = "Preferred chart color: teal (#008080)."
+
+
+async def test_forgetting_the_last_profile_fact_leaves_nothing_recalled(tmp_path, memory_dirs):
+    """profile.md keeps its "# Profile" heading after its last fact goes, and
+    that heading alone recalls nothing. A page build handed it read the
+    recalled-preferences framing over an empty profile."""
+    global_dir, _ = memory_dirs
+    (global_dir / "profile.md").write_text(f"# Profile\n- {_COLOR}\n")
+    session = _session(tmp_path, memory_dirs)
+    await session._build_system_prompt("hello")
+    assert session.recalled_preferences() == f"## Your Memory — Identity\n# Profile\n- {_COLOR}"
+
+    result = await handle_forget(session, {"entries": [{"text": _COLOR, "scope": "global"}]})
+
+    assert result.ok is True
+    assert (global_dir / "profile.md").read_text().strip() == "# Profile"
+    # This turn's page build gets nothing, and neither does a new conversation's.
+    assert session.recalled_preferences() == ""
+    other = _session(tmp_path, memory_dirs, session_id=OTHER_CONV)
+    prompt = await other._build_system_prompt("chart my sales")
+    assert other.recalled_preferences() == ""
+    assert "## Your Memory — Identity" not in prompt
+
+
+async def test_forgetting_a_tiers_last_rule_drops_its_section_and_keeps_the_rest_as_it_was(
+    tmp_path, memory_dirs,
+):
+    global_dir, project_dir = memory_dirs
+    (global_dir / "profile.md").write_text("# Profile\n- Name: Ada\n")
+    (global_dir / "rules.md").write_text(f"# Rules\n\n## Always\n- {TEAL}\n")
+    (project_dir / "rules.md").write_text("# Rules\n\n## Never\n- Never show salaries\n")
+    session = _session(tmp_path, memory_dirs)
+    await session._build_system_prompt("hello")
+    identity = "## Your Memory — Identity\n# Profile\n- Name: Ada"
+    project = "## Your Memory — Project Rules\n## Never\n- Never show salaries"
+    assert session.recalled_preferences() == (
+        f"{identity}\n\n## Your Memory — Global Rules\n## Always\n- {TEAL}\n\n{project}"
+    )
+
+    result = await handle_forget(session, {"entries": [{"text": TEAL, "scope": "global"}]})
+
+    assert result.ok is True
+    assert session.recalled_preferences() == f"{identity}\n\n{project}"
+
+
+async def test_forgetting_the_last_tiers_last_rule_drops_its_section_and_the_trailing_gap(
+    tmp_path, memory_dirs,
+):
+    global_dir, project_dir = memory_dirs
+    (global_dir / "profile.md").write_text("# Profile\n- Name: Ada\n")
+    (global_dir / "rules.md").write_text(f"# Rules\n\n## Always\n- {TEAL}\n")
+    (project_dir / "rules.md").write_text("# Rules\n\n## Never\n- Never show salaries\n")
+    session = _session(tmp_path, memory_dirs)
+    await session._build_system_prompt("hello")
+    identity = "## Your Memory — Identity\n# Profile\n- Name: Ada"
+
+    result = await handle_forget(
+        session, {"entries": [{"text": "Never show salaries", "scope": "project"}]}
+    )
+
+    assert result.ok is True
+    assert session.recalled_preferences() == (
+        f"{identity}\n\n## Your Memory — Global Rules\n## Always\n- {TEAL}"
+    )
+
+
+async def test_forgetting_a_rule_kinds_last_rule_drops_its_subheading(tmp_path, memory_dirs):
+    global_dir, _ = memory_dirs
+    (global_dir / "rules.md").write_text(
+        f"# Rules\n\n## Always\n- {TEAL}\n\n## Never\n- Never use pie charts\n\n"
+        "## When\n- When asked for totals, add a sum row\n"
+    )
+    session = _session(tmp_path, memory_dirs)
+    await session._build_system_prompt("hello")
+
+    removed = await handle_forget(
+        session,
+        {"entries": [
+            {"text": TEAL, "scope": "global"},
+            {"text": "When asked for totals, add a sum row", "scope": "global"},
+        ]},
+    )
+
+    assert removed.ok is True
+    assert session.recalled_preferences() == (
+        "## Your Memory — Global Rules\n## Never\n- Never use pie charts"
+    )
+
+
 async def test_a_removal_leaves_the_same_line_in_the_operators_and_the_other_tiers_sections(
     tmp_path, memory_dirs,
 ):
@@ -444,10 +534,10 @@ async def test_a_removal_leaves_the_same_line_in_the_operators_and_the_other_tie
 
     assert result.ok is True
     recalled = session.recalled_preferences()
-    operator, rest = recalled.split("## Your Memory — Global Rules")
-    global_section, project_section = rest.split("## Your Memory — Project Rules")
+    operator, project_section = recalled.split("## Your Memory — Project Rules")
     assert line in operator
-    assert line not in global_section
+    # The global section held only that line, so it goes with it.
+    assert "## Your Memory — Global Rules" not in recalled
     assert line in project_section
     assert line not in (global_dir / "rules.md").read_text()
     assert line in (managed / "rules.md").read_text()
@@ -658,6 +748,35 @@ async def test_a_cloud_prompt_built_again_in_the_turn_still_leaves_the_line_out(
 
     assert TEAL not in session.recalled_preferences()
     assert "Answer in English" in session.recalled_preferences()
+
+
+async def test_a_cloud_turn_recalls_nothing_from_a_profile_left_with_its_heading(
+    tmp_path, monkeypatch, memory_dir,
+):
+    """After the host removes the last profile fact, the profile it sends the
+    next turn is its heading alone."""
+    memory = {"global": {"profile": "# Profile\n\n", "rules": "## Always\n- Answer in English"}}
+    session = _real_cloud_session(tmp_path, monkeypatch, memory=memory)
+
+    prompt = await session._build_system_prompt("chart my sales")
+
+    assert "Identity" not in session.recalled_preferences()
+    assert "## Your Memory — Identity" not in prompt
+    assert "- Answer in English" in session.recalled_preferences()
+
+
+async def test_a_cloud_forget_of_the_last_profile_fact_leaves_nothing_recalled(
+    tmp_path, monkeypatch, memory_dir,
+):
+    memory = {"global": {"profile": f"# Profile\n- {_COLOR}"}, "project": {}}
+    session = _real_cloud_session(tmp_path, monkeypatch, memory=memory)
+    await session._build_system_prompt("chart my sales")
+    assert _COLOR in session.recalled_preferences()
+
+    result = await handle_forget(session, {"entries": [{"text": _COLOR, "scope": "global"}]})
+
+    assert result.ok is True
+    assert session.recalled_preferences() == ""
 
 
 async def test_a_cloud_request_named_twice_is_sent_once(tmp_path, monkeypatch, memory_dir):

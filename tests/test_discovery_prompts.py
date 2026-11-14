@@ -8,6 +8,7 @@ is locked in test_artifact_prefix_stability.py.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +26,7 @@ from anton.core.tools.generate_artifact.prompts import (
     RECALLED_PREFERENCES_FOOTER,
     RECALLED_PREFERENCES_HEADING,
     preferences_text,
+    recalled_preferences_section,
 )
 from anton.core.tools.generate_artifact.discovery.prompts import (
     SCRATCHPADS_HEADER,
@@ -47,6 +49,26 @@ def _state(**over) -> GenState:
     )
     base.update(over)
     return GenState(**base)
+
+
+#: Words that would name a page's look in the recalled-preferences framing.
+_LOOK_EXAMPLE = re.compile(
+    r"#[0-9a-f]{3,8}\b|rgb|\b(?:teal|red|blue|green|orange|purple|yellow|indigo|navy|"
+    r"black|white|gray|grey|pink|serif|sans|bold|italic|dark|light)\b",
+    re.I,
+)
+
+
+def test_the_recalled_preferences_framing_gives_no_example_of_a_look():
+    """Shown over a profile with nothing saved, a framing whose example said
+    "chart bars are teal" made most pages teal-like. It names no look, so it
+    adds none of its own to the recalled text it frames."""
+    heading = RECALLED_PREFERENCES_HEADING
+    section = recalled_preferences_section("## Your Memory — Global Rules\n## Always\n- x")
+    for text in (heading, section):
+        assert not _LOOK_EXAMPLE.search(text), _LOOK_EXAMPLE.search(text)
+    assert "such as" not in heading
+    assert "Write what a rule changes as a plain requirement, never the rule itself" in heading
 
 
 def test_pipeline_system_prompt_lists_every_buildable_artifact_type_and_no_other():

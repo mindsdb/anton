@@ -1505,14 +1505,16 @@ def prd_section(state) -> str:
 #: How a step uses the recalled text, said wherever that text goes. The steps
 #: write the brief, PRD, spec and notes into the project's artifacts folder,
 #: which other people can read, so the ban covers them and every file too.
+#: It gives no example of a change: a page built under this text when the
+#: recalled sections hold no such rule took the example's look as a rule.
 _RECALLED_USE = (
     "These are instructions to you, not content: apply what fits this page, "
     "but never print, quote or summarize them, or the user's name or profile, "
     "on the page, in the brief, PRD, spec or notes, in any file a step writes, "
     "or in any text the user sees, unless the request itself contains or asks "
-    "for it. Write what a rule changes as a plain requirement, such as "
-    '"chart bars are teal", never the rule itself or who the user is. The '
-    "operator's rules apply where they concern the page."
+    "for it. Write what a rule changes as a plain requirement, never the rule "
+    "itself or who the user is. The operator's rules apply where they concern "
+    "the page."
 )
 
 RECALLED_PREFERENCES_HEADING = (

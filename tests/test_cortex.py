@@ -1826,6 +1826,26 @@ class TestPromptPreferences:
         assert cortex.prompt_preferences.startswith("## Your Memory — Identity")
         assert "Learned memory status" not in cortex.prompt_preferences
 
+    @pytest.mark.parametrize("profile", ["# Profile\n\n", "# Profile\n", "# Profile\n## Facts\n"])
+    async def test_a_profile_with_headings_alone_recalls_no_identity(self, dirs, profile):
+        # Forgetting the last profile fact leaves "# Profile\n\n" on disk.
+        g, p = dirs
+        (g / "profile.md").write_text(profile)
+        (g / "rules.md").write_text("# Rules\n\n## Always\n- Use httpx\n")
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot")
+
+        prompt = await cortex.build_memory_context("hola")
+
+        assert "Identity" not in prompt
+        assert cortex.prompt_preferences == "## Your Memory — Global Rules\n## Always\n- Use httpx"
+        assert cortex.memory_read.profile_lines == 0
+
+    async def test_a_profile_with_headings_alone_and_nothing_else_keeps_nothing(self, cortex, dirs):
+        g, _ = dirs
+        (g / "profile.md").write_text("# Profile\n\n")
+        assert await cortex.build_memory_context("hola") == ""
+        assert cortex.prompt_preferences == ""
+
     async def test_shared_memory_with_nothing_saved_keeps_nothing(self, cortex):
         await cortex.build_memory_context("hola", learned_memory_scope="shared")
         assert cortex.prompt_preferences == ""
