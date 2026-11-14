@@ -58,7 +58,7 @@ except ValueError:
 _SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", EXPLAINABILITY_QUERIES_NAME})
 
 # Helpers this module injects. They are excluded because they are rebuilt fresh each
-# boot and some (`get_llm`, `web_search`, `query_minds_data`) close over live network
+# boot and some (`get_llm`, `web_search`, `query_minds_data`, `call_minds_api`) close over live network
 # clients that must not be pickled or carried between processes.
 #
 # Excluded BY IDENTITY, not by name (`_INJECTED_HELPERS` below). Excluding by name
@@ -1178,6 +1178,236 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
         # The prompt still advertises the helper, so say on the controller's
         # stderr why the agent will meet a NameError instead of it.
         print(f"cloud datasource helper not injected: malformed connection references ({type(exc).__name__})",
+              file=sys.stderr)
+
+# --- Inject the turn-key-bound custom API helper ---
+if _cloud_turn and os.environ.get("ANTON_CLOUD_CUSTOM_API_CONNECTIONS"):
+    try:
+        import base64 as _custom_base64
+        import http.client as _custom_http
+        import ssl as _custom_ssl
+        import urllib.parse as _custom_parse
+
+        # The gateway is on the inference host this child already calls, with the
+        # same turn key. Never the ANTON_OPENAI_* fallbacks get_llm reads.
+        _custom_gateway_url = os.environ.get("OPENAI_BASE_URL", "").strip().rstrip("/")
+        _custom_turn_key = os.environ.get("OPENAI_API_KEY", "")
+        _custom_correlation_id = os.environ.get("ANTON_CLOUD_CUSTOM_API_CORRELATION_ID", "")
+        _custom_versions = {
+            int(ref["connection_id"]): int(ref["credential_version"])
+            for ref in json.loads(os.environ["ANTON_CLOUD_CUSTOM_API_CONNECTIONS"])
+            if isinstance(ref, dict)
+        }
+        # The gateway's closed vocabulary (mindshub_inference's
+        # docs/contracts/custom-api-request-v1.json). A body naming anything
+        # else is not relayed: an error code must not become a channel into the
+        # agent's context.
+        _custom_gateway_codes = frozenset({
+            "unauthorized", "gateway_disabled", "invalid_request", "invalid_connection",
+            "authorization_unavailable", "destination_forbidden", "redirect_refused",
+            "encoding_refused", "timed_out", "response_too_large", "rate_limited",
+            "upstream_unavailable",
+        })
+        # The gateway's fixed 422 details that name what to fix. Only an exact
+        # match adds a part; the detail text itself is never relayed.
+        _custom_refused_parts = {
+            "Custom API request path is not allowed.": "path",
+            "Custom API request query is not allowed.": "query",
+            "Custom API request headers is not allowed.": "headers",
+            "Custom API request may not carry the turn key.": "turn_key",
+        }
+        _custom_media_types = frozenset({
+            "application/json", "text/plain", "text/csv", "text/html", "application/xml",
+            "application/pdf", "application/octet-stream",
+        })
+        _custom_answer_keys = frozenset({
+            "protocol_version", "connection_id", "credential_version", "status", "headers",
+            "body", "body_encoding",
+        })
+        # A 1 MiB answer JSON-escaped is at most about 6 MiB.
+        _custom_read_cap = 8_388_608
+
+        def _custom_error(code, part=None):
+            """The helper's error result, with the part to fix when the gateway named one."""
+            error = {"type": "error", "error_code": code}
+            if part is not None:
+                error["part"] = part
+            return error
+
+        def _custom_query_pairs(query):
+            """``query`` as the wire's [name, value] string pairs, or None when it cannot be sent.
+
+            A dict or a list of 2-item pairs; names are text, values text or
+            numbers (sent as Python writes them), never booleans.
+            """
+            if query is None:
+                return []
+            if isinstance(query, dict):
+                items = list(query.items())
+            elif isinstance(query, (list, tuple)):
+                items = []
+                for pair in query:
+                    if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                        return None
+                    items.append(tuple(pair))
+            else:
+                return None
+            pairs = []
+            for name, value in items:
+                if not isinstance(name, str) or isinstance(value, bool):
+                    return None
+                if isinstance(value, str):
+                    pairs.append([name, value])
+                elif isinstance(value, (int, float)):
+                    try:
+                        pairs.append([name, str(value)])
+                    except ValueError:
+                        # An int past Python's digit limit has no text form to send.
+                        return None
+                else:
+                    return None
+            return pairs
+
+        def _custom_post(payload):
+            """One POST over a verified TLS connection. http.client never follows
+            a redirect, so the bearer cannot be replayed to wherever a response
+            points; a 3xx is just a failed status to the caller."""
+            parsed = _custom_parse.urlsplit(_custom_gateway_url)
+            connection = _custom_http.HTTPSConnection(
+                parsed.hostname, parsed.port or 443, timeout=30, context=_custom_ssl.create_default_context()
+            )
+            try:
+                connection.request(
+                    "POST",
+                    "/v1/datasources/custom-api/request",
+                    body=payload,
+                    headers={
+                        "Authorization": f"Bearer {_custom_turn_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                )
+                response = connection.getresponse()
+                return response.status, response.read(_custom_read_cap + 1)
+            finally:
+                connection.close()
+
+        def _custom_refusal(body):
+            """The gateway's own code (and part) from a refusal body; any other body is an outage."""
+            try:
+                error = json.loads(body.decode("utf-8")) if len(body) <= 65_536 else None
+            except (ValueError, RecursionError):
+                return _custom_error("custom_api_unavailable")
+            code = error.get("code") if isinstance(error, dict) else None
+            if not isinstance(code, str) or code not in _custom_gateway_codes:
+                return _custom_error("custom_api_unavailable")
+            detail = error.get("detail")
+            part = _custom_refused_parts.get(detail) if code == "invalid_request" and isinstance(detail, str) else None
+            return _custom_error(code, part)
+
+        def _custom_answer(body, connection_id):
+            """The result for the gateway's 200, or invalid_custom_api_response when it is not the contract's answer."""
+            invalid = _custom_error("invalid_custom_api_response")
+            try:
+                answer = json.loads(body.decode("utf-8"))
+            except (ValueError, RecursionError):
+                return invalid
+            if not isinstance(answer, dict) or set(answer) != _custom_answer_keys:
+                return invalid
+            expected = {
+                "protocol_version": 1,
+                "connection_id": connection_id,
+                "credential_version": _custom_versions[connection_id],
+            }
+            # A result that does not echo this exact binding is not this call's answer.
+            if not all(type(answer[key]) is type(value) and answer[key] == value for key, value in expected.items()):
+                return invalid
+            status, headers = answer["status"], answer["headers"]
+            body_text, encoding = answer["body"], answer["body_encoding"]
+            if type(status) is not int or not 100 <= status <= 999:
+                return invalid
+            if not isinstance(headers, dict) or set(headers) - {"content-type"}:
+                return invalid
+            if headers and (
+                not isinstance(headers["content-type"], str) or headers["content-type"] not in _custom_media_types
+            ):
+                return invalid
+            if not isinstance(body_text, str) or encoding not in ("text", "base64"):
+                return invalid
+            if encoding == "base64":
+                try:
+                    _custom_base64.b64decode(body_text, validate=True)
+                except ValueError:
+                    return invalid
+            return {
+                "type": "response",
+                "status": status,
+                "headers": dict(headers),
+                "body": body_text,
+                "body_encoding": encoding,
+            }
+
+        def call_minds_api(connection_id, path, query=None, headers=None):
+            """Call a custom API connection of this turn with one GET, through the gateway.
+
+            The gateway adds the credentials and the address the user saved;
+            this turn holds neither. Returns {'type': 'response', 'status',
+            'headers', 'body', 'body_encoding'} or {'type': 'error',
+            'error_code'[, 'part']}.
+            """
+            try:
+                if (
+                    isinstance(connection_id, bool)
+                    or not isinstance(connection_id, int)
+                    or connection_id not in _custom_versions
+                    or not isinstance(path, str)
+                    or not path.startswith("/")
+                ):
+                    return _custom_error("invalid_custom_api_request")
+                pairs = _custom_query_pairs(query)
+                if pairs is None:
+                    return _custom_error("invalid_custom_api_request")
+                if headers is None:
+                    headers = {}
+                if not isinstance(headers, dict) or not all(
+                    isinstance(name, str) and isinstance(value, str) for name, value in headers.items()
+                ):
+                    return _custom_error("invalid_custom_api_request")
+                parsed_url = _custom_parse.urlsplit(_custom_gateway_url)
+                if (
+                    parsed_url.scheme != "https"
+                    or not parsed_url.hostname
+                    or parsed_url.username is not None
+                    or parsed_url.password is not None
+                    or parsed_url.path != "/v1"
+                    or parsed_url.query
+                    or parsed_url.fragment
+                ):
+                    return _custom_error("gateway_unavailable")
+                payload = json.dumps(
+                    {
+                        "protocol_version": 1,
+                        "connection_id": connection_id,
+                        "credential_version": _custom_versions[connection_id],
+                        "correlation_id": _custom_correlation_id,
+                        "request": {"method": "GET", "path": path, "query": pairs, "headers": dict(headers)},
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                status, body = _custom_post(payload)
+                if status != 200:
+                    return _custom_refusal(body)
+                if len(body) > _custom_read_cap:
+                    return _custom_error("response_too_large")
+                return _custom_answer(body, connection_id)
+            except (_custom_http.HTTPException, TimeoutError, ValueError, OSError):
+                return _custom_error("custom_api_unavailable")
+
+        _inject_helper("call_minds_api", call_minds_api)
+    except (KeyError, TypeError, ValueError) as exc:
+        # The prompt still advertises the helper, so say on the controller's
+        # stderr why the agent will meet a NameError instead of it.
+        print(f"cloud custom API helper not injected: malformed connection references ({type(exc).__name__})",
               file=sys.stderr)
 
 # Read-execute loop

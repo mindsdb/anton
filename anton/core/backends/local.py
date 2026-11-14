@@ -181,7 +181,7 @@ def _encode_cell_payload(payload: str) -> bytes:
 
 
 def _is_cloud_turn_state(key: str) -> bool:
-    return key == "ANTON_CLOUD_TURN" or key.startswith("ANTON_CLOUD_DATASOURCE_")
+    return key == "ANTON_CLOUD_TURN" or key.startswith(("ANTON_CLOUD_DATASOURCE_", "ANTON_CLOUD_CUSTOM_API_"))
 
 
 def _apply_workspace_overlay(env: dict[str, str], overlay: dict[str, str] | None) -> list[str]:
