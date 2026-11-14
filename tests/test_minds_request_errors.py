@@ -236,6 +236,20 @@ def test_a_server_error_is_reported_without_a_cause(server, status, body):
     assert not any(word in note for word in ("outage", "transient", "overload", "maintenance"))
 
 
+@pytest.mark.parametrize("status", [302, 399, 600])
+def test_a_status_outside_4xx_and_5xx_is_not_called_a_server_error(server, status):
+    """urllib raises for a redirect without a Location and for unknown
+    statuses; those are not server errors, so they don't get that note."""
+    base, answer = server
+    answer("/upload", status, {"error": "x"})
+
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        minds_request(f"{base}/upload", "key", method="POST", payload=b"{}")
+
+    line = describe_minds_request_failure(caught.value)
+    assert line.endswith("Anton's note: the server answered with an unexpected status.")
+
+
 def test_no_response_is_reported_without_a_cause():
     base = _closed_port_url()
 
