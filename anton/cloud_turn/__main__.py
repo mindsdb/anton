@@ -49,6 +49,7 @@ from anton.cloud_turn.session import (
     remove_staged_skills,
 )
 from anton.cloud_turn.stdin import start_answer_reader
+from anton.core.browser.tool import tidy_after_turn
 from anton.core.llm.liveness import MODEL_WAIT_PHASE, MODEL_WAIT_TICK_S
 from anton.core.llm.provider import ProviderErrorFilter
 
@@ -481,6 +482,10 @@ async def _stream_turn(
             if rows:
                 logger.info("emitting %d turn-history row(s)", len(rows))
                 wire({"kind": "history", "rows": rows})
+        # Before the terminal: the browser tidy asks its decision with the
+        # turn key, which the host revokes once `turn_completed` arrives.
+        # Bounded by TIDY_TIMEOUT_S and never raises; close() then skips it.
+        await tidy_after_turn(session)
         logger.info("cloud turn completed")
         completed = {"kind": "turn_completed"}
         # The folders this turn's tools and cells touched, so the host stats

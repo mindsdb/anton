@@ -276,6 +276,11 @@ _pending_lock = threading.Lock()
 #                    security check"): the tool handed a human check to the
 #                    user (anton/core/browser/tool.py::_unless_human_check)
 #
+#   browser_hand_over_waits state ("checked" or "filled"): the model handed
+#                    the browser to the user with wait_for naming one element,
+#                    a checkbox or toggle to be checked or a field to be
+#                    filled (anton/core/browser/tool.py::_do_hand_to_user)
+#
 # Every event listed here also carries `environment`: the deployment that sent
 # it, from ANTON_DEPLOYMENT_ENV (`prod`, `staging`, `dev`, ...). It is "" wherever
 # no host set it, such as the CLI, so "" means unknown, not production. Absent
@@ -291,6 +296,7 @@ _POSTHOG_EVENTS = frozenset(
         "tool_completed",
         "browser_jev_step",
         "browser_human_check",
+        "browser_hand_over_waits",
     }
 )
 

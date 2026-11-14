@@ -3619,6 +3619,8 @@ class ChatSession:
                 try:
                     if self._browser_state is not None:
                         # Jev may close a browser the task is done with; its tabs are noted.
+                        # A turn tidies once: after the cloud turn's own tidy
+                        # before `turn_completed`, this finds nothing to do.
                         from anton.core.browser.tool import tidy_after_turn
 
                         await tidy_after_turn(self)
@@ -6867,8 +6869,9 @@ class ChatSession:
             # guard passes the books this turn opened so a late finalizer
             # can't close a newer turn's.
             self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
-            # close() tidies the browser only after a turn that completed and
-            # used it; a cancelled, failed, paused or limit-stopped one leaves it as it is.
+            # The browser is tidied (by the cloud turn, else close()) only after
+            # a turn that completed and used it; a cancelled, failed, paused or
+            # limit-stopped one leaves it as it is.
             browser = self._browser_state
             self._tidy_browser = bool(
                 browser is not None and browser.used and not _turn_raised
