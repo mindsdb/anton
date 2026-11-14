@@ -217,8 +217,9 @@ def test_a_local_failure_is_not_described_as_a_request():
     (504, {"error": "pip install timed out (540s)"}),
 ])
 def test_a_server_error_is_reported_without_a_cause(server, status, body):
-    """The agent read "outage" into a bare status once; the line it reads
-    must not hand it that story either."""
+    """The agent read "outage" into a bare status once, and later called a 503
+    "usually a transient blip". The line it reads names neither a cause nor
+    whether the error will clear, and says that it cannot."""
     base, answer = server
     answer("/upload", status, body, "application/json" if isinstance(body, dict) else "text/html")
 
@@ -227,7 +228,26 @@ def test_a_server_error_is_reported_without_a_cause(server, status, body):
 
     line = describe_minds_request_failure(caught.value)
     assert line.startswith(f"POST {base}/upload returned HTTP {status}")
-    assert "outage" not in line.lower()
+    assert line.endswith(
+        "Anton's note: the server reported an error. Nothing here shows its cause, "
+        "or whether it is temporary or a retry would help."
+    )
+    note = line.split("Anton's note:", 1)[1].lower()
+    assert not any(word in note for word in ("outage", "transient", "overload", "maintenance"))
+
+
+@pytest.mark.parametrize("status", [302, 399, 600])
+def test_a_status_outside_4xx_and_5xx_is_not_called_a_server_error(server, status):
+    """urllib raises for a redirect without a Location and for unknown
+    statuses; those are not server errors, so they don't get that note."""
+    base, answer = server
+    answer("/upload", status, {"error": "x"})
+
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        minds_request(f"{base}/upload", "key", method="POST", payload=b"{}")
+
+    line = describe_minds_request_failure(caught.value)
+    assert line.endswith("Anton's note: the server answered with an unexpected status.")
 
 
 def test_no_response_is_reported_without_a_cause():
