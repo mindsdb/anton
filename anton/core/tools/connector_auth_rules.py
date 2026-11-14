@@ -383,7 +383,8 @@ def parse_auth(
     kind = data.get("type")
     stored_none = stored and kind == AUTH_NONE
     if not stored_none and (not isinstance(kind, str) or kind not in AUTH_KEYS):
-        raise AuthRuleError(f"auth.type must be one of: {', '.join(sorted(AUTH_KEYS))}.")
+        types = sorted({*AUTH_KEYS, AUTH_NONE} if stored else AUTH_KEYS)
+        raise AuthRuleError(f"auth.type must be one of: {', '.join(types)}.")
     _check_keys(data, frozenset({"type"}) if stored_none else AUTH_KEYS[kind], "auth")
     declared = frozenset(name for name, _ in fields)
     secrets = {name for name, secret in fields if secret}
@@ -411,7 +412,8 @@ def parse_auth(
         _check_basic_optional(placed, password, in_password, optional, secrets)
         placed |= in_password
         canonical = {"type": kind, "username": username, "password": password}
-    if not stored and not placed & secrets:
+    # Basic is kept to a secret even stored, so no request carries an identity with an empty password.
+    if (not stored or kind == "basic") and not placed & secrets:
         raise AuthRuleError("auth must place a secret field, such as {api_key}.")
     unused = [i for i, (name, _) in enumerate(fields) if name not in placed]
     if unused:
@@ -437,10 +439,17 @@ def _check_basic_optional(
         raise AuthRuleError("An optional auth.password needs a username that places a required secret field.")
 
 
+def _check_drops_only_missing(placed: set[str], missing: set[str]) -> None:
+    """Refuse dropping a placement that also places a field the connection holds."""
+    if placed & missing and placed - missing:
+        raise AuthRuleError("A placement of a missing field also places a field the connection holds.")
+
+
 def without_missing(auth: Mapping[str, Any], held: Iterable[str], optional: Iterable[str]) -> dict[str, Any]:
     """Take out of a template's auth section the placements of fields a connection does not hold.
 
-    A header or parameter that places a missing field is dropped, a missing
+    A header or parameter that places a missing field is dropped, and so
+    must place nothing else the connection holds. A missing
     Basic password becomes empty, and a section left with no header or
     parameter becomes ``none``. The result is the section ``parse_auth`` takes
     with ``stored=True``. Computed once from the stored template, never from
@@ -455,8 +464,9 @@ def without_missing(auth: Mapping[str, Any], held: Iterable[str], optional: Iter
         A new section; ``auth`` is not changed.
 
     Raises:
-        AuthRuleError: when a missing field is not optional, or the type is
-            not one these rules can apply.
+        AuthRuleError: when a missing field is not optional, a placement of a
+            missing field also places a held one, or the type is not one these
+            rules can apply.
     """
     held = set(held)
     optional = set(optional)
@@ -476,7 +486,14 @@ def without_missing(auth: Mapping[str, Any], held: Iterable[str], optional: Iter
     if kind == "basic":
         if set(PLACEHOLDER.findall(auth["username"])) & missing:
             raise AuthRuleError("A field that is not optional has no value.")
-        password = "" if set(PLACEHOLDER.findall(auth["password"])) & missing else auth["password"]
+        in_password = set(PLACEHOLDER.findall(auth["password"]))
+        _check_drops_only_missing(in_password, missing)
+        password = "" if in_password & missing else auth["password"]
         return {"type": kind, "username": auth["username"], "password": password}
-    kept = {n: t for n, t in auth[key].items() if not set(PLACEHOLDER.findall(t)) & missing}
+    kept = {}
+    for name, template in auth[key].items():
+        placed = set(PLACEHOLDER.findall(template))
+        _check_drops_only_missing(placed, missing)
+        if not placed & missing:
+            kept[name] = template
     return {"type": kind, key: kept} if kept else {"type": AUTH_NONE}

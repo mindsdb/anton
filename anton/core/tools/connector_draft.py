@@ -508,8 +508,9 @@ _DESCRIPTION = (
     "the URL parameters that carry the key, such as access_key: {api_key}; "
     "{field_name} places a field's value and every field must be placed. "
     "Mark a key required: false only when the provider documents public "
-    "access without it, and then also give check.public_path, a GET that "
-    "answers without a key; path still answers only with one. "
+    "access without it. When every key is optional, also give "
+    "check.public_path, a GET that answers without a key; path still "
+    "answers only with one. With any key required, leave public_path out. "
     "The user types only the API's host when connecting (such as "
     "api.example.com), so leave it out, and start every path at the host: "
     "include any version the provider's docs put after the host "
@@ -559,7 +560,7 @@ _INPUT_SCHEMA = {
                         "type": "boolean",
                         "description": (
                             "Defaults to true. Set false only on a secret key the provider documents "
-                            "public access without; then give check.public_path."
+                            "public access without. Give check.public_path only when every key is optional."
                         ),
                     },
                     "placeholder": _TEXT,

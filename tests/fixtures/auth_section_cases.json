@@ -1293,23 +1293,19 @@
       "stored": true
     },
     {
-      "accepted": true,
+      "accepted": false,
       "auth": {
         "password": "",
         "type": "basic",
         "username": "{email}"
       },
+      "error": "auth must place a secret field, such as {api_key}.",
       "fields": [
         [
           "email",
           false
         ]
       ],
-      "result": {
-        "password": "",
-        "type": "basic",
-        "username": "{email}"
-      },
       "stored": true
     },
     {
@@ -1317,7 +1313,7 @@
       "auth": {
         "type": "oauth"
       },
-      "error": "auth.type must be one of: basic, header, query.",
+      "error": "auth.type must be one of: basic, header, none, query.",
       "fields": [],
       "stored": true
     },
@@ -1336,6 +1332,79 @@
           true
         ]
       ]
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      },
+      "fields": [
+        [
+          "api_key",
+          true
+        ]
+      ],
+      "result": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      },
+      "stored": true
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "password": "",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "fields": [
+        [
+          "email",
+          true
+        ]
+      ],
+      "result": {
+        "password": "",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "stored": true
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}",
+          "X-Account": "{account}"
+        },
+        "type": "header"
+      },
+      "fields": [
+        [
+          "api_key",
+          true
+        ],
+        [
+          "account",
+          false
+        ]
+      ],
+      "optional": [
+        "api_key"
+      ],
+      "result": {
+        "headers": {
+          "Authorization": "Bearer {api_key}",
+          "X-Account": "{account}"
+        },
+        "type": "header"
+      },
+      "stored": true
     }
   ],
   "query_collides": [
@@ -2093,6 +2162,38 @@
       "error": "auth.type is not one these rules can apply.",
       "held": [],
       "optional": []
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "password": "{password}",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "error": "A field that is not optional has no value.",
+      "held": [
+        "password"
+      ],
+      "optional": [
+        "email",
+        "password"
+      ]
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "headers": {
+          "A": "{acct}-{api_key}"
+        },
+        "type": "header"
+      },
+      "error": "A placement of a missing field also places a field the connection holds.",
+      "held": [
+        "acct"
+      ],
+      "optional": [
+        "api_key"
+      ]
     }
   ]
 }
