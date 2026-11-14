@@ -109,6 +109,62 @@ def _rejects_cache_breakpoint(exc: "openai.BadRequestError") -> bool:
 _CACHE_BREAKPOINT_REFUSED: set[tuple[str, str]] = set()
 
 
+_CLAUDE_MODEL_WORDS = ("claude", "sonnet", "opus", "haiku", "fable")
+_EPHEMERAL = {"type": "ephemeral"}
+
+
+def _cache_marked(message: dict) -> dict | None:
+    """``message`` with a cache mark on its last non-empty text, or None if it has none."""
+    if message.get("role") == "tool":
+        return {**message, "cache_control": _EPHEMERAL}
+    content = message.get("content")
+    if isinstance(content, str) and content:
+        return {**message, "content": [{"type": "text", "text": content, "cache_control": _EPHEMERAL}]}
+    if isinstance(content, list):
+        # The last text part: MindsHub drops a mark on an image part.
+        for i in range(len(content) - 1, -1, -1):
+            part = content[i]
+            if isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
+                return {**message, "content": [*content[:i], {**part, "cache_control": _EPHEMERAL}, *content[i + 1:]]}
+    return None
+
+
+def _with_claude_cache_breakpoints(messages: list[dict], model: str, *, mark_messages: bool = True) -> list[dict]:
+    """Chat messages for MindsHub with the Anthropic cache marks placed here.
+
+    MindsHub marks the system prompt as one block whose tail differs per
+    conversation, so every conversation re-wrote the shared rules. Any mark we
+    send turns MindsHub's own off, so the history marks come from here too,
+    or not at all when ``mark_messages`` is False.
+    """
+    from .prompt_builder import SESSION_CONTEXT_MARKER
+
+    if not messages or not any(word in model.lower() for word in _CLAUDE_MODEL_WORDS):
+        return messages
+    out = list(messages)
+    system = out[0].get("content") if out[0].get("role") == "system" else None
+    if isinstance(system, str) and system:
+        parts = [system]
+        if system.count(SESSION_CONTEXT_MARKER) == 1:
+            static, session = system.split(SESSION_CONTEXT_MARKER, 1)
+            parts = [static, SESSION_CONTEXT_MARKER + session]
+        out[0] = {**out[0], "content": [
+            {"type": "text", "text": p, "cache_control": _EPHEMERAL} for p in parts if p]}
+    if not mark_messages:
+        return out
+    # Where the previous request ended (just before the latest assistant turn),
+    # so it is read back without relying on Anthropic's 20-block lookback; and
+    # the newest message, for the next request.
+    last_assistant = max((i for i, m in enumerate(out) if m.get("role") == "assistant"), default=None)
+    targets = {len(out) - 1}
+    if last_assistant is not None and last_assistant > 1:
+        targets.add(last_assistant - 1)
+    for i in sorted(targets):
+        if i > 0 and (marked := _cache_marked(out[i])) is not None:
+            out[i] = marked
+    return out
+
+
 def _shared_prompt_input(static: str, session: str) -> list[dict]:
     """The system prompt as two developer messages, the shared part cacheable."""
     return [
@@ -205,8 +261,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         Cloudflare HTML 403s carry no such code and must fall through to
         the generic message, never the plan copy.
       - 402/429 with an M3 gate billing code (``wallet_empty`` /
-        ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded``,
-        body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
+        ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded`` /
+        ``budget_exceeded``, body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
         subclass from ``mindshub_billing_stop`` (ENG-1169). Code-exact: BYOK
         402s stay generic.
       - 403 with the gateway's ``model_restricted`` deny detail
@@ -269,7 +325,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
     # MindsHub billing taxonomy: the authorization gate denies
     # an empty wallet as 402 ``wallet_empty``, a spent free allowance as 429
     # ``included_allowance_exhausted`` and a tripped fleet-wide free-serving
-    # budget as 429 ``free_air_daily_spend_fuse_exceeded``. All three are
+    # budget as 429 ``free_air_daily_spend_fuse_exceeded``, and a spent org
+    # spending budget as 402 ``budget_exceeded``. All four are
     # permanent for the identical request: without this branch the
     # 402 fell to the generic "temporarily unavailable" ConnectionError, got
     # auto-retried, and was finally rendered as assistant prose. The typed
@@ -1255,6 +1312,10 @@ class OpenAIProvider(LLMProvider):
             )
 
         oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
+        if self._flavor == self.FLAVOR_MINDS_PASSTHROUGH:
+            # No mark on the messages: one-off calls (structured output,
+            # compaction) never send the same history again.
+            oai_messages = _with_claude_cache_breakpoints(oai_messages, model, mark_messages=False)
 
         kwargs = build_chat_completion_kwargs(
             model=model,
@@ -1378,6 +1439,8 @@ class OpenAIProvider(LLMProvider):
             return
 
         oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
+        if self._flavor == self.FLAVOR_MINDS_PASSTHROUGH:
+            oai_messages = _with_claude_cache_breakpoints(oai_messages, model)
 
         kwargs = build_chat_completion_kwargs(
             model=model,

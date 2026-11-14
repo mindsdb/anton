@@ -94,7 +94,7 @@ def test_which_mode_ran_is_recorded_for_every_outcome(tmp_path: Path):
     assert st_without.trace[0].detail != st_with.trace[0].detail
 
 
-async def test_generate_loads_the_prd_before_running_the_fsm(tmp_path: Path, monkeypatch):
+async def test_generate_loads_the_prd_before_running_the_fsm(tmp_path: Path, monkeypatch, decline_fast_path):
     """Wired into the public entry point, not just callable: the FSM must
     never see a state whose PRD has not been loaded yet."""
     _write_prd(tmp_path, "## Goal\nShow the orders table.")
@@ -120,7 +120,7 @@ async def test_generate_loads_the_prd_before_running_the_fsm(tmp_path: Path, mon
     assert "Show the orders table." in seen["prd"]
 
 
-async def test_a_resumed_generation_reads_the_api_contract_back(tmp_path: Path, monkeypatch):
+async def test_a_resumed_generation_reads_the_api_contract_back(tmp_path: Path, monkeypatch, decline_fast_path):
     """`resume_generate` skips `_make_api_spec`, and nothing else set
     `state.api_spec`: both generators got `{}` as the contract, `_probe_app`
     probed nothing and the contract check saw no contract (I-48)."""
@@ -152,7 +152,7 @@ async def test_a_resumed_generation_reads_the_api_contract_back(tmp_path: Path, 
     assert API_SPEC_FILENAME in seen["internal"]
 
 
-async def test_a_resumed_spec_phase_does_not_read_a_contract_it_will_rewrite(tmp_path: Path, monkeypatch):
+async def test_a_resumed_spec_phase_does_not_read_a_contract_it_will_rewrite(tmp_path: Path, monkeypatch, decline_fast_path):
     """At `resume_spec` the contract is regenerated; a file on disk (a stale
     one `_invalidate_specs` has not reached yet) must not pre-seed the state."""
     from anton.core.artifacts.internal_files import API_SPEC_FILENAME

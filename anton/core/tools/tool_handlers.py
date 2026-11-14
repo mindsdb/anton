@@ -483,12 +483,27 @@ def _primary_name(store, slug: str) -> str | None:
     return metadata.primary if metadata is not None else None
 
 
-def _repairs_left_line(left: int) -> str:
+def editor_offered(session: "ChatSession") -> bool:
+    """Whether this session offers `edit_artifact` (ENG-4207), so repairs are routed to it."""
+    registry = getattr(session, "tool_registry", None)
+    get = getattr(registry, "get_tool_defs", None)
+    if not callable(get):
+        return False
+    try:
+        return any(getattr(tool, "name", "") == "edit_artifact" for tool in get())
+    except Exception:
+        return False
+
+
+def _repairs_left_line(left: int, *, editor: bool = False) -> str:
     cells = "cell" if left == 1 else "cells"
+    how = (
+        "repair it with edit_artifact, naming each finding in the task" if editor
+        else "change it in a scratchpad cell to fix the code each finding names"
+    )
     return (
-        f"{left} repair {cells} left for this page this turn: change it in a scratchpad cell to fix "
-        "the code each finding names, and keep every view. Until a check passes it, do not call it or "
-        "any view in it browser-verified, tested or working"
+        f"{left} repair {cells} left for this page this turn: {how}, and keep every view. Until a check passes "
+        "it, do not call it or any view in it browser-verified, tested or working"
     )
 
 
@@ -556,6 +571,7 @@ def _check_pages(
     geography_request: str = "",
     geography_requirements: dict[PageKey, GeographyRequirement] | None = None,
     held_back: frozenset[PageKey] = frozenset(),
+    editor: bool = False,
 ) -> ArtifactLint:
     """Load the changed artifacts' pages in a browser.
 
@@ -728,7 +744,7 @@ def _check_pages(
                     messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                     continue
                 messages.append(f"{label} — {static_findings[page.key(store)]}")
-                messages.append(f"{label} — {_repairs_left_line(left)}")
+                messages.append(f"{label} — {_repairs_left_line(left, editor=editor)}")
                 continue
             if cell_sandbox is not None:
                 messages.append(f"{label} — {_SANDBOX_BROWSER_SKIP}")
@@ -759,7 +775,7 @@ def _check_pages(
                 messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                 continue
             messages += [f"{label} — {f.message()}" for f in findings]
-            messages.append(f"{label} — {_repairs_left_line(left)}")
+            messages.append(f"{label} — {_repairs_left_line(left, editor=editor)}")
         return ArtifactLint(
             messages=_lines(), page_checks=page_checks, repaired=frozenset(repaired), edited=edited,
             out_of_repairs=frozenset(out_of_repairs),
@@ -782,7 +798,7 @@ def _check_pages(
                     messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                 else:
                     messages.append(f"{label} — {static_findings[key]}")
-                    messages.append(f"{label} — {_repairs_left_line(left)}")
+                    messages.append(f"{label} — {_repairs_left_line(left, editor=editor)}")
             continue
         key = page.key(store)
         remaining = deadline - time.monotonic()
@@ -890,7 +906,7 @@ def _check_pages(
             messages.append(f"{label} — and {more} more distinct findings, not listed")
         if failed:
             messages += _comparison_lines(label, _notes(key, comparison))
-            messages.append(f"{label} — {_repairs_left_line(left)}")
+            messages.append(f"{label} — {_repairs_left_line(left, editor=editor)}")
     return ArtifactLint(
         messages=_lines(), screenshot=shot, screenshot_page=shot_page, page_checks=page_checks,
         findings_listed=frozenset(findings_listed), repaired=frozenset(repaired), failed_views=views_of_failed,
@@ -913,6 +929,7 @@ def lint_changed_artifact_files(
     geography_request: str = "",
     geography_requirements: dict[PageKey, GeographyRequirement] | None = None,
     held_back: frozenset[PageKey] = frozenset(),
+    editor: bool = False,
 ) -> ArtifactLint:
     """Run the format-appropriate checker on artifact folders this cell
     changed (any content file written, replaced, added or removed since
@@ -967,6 +984,7 @@ def lint_changed_artifact_files(
         findings_listed_earlier=findings_listed_earlier,
         failing=failing, repairs_used=repairs_used, failed_views=failed_views, turn_pages=turn_pages,
         geography_request=geography_request, geography_requirements=geography_requirements, held_back=held_back,
+        editor=editor,
     )
     return replace(checked, messages=messages + checked.messages)
 
@@ -1241,6 +1259,7 @@ async def check_cell_artifacts(
             failing=failing, repairs_used=repairs_used, failed_views=failed_views, turn_pages=turn_pages,
             geography_request=getattr(session, "_artifact_geography_request", ""),
             geography_requirements=geography_pages.requirements_of(session), held_back=held_back,
+            editor=editor_offered(session),
         )
     except Exception:
         # Best-effort: a lint crash must never fail the cell's own result.
@@ -2014,6 +2033,25 @@ _STATUS_INSTRUCTIONS = {
         "page still fails, tell the user it failed its browser check, and do "
         "not call it or any view in it browser-verified, tested or working."
     ),
+    # `browser_check_failed` when the session offers `edit_artifact` (ENG-4207):
+    # the repair goes through the editor, which checks and repairs in one call.
+    "browser_check_failed_editor": (
+        "The page passed the pipeline's static checks, but a browser loaded "
+        "`<path>/<page>` and found the problems `findings` lists, in the views "
+        "`views_measured` names. That page is on disk: repair it yourself now, "
+        "instead of asking the user how to proceed, by calling "
+        "`edit_artifact(slug, task)` with a task that names each finding and "
+        "says to fix the code it names and keep every view, its tab and its "
+        "`runView` call. Do not read the page with `read_text_file` or patch it "
+        "in a scratchpad cell first: edit_artifact reads it, edits it, loads it "
+        "in a browser and repairs it in one call, and this page gets "
+        "`repair_cells` repair calls this turn. Do NOT call generate_artifact "
+        "again for this page: it would rebuild the page from the spec instead of "
+        "repairing it. Once edit_artifact's check passes, say "
+        "\"browser-verified\" only of what that check names. If the page still "
+        "fails, tell the user it failed its browser check, and do not call it or "
+        "any view in it browser-verified, tested or working."
+    ),
     "stopped_over_budget": (
         "This turn reached its token budget and the pipeline stopped "
         "cleanly; what it had finished is on disk. Tell the user how far it "
@@ -2075,7 +2113,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         return
 
     slug = (tc_input.get("slug") or "").strip()
-    if not slug and os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on":
+    if not slug:
         # A new page can enter the same generator without a separate model
         # round trip solely to register its folder. Existing-slug edits keep
         # their normal path. Validate before creating any persistent resource.
@@ -2097,8 +2135,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
             slug = artifact.slug
             _track_artifact(session, store, slug, summary=f"Created artifact: {name}")
     if not slug:
-        yield ("Error: `slug` (an existing artifact) or `name` (a new one) is required."
-               if os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on" else "Error: `slug` is required.")
+        yield "Error: `slug` (an existing artifact) or `name` (a new one) is required."
         return
     artifact = store.open(slug)
     if artifact is None:
@@ -2232,8 +2269,6 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
 
     def failure_context(detail):
         message = detail if detail.startswith("Error:") else _generation_failed(detail)
-        if os.environ.get("ANTON_STATIC_SINGLE_CALL") != "on":
-            return message
         # Creation may have happened inside this call. Losing its identity on
         # failure makes a caller recreate the artifact or discard collected data.
         recovery = {"status": "failed", "slug": slug, "path": str(folder),
@@ -2448,7 +2483,9 @@ async def _browser_check_failed_outcome(
         if turn_pages is not None:
             await asyncio.to_thread(turn_pages.hold, (key,), store)
         return ToolOutcome(content=json.dumps(body, indent=2), ok=True)
-    instruction = _STATUS_INSTRUCTIONS["browser_check_failed"]
+    instruction = _STATUS_INSTRUCTIONS[
+        "browser_check_failed_editor" if editor_offered(session) else "browser_check_failed"
+    ]
     # A rebuild of an existing page is compared with the page as the turn
     # found it: the repair starts knowing what the build broke or dropped.
     changes = render_check.comparison_notes(result.comparison)

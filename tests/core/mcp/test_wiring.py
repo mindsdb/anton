@@ -92,6 +92,15 @@ async def test_access_mode_defaults_to_read_when_unset(patch_mcp_session_to_stub
     await wiring.close_mcp_sessions(sessions)
 
 
+async def test_notion_write_mode_registers_every_tool(patch_mcp_session_to_stub):
+    vault = FakeDataVault({("notion", "acme"): {"_method": "mcp", "_access_mode": "write", "access_token": "tok"}})
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "notion", "name": "acme"}]
+    )
+    assert {d.name for d in tool_defs} == {"notion__add", "notion__boom"}
+    await wiring.close_mcp_sessions(sessions)
+
+
 async def test_two_connections_for_the_same_engine_get_disambiguated_names(patch_mcp_session_to_stub):
     """The vault explicitly supports more than one connection per engine
     (data_vault.py: `name` "disambiguates when an org has more than one

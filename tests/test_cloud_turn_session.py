@@ -10,6 +10,8 @@ Two layers:
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -20,6 +22,8 @@ from pathlib import Path
 # `_pin_today` later replaces on the module.
 from datetime import datetime as _stdlib_datetime
 
+import httpx2 as httpx
+import openai
 import pytest
 
 import anton.core.llm.client as llm_client_mod
@@ -31,6 +35,7 @@ from anton.cloud_turn.session import (
     _ARTIFACTS_ROOT_ENV,
     _WORKSPACE_PATH_ENV,
     build_cloud_chat_session,
+    drain_pending_connectors,
     resolve_trusted_artifacts_root,
     resolve_trusted_workspace_path,
 )
@@ -350,6 +355,13 @@ def test_jev_decisions_set_the_completion_check(tmp_path, monkeypatch, jev_decis
     assert cfg.settings.verifier_jev == verifier_jev
 
 
+@pytest.mark.parametrize("ui_locale", ["es", None])
+def test_ui_locale_reaches_the_session(tmp_path, monkeypatch, ui_locale):
+    """ENG-4149: the request's UI language is the session's."""
+    _, cfg = _build(tmp_path, monkeypatch, ui_locale=ui_locale)
+    assert cfg.ui_locale == ui_locale
+
+
 def test_cloud_session_uses_turn_key_from_request(tmp_path, monkeypatch):
     # No minds env set; the credential must come from the request's llm block.
     monkeypatch.delenv("ANTON_MINDS_API_KEY", raising=False)
@@ -592,6 +604,61 @@ def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
     return session
 
 
+def _hermetic_limits_env(monkeypatch):
+    for name in (
+        "ANTON_MAX_TOOL_ROUNDS", "ANTON_MAX_CONTINUATIONS", "ANTON_MAX_TURN_TOKENS",
+        "ANTON_MAX_TURN_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_the_tenants_limits_from_the_wire_bound_the_real_session(tmp_path, monkeypatch):
+    _hermetic_limits_env(monkeypatch)
+    line = json.dumps({
+        "protocol_version": 1, "conversation_id": "conv_1", "input": "hi",
+        # Unlike both anton's old (25/3/1.25M) and new (250/10/25M) defaults,
+        # so a session that ignored the limits could not pass by accident.
+        "limits": {"max_tool_rounds": 7, "max_continuations": 2, "max_turn_tokens": 4_000_000},
+    })
+    request = TurnRequestV1.from_json(line)
+    session = _real_cloud_session(tmp_path, monkeypatch, limits=request.limits)
+    assert session._max_tool_rounds == 7
+    assert session._max_continuations == 2
+    assert session._max_turn_tokens == 4_000_000
+
+
+def test_the_time_limit_from_the_wire_bounds_the_real_session(tmp_path, monkeypatch):
+    _hermetic_limits_env(monkeypatch)
+    line = json.dumps({
+        "protocol_version": 1, "conversation_id": "conv_1", "input": "hi",
+        "limits": {"max_turn_seconds": 3600},
+    })
+    request = TurnRequestV1.from_json(line)
+    session = _real_cloud_session(tmp_path, monkeypatch, limits=request.limits)
+    assert session._max_turn_seconds == 3600
+
+
+def test_a_turn_without_limits_keeps_antons_defaults(tmp_path, monkeypatch):
+    from anton.core.settings import CoreSettings
+
+    _hermetic_limits_env(monkeypatch)
+    defaults = CoreSettings()
+    session = _real_cloud_session(tmp_path, monkeypatch)
+    assert session._max_tool_rounds == defaults.max_tool_rounds
+    assert session._max_continuations == defaults.max_continuations
+    assert session._max_turn_tokens == defaults.max_turn_tokens
+
+
+def test_one_limit_replaces_only_its_own_default(tmp_path, monkeypatch):
+    from anton.core.settings import CoreSettings
+
+    _hermetic_limits_env(monkeypatch)
+    defaults = CoreSettings()
+    session = _real_cloud_session(tmp_path, monkeypatch, limits={"max_turn_tokens": 3_000_000})
+    assert session._max_turn_tokens == 3_000_000
+    assert session._max_tool_rounds == defaults.max_tool_rounds
+
+
 def _pin_today(monkeypatch, moment):
     """Pin what the session sees as "now".
 
@@ -673,6 +740,33 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
     )
 
 
+def test_connector_drafts_add_only_the_draft_tool(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {"create_connector_draft"}
+    assert [t.name for t in cfg.tools] == ["create_connector_draft"]
+
+
+def test_without_connector_drafts_there_is_no_draft_tool(tmp_path, monkeypatch):
+    session, cfg = _build(tmp_path, monkeypatch)
+    assert "create_connector_draft" not in cfg.tool_allowlist
+    assert cfg.tools == []
+    assert drain_pending_connectors(session) == []
+
+
+def test_a_real_turn_with_connector_drafts_registers_and_drains_the_tool(tmp_path, monkeypatch):
+    session = _real_cloud_session(tmp_path, monkeypatch, connector_drafts=True)
+    session._build_tools()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert names == set(CLOUD_TOOL_ALLOWLIST) | {"create_connector_draft"}
+
+    draft = {
+        "connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}],
+        "auth": {"type": "header", "headers": {"Authorization": "Bearer {api_key}"}},
+    }
+    tool = next(t for t in session._extra_tools if t.name == "create_connector_draft")
+    assert asyncio.run(tool.handler(session, draft)).ok is True
+    assert [d["connector_id"] for d in drain_pending_connectors(session)] == ["acme"]
+    assert drain_pending_connectors(session) == []
 # ── the browser: only the router block a turn carries ───────────────────────
 
 _ROUTER = "https://app.example.test/browser"
@@ -1356,6 +1450,124 @@ def test_needs_reconnect_yields_no_env_not_a_crash(tmp_path, monkeypatch):
     assert "DS_GMAIL_PRIMARY__ACCESS_TOKEN" not in os.environ
 
 
+_MINDS_LLM = {"provider": "minds-cloud", "api_key": "mdb_k", "base_url": "https://api.mindshub.ai"}
+
+
+def _build_real_client(tmp_path, monkeypatch, **req_overrides):
+    """The real LLMClient a cloud turn builds for this request, with ChatSession faked."""
+    captured: dict = {}
+    real_from_settings = llm_client_mod.LLMClient.from_settings.__func__
+
+    def capture(cls, settings):
+        captured["client"] = real_from_settings(cls, settings)
+        return captured["client"]
+
+    monkeypatch.setattr(session_mod, "ChatSession", lambda config: _FakeSession())
+    monkeypatch.setattr(llm_client_mod.LLMClient, "from_settings", classmethod(capture))
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    body = dict(protocol_version=1, conversation_id="conv_1", input="hello", llm=_MINDS_LLM)
+    body.update(req_overrides)
+    build_cloud_chat_session(TurnRequestV1(**body))
+    return captured["client"]
+
+
+def _chat_stream(text: str) -> bytes:
+    """``text`` as a streamed chat.completions answer, the format the minds passthrough reads."""
+    chunk = {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 0, "model": "m"}
+    chunks = [
+        {**chunk, "choices": [{"index": 0, "delta": {"role": "assistant", "content": text},
+                               "finish_reason": None}]},
+        {**chunk, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    return ("".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n").encode()
+
+
+def _record_requests(monkeypatch) -> list[tuple[str, dict]]:
+    """Point every OpenAI SDK client built from now on at a transport that
+    records each request as (path, body) and answers it with a short completion."""
+    requests: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent = json.loads(request.content)
+        requests.append((request.url.path, sent))
+        if sent.get("stream"):
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"},
+                content=_chat_stream("answered"),
+            )
+        return httpx.Response(200, json={
+            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "answered"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+
+    real_async_openai = openai.AsyncOpenAI
+
+    def mock_async_openai(**kwargs):
+        kwargs["http_client"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return real_async_openai(**{**kwargs, "max_retries": 0})
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", mock_async_openai)
+    return requests
+
+
+async def _efforts_on_the_wire(client, requests) -> dict[str, str | None]:
+    """One call per role; the ``reasoning_effort`` each chat.completions request carried."""
+    messages = [{"role": "user", "content": "hi"}]
+    async for _ in client.plan_stream(system="s", messages=messages):
+        pass
+    async for _ in client.code_stream(system="s", messages=messages):
+        pass
+    await client.summarize(system="s", messages=messages)
+    assert [path for path, _ in requests] == ["/v1/chat/completions"] * 3
+    efforts = (sent.get("reasoning_effort") for _, sent in requests)
+    return dict(zip(("planning", "coding", "router"), efforts))
+
+
+@pytest.mark.parametrize("coding_model", [None, "claude-opus-4-6"])
+@pytest.mark.parametrize("router", [False, True])
+async def test_selected_effort_reaches_only_the_planning_request(tmp_path, monkeypatch, coding_model, router):
+    """The router shares the coding provider unless one is configured, so
+    coding effort must stay put or history summarization would change too."""
+    if router:
+        monkeypatch.setenv("ANTON_ROUTER_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("ANTON_CODING_REASONING_EFFORT", "medium")
+    requests = _record_requests(monkeypatch)
+    llm = dict(_MINDS_LLM, coding_model=coding_model) if coding_model else _MINDS_LLM
+    client = _build_real_client(
+        tmp_path, monkeypatch, model="claude-opus-4-6", llm=llm, reasoning_effort="low",
+    )
+    try:
+        sent = await _efforts_on_the_wire(client, requests)
+    finally:
+        await client.aclose()
+    assert sent == {"planning": "low", "coding": "medium", "router": None if router else "medium"}
+
+
+async def test_no_selected_effort_keeps_the_configured_planning_effort(tmp_path, monkeypatch):
+    """With nothing selected, planning carries the configured effort and the other roles none."""
+    monkeypatch.setenv("ANTON_PLANNING_REASONING_EFFORT", "high")
+    requests = _record_requests(monkeypatch)
+    client = _build_real_client(tmp_path, monkeypatch, reasoning_effort=None)
+    try:
+        sent = await _efforts_on_the_wire(client, requests)
+    finally:
+        await client.aclose()
+    assert sent == {"planning": "high", "coding": None, "router": None}
+
+
+async def test_no_selected_or_configured_effort_sends_none(tmp_path, monkeypatch):
+    """With nothing selected or configured, no request carries an effort."""
+    requests = _record_requests(monkeypatch)
+    client = _build_real_client(tmp_path, monkeypatch)
+    try:
+        sent = await _efforts_on_the_wire(client, requests)
+    finally:
+        await client.aclose()
+    assert sent == {"planning": None, "coding": None, "router": None}
+
+
 # ── ENG-1638: the pod injects a configured-LLM block ─────────────────────────
 
 def test_pod_injects_a_configured_llm_block_for_the_runtime_identity(tmp_path, monkeypatch):
@@ -1456,6 +1668,53 @@ def test_the_credential_context_states_parity_with_its_caveat(tmp_path, monkeypa
     assert "Cowork Desktop App" in suffix
     assert "not readable from this conversation" in suffix
     assert "does not make it usable in this conversation" in suffix
+
+
+#: sha256 of the credential block and the whole suffix as they read before a
+#: turn could build connector templates. A turn without the tool keeps them.
+_CREDENTIAL_CONTEXT_SHA256 = "196e8bd8c4c555fd1f5b99a0771454a40cd3a46fb52ffa2802c9573be5929552"
+_POD_SUFFIX_SHA256 = "a61d2d5379b5dd2b4d5252931a8049cc116de52a5c5dfc8a16a0d863394408f0"
+
+
+def test_without_connector_drafts_the_credential_text_is_unchanged(tmp_path, monkeypatch):
+    from anton.cloud_turn.session import _CREDENTIAL_CONTEXT
+
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert hashlib.sha256(_CREDENTIAL_CONTEXT.encode()).hexdigest() == _CREDENTIAL_CONTEXT_SHA256
+    assert hashlib.sha256(cfg.system_prompt_context.suffix.encode()).hexdigest() == _POD_SUFFIX_SHA256
+    assert "create_connector_draft" not in cfg.system_prompt_context.suffix
+
+
+def test_with_connector_drafts_the_turn_is_told_to_build_a_template(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
+    suffix = cfg.system_prompt_context.suffix
+
+    assert "build its template with create_connector_draft" in suffix
+    assert "still never ask for a value" in suffix
+    assert "saves the template from its card" in suffix
+    assert "credentials for it in Connect Apps and Data" in suffix
+    # Drivers and redirect sign-ins still go to the desktop app, with the caveat.
+    assert "a database that needs a driver" in suffix
+    assert "Cowork Desktop App" in suffix
+    assert "not readable from this conversation" in suffix
+    # The rest of the rule is the same text.
+    assert "Never ask the user to type a password" in suffix
+    assert "no tool call, no file and no store" in suffix
+    assert "If the user reports that the connector they need is not offered, say" not in suffix
+
+
+def test_the_template_guidance_reaches_the_built_prompt(tmp_path, monkeypatch):
+    from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+
+    _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
+    prompt = ChatSystemPromptBuilder().build(
+        conversation_started="2026-09-10T12:00:00+00:00",
+        system_prompt_context=cfg.system_prompt_context,
+        proactive_dashboards=False,
+        output_dir="",
+        tool_defs=[],
+    )
+    assert "build its template with create_connector_draft" in prompt
 
 
 def test_the_credential_context_names_no_connector(tmp_path, monkeypatch):

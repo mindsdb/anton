@@ -27,7 +27,7 @@ import httpx2
 import mcp
 from mcp_types import Tool as McpTool
 
-from anton.core.mcp.errors import McpPermanentError, classify_mcp_error
+from anton.core.mcp.errors import McpPermanentError, McpTokenRejected, classify_mcp_error
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,18 @@ class McpSession:
         self._read_timeout_seconds = read_timeout_seconds
         self._http_client: httpx2.AsyncClient | None = None
         self._client: mcp.Client | None = None
+        # The SDK turns any HTTP 4xx into a JSON-RPC error with no status on
+        # it, so a 401/403 is recorded off the wire to tell a rejected token
+        # from an outage.
+        self._rejected_status: int | None = None
+
+    async def _record_status(self, response: Any) -> None:
+        if response.status_code in (401, 403):
+            self._rejected_status = response.status_code
+
+    def _raise_if_rejected(self, exc: BaseException) -> None:
+        if self._rejected_status is not None:
+            raise McpTokenRejected(self._rejected_status) from exc
 
     async def __aenter__(self) -> "McpSession":
         await self._connect()
@@ -80,7 +92,7 @@ class McpSession:
             target: Any = self._server
         else:
             headers = {"Authorization": f"Bearer {self._access_token}"} if self._access_token else {}
-            self._http_client = httpx2.AsyncClient(headers=headers)
+            self._http_client = httpx2.AsyncClient(headers=headers, event_hooks={"response": [self._record_status]})
             from mcp.client.streamable_http import streamable_http_client
 
             target = streamable_http_client(self._url, http_client=self._http_client)
@@ -89,11 +101,13 @@ class McpSession:
             target, raise_exceptions=True, read_timeout_seconds=self._read_timeout_seconds
         )
         started = time.monotonic()
+        self._rejected_status = None
         try:
             await client.__aenter__()
-        except Exception:
+        except Exception as exc:
             if self._http_client is not None:
                 await self._http_client.aclose()
+            self._raise_if_rejected(exc)
             raise
         self._log_round_trip("initialize()", started)
         self._client = client
@@ -145,7 +159,12 @@ class McpSession:
         """List every tool this server advertises, unfiltered."""
         client = self._require_client()
         started = time.monotonic()
-        result = await client.list_tools()
+        self._rejected_status = None
+        try:
+            result = await client.list_tools()
+        except Exception as exc:
+            self._raise_if_rejected(exc)
+            raise
         self._log_round_trip("tools/list()", started)
         return list(result.tools)
 
@@ -196,6 +215,7 @@ class McpSession:
         """
         last_error: BaseException | None = None
         for attempt in (1, 2):
+            self._rejected_status = None
             try:
                 result = await self._require_client().call_tool(name, arguments)
                 return _flatten_content(result.content), result.is_error
@@ -203,6 +223,7 @@ class McpSession:
                 raise
             except BaseException as exc:  # noqa: BLE001 - reclassified/reraised below
                 if isinstance(exc, Exception):
+                    self._raise_if_rejected(exc)
                     classified = classify_mcp_error(exc)
                     if isinstance(classified, McpPermanentError):
                         raise classified from exc

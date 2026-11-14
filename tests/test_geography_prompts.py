@@ -19,17 +19,16 @@ from anton.core.tools.generate_artifact.discovery.prompts import step_message
 from anton.core.tools.generate_artifact.state import BrowserCheck, GenState
 
 
-@pytest.mark.parametrize("single_call", [False, True])
+@pytest.mark.parametrize("tool_has_name", [False, True])
 @pytest.mark.parametrize("proactive", [False, True])
 @pytest.mark.parametrize("direct_reports", [False, True])
 @pytest.mark.parametrize("fullstack_offered", [False, True])
 def test_main_agent_always_receives_geography_without_skill_recall(
-    monkeypatch, single_call, proactive, direct_reports, fullstack_offered,
+    tool_has_name, proactive, direct_reports, fullstack_offered,
 ):
-    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on" if single_call else "off")
     tool = SimpleNamespace(
         name="generate_artifact", prompt=None,
-        input_schema={"properties": {"name": {}}},
+        input_schema={"properties": {"name": {}} if tool_has_name else {}},
     )
     system = ChatSystemPromptBuilder().build(
         conversation_started="2026-10-30", system_prompt_context=SystemPromptContext(),
@@ -41,9 +40,8 @@ def test_main_agent_always_receives_geography_without_skill_recall(
     assert system.count(GEOGRAPHY_GUIDANCE) == 1
     assert GEOGRAPHY_GUIDANCE in system.split(SESSION_CONTEXT_MARKER)[0]
     assert "Procedural memory" not in system
-    # Exercise the single-call switch, rather than accidentally testing only
-    # the ordinary prompt with an incompatible tool schema.
-    assert ("This one\noperation registers the folder" in system) is single_call
+    # A generate tool that takes `name` switches the prompt to the single-call instructions.
+    assert ("This one\noperation registers the folder" in system) is tool_has_name
 
 
 @pytest.mark.parametrize("builder", [
@@ -137,7 +135,6 @@ def test_manual_dashboard_skill_keeps_the_same_geography_and_repair_scope():
 async def test_actual_fast_writer_call_receives_geography_and_preserves_its_output_api(
     tmp_path, monkeypatch, components,
 ):
-    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on" if components else "off")
     data = {"points": [{"name": "Paris", "lat": 48.8566, "lon": 2.3522}]}
     (tmp_path / "observed-data.json").write_text(json.dumps(data))
     key = observed_data.identity(data)
@@ -163,7 +160,9 @@ async def test_actual_fast_writer_call_receives_geography_and_preserves_its_outp
 
     async def stream(**kwargs):
         calls.append(kwargs)
-        yield StreamComplete(LLMResponse(content=program if components else html))
+        # The ordinary HTML writer is reached when the component writer declines.
+        reply = program if components else (component_page.FALLBACK if len(calls) == 1 else html)
+        yield StreamComplete(LLMResponse(content=reply))
 
     monkeypatch.setattr(
         fast_static.verifiers, "verify_frontend_live",
@@ -178,10 +177,10 @@ async def test_actual_fast_writer_call_receives_geography_and_preserves_its_outp
     result = await fast_static.run(state)
 
     assert result["status"] == "generated"
-    assert len(calls) == 1
-    assert calls[0]["system"].count(GEOGRAPHY_GUIDANCE) == 1
+    assert len(calls) == (1 if components else 2)
+    assert calls[-1]["system"].count(GEOGRAPHY_GUIDANCE) == 1
     exception = "For component output, satisfy this geography guidance through the supported map/globe"
-    assert (exception in calls[0]["system"]) is components
+    assert (exception in calls[-1]["system"]) is components
     assert ("presentation-program.js" in result["internal_files"]) is components
     written = (tmp_path / "index.html").read_text()
     if components:
@@ -189,5 +188,5 @@ async def test_actual_fast_writer_call_receives_geography_and_preserves_its_outp
         assert "API and use USE_HTML_WRITER" in calls[0]["system"]
         assert component_page.existing_program(written) == program
     else:
-        assert "complete HTML document" in calls[0]["system"]
+        assert "complete HTML document" in calls[-1]["system"]
         assert observed_data.strip_binding(written) == html
