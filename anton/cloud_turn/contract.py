@@ -46,6 +46,10 @@ Events written back on stdout (JSONL):
   {"kind": "skill", "entries": [...]}   - pre-terminal; skill drafts the agent
       built this turn, as [{"slug", "files": {name: text}}]. Staged only: cowork
       surfaces a card and the user saves it, so nothing reaches the skill store.
+  {"kind": "connector", "entries": [...]}  - pre-terminal; connector templates
+      the agent built this turn with `create_connector_draft`, at most 3, each
+      as `ConnectorDraft.to_dict()`. Sent only when the request set
+      `connector_drafts`. Staged only: cowork shows a card the user saves.
   {"kind": "history", "rows": [...]}  - pre-terminal; this turn's tool
       block-rows as [{"role", "content"}], where content holds only tool_use
       (assistant) or tool_result (user) blocks. For a turn that did not
@@ -105,6 +109,13 @@ Events written back on stdout (JSONL):
       including an unknown or refused id.
       An `addon` line repeating a known `addon_id` re-reports that message's
       current state rather than adding it twice.
+  {"kind": "artifact_check", "type": "response.artifact_check", "check_id":
+   "acheck:<hex>", "artifact_slug": "...", "timeout_s": N}  - ENG-4227, only
+      when the request set `preview_checks`: the turn asks the host to reload
+      the user's open preview of that artifact and report its errors. Answered
+      by one `check_result` stdin line (below); no answer within timeout_s is
+      "unverified". The controller must relay it (as a `turn_step`, step
+      "artifact_check", like the ask_user kinds).
   {"kind": "browser", "session_id": "..."}  - the browser tool opened (or
       reopened) the person's browser session. cowork shows the browser beside
       the chat, with a viewer link it mints with the person's own credential.
@@ -159,6 +170,13 @@ Addon lines on stdin (any turn, same 64 KB bound), ENG-4194:
   The model sees each added message as a separate text block (never inside a
   tool result), wrapped in <user_addition id="..."> with a marker drawn per
   turn; any user_addition tag inside the text is stripped.
+Check lines on stdin (requests with `preview_checks`, same 64 KB bound), ENG-4227:
+  {"kind": "check_result", "check_id": "acheck:<hex>", "body": {"status":
+   "passed" | "failed" | "unavailable", "errors": [{type, message, file, line,
+   url}], "ms": N} | null}  - the answer to an `artifact_check` event; null or
+      "unavailable" (no preview open, timed out) reads as unverified. A line for
+      no pending check is ignored; pending checks resolve as unanswered when
+      stdin closes or the turn ends.
 A stdin line of any other kind, or a malformed one, is logged and skipped.
 """
 
@@ -166,6 +184,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict
@@ -178,6 +198,12 @@ logger = logging.getLogger(__name__)
 TURN_PROTOCOL_VERSION = 1
 DATASOURCE_PROTOCOL_VERSION = 1
 MAX_DATASOURCE_CONNECTIONS = 100
+_REQUIRED_REF_KEYS = frozenset({"connection_id", "credential_version"})
+# Names only, for the prompt. cowork-server's queue check allows the same two.
+_OPTIONAL_REF_KEYS = frozenset({"label", "engine"})
+_ENGINE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,31}")
+#: Auth caps a connection's name at this many characters; the prompt keeps the same bound.
+MAX_CONNECTION_LABEL_LEN = 128
 
 # The `turn_completed` key that names the artifact folders the turn touched.
 # scratchpad-controller's `scratchpad_controller/anton_turn.py` relays it and
@@ -204,6 +230,10 @@ def _is_version(value: object, expected: int) -> bool:
 class DatasourceConnectionRefV1:
     connection_id: int
     credential_version: int
+    #: The name the user gave the connection, already safe for one prompt line.
+    label: str | None = None
+    #: Auth's connector id for the connection, such as ``postgres``.
+    engine: str | None = None
 
 
 @dataclass(frozen=True)
@@ -227,7 +257,10 @@ def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
     refs: list[DatasourceConnectionRefV1] = []
     seen: set[int] = set()
     for connection in connections:
-        if not isinstance(connection, dict) or set(connection) != {"connection_id", "credential_version"}:
+        if (
+            not isinstance(connection, dict)
+            or not _REQUIRED_REF_KEYS <= set(connection) <= _REQUIRED_REF_KEYS | _OPTIONAL_REF_KEYS
+        ):
             raise ValueError("datasource connection reference is invalid")
         connection_id = connection.get("connection_id")
         credential_version = connection.get("credential_version")
@@ -242,8 +275,41 @@ def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
         ):
             raise ValueError("datasource connection reference is invalid")
         seen.add(connection_id)
-        refs.append(DatasourceConnectionRefV1(connection_id, credential_version))
+        refs.append(
+            DatasourceConnectionRefV1(
+                connection_id,
+                credential_version,
+                label=_usable_label(connection.get("label")),
+                engine=_usable_engine(connection.get("engine")),
+            )
+        )
     return DatasourceBlockV1(DATASOURCE_PROTOCOL_VERSION, tuple(refs))
+
+
+def _usable_label(value: object) -> str | None:
+    """The connection's name as one clean prompt line, or ``None`` when nothing usable is left.
+
+    Spaces of any kind become a plain space and other non-printable characters go, so a
+    name cannot start a new prompt line. cowork-server sends the name as the user typed it,
+    so this is the only place it is cleaned.
+    """
+    if not isinstance(value, str):
+        return None
+    spaced = "".join(" " if unicodedata.category(ch) == "Zs" else ch for ch in value)
+    cleaned = "".join(ch for ch in spaced if ch.isprintable()).strip()
+    cleaned = cleaned[:MAX_CONNECTION_LABEL_LEN].strip()
+    return cleaned or None
+
+
+def _usable_engine(value: object) -> str | None:
+    """Auth's connector id if it has the shape of one, else ``None``.
+
+    A name is only a hint for the model, so an odd value is dropped rather
+    than failing the turn. ``fullmatch``, so a trailing newline does not pass.
+    """
+    if isinstance(value, str) and _ENGINE_PATTERN.fullmatch(value):
+        return value
+    return None
 
 
 class TurnSkillEntry(BaseModel):
@@ -415,8 +481,10 @@ class TurnRequestV1:
     #: empty means no connectors for this turn — see cloud_turn/session.py's
     #: build_cloud_chat_session, which is the only place this is read.
     oauth: dict | None = None
-    #: Optional verified datasource references: only IDs and immutable versions.
-    #: No capability or password crosses; the gateway is on the `llm` base URL's host.
+    #: Optional verified datasource references: IDs and immutable versions, each with
+    #: an optional ``label`` (the user's name for it) and ``engine`` (auth's connector
+    #: id), which only the prompt reads. No capability or password crosses; the
+    #: gateway is on the `llm` base URL's host.
     datasource: DatasourceBlockV1 | None = None
     #: Optional ISO 8601 creation time of the conversation, as cowork-server
     #: resolved it. The pod is new every turn and cannot derive this: history
@@ -447,10 +515,19 @@ class TurnRequestV1:
     #: session validates it (`anton.core.llm.ui_locale`); absent, or a
     #: controller that does not forward it, leaves the prompt unchanged.
     ui_locale: str | None = None
+    #: Whether the host answers `artifact_check` events with `check_result`
+    #: stdin lines (the user's open artifact preview, ENG-4227). Only a JSON
+    #: `true` turns it on: without a host that answers, every artifact edit
+    #: would wait out the check's timeout for nothing.
+    preview_checks: bool = False
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
     connectors: dict | None = None
+    #: Whether this turn may build connector templates with
+    #: `create_connector_draft`, sent back on the `connector` event. Anything
+    #: but a JSON `true` reads as False, so the tool stays off by default.
+    connector_drafts: bool = False
     #: Optional reasoning effort the user picked for this turn. Applied to the
     #: planning model only; the name is passed to the provider uninterpreted.
     #: Absent, null, blank, or non-string keeps the configured default.
@@ -506,10 +583,12 @@ class TurnRequestV1:
             tool_messages=d.get("tool_messages") is True,
             jev_decisions=d.get("jev_decisions", True) is True,
             ui_locale=d.get("ui_locale") if isinstance(d.get("ui_locale"), str) else None,
+            preview_checks=d.get("preview_checks") is True,
             # Same defensive isinstance check as oauth/trace.
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None
             ),
+            connector_drafts=d.get("connector_drafts") is True,
             reasoning_effort=reasoning_effort.strip() or None,
             browser=BrowserConfig.from_dict(d.get("browser")),
             limits=_parse_limits(d.get("limits"), str(d["conversation_id"])),

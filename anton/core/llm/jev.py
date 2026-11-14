@@ -166,6 +166,34 @@ class JevDecision:
             return 0.0
 
 
+# MindsHub's answer when Jev's routing policy is briefly not loaded: a 503
+# with exactly this message. Nothing was decided, so the same request may be
+# sent once more within the same deadline (yolocoder's edit router does).
+POLICY_UNAVAILABLE = "The model policy is temporarily unavailable. Please retry shortly."
+
+
+def policy_unavailable(response) -> bool:
+    """Whether RESPONSE is MindsHub's 503 "policy temporarily unavailable" refusal."""
+    if response.status_code != 503:
+        return False
+    try:
+        text = response.text
+    except Exception:
+        return False
+    if len(text) >= 8 << 10:
+        return False
+    if text.strip() == POLICY_UNAVAILABLE:
+        return True
+    try:
+        import json
+
+        body = json.loads(text)
+    except ValueError:
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    return isinstance(error, dict) and error.get("message") == POLICY_UNAVAILABLE
+
+
 async def decide(
     *,
     base_url: str = "",
@@ -176,12 +204,19 @@ async def decide(
     timeout_s: float,
     client=None,
     url: str = "",
+    headers: dict[str, str] | None = None,
+    retry_policy_unavailable: bool = False,
 ) -> JevDecision:
     """POST one decision request with any questions. Never raises.
 
     The request goes to ``{base_url}/decisions`` (a MindsHub inference base
     URL, incl. /v1), or to ``url`` as given when there is one: a decision
-    endpoint's full URL, which hosts serve at paths of their own."""
+    endpoint's full URL, which hosts serve at paths of their own.
+
+    ``retry_policy_unavailable``: send the request once more after MindsHub's
+    503 "policy temporarily unavailable", inside the same ``timeout_s``.
+    ``headers`` are sent alongside the key, which they cannot override.
+    """
     import httpx2 as httpx
 
     started = time.monotonic()
@@ -193,11 +228,14 @@ async def decide(
     client = client or httpx.AsyncClient(timeout=timeout_s)
     try:
         async with asyncio.timeout(timeout_s):
-            response = await client.post(
-                url or f"{base_url.rstrip('/')}/decisions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={"model": model, "state": state, "questions": questions},
-            )
+            for attempt in range(2):
+                response = await client.post(
+                    url or f"{base_url.rstrip('/')}/decisions",
+                    headers={**(headers or {}), "Authorization": f"Bearer {api_key}"},
+                    json={"model": model, "state": state, "questions": questions},
+                )
+                if not (retry_policy_unavailable and attempt == 0 and policy_unavailable(response)):
+                    break
     except TimeoutError:
         return JevDecision(answers={}, ms=elapsed(), error="timeout")
     except httpx.HTTPError:
@@ -219,3 +257,88 @@ async def decide(
     except Exception:
         return JevDecision(answers={}, ms=ms, error="malformed")
     return JevDecision(answers=answers, ms=ms, model=str(body.get("model") or ""))
+
+
+# ── which decisions model, if any (ENG-4227) ─────────────────────────
+
+DEFAULT_DECISIONS_MODEL = "jev-1.13.0"
+_DISABLED = ("", "off", "none", "false", "0")
+
+
+def _host(url: str | None) -> str:
+    from urllib.parse import urlsplit
+
+    try:
+        return (urlsplit((url or "").strip()).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+MINDSHUB_API_HOST = "api.mindshub.ai"
+
+
+def _provider(settings) -> str:
+    return str(getattr(settings, "planning_provider", "") or "").strip().lower().replace("_", "-")
+
+
+def _v1(url: str) -> str:
+    base = str(url).strip().rstrip("/")
+    return base if base.endswith("/v1") else base + "/v1"
+
+
+def _active_mindshub(settings) -> tuple[str, str] | None:
+    """``(base_url ending in /v1, api_key)`` when the configured LLM provider itself is MindsHub, else None.
+
+    Only the active (planning) provider's own config counts: ``minds-cloud``
+    (its ``minds_url`` / ``minds_api_key``), or ``openai-compatible`` whose
+    base URL host is exactly api.mindshub.ai (its ``openai_base_url`` /
+    ``openai_api_key``; AntonSettings reads ``minds-cloud`` this way). A
+    MindsHub key or URL left over beside an Anthropic or OpenAI provider is
+    never used.
+    """
+    provider = _provider(settings)
+    if provider == "minds-cloud":
+        url, key = getattr(settings, "minds_url", None), getattr(settings, "minds_api_key", None)
+    elif provider == "openai-compatible":
+        url, key = getattr(settings, "openai_base_url", None), getattr(settings, "openai_api_key", None)
+    else:
+        return None
+    if not url or not key or _host(url) != MINDSHUB_API_HOST:
+        return None
+    return _v1(url), str(key)
+
+
+def default_decisions_model(settings) -> str | None:
+    """The decisions model when none is configured: Jev when the LLM provider is MindsHub, otherwise none."""
+    return DEFAULT_DECISIONS_MODEL if _active_mindshub(settings) else None
+
+
+def decisions_model(settings) -> str | None:
+    """The configured decisions model (``ANTON_DECISIONS_MODEL``), the MindsHub default when unset, or None.
+
+    An explicit empty value (or "off" / "none") disables it.
+    """
+    value = getattr(settings, "decisions_model", None)
+    if value is None:
+        return default_decisions_model(settings)
+    value = str(value).strip()
+    return None if value.lower() in _DISABLED else value
+
+
+def decisions_config(settings) -> tuple[str, str, str] | None:
+    """``(base_url, api_key, model)`` for MindsHub's ``/v1/decisions``, or None when there is no decisions model.
+
+    Available only when the configured LLM provider itself is MindsHub (see
+    :func:`_active_mindshub`); an explicit ``ANTON_DECISIONS_MODEL`` picks the
+    model but never borrows a URL or key from anywhere else.
+    """
+    connection = _active_mindshub(settings)
+    model = decisions_model(settings)
+    if connection is None or not model:
+        return None
+    return connection[0], connection[1], model
+
+
+def decisions_available(settings) -> bool:
+    """Whether the quick-edit bar may route (and so edit directly). False: send every message to the agent."""
+    return decisions_config(settings) is not None
