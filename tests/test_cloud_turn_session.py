@@ -762,6 +762,7 @@ def test_a_real_turn_with_connector_drafts_registers_and_drains_the_tool(tmp_pat
     draft = {
         "connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}],
         "auth": {"type": "header", "headers": {"Authorization": "Bearer {api_key}"}},
+        "check": {"path": "/v1/me"},
     }
     tool = next(t for t in session._extra_tools if t.name == "create_connector_draft")
     assert asyncio.run(tool.handler(session, draft)).ok is True

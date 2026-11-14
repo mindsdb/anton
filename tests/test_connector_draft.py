@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -365,21 +366,29 @@ def test_a_token_run_is_caught_where_the_scrubber_is_not():
         parse_connector_draft(_draft(label=value))
 
 
+_TOOL_CHECK = {"path": "/v1/me"}
+
+
+def _tool_draft(**overrides):
+    """A draft as the tool takes it, which requires a check."""
+    return _draft(**{"check": _TOOL_CHECK, **overrides})
+
+
 def test_the_tool_keeps_drafts_and_the_box_drains_once():
     box = ConnectorDraftBox()
     tool = connector_draft_tool(box)
-    outcome = asyncio.run(tool.handler(None, _draft()))
+    outcome = asyncio.run(tool.handler(None, _tool_draft()))
     assert outcome.ok is True
     assert json.loads(outcome.content)["status"] == "staged"
-    assert box.drain() == [parse_connector_draft(_draft()).to_dict()]
+    assert box.drain() == [parse_connector_draft(_tool_draft()).to_dict()]
     assert box.drain() == []
 
 
-def test_the_same_id_replaces_the_earlier_draft():
+def test_the_same_id_replaces_the_earlier_tool_draft():
     box = ConnectorDraftBox()
     tool = connector_draft_tool(box)
-    asyncio.run(tool.handler(None, _draft(label="First")))
-    asyncio.run(tool.handler(None, _draft(label="Second")))
+    asyncio.run(tool.handler(None, _tool_draft(label="First")))
+    asyncio.run(tool.handler(None, _tool_draft(label="Second")))
     assert [d["label"] for d in box.drain()] == ["Second"]
 
 
@@ -387,12 +396,52 @@ def test_a_turn_holds_at_most_three_drafts():
     box = ConnectorDraftBox()
     tool = connector_draft_tool(box)
     for i in range(MAX_DRAFTS_PER_TURN):
-        assert asyncio.run(tool.handler(None, _draft(connector_id=f"acme_{i}"))).ok
-    refused = asyncio.run(tool.handler(None, _draft(connector_id="acme_extra")))
+        assert asyncio.run(tool.handler(None, _tool_draft(connector_id=f"acme_{i}"))).ok
+    refused = asyncio.run(tool.handler(None, _tool_draft(connector_id="acme_extra")))
     assert refused.ok is False and refused.reason == "draft_limit"
     # Replacing one already held still works at the cap.
-    assert asyncio.run(tool.handler(None, _draft(connector_id="acme_0", label="New"))).ok
+    assert asyncio.run(tool.handler(None, _tool_draft(connector_id="acme_0", label="New"))).ok
     assert [d["connector_id"] for d in box.drain()] == ["acme_0", "acme_1", "acme_2"]
+
+
+@pytest.mark.parametrize("check", ["missing", None], ids=["missing", "null"])
+def test_the_tool_refuses_a_template_without_a_check_and_says_what_to_do(check):
+    box = ConnectorDraftBox()
+    draft = _draft() if check == "missing" else _draft(check=None)
+
+    outcome = asyncio.run(connector_draft_tool(box).handler(None, draft))
+
+    assert outcome.ok is False and outcome.reason == "invalid_draft"
+    error = json.loads(outcome.content)["error"]
+    assert "needs a check" in error and "path of one GET" in error
+    assert box.drain() == []
+
+
+@pytest.mark.parametrize("check", [
+    {"path": "/v1/me?key={api_key}"},
+    {"path": "v1/me"},
+], ids=["placeholder-in-path", "no-leading-slash"])
+def test_the_tool_says_what_to_do_when_a_check_path_is_refused(check):
+    """A refused check path also says when to skip the connector."""
+    box = ConnectorDraftBox()
+
+    outcome = asyncio.run(connector_draft_tool(box).handler(None, _tool_draft(check=check)))
+
+    assert outcome.ok is False and outcome.reason == "invalid_draft"
+    error = json.loads(outcome.content)["error"]
+    assert "call it directly from code" in error and "cannot be a custom connector yet" in error
+    assert box.drain() == []
+
+
+def test_the_tool_refuses_a_draft_outside_the_check_without_the_check_guidance():
+    outcome = asyncio.run(connector_draft_tool(ConnectorDraftBox()).handler(None, _tool_draft(label="")))
+
+    assert outcome.ok is False
+    assert "call it directly from code" not in json.loads(outcome.content)["error"]
+
+
+def test_the_tool_schema_requires_the_check():
+    assert "check" in connector_draft_tool(ConnectorDraftBox()).input_schema["required"]
 
 
 def test_the_tool_refuses_a_bad_draft_without_the_value():
@@ -722,6 +771,7 @@ def test_the_tool_describes_the_check():
     assert set(check["properties"]) == {"path"}
     assert check["additionalProperties"] is False
     assert "check" in tool.description
+    assert "call it directly from code" in tool.description
     assert "base URL" not in tool.input_schema["properties"]["usage_notes"]["description"]
 
 
@@ -738,7 +788,19 @@ def test_the_tool_says_every_path_starts_at_the_host_with_its_version():
         assert "/v2/" in text, where
         assert "includ" in text and "version" in text, where
     assert "(/v2/exchanges, not /exchanges)" in texts["description"]
-    assert "/v2/eod?symbols=AAPL" in texts["usage_notes"]
+    assert "path /v2/eod with query {'symbols': 'AAPL'}" in texts["usage_notes"]
+
+
+def test_no_example_path_for_a_call_carries_its_query():
+    """call_minds_api takes parameters apart from the path; a check path may still carry a query."""
+    tool = connector_draft_tool(ConnectorDraftBox())
+    texts = {
+        "description": tool.description,
+        "usage_notes": tool.input_schema["properties"]["usage_notes"]["description"],
+    }
+
+    for where, text in texts.items():
+        assert re.findall(r"/[A-Za-z0-9_./-]*\?", text) == [], where
 
 
 def test_a_check_path_with_a_host_is_refused_with_a_versioned_example():

@@ -1,0 +1,19 @@
+{
+  "custom_api": {
+    "turn_key": "mdb_turnkey.secret",
+    "connections": [
+      {
+        "connection_id": 3,
+        "connector_id": "beta_api",
+        "name": "Ops desk",
+        "credential_version": 1
+      },
+      {
+        "connection_id": 5,
+        "connector_id": "acme_crm",
+        "name": "Prod",
+        "credential_version": 2
+      }
+    ]
+  }
+}

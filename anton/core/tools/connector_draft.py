@@ -68,6 +68,10 @@ class ConnectorDraftError(ValueError):
     never quotes its value, since the value may be a credential."""
 
 
+class ConnectorCheckError(ConnectorDraftError):
+    """The draft's check was refused."""
+
+
 @dataclass(frozen=True)
 class ConnectorDraftField:
     """One credential field the member fills in; it describes, never holds, a value."""
@@ -334,7 +338,10 @@ def _parse_check(data: Any, auth: ConnectorDraftAuth) -> ConnectorDraftCheck | N
     if not isinstance(data, dict):
         raise ConnectorDraftError("check must be an object.")
     _check_keys(data, _CHECK_KEYS, "check")
-    path = _check_path(data.get("path"))
+    try:
+        path = _check_path(data.get("path"))
+    except ConnectorDraftError as e:
+        raise ConnectorCheckError(str(e)) from e
     if rules.query_collides(auth.to_dict(), rules.query_names(urlsplit(path).query)):
         raise ConnectorDraftError("check.path may carry only plain parameter names, none of them one auth places.")
     return ConnectorDraftCheck(path=path)
@@ -444,6 +451,12 @@ class ConnectorDraftBox:
         return drained
 
 
+_NO_CONNECTOR_CASES = (
+    "If an API takes no key or token, do not build a connector: call it directly "
+    "from code. If it has no GET that answers only with valid credentials, it "
+    "cannot be a custom connector yet: tell the user so."
+)
+
 _DESCRIPTION = (
     "Build the template for a connector to an API the user needs and has no "
     "connector for. Pass the connector's id, a label, the credential fields "
@@ -464,7 +477,7 @@ _DESCRIPTION = (
     "template is staged, not saved: the user sees it as a card in the chat "
     "and saves it, then enters their credentials in Connect Apps and Data. "
     "Only API connectors that take keys or tokens are supported; not "
-    "database drivers and not sign-in flows that redirect to the provider."
+    "database drivers and not sign-in flows that redirect to the provider. " + _NO_CONNECTOR_CASES
 )
 
 _TEXT = {"type": "string"}
@@ -487,7 +500,7 @@ _INPUT_SCHEMA = {
                 "the credentials, including any key parameter auth places in the URL, so leave out "
                 "auth headers, key parameters, keys and the API's address. No values. The user types "
                 "only the host, so every path starts at the host and includes any version, "
-                "e.g. /v2/eod?symbols=AAPL."
+                "with its parameters apart, e.g. path /v2/eod with query {'symbols': 'AAPL'}."
             ),
         },
         "fields": {
@@ -513,7 +526,7 @@ _INPUT_SCHEMA = {
             },
         },
     },
-    "required": ["connector_id", "label", "fields", "auth"],
+    "required": ["connector_id", "label", "fields", "auth", "check"],
     "additionalProperties": False,
 }
 # One flat object with a type, not a oneOf: providers refuse union schemas in tool inputs.
@@ -565,6 +578,11 @@ _INPUT_SCHEMA["properties"]["check"] = {
 }
 
 
+_CHECK_REQUIRED = (
+    "A connector needs a check: the path of one GET that answers only with valid credentials."
+)
+
+
 def connector_draft_tool(box: ConnectorDraftBox) -> ToolDef:
     """The `create_connector_draft` tool, keeping its drafts in ``box``."""
 
@@ -572,8 +590,15 @@ def connector_draft_tool(box: ConnectorDraftBox) -> ToolDef:
         """Parse one draft and keep it in ``box``; refusals name the field only."""
         try:
             draft = parse_connector_draft(tc_input)
+        except ConnectorCheckError as e:
+            # A refused check path: say when no connector is needed at all.
+            return ToolOutcome(content=json.dumps({"error": f"{e} {_NO_CONNECTOR_CASES}"}), ok=False, reason="invalid_draft")
         except ConnectorDraftError as e:
             return ToolOutcome(content=json.dumps({"error": str(e)}), ok=False, reason="invalid_draft")
+        # The parser keeps the check optional for templates stored before it
+        # existed; a new one without it could never be connected.
+        if draft.check is None:
+            return ToolOutcome(content=json.dumps({"error": _CHECK_REQUIRED}), ok=False, reason="invalid_draft")
         if not box.put(draft):
             return ToolOutcome(
                 content=json.dumps({
