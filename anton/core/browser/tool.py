@@ -1428,9 +1428,12 @@ async def _after_hand_over(
             "click Done in the browser when finished, then end your turn and wait for them."
         )
     if answer == "stop":
+        # Done after a Stop only hands the browser back: the task carries on
+        # from the user's next message, so don't promise that Done continues it.
         return (
-            f"The user chose Stop. {_STAYS} Don't retry the step. Ask them in chat how they want to "
-            "continue, and end your turn."
+            f"The user chose Stop. {_STAYS} Done then only hands it back and doesn't carry this task on: "
+            "don't tell them to click Done to continue. Don't retry the step. Ask them in chat how they "
+            "want to continue, and end your turn: their next message carries the task on."
         )
     if answer != "done":
         ended = _ENDED_WITHOUT_DONE.get(answer, f"The hand-over card closed ({answer}).")

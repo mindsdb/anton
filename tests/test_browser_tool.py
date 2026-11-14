@@ -1637,6 +1637,10 @@ async def test_stop_leaves_the_browser_with_the_user_and_asks_how_to_go_on(elici
     result = await browser_tool.handle_browser(session, {"action": "hand_to_user", "reason": "Sign in"})
     assert "The user chose Stop" in result.content and "how they want to continue" in result.content
     assert "stays with the user" in result.content
+    # Done after a Stop doesn't carry the task on, so the model mustn't promise it does.
+    assert "doesn't carry this task on" in result.content
+    assert "don't tell them to click Done to continue" in result.content
+    assert "their next message carries the task on" in result.content
     assert [b["holder"] for b in host.posted("/control")] == ["human"]
 
 
