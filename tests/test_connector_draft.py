@@ -930,3 +930,12 @@ def test_the_tool_stages_an_optional_key_and_names_it_in_its_text():
     assert "required: false" in tool.description and "public_path" in tool.description
     assert "no key or token at all" in tool.description
     assert "none" not in tool.input_schema["properties"]["auth"]["properties"]["type"]["enum"]
+
+
+def test_the_tool_texts_say_public_path_goes_only_with_every_key_optional():
+    tool = connector_draft_tool(ConnectorDraftBox())
+    required = tool.input_schema["properties"]["fields"]["items"]["properties"]["required"]["description"]
+
+    assert "every key is optional" in tool.description and "every key is optional" in required
+    assert "public_path" in tool.input_schema["properties"]["check"]["properties"]
+    assert "every key is required: false" in tool.input_schema["properties"]["check"]["properties"]["public_path"]["description"]

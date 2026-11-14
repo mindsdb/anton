@@ -27,7 +27,7 @@ from anton.core.tools.connector_auth_rules import (
 )
 
 _MODULE = Path(__file__).resolve().parents[1] / "anton" / "core" / "tools" / "connector_auth_rules.py"
-_MODULE_SHA256 = "3a19692dc75a05d7dcb39b55dccfdf2634c84b5f305b88c93bf1f5ea5513baa5"
+_MODULE_SHA256 = "e6d4db34127c0ca1565ec4a3f21f3ae57075d0c27a122e378aa10c4eb248b75d"
 #: Copies to update, and the hash their tests pin, whenever the module changes.
 _COPIES = (
     "auth: auth/datavault/connector_auth_rules.py",
@@ -55,7 +55,7 @@ def test_the_module_hash_is_pinned_so_its_copies_are_resynced():
 
 
 _CASES = Path(__file__).parent / "fixtures" / "auth_section_cases.json"
-_CASES_SHA256 = "792211deaad950ebf30d1831162cd9ae61c53ad24f0b3b9e69ad12407845c42e"
+_CASES_SHA256 = "c541a8e0b516371a71c683b910a5146e0cc4c8de5e4456ec5088ea5d1336ed76"
 #: Rewrites the case list after a rule change; copy the result to every service that carries the module.
 _REGENERATE = (
     "uv run python -c \"from tests.test_connector_auth_rules import _CASES, _cases_text; "
@@ -154,6 +154,9 @@ _PARSE_OPTIONAL_INPUTS = [
     ([["email", False]], {"type": "basic", "username": "{email}", "password": ""}, [], True),
     ([], {"type": "oauth"}, [], True),
     (_KEY, _LITERAL, [], False),
+    (_OPT_KEY, _BEARER, [], True),
+    ([["email", True]], {"type": "basic", "username": "{email}", "password": ""}, [], True),
+    (_OPT_ACCOUNT, {"type": "header", "headers": {"Authorization": "Bearer {api_key}", "X-Account": "{account}"}}, ["api_key"], True),
 ]
 #: (auth, held names, optional names) for without_missing.
 _WITHOUT_MISSING_INPUTS = [
@@ -172,6 +175,8 @@ _WITHOUT_MISSING_INPUTS = [
     ({"type": "basic", "username": "{email}", "password": "{password}"}, ["email"], []),
     ({"type": "none"}, [], []),
     ({"type": "oauth"}, [], []),
+    ({"type": "basic", "username": "{email}", "password": "{password}"}, ["password"], ["email", "password"]),
+    ({"type": "header", "headers": {"A": "{acct}-{api_key}"}}, ["acct"], ["api_key"]),
 ]
 #: (auth, values) pairs for render.
 _RENDER_INPUTS = [
@@ -498,3 +503,37 @@ def test_what_without_missing_gives_is_a_valid_stored_section():
     for held in (["account"], ["api_key", "account"]):
         reduced = without_missing(auth, held, ["api_key"])
         assert parse_auth(reduced, [f for f in fields if f[0] in held], stored=True) == reduced
+
+
+def test_a_stored_basic_section_must_place_a_secret_field():
+    auth = {"type": "basic", "username": "{email}", "password": ""}
+    with pytest.raises(AuthRuleError, match="must place a secret field"):
+        _stored(auth, [["email", False]])
+    assert _stored(auth, [["email", True]]) == auth
+
+
+def test_a_stored_type_error_lists_none_and_a_template_one_does_not():
+    with pytest.raises(AuthRuleError, match="basic, header, none, query"):
+        _stored({"type": "oauth"}, [])
+    with pytest.raises(AuthRuleError) as exc:
+        parse_auth({"type": "oauth"}, [])
+    assert "none" not in str(exc.value)
+
+
+def test_a_stored_keyed_section_still_parses():
+    assert _stored(_BEARER, [["api_key", True]]) == _BEARER
+
+
+def test_without_missing_refuses_a_missing_username_even_when_the_password_is_held():
+    auth = {"type": "basic", "username": "{email}", "password": "{password}"}
+    with pytest.raises(AuthRuleError, match="not optional"):
+        without_missing(auth, ["password"], ["email", "password"])
+
+
+@pytest.mark.parametrize("auth,held,optional", [
+    ({"type": "header", "headers": {"A": "{acct}-{api_key}"}}, ["acct"], ["api_key"]),
+    ({"type": "query", "params": {"a": "{acct}{api_key}"}}, ["acct"], ["api_key"]),
+])
+def test_without_missing_refuses_to_drop_a_placement_that_also_places_a_held_field(auth, held, optional):
+    with pytest.raises(AuthRuleError, match="also places a field the connection holds"):
+        without_missing(auth, held, optional)
