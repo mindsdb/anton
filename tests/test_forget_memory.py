@@ -84,6 +84,8 @@ def _prompt_line(prompt: str, phrase: str) -> str:
     "- Always use teal (#008080) for chart bars",
     "  -   always USE teal (#008080)\tfor  chart bars  ",
     "- Always use teal (#008080) for chart bars <!-- confidence:high source:user ts:2026-11-12 -->",
+    "Always use teal (#008080) for chart bars.",            # a final period added
+    "- Always use teal (#008080) for chart bars!",
 ])
 def test_a_line_as_the_prompt_shows_it_names_the_entry(line):
     assert normalize_prompt_line(line) == normalize_entry_text(TEAL)
@@ -92,7 +94,9 @@ def test_a_line_as_the_prompt_shows_it_names_the_entry(line):
 
 @pytest.mark.parametrize("line", [
     "Always use teal",                                      # part of the line
-    "Always use teal (#008080) for chart bars.",            # punctuation added
+    "Always use teal (#008080) for chart bars,",            # a comma is not sentence punctuation
+    "Always use teal (#008080) for chart bars.)",           # nor is what follows the period
+    "Always use teal (#008080), for chart bars",            # punctuation inside the line
     "Use teal (#008080) for chart bars",                    # reworded
     "Always use teal (#008080) for all chart bars",
 ])
@@ -102,9 +106,46 @@ def test_anything_else_names_nothing(line):
 
 def test_the_rule_folds_case_and_is_stable_on_its_own_output():
     assert normalize_entry_text("STRASSE") == normalize_entry_text("Straße")
-    for text in (TEAL, "- Name: Ada", "İstanbul ΣΑΣ <!-- ts:2026-01-01 -->"):
+    for text in (TEAL, "- Name: Ada", "İstanbul ΣΑΣ <!-- ts:2026-01-01 -->", "Note: . ?", "..."):
         once = normalize_entry_text(text)
         assert normalize_entry_text(once) == once
+
+
+# The form a saved entry is compared in, case by case. cowork-server's
+# tests/test_turn_memory_forget.py holds this same table (_SHARED_FORM) for
+# its normalize_memory_line; change both together.
+_SHARED_FORM = [
+    ("  Reply   in\tSpanish <!-- confidence:high source:user ts:2026-11-12 -->  ", "reply in spanish"),
+    ("Reply in Spanish\n", "reply in spanish"),
+    ("Straße", "strasse"),
+    ("a <!-- b --> c", "a <!-- b --> c"),                  # only a tail is metadata
+    ("- Reply in Spanish", "- reply in spanish"),          # an entry's own bullet stays
+    ("<!-- ts:2026-11-12 -->", ""),
+    ("Preferred chart color: teal (#008080).", "preferred chart color: teal (#008080)"),
+    ("Preferred chart color: teal (#008080). <!-- confidence:high source:user ts:2026-11-14 -->",
+     "preferred chart color: teal (#008080)"),
+    ("Preferred chart color: teal (#008080)", "preferred chart color: teal (#008080)"),
+    ("Reply in Spanish!", "reply in spanish"),
+    ("Reply in Spanish?", "reply in spanish"),
+    ("Reply in Spanish;", "reply in spanish"),
+    ("Reply in Spanish:", "reply in spanish"),
+    ("Reply in Spanish ?!.. ", "reply in spanish"),        # a run of it, spaces between
+    ("Use v1.2 of the API: always.", "use v1.2 of the api: always"),
+    ("Reply in Spanish,", "reply in spanish,"),            # a comma stays
+    ("(see the docs.)", "(see the docs.)"),                # punctuation before a bracket stays
+    ("Reply in Spanish…", "reply in spanish…"),            # so does an ellipsis character
+    # Stripped, a note would end the form and a second pass would drop it.
+    ("Reply in Spanish <!-- x --> .", "reply in spanish <!-- x --> ."),
+    ("...", "..."),                                       # only punctuation keeps it
+    ("Name: Ada", "name: ada"),
+]
+
+
+@pytest.mark.parametrize("text, form", _SHARED_FORM)
+def test_an_entry_normalizes_to_the_form_cowork_shares(text, form):
+    assert normalize_entry_text(text) == form
+    # cowork normalizes the form a cloud turn sends once more, so it must hold.
+    assert normalize_entry_text(form) == form
 
 
 # cowork-server's rule for a saved entry (normalize_memory_line in
@@ -113,17 +154,14 @@ _COWORK_TAIL = re.compile(r"\s*<!--[^>]*-->\s*$")
 
 
 def _cowork_form(text: str) -> str:
-    return " ".join(_COWORK_TAIL.sub("", text).split()).casefold()
+    folded = " ".join(_COWORK_TAIL.sub("", text).split()).casefold()
+    stripped = folded.rstrip(".!?;: ")
+    return folded if not stripped or stripped.endswith("-->") else stripped
 
 
-@pytest.mark.parametrize("text", [
-    TEAL,
-    "- Always use teal for bars",                           # an entry saved with its own bullet
-    "  CoinGecko   rate-limits at 50/min <!-- topic:api ts:2026-11-01 -->",
-    "Name: Ada",
-])
-def test_an_entry_normalizes_as_cowork_compares_it(text):
-    assert normalize_entry_text(text) == _cowork_form(text)
+@pytest.mark.parametrize("text, form", _SHARED_FORM)
+def test_cowork_normalizes_an_entry_to_the_same_form(text, form):
+    assert _cowork_form(text) == form
 
 
 def test_only_the_prompts_own_list_marker_leaves_a_requested_line():
@@ -435,6 +473,53 @@ async def test_an_entry_saved_with_a_bullet_is_removed_by_its_prompt_line(tmp_pa
     assert "teal" not in session.recalled_preferences()
 
 
+@pytest.mark.parametrize("saved, kind, sent", [
+    # memorize keeps the profile fact's period, and the prompt shows it, but
+    # the model sent the line without it (gpt-5.6-luna, 2 of 2 tries).
+    ("Preferred chart color: teal (#008080).", "profile", "Preferred chart color: teal (#008080)"),
+    ("Label chart axes in English.", "always", "- Label chart axes in English"),
+    # The other way: a line that adds a period still names the entry.
+    ("Label chart axes in English", "always", "Label chart axes in English."),
+])
+async def test_a_line_that_adds_or_drops_the_final_period_removes_the_entry(
+    tmp_path, memory_dirs, saved, kind, sent,
+):
+    global_dir, _ = memory_dirs
+    session = _session(tmp_path, memory_dirs)
+    await handle_memorize(session, {"entries": [{"text": saved, "kind": kind, "scope": "global"}]})
+    await session.settle_memory_writes()
+    prompt = await session._build_system_prompt("hello")
+    assert _prompt_line(prompt, saved.split()[0]) == f"- {saved}"   # shown as saved
+
+    result = await handle_forget(session, {"entries": [{"text": sent, "scope": "global"}]})
+
+    assert result.ok is True
+    assert f'Removed from memory:\n- "{saved}"' in result.content
+    assert "Not found" not in result.content
+    saved_files = "".join(path.read_text() for path in global_dir.glob("*.md"))
+    assert saved.rstrip(".") not in saved_files
+    assert saved.rstrip(".") not in session.recalled_preferences()
+
+
+async def test_two_entries_that_differ_only_in_a_final_period_are_both_removed(tmp_path, memory_dirs):
+    """They say the same thing, so a person who asks to forget it wants neither
+    kept: the one left would still shape the answers. One line removes both,
+    as it does two entries that differ only in case or spacing."""
+    global_dir, _ = memory_dirs
+    (global_dir / "rules.md").write_text(
+        "# Rules\n\n## Always\n- Use teal for bars.\n- Use teal for bars\n- Answer in English\n"
+    )
+    session = _session(tmp_path, memory_dirs)
+
+    result = await handle_forget(session, {"entries": [{"text": "Use teal for bars", "scope": "global"}]})
+
+    assert result.ok is True
+    assert '- "Use teal for bars." (global rule)' in result.content
+    assert '- "Use teal for bars" (global rule)' in result.content
+    rules = (global_dir / "rules.md").read_text()
+    assert "teal" not in rules and "- Answer in English" in rules
+
+
 async def test_one_call_reads_each_tier_once_and_at_most_100_entries(tmp_path, memory_dirs, monkeypatch):
     _save(memory_dirs)
     before = _files(memory_dirs)
@@ -640,6 +725,38 @@ async def test_a_cloud_entry_saved_with_a_bullet_is_sent_in_coworks_form(tmp_pat
     sent = drain_pending_forget(session)
     assert sent == [{"text": "- always use teal for bars", "scope": "global"}]
     assert sent[0]["text"] == _cowork_form(entry.text)
+
+
+async def test_a_cloud_profile_fact_with_a_period_is_asked_for_by_its_line_without_it(
+    tmp_path, monkeypatch, memory_dir,
+):
+    """The cloud turns the live check ran: the model dropped the period, the
+    pod matched nothing, and no removal reached cowork. Two saved entries that
+    differ only in it are sent as one form, which cowork removes both by."""
+    from anton.cloud_turn.session import drain_pending_forget
+
+    memory = {
+        "global": {
+            "profile": "- Preferred chart color: teal (#008080).",
+            "rules": "## Always\n- Use teal for bars.\n- Use teal for bars",
+        },
+        "project": {},
+    }
+    session = _real_cloud_session(tmp_path, monkeypatch, memory=memory)
+
+    result = await handle_forget(session, {"entries": [
+        {"text": "- Preferred chart color: teal (#008080)", "scope": "global"},
+        {"text": "Use teal for bars", "scope": "any"},
+    ]})
+
+    assert result.ok is True
+    assert '- "Preferred chart color: teal (#008080)." (global profile fact)' in result.content
+    assert '- "Use teal for bars." (global rule)' in result.content
+    assert '- "Use teal for bars" (global rule)' in result.content
+    assert drain_pending_forget(session) == [
+        {"text": "preferred chart color: teal (#008080)", "scope": "global"},
+        {"text": "use teal for bars", "scope": "global"},
+    ]
 
 
 # ── cloud: a turn whose writes cowork keeps none of (memory_writable false) ──

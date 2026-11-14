@@ -1075,8 +1075,9 @@ def _attachments_section(base: Path) -> _AttachmentsSection:
     from anton.clipboard import is_image_path
 
     image_blocks: list[dict] = []
-    # Every image shown above keeps its line, so each block has a name; the
-    # paths stop at the list cap like the project files.
+    # Every image shown above keeps its line, so each block has a name and a
+    # path: the agent needs the path to put the image in a page or hand it to
+    # a tool. The other paths stop at the list cap like the project files.
     lines: list[str] = []
     items: list[str] = []
     for f in scanned.files:
@@ -1087,7 +1088,7 @@ def _attachments_section(base: Path) -> _AttachmentsSection:
                 block = _image_block_from_file(f)
                 if block is not None:
                     image_blocks.append(block)
-                    lines.append(f"  - {_shown(f.name)} (image, shown above)")
+                    lines.append(f"  - {_path_item(f)} (image, shown above)")
                 else:
                     items.append(f"{_path_item(f)} (image could not be shown inline; read from this path if needed)")
             else:
@@ -1099,8 +1100,10 @@ def _attachments_section(base: Path) -> _AttachmentsSection:
     if scanned.truncated:
         lines.append(f"  - the listing stopped here; {attach_dir} holds more")
     listing = (
-        "The user attached the following files to this conversation. Any images "
-        "are included in this message; read other files from their absolute paths:\n"
+        "The user attached the following files to this conversation. Each image "
+        "marked shown above is also included in this message. Files are listed "
+        "at their absolute paths; use a path to read the file or to hand it to "
+        "a tool:\n"
         + "\n".join(lines)
     )
     return _AttachmentsSection(image_blocks, listing)

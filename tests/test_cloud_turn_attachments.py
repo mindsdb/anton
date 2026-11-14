@@ -33,6 +33,31 @@ def test_image_attachment_becomes_a_vision_block(tmp_path):
     assert "shot.png" in text and "do you see the screenshot?" in text
 
 
+def test_a_shown_image_is_listed_at_a_path_generate_artifact_accepts(tmp_path):
+    """The folder a cloud pod saw for a png uploaded to its conversation: the
+    agent sees the image inline, and it also needs the path to put the image
+    in a page or pass it in generate_artifact's attachments. With the name
+    alone it told the user the logo's path was not available."""
+    from anton.core.tools.generate_artifact.attachments import resolve_attachments
+
+    att = tmp_path / "attachments" / "11ec6a08-21bb-43c4-bdd1-ef1b219ff5d3"
+    att.mkdir(parents=True)
+    logo = att / "logo.png"
+    logo.write_bytes(_PNG)
+    logo.chmod(0o600)
+    (tmp_path / "project-files").mkdir()
+    (tmp_path / ".anton").mkdir()
+
+    content = cloud_session.build_turn_content(tmp_path, "Make a chart with my logo.")
+    assert len([b for b in content if b["type"] == "image"]) == 1
+    text = _text(content)
+    assert f"  - {logo} (image, shown above)\n" in text
+    listed = text.split("  - ", 1)[1].split(" (image, shown above)", 1)[0]
+    kept, dropped = resolve_attachments([listed], workspace=tmp_path)
+    assert dropped == []
+    assert [a.name for a in kept] == ["logo.png"]
+
+
 def test_non_image_is_listed_by_path_not_inlined(tmp_path):
     att = tmp_path / "attachments" / "fileid2"
     att.mkdir(parents=True)
@@ -306,7 +331,7 @@ def test_attachments_list_stops_at_the_cap_and_keeps_every_shown_image(tmp_path)
     # Each inline image keeps the line that names it.
     assert len([b for b in content if b["type"] == "image"]) == 3
     for i in range(3):
-        assert f"  - chart-{i}.png (image, shown above)" in text
+        assert f"  - {shown / f'chart-{i}.png'} (image, shown above)" in text
 
 
 def test_the_servers_not_copied_list_names_each_file_and_why(tmp_path):
@@ -489,7 +514,7 @@ def test_a_non_utf8_name_shows_as_a_mark_and_the_turn_encodes(tmp_path, monkeypa
     att = tmp_path / "attachments" / "id"
     note = "(its real name has a line break, control character or non-UTF-8 byte where this shows ?)"
     assert f"  - {att / 'a?.txt'} {note}\n" in text
-    assert "  - b?.png (image, shown above)\n" in text
+    assert f"  - {att / 'b?.png'} {note} (image, shown above)\n" in text
     assert f"  - {att / 'c?.png'} {note} (image could not be shown inline" in text
     assert f"  - {att / 'd?.txt'} (could not be read this turn)\n" in text
     assert f"  - {tmp_path / 'project-files' / 'e?.md'} {note}" in text

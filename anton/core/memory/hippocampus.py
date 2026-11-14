@@ -82,17 +82,33 @@ def _extract_metadata(text: str) -> tuple[str, dict]:
     return clean_text, meta
 
 
+# The sentence punctuation a line's end may carry or drop without naming a
+# different entry. cowork-server strips the same characters
+# (_SENTENCE_END in cowork/services/memory.py).
+_SENTENCE_END = ".!?;:"
+
+
 def normalize_entry_text(text: str) -> str:
     """A saved entry's text in the form forgetting compares.
 
     The trailing ``<!-- ... -->`` metadata and the surrounding whitespace go,
-    each run of whitespace inside becomes one space, and case is folded. An
-    entry whose own text starts with ``- `` keeps it. cowork-server compares
-    its saved entries in this same form (normalize_memory_line in
-    cowork/services/memory.py), so a cloud turn sends each entry it matched
-    in this form, and cowork removes exactly the entries that show it.
+    each run of whitespace inside becomes one space, case is folded, and the
+    sentence punctuation (``. ! ? ; :``) that ends the text goes, since a
+    model that copies a line often adds or drops its final period. A text
+    that is only such punctuation keeps it, so it still names its entry, and
+    so does one where the punctuation follows a ``-->``: without it, a second
+    pass would drop that note as metadata, and cowork normalizes the form a
+    cloud turn sends once more. An entry whose own text starts with ``- ``
+    keeps it. cowork-server compares its saved entries in this same form
+    (normalize_memory_line in cowork/services/memory.py), so a cloud turn
+    sends each entry it matched in this form, and cowork removes exactly the
+    entries that show it.
     """
-    return " ".join(_extract_metadata(str(text))[0].split()).casefold()
+    folded = " ".join(_extract_metadata(str(text))[0].split()).casefold()
+    stripped = folded.rstrip(_SENTENCE_END + " ")
+    if not stripped or stripped.endswith("-->"):
+        return folded
+    return stripped
 
 
 def normalize_prompt_line(line: str) -> str:
@@ -102,9 +118,10 @@ def normalize_prompt_line(line: str) -> str:
     The prompt shows each entry after a ``- `` list marker, so one leading
     ``- `` goes here as well as what normalize_entry_text drops. A line names
     an entry exactly when the two forms are equal; there is no substring or
-    fuzzy match. A lesson's line, metadata and list marker included, names
-    its lesson, and an entry saved as ``- text`` is named by the prompt's
-    ``- - text``.
+    fuzzy match. Two saved entries that differ only in their ending
+    punctuation are both named by one line. A lesson's line, metadata and
+    list marker included, names its lesson, and an entry saved as ``- text``
+    is named by the prompt's ``- - text``.
     """
     words = _extract_metadata(str(line))[0].split()
     if words[:1] == ["-"]:
