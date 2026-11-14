@@ -14,7 +14,8 @@ Safety posture (all internal — nothing here is on the wire):
   auth's turn-key endpoint) — ``None`` (connectors OFF) otherwise. Disk
   history stays OFF regardless.
 * Memory never persists pod-side: cowork sends the tenant's slots per turn, and
-  writes are reported back for cowork to apply (see :func:`_build_cortex`).
+  writes are reported back for cowork to apply, or refused read-only when the
+  request says cowork keeps none (see :func:`_build_cortex`).
 * Only reviewed, headless-safe tools are exposed (scratchpad + artifacts).
 """
 
@@ -42,6 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from anton.cloud_turn.contract import TurnRequestV1, TurnSkillEntry, parse_turn_skills
 from anton.core.llm.tracing import HARNESS_ANTON
 from anton.core.memory.always_on_skills import AlwaysOnSkill, render_always_on_skills
+from anton.core.tools.connector_draft import ConnectorDraftBox, connector_draft_tool
 from anton.core.tools.skill_format import SKILL_FILE
 from anton.utils.nofollow import opened_dir_nofollow, read_bytes_nofollow
 
@@ -81,6 +83,9 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         # Safe to list only because a cortex is always built — core registers
         # `memorize` with one, and an allowlist name matching no tool is fatal.
         "memorize",
+        # Same reason as `memorize`. Deletes nothing pod-side: the cortex
+        # records the request and cowork decides after the turn what to remove.
+        "forget",
         # Read-only over staged skills + builtins. The prompt mandates recalling
         # some builtins, so stripping the tool would point the model at a
         # missing tool. Only writes a stats counter in the discarded staging dir.
@@ -97,8 +102,9 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
 #: prompt still invites asking for them and is left alone to keep this fix
 #: web-only, so this text has to claim precedence instead of winning it by
 #: position, and it names no connector because the pod cannot see which ones
-#: auth offers.
-_CREDENTIAL_CONTEXT = (
+#: auth offers. The middle sentence is the one that changes when the turn can
+#: build a connector template.
+_CREDENTIAL_HEAD = (
     "CREDENTIALS ON THIS SURFACE: no tool here can capture a credential, and "
     "none will appear mid-turn. Never ask the user to type a password, API "
     "key, token, connection string, or private key into this conversation. "
@@ -110,11 +116,28 @@ _CREDENTIAL_CONTEXT = (
     "Apps and Data, which reads Connected Apps and Data once something is "
     "connected. You cannot see which connectors it offers, so never state "
     "that a particular one is or is not available there. When a task needs a "
-    "connection that does not exist yet, name that entry. If the user reports "
+    "connection that does not exist yet, name that entry. "
+)
+_DESKTOP_REFERRAL = (
+    "If the user reports "
     "that the connector they need is not offered, say that it is not on Cloud "
     "yet and that it can be used in the Cowork Desktop App instead, and be "
     "exact about what that means: the work itself would move to that app, "
     "because a credential added there is not readable from this conversation. "
+)
+_TEMPLATE_REFERRAL = (
+    "If the user reports that the connector they need is not offered and it "
+    "is an API that takes keys or tokens, build its template with "
+    "create_connector_draft, and still never ask for a value: the user saves "
+    "the template from its card in this chat, then enters their credentials "
+    "for it in Connect Apps and Data. Anything else that is not offered, such "
+    "as a database that needs a driver or a sign-in that redirects to the "
+    "provider, is not on Cloud yet and can be used in the Cowork Desktop App "
+    "instead; be exact about what that means: the work itself would move to "
+    "that app, because a credential added there is not readable from this "
+    "conversation. "
+)
+_CREDENTIAL_TAIL = (
     "Never offer another location inside this app: saving a credential "
     "somewhere else does not make it usable in this conversation. If a "
     "credential arrives here anyway, say plainly that it is now in the "
@@ -122,6 +145,8 @@ _CREDENTIAL_CONTEXT = (
     "it into no tool call, no file and no store: nothing here can vault it, "
     "so having it rotated is the whole of the correct response."
 )
+_CREDENTIAL_CONTEXT = _CREDENTIAL_HEAD + _DESKTOP_REFERRAL + _CREDENTIAL_TAIL
+_CREDENTIAL_CONTEXT_WITH_TEMPLATES = _CREDENTIAL_HEAD + _TEMPLATE_REFERRAL + _CREDENTIAL_TAIL
 
 #: Per-turn staging: Hippocampus reads slots from disk, so the payload has to land
 #: as files. Used only as a fallback when no shared mount is configured (desktop,
@@ -526,14 +551,39 @@ def _write_memory_slots(dest: Path, slots: dict | None) -> None:
 def _cloud_cortex_class():
     """Cortex that records writes for the entrypoint to emit instead of storing
     them. cowork applies them under its own scope; nothing persists pod-side."""
-    from anton.core.memory.cortex import Cortex
+    from anton.cloud_turn.contract import MemoryForgetEntry
+    from anton.core.memory.cortex import Cortex, ForgetRequest, ForgetResult
+    from anton.core.memory.hippocampus import normalize_entry_text
 
     class _CloudCortex(Cortex):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
             self.pending_memory: list[dict] = []
+            # The saved entries this turn asked to remove, each once.
+            self.pending_forget: list[MemoryForgetEntry] = []
+
+        def forget(self, requests: list[ForgetRequest]) -> ForgetResult:
+            # Nothing is deleted pod-side: cowork removes the entries when the
+            # turn ends, under its own access checks. The read-only copies here
+            # say which entries the requests name, and each is sent in the form
+            # cowork compares saved entries in, scoped to the tier it was found
+            # in. So cowork removes the entries the tool reported and no other:
+            # not the same line saved this turn to another tier, and not one
+            # the copies do not hold.
+            matches, not_found = self._find_saved(requests)
+            for match in matches:
+                entry = MemoryForgetEntry(
+                    text=normalize_entry_text(match.entry.text), scope=match.tier
+                )
+                if entry not in self.pending_forget:
+                    self.pending_forget.append(entry)
+            return ForgetResult(removed=[], pending=matches, not_found=not_found)
 
         async def encode(self, engrams: list) -> list[str]:
+            if self.mode == "off":
+                # As Cortex.encode: memory mode "off" records nothing, so the
+                # turn sends no `memory` event that cowork would drop.
+                return ["Memory encoding is disabled."]
             # Normalize only — cowork validates, being the trust boundary.
             accepted = [
                 {"text": e.text, "kind": e.kind, "scope": e.scope or "global",
@@ -567,9 +617,16 @@ def _global_memory_dir(memory: dict | None) -> Path:
     return global_dir
 
 
-def _build_cortex(memory: dict | None, llm_client):
+def _build_cortex(*, memory: dict | None, writable: bool, llm_client):
     """Cortex over cowork's memory. Built even for an empty store, or an org could
-    never record its first memory: core only registers `memorize` with a cortex."""
+    never record its first memory: core only registers `memorize` with a cortex.
+
+    ``writable`` is the request's ``memory_writable``. False builds memory mode
+    "off", as the in-process harness does when cowork keeps none of the turn's
+    writes: `memorize` and `forget` answer read-only, and the session's ACC
+    observes nothing. The slots are staged and recalled either way, since the
+    prompt's memory section does not read the mode.
+    """
     from anton.core.memory.hippocampus import Hippocampus
 
     memory = memory if isinstance(memory, dict) else {}
@@ -577,12 +634,12 @@ def _build_cortex(memory: dict | None, llm_client):
     global_dir = _global_memory_dir(memory)
     project_dir = _MEMORY_DIR / "project"
     _write_memory_slots(project_dir, memory.get("project"))
-    # Not "off", or `memorize` refuses to encode; the automatic passes that mode
-    # also unlocks are disabled via `background_memory`.
+    # Not "off" while writable, or `memorize` refuses to encode; the automatic
+    # passes that mode also unlocks are disabled via `background_memory`.
     return _cloud_cortex_class()(
         global_hc=Hippocampus(global_dir),
         project_hc=Hippocampus(project_dir),
-        mode="autopilot",
+        mode="autopilot" if writable else "off",
         llm_client=llm_client,
     )
 
@@ -595,6 +652,18 @@ def drain_pending_memory(session) -> list[dict]:
     if not pending:
         return []
     drained = list(pending)
+    pending.clear()
+    return drained
+
+
+def drain_pending_forget(session) -> list[dict]:
+    """The saved entries this turn asked to remove, as ``[{"text", "scope"}]``
+    (MemoryForgetEntry). Clears as it reads, so a second call can't repeat them."""
+    cortex = getattr(session, "_cortex", None)
+    pending = getattr(cortex, "pending_forget", None)
+    if not pending:
+        return []
+    drained = [entry.model_dump() for entry in pending]
     pending.clear()
     return drained
 
@@ -647,6 +716,16 @@ def drain_pending_skills(session) -> list[dict]:
         slug: digest for slug, digest in after.items() if slug not in changed
     } | delivered
     return entries
+
+
+def drain_pending_connectors(session) -> list[dict]:
+    """Connector templates this turn built, as ``ConnectorDraft.to_dict()``.
+
+    Empty when the turn had no `create_connector_draft` tool. Clears as it
+    reads, so a second call cannot repeat them.
+    """
+    box = getattr(session, "_connector_drafts", None)
+    return box.drain() if box is not None else []
 
 
 def resolve_trusted_workspace_path() -> Path:
@@ -702,7 +781,7 @@ _ATTACHMENTS_DIRNAME = "attachments"
 #: The project's shared files, which cowork-server copies into the workspace
 #: before every turn. A copy the pod edits is replaced on the next turn.
 _PROJECT_FILES_DIRNAME = "project-files"
-#: cowork-server's list of the project files it did not copy, inside the
+#: cowork-server's list of the project files a copy limit left out, inside the
 #: project-files folder. A dot name, so no project file can take it: the
 #: server never copies a dot path.
 _NOT_COPIED_NAME = ".not-copied.json"
@@ -713,10 +792,12 @@ _NOT_COPIED_MAX_BYTES = 1024 * 1024
 #: "and N more", and the most characters those lines may take.
 _LIST_CAP = 100
 _LIST_MAX_CHARS = 32_000
-#: How far a scan of one staged folder goes: the entries it examines and the
-#: folder depth it descends to. The server copies at most a few hundred
-#: files, so a scan that reaches these is reading something it did not put
-#: there, and stops.
+#: How far a scan of one staged folder goes: the entries it examines, folders
+#: included, and the folder depth it descends to. The pod can write both
+#: folders, so the scan needs a bound. A copy the server made whole can still
+#: pass the entry bound, with its files spread over many folders or with a
+#: server file limit above it. The listing then says where it stopped, and
+#: the agent lists the folder itself.
 _SCAN_MAX_ENTRIES = 2000
 _SCAN_MAX_DEPTH = 32
 
@@ -842,7 +923,9 @@ def _scan_files(base: Path, dirname: str, *, skip_hidden: bool) -> _ScannedFiles
 
 
 class _NotCopiedReason(StrEnum):
-    """Why cowork-server left a project file out of the copy."""
+    """Which copy limit left a project file out. The kinds of file
+    cowork-server never copies are named once in the project-files header
+    (_project_files_section), never file by file, so none has a reason here."""
 
     TOO_LARGE = "too_large"
     TOO_MANY_FILES = "too_many_files"
@@ -992,7 +1075,10 @@ def _attachments_section(base: Path) -> _AttachmentsSection:
     from anton.clipboard import is_image_path
 
     image_blocks: list[dict] = []
+    # Every image shown above keeps its line, so each block has a name; the
+    # paths stop at the list cap like the project files.
     lines: list[str] = []
+    items: list[str] = []
     for f in scanned.files:
         # One bad attachment must never sink the whole set: degrade it to a
         # path listing line so "never raises" actually holds.
@@ -1003,12 +1089,13 @@ def _attachments_section(base: Path) -> _AttachmentsSection:
                     image_blocks.append(block)
                     lines.append(f"  - {_shown(f.name)} (image, shown above)")
                 else:
-                    lines.append(f"  - {_path_item(f)} (image could not be shown inline; read from this path if needed)")
+                    items.append(f"{_path_item(f)} (image could not be shown inline; read from this path if needed)")
             else:
-                lines.append(f"  - {_path_item(f)}")
+                items.append(_path_item(f))
         except Exception:
             logger.warning("cloud turn: skipping unreadable attachment %s", f, exc_info=True)
-    lines.extend(f"  - {_unreadable_item(p)}" for p in scanned.unreadable)
+    items.extend(_unreadable_item(p) for p in scanned.unreadable)
+    lines.extend(_capped_lines(items, more=f"in {attach_dir}"))
     if scanned.truncated:
         lines.append(f"  - the listing stopped here; {attach_dir} holds more")
     listing = (
@@ -1025,10 +1112,11 @@ def _project_files_section(base: Path) -> str | None:
     many, and they are not this turn's attachments."""
     folder = base / _PROJECT_FILES_DIRNAME
     header = (
-        "These are the project's shared files. They are copied into this "
-        "conversation read-only and refreshed every turn, so any edit you make "
-        "to them is discarded; save your own work elsewhere. Read them before "
-        "you search the web."
+        "These are the project's shared files. They are copies refreshed every "
+        "turn, so any edit you make to them is discarded; save your own work "
+        "elsewhere. Read them before you search the web. Hidden files, OS files "
+        "(desktop.ini, Thumbs.db), node_modules and __pycache__ folders, links "
+        "(hard-linked files included), pipes and devices are not copied."
     )
     tell_the_user = "Tell the user so, rather than searching the web for what they hold."
     scanned = _scan_files(base, _PROJECT_FILES_DIRNAME, skip_hidden=True)
@@ -1066,8 +1154,9 @@ def _project_files_section(base: Path) -> str | None:
         )
     if listed is not None and listed.listing_truncated:
         parts.append(
-            "The copy stopped before it reached every project file, so some of "
-            "its files were neither copied nor named here. A later turn may copy more."
+            "The copy stopped before it reached every project file (the project "
+            "is too large or too deep to copy whole, or this turn's copy time ran "
+            "out), so some files were neither copied nor named here."
         )
     if not_copied.unreadable:
         parts.append("The list of project files that were not copied could not be read this turn.")
@@ -1150,6 +1239,10 @@ CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
 _POD_PROMPT_SUFFIX = "\n\n".join(
     (CLOUD_ARTIFACT_DELIVERY_GUIDANCE, _CREDENTIAL_CONTEXT)
 )
+#: The same, for a turn that has `create_connector_draft`.
+_POD_PROMPT_SUFFIX_WITH_TEMPLATES = "\n\n".join(
+    (CLOUD_ARTIFACT_DELIVERY_GUIDANCE, _CREDENTIAL_CONTEXT_WITH_TEMPLATES)
+)
 
 
 def _connector_usage_notes(connectors: dict | None) -> dict[str, str]:
@@ -1168,13 +1261,16 @@ def _connector_usage_notes(connectors: dict | None) -> dict[str, str]:
 
 
 def build_cloud_chat_session(
-    request: TurnRequestV1, elicitor: "Elicitor | None" = None
+    request: TurnRequestV1, elicitor: "Elicitor | None" = None, preview_checker=None,
 ) -> "ChatSession":
     """Assemble a cloud-safe ChatSession for one turn.
 
     History is DB-authoritative (from the request). The workspace path is the
     trusted pod mount, NOT ``request.workspace_path``. *elicitor* is given only
     for an interactive turn; it is what makes ``ask_user`` available.
+    *preview_checker* (``cloud_turn/preview_check.py``) is given only when the
+    request set ``preview_checks``: it checks an edited artifact in the user's
+    open preview.
     """
     from anton.config.settings import AntonSettings
     from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -1272,7 +1368,9 @@ def build_cloud_chat_session(
 
     llm_client = LLMClient.from_settings(settings)
 
-    cortex = _build_cortex(request.memory, llm_client)
+    cortex = _build_cortex(
+        memory=request.memory, writable=request.memory_writable, llm_client=llm_client
+    )
 
     # Connectors ON only when this turn carries an oauth block (Google
     # Drive/Gmail today) — clears+reinjects DS_* env before the sandbox subprocess inherits it.
@@ -1329,6 +1427,14 @@ def build_cloud_chat_session(
         | ({"ask_user"} if elicitor is not None else set())
         | ({"browser"} if request.browser is not None else set())
     )
+    # Only when cowork-server asked for it: the template a member saves can be
+    # connected only where the host offers that, so the tool is off by default.
+    connector_drafts = ConnectorDraftBox() if request.connector_drafts else None
+    extra_tools = list(mcp_tool_defs)
+    if connector_drafts is not None:
+        draft_tool = connector_draft_tool(connector_drafts)
+        extra_tools.append(draft_tool)
+        tool_allowlist |= {draft_tool.name}
 
     config = ChatSessionConfig(
         llm_client=llm_client,
@@ -1355,7 +1461,10 @@ def build_cloud_chat_session(
             # the desktop harness injects its own via `_turn_style_context`.
             # Org and team skills cowork marks always-on follow, so they hold
             # on every turn rather than only when recalled.
-            suffix=_POD_PROMPT_SUFFIX + render_always_on_skills(_always_on_skills(turn_skills)),
+            suffix=(
+                (_POD_PROMPT_SUFFIX_WITH_TEMPLATES if connector_drafts is not None else _POD_PROMPT_SUFFIX)
+                + render_always_on_skills(_always_on_skills(turn_skills))
+            ),
         ),
         # WHERE the user was, which this pod cannot know on its own — only the
         # deployment does, so cowork sends it (ENG-1459). Absent when the pod is
@@ -1372,6 +1481,7 @@ def build_cloud_chat_session(
         initial_history=list(request.history) if request.history else None,
         console=None,                       # headless
         elicitor=elicitor,                  # interactive turns only; None = no ask_user
+        preview_checker=preview_checker,    # requests with preview_checks only; None = unverified
         # Whether cowork renders a tool's message to the user (UI turns do,
         # channel turns do not); only the request can say.
         tool_messages=request.tool_messages,
@@ -1383,10 +1493,10 @@ def build_cloud_chat_session(
         data_vault=data_vault,              # connectors ON iff request.oauth is set
         connector_usage_notes=_connector_usage_notes(request.connectors),
         history_store=None,                 # disk history OFF (DB authoritative)
-        tools=mcp_tool_defs,                 # ENG-1816: this turn's MCP connections, if any
-        # Static CLOUD_TOOL_ALLOWLIST plus this turn's own discovered MCP
+        tools=extra_tools,                   # this turn's MCP tools, and the connector draft tool
+        # Static CLOUD_TOOL_ALLOWLIST plus this turn's own MCP and draft
         # tool names — _build_tools() re-enforces the allowlist on every
-        # call (not just the first), so an MCP tool left out of it would
+        # call (not just the first), so an extra tool left out of it would
         # survive exactly one round then vanish on the turn's next rebuild.
         tool_allowlist=tool_allowlist,
         mcp_sessions=mcp_sessions,           # closed in ChatSession.close()
@@ -1419,6 +1529,7 @@ def build_cloud_chat_session(
     # from earlier turns are already on the workspace, so without this every
     # turn would re-report all of them.
     session._skill_drafts_before = _snapshot_skill_drafts(settings.skill_drafts_root)
+    session._connector_drafts = connector_drafts
     logger.info(
         "cloud session built conversation=%s workspace=%s tools=%s",
         request.conversation_id, base, sorted(tool_allowlist),

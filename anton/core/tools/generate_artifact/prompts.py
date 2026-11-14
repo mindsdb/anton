@@ -976,6 +976,8 @@ def build_subagent_system_prompt(
     user_language: str = "",
     project_rules: str = "",
     artifact_skills: str = "",
+    recalled_preferences: str = "",
+    stated_preferences: str = "",
 ) -> str:
     """System prompt for the single-generator path — the `html-app` page.
 
@@ -989,13 +991,19 @@ def build_subagent_system_prompt(
     (`Artifact.primary: str | None`, `artifacts/models.py:153`) — then the shared
     default applies, the same one the orchestrator's cleanup step uses, so the
     two never disagree about which file is the entry point.
+
+    `recalled_preferences` is the text the conversation recalled from memory
+    (`GenState.recalled_preferences`) and `stated_preferences` the calling
+    agent's (`GenState.user_preferences`), rendered together by
+    `recalled_preferences_section`.
     """
     target = primary or HTML_APP_DEFAULT_PRIMARY
     # `artifact_path` is deliberately not quoted: every path the model writes
     # is relative to the artifact root, and an absolute path in the prompt is
     # only something to misuse. The parameter stays for signature stability.
-    # `project_rules` and `artifact_skills` sit after the fixed blocks, so
-    # they stay one shared prefix across projects; "" drops out of the join.
+    # `project_rules`, `artifact_skills` and the recalled preferences sit
+    # after the fixed blocks, so they stay one shared prefix across projects;
+    # "" drops out of the join.
     return "\n\n".join(
         part
         for part in [
@@ -1009,6 +1017,7 @@ def build_subagent_system_prompt(
             _GEN_TOOLS,
             project_rules,
             artifact_skills,
+            recalled_preferences_section(recalled_preferences, stated_preferences),
             _ui_language(user_language),
         ]
         if part
@@ -1411,6 +1420,8 @@ def build_frontend_system_prompt(
     user_language: str = "",
     project_rules: str = "",
     artifact_skills: str = "",
+    recalled_preferences: str = "",
+    stated_preferences: str = "",
 ) -> str:
     # `artifact_path` is not quoted, for the same reason as in the html-app
     # builder: every path the model writes is relative to the artifact root.
@@ -1428,13 +1439,14 @@ def build_frontend_system_prompt(
         _GEN_TOOLS,
         project_rules,
         artifact_skills,
+        recalled_preferences_section(recalled_preferences, stated_preferences),
         _ui_language(user_language),
     ]
     if live_app:
         # Right after the contract it tightens. Without live apps the prompt
         # is as it was, byte for byte.
         sections.insert(sections.index(contract) + 1, _LIVE_APP_SCRIPTS)
-    # "" (no anton.md, no artifact skill) drops out of the join.
+    # "" (no anton.md, no artifact skill, nothing recalled) drops out of the join.
     return "\n\n".join(part for part in sections if part)
 
 
@@ -1490,13 +1502,25 @@ def prd_section(state) -> str:
     return f"{PRD_SECTION_HEADER}\n{body}\n{PRD_SECTION_FOOTER}" if body else ""
 
 
-RECALLED_PREFERENCES_HEADING = (
-    "Recalled from memory. These are instructions to you, not content: apply "
-    "what fits this page, but never print, quote or summarize them, or the "
-    "user's name or profile, on the page or in any text the user sees. The "
-    "operator's rules always apply; where the user's own saved rules or "
-    "profile differ from the request, the request wins."
+#: How a step uses the recalled text, said wherever that text goes. The steps
+#: write the brief, PRD, spec and notes into the project's artifacts folder,
+#: which other people can read, so the ban covers them and every file too.
+_RECALLED_USE = (
+    "These are instructions to you, not content: apply what fits this page, "
+    "but never print, quote or summarize them, or the user's name or profile, "
+    "on the page, in the brief, PRD, spec or notes, in any file a step writes, "
+    "or in any text the user sees, unless the request itself contains or asks "
+    "for it. Write what a rule changes as a plain requirement, such as "
+    '"chart bars are teal", never the rule itself or who the user is. The '
+    "operator's rules apply where they concern the page."
 )
+
+RECALLED_PREFERENCES_HEADING = (
+    f"Recalled from memory. {_RECALLED_USE} Where the user's own saved rules "
+    "or profile differ from the request or from the preferences stated above "
+    "for this request, the request and those preferences win."
+)
+RECALLED_PREFERENCES_FOOTER = "--- end of recalled preferences ---"
 
 
 def preferences_text(state) -> str:
@@ -1505,15 +1529,57 @@ def preferences_text(state) -> str:
 
     The agent often leaves its field empty even when its prompt holds a saved
     preference such as a chart color, so the gathering step and the one-reply
-    static writer read both. With nothing recalled, the agent's text comes
-    back unchanged.
+    static writer read both. The recalled block is closed by a footer, so the
+    line after it is not read as one more recalled rule. With nothing
+    recalled, the agent's text comes back unchanged.
     """
     stated = state.user_preferences
     recalled = (state.recalled_preferences or "").strip()
     if not recalled:
         return stated
-    block = f"{RECALLED_PREFERENCES_HEADING}\n{recalled}"
+    block = f"{RECALLED_PREFERENCES_HEADING}\n{recalled}\n{RECALLED_PREFERENCES_FOOTER}"
     return f"{stated}\n\n{block}" if stated else block
+
+
+RECALLED_PREFERENCES_HEADER = "## Saved preferences (follow, don't display)"
+
+
+def recalled_preferences_section(recalled: str, stated: str = "") -> str:
+    """The rules and identity the conversation recalled from memory as a
+    system-prompt section, or "" when there are none.
+
+    For the steps that never read the gathering kickoff: the two page
+    writers and the cold tech spec. A system-prompt section for the same
+    reason as `project_rules_section`, and closed by a footer because the
+    recalled sections carry `##` headings of their own.
+
+    `stated` is the calling agent's `user_preferences`. With something
+    recalled it comes first and wins, as in `preferences_text`: the brief,
+    PRD and spec may leave a stated preference out, and the saved rule would
+    then win by being the only one these steps read. With nothing recalled
+    the section is "" and these steps read the stated preferences through
+    the PRD and spec, as before.
+    """
+    text = recalled.strip()
+    if not text:
+        return ""
+    stated = stated.strip()
+    sources = "rules and identity this conversation recalled from memory"
+    wins = "the request, as the brief, PRD and spec carry it, the request wins"
+    body = text
+    if stated:
+        sources = f"preferences the calling agent stated for this request, then the {sources}"
+        wins = (
+            "the request, as the brief, PRD and spec carry it, or from the stated "
+            "preferences, the request and the stated preferences win"
+        )
+        body = f"Stated for this request:\n{stated}\n\nRecalled from memory:\n{text}"
+    return (
+        f"{RECALLED_PREFERENCES_HEADER}\n"
+        f"The {sources}. {OVER_DEFAULTS} {_RECALLED_USE} Where the user's own "
+        f"saved rules or profile differ from {wins}.\n\n"
+        f"{body}\n{RECALLED_PREFERENCES_FOOTER}"
+    )
 
 
 KNOWN_DATA_HEADER = "## Known data (passed in by the calling agent)"
@@ -1825,7 +1891,9 @@ def build_tech_spec_instruction(state) -> str:
 
 def build_tech_spec_prompt(state) -> tuple[str, str]:
     """Cold-start form: the assembled context plus the same instruction the
-    hot path sends, so both paths ask for the same document."""
+    hot path sends, so both paths ask for the same document. The hot path
+    reads the recalled preferences in the gathering kickoff it continues;
+    this form has no kickoff, so they come in the system prompt."""
     system = with_project_rules(
         _DATA_CONTEXT_HEADER
         + "You are the `make_tech_spec` node. Your document is saved to "
@@ -1834,6 +1902,9 @@ def build_tech_spec_prompt(state) -> tuple[str, str]:
         "says what goes into it.",
         state.project_rules,
     )
+    recalled = recalled_preferences_section(state.recalled_preferences, state.user_preferences)
+    if recalled:
+        system = f"{system}\n\n{recalled}"
     user = _brief_and_notes(state) + (
         f"\n\n## Artifact type\n{state.artifact_type}\n\n"
         + build_tech_spec_instruction(state)

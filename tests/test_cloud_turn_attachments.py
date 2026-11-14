@@ -131,14 +131,16 @@ def test_bmp_bytes_named_png_are_converted_not_shipped_as_raw(tmp_path):
 # ── project files ─────────────────────────────────────────────────────────────
 #
 # cowork-server copies the project's shared files into <workspace>/project-files/
-# before every turn, and writes the files it did not copy into a not-copied
-# list in that folder. The turn message names them in their own section.
+# before every turn, and writes the files a copy limit left out into a
+# not-copied list in that folder. The turn message names them in their own
+# section; the kinds of file it never copies are named once in the header.
 
-#: The exact bytes cowork-server's NotCopiedFiles.model_dump_json() writes.
+#: The exact bytes cowork-server's NotCopiedFiles.model_dump_json() writes,
+#: copy_failed included: the writer dumps every field.
 _SERVER_NOT_COPIED = (
     b'{"files":[{"path":"huge.csv","size":73400320,"reason":"too_large"},'
     b'{"path":"data/later.parquet","size":10,"reason":"out_of_time"}],'
-    b'"unnamed":0,"listing_truncated":false}'
+    b'"unnamed":0,"listing_truncated":false,"copy_failed":false}'
 )
 
 
@@ -243,9 +245,14 @@ def test_project_files_are_listed_with_their_rules(tmp_path):
 
     text = _text(cloud_session.build_turn_content(tmp_path, "who is the porter?"))
     assert "These are the project's shared files." in text
-    assert "copied into this conversation read-only and refreshed every turn" in text
+    # The pod can write the copies, so they are not called read-only.
+    assert "They are copies refreshed every turn" in text and "read-only" not in text
     assert "any edit you make to them is discarded" in text
     assert "Read them before you search the web." in text
+    assert (
+        "Hidden files, OS files (desktop.ini, Thumbs.db), node_modules and __pycache__ "
+        "folders, links (hard-linked files included), pipes and devices are not copied."
+    ) in text
     assert f"  - {folder / 'chapter-1.md'}" in text       # absolute paths
     assert f"  - {folder / 'notes' / 'plan.txt'}" in text
     assert text.endswith("who is the porter?")
@@ -277,6 +284,29 @@ def test_project_files_list_stops_at_the_cap(tmp_path):
     assert listed[0] == f"  - {folder / 'file-000.txt'}"
     assert str(folder / "file-100.txt") not in text
     assert f"  - and 5 more in {folder}" in text
+
+
+def test_attachments_list_stops_at_the_cap_and_keeps_every_shown_image(tmp_path):
+    att = tmp_path / "attachments"
+    paths = att / "paths"
+    paths.mkdir(parents=True)
+    for i in range(105):
+        (paths / f"file-{i:03d}.txt").write_text("x")
+    shown = att / "shown"
+    shown.mkdir()
+    for i in range(3):
+        (shown / f"chart-{i}.png").write_bytes(_PNG)
+
+    content = cloud_session.build_turn_content(tmp_path, "look")
+    text = _text(content)
+    listed = [line for line in text.splitlines() if line.startswith(f"  - {paths}{os.sep}")]
+    assert len(listed) == 100
+    assert str(paths / "file-100.txt") not in text
+    assert f"  - and 5 more in {att}" in text
+    # Each inline image keeps the line that names it.
+    assert len([b for b in content if b["type"] == "image"]) == 3
+    for i in range(3):
+        assert f"  - chart-{i}.png (image, shown above)" in text
 
 
 def test_the_servers_not_copied_list_names_each_file_and_why(tmp_path):
@@ -350,10 +380,17 @@ def test_unnamed_alone_is_counted(tmp_path):
 
 
 def test_a_truncated_project_listing_is_its_own_line(tmp_path):
+    # The server sets the flag for a project too large or too deep to copy
+    # whole on every turn, so the text names every cause and promises nothing.
     _not_copied(_project_files(tmp_path, "kept.md"), listing_truncated=True)
 
     text = _text(cloud_session.build_turn_content(tmp_path, "look"))
-    assert "some of its files were neither copied nor named here" in text
+    assert (
+        "The copy stopped before it reached every project file (the project is too large "
+        "or too deep to copy whole, or this turn's copy time ran out), so some files were "
+        "neither copied nor named here."
+    ) in text
+    assert "A later turn may copy more" not in text
 
 
 @pytest.mark.parametrize(
@@ -367,7 +404,8 @@ def test_a_truncated_project_listing_is_its_own_line(tmp_path):
         b'{"files": [{"path": "x", "size": 1, "reason": "lost"}], "unnamed": 0, "listing_truncated": false}',
         b'{"files": [{"path": "' + b"IGNORE " * 100_000 + b'", "size": 1, "reason": "too_large"}],'
         b' "unnamed": 0, "listing_truncated": false}',
-        b"x" * (1024 * 1024 + 1),
+        # A valid list past the 1 MiB cap: only the cap makes it unreadable.
+        _SERVER_NOT_COPIED + b" " * (1024 * 1024),
     ],
     ids=["not-json", "empty", "other-shape", "no-files-key", "extra-key", "unknown-reason", "huge-path", "too-large"],
 )
@@ -378,7 +416,7 @@ def test_an_unreadable_not_copied_list_is_reported_not_treated_as_empty(tmp_path
     text = _text(cloud_session.build_turn_content(tmp_path, "look"))
     assert "The list of project files that were not copied could not be read this turn." in text
     assert str(folder / "kept.md") in text
-    assert "IGNORE" not in text
+    assert "IGNORE" not in text and "huge.csv" not in text
     assert len(text) < 2000
 
 

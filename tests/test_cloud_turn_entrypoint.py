@@ -15,6 +15,7 @@ import pytest
 
 from anton.cloud_turn.contract import ARTIFACTS_TOUCHED_KEY, MAX_ARTIFACTS_TOUCHED, TurnRequestV1
 from anton.cloud_turn.__main__ import _clip_result_content, stream_turn
+from anton.core.tools.connector_draft import ConnectorDraftBox, parse_connector_draft
 from anton.core.llm.provider import (
     AllowanceExhaustedError,
     FreeServingPausedError,
@@ -644,6 +645,71 @@ def test_failed_turn_emits_no_memory():
     assert kinds == ["turn_failed"]
 
 
+# ── memory removal events ────────────────────────────────────────────────────
+
+class _ForgetSession(_FakeSession):
+    """A session whose turn asks a real cloud cortex to forget saved lines, as
+    the forget tool does, then fails if told to."""
+
+    def __init__(self, cortex, texts, deltas=(), fail_after=None):
+        super().__init__(deltas=deltas)
+        self._cortex = cortex
+        self._texts = texts
+        self._fail_after = fail_after
+
+    async def turn_stream(self, user_input, **kwargs):
+        from anton.core.memory.cortex import ForgetRequest
+
+        self._cortex.forget([ForgetRequest(text=t, scope="any") for t in self._texts])
+        if self._fail_after:
+            raise self._fail_after
+        for d in self._deltas:
+            yield StreamTextDelta(text=d)
+
+
+def _cloud_cortex(tmp_path):
+    from anton.cloud_turn.session import _cloud_cortex_class
+    from anton.core.memory.hippocampus import Hippocampus
+
+    global_dir, project_dir = tmp_path / "global", tmp_path / "project"
+    global_dir.mkdir()
+    project_dir.mkdir()
+    (global_dir / "rules.md").write_text("# Rules\n\n## Always\n- Reply in Spanish\n")
+    return _cloud_cortex_class()(
+        global_hc=Hippocampus(global_dir), project_hc=Hippocampus(project_dir), mode="autopilot",
+    )
+
+
+def test_memory_forget_precedes_memory_and_the_terminal_event(tmp_path):
+    """cowork removes the entries on this event and stops reading at the
+    terminal one; the pod itself deletes nothing. cowork applies memory_forget
+    and memory in order, so the removal comes first: a line the turn saves
+    again stays saved."""
+    cortex = _cloud_cortex(tmp_path)
+    cortex.pending_memory.append(_ENTRY)
+    events = _drive(_ForgetSession(cortex, ["- REPLY in  spanish"], deltas=["ok"]))
+    assert events == [
+        {"kind": "delta", "text": "ok"},
+        {"kind": "memory_forget", "entries": [{"text": "reply in spanish", "scope": "global"}]},
+        {"kind": "memory", "entries": [_ENTRY]},
+        {"kind": "turn_completed"},
+    ]
+    assert "- Reply in Spanish" in (tmp_path / "global" / "rules.md").read_text()
+
+
+def test_no_memory_forget_event_when_nothing_matched(tmp_path):
+    events = _drive(_ForgetSession(_cloud_cortex(tmp_path), ["no such line"], deltas=["ok"]))
+    assert events == [{"kind": "delta", "text": "ok"}, {"kind": "turn_completed"}]
+
+
+def test_failed_turn_emits_no_memory_forget(tmp_path):
+    """Same rule as memory: a turn that raised removes nothing."""
+    session = _ForgetSession(
+        _cloud_cortex(tmp_path), ["Reply in Spanish"], fail_after=RuntimeError("boom"),
+    )
+    assert [e["kind"] for e in _drive(session)] == ["turn_failed"]
+
+
 _DRAFT_MD = "---\nname: my-skill\ndescription: d\n---\nsteps"
 
 
@@ -683,6 +749,40 @@ def test_no_skill_event_when_no_draft_was_built(tmp_path):
 def test_failed_turn_emits_no_skill_draft(tmp_path):
     """A turn that raised has no trustworthy result — same rule as memory."""
     session = _DraftSession(tmp_path, deltas=["ok"])
+    session._raise = RuntimeError("boom")
+    assert [e["kind"] for e in _drive(session)] == ["turn_failed"]
+
+
+class _ConnectorSession(_FakeSession):
+    """A session whose turn builds a connector template, like the tool would."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._connector_drafts = ConnectorDraftBox()
+
+    async def turn_stream(self, user_input, **kwargs):
+        self._connector_drafts.put(parse_connector_draft(_CONNECTOR_DRAFT))
+        async for event in super().turn_stream(user_input, **kwargs):
+            yield event
+
+
+_CONNECTOR_DRAFT = {
+    "connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}],
+    "auth": {"type": "header", "headers": {"Authorization": "Bearer {api_key}"}},
+}
+
+
+def test_connector_draft_emitted_before_the_terminal_event():
+    events = _drive(_ConnectorSession(deltas=["ok"]))
+    assert events == [
+        {"kind": "delta", "text": "ok"},
+        {"kind": "connector", "entries": [parse_connector_draft(_CONNECTOR_DRAFT).to_dict()]},
+        {"kind": "turn_completed"},
+    ]
+
+
+def test_failed_turn_emits_no_connector_draft():
+    session = _ConnectorSession(deltas=["ok"])
     session._raise = RuntimeError("boom")
     assert [e["kind"] for e in _drive(session)] == ["turn_failed"]
 
@@ -750,6 +850,7 @@ _HISTORY_TURN = [
 
 _EXPECTED_ROWS = [
     {"role": "assistant", "content": [
+        {"type": "text", "text": "looking"},
         {"type": "tool_use", "id": "t1", "name": "recall_skill", "input": {"name": "pdf"}}]},
     {"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": "t1", "content": "BODY"}]},

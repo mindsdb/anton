@@ -21,7 +21,11 @@ from anton.core.tools.generate_artifact.discovery.prompts import (
     step_message,
 )
 from anton.core.tools.generate_artifact import engine
-from anton.core.tools.generate_artifact.prompts import RECALLED_PREFERENCES_HEADING, preferences_text
+from anton.core.tools.generate_artifact.prompts import (
+    RECALLED_PREFERENCES_FOOTER,
+    RECALLED_PREFERENCES_HEADING,
+    preferences_text,
+)
 from anton.core.tools.generate_artifact.discovery.prompts import (
     SCRATCHPADS_HEADER,
     render_scratchpads_context,
@@ -90,12 +94,16 @@ _OPERATOR = "## Operator Memory — Rules\n## Never\n- Never load scripts from e
 def test_call_kickoff_carries_the_recalled_preferences_after_the_agents_own():
     kickoff = build_call_kickoff(_state(recalled_preferences=_TEAL))
     section = kickoff.split("## User preferences\n", 1)[1]
-    assert section.startswith(f"prefers dark mode\n\n{RECALLED_PREFERENCES_HEADING}\n{_TEAL}")
+    assert section.startswith(
+        f"prefers dark mode\n\n{RECALLED_PREFERENCES_HEADING}\n{_TEAL}\n{RECALLED_PREFERENCES_FOOTER}\n\n"
+    )
 
 
 def test_call_kickoff_carries_the_recalled_preferences_when_the_agent_passed_none():
     kickoff = build_call_kickoff(_state(user_preferences="", recalled_preferences=_TEAL))
-    assert f"## User preferences\n{RECALLED_PREFERENCES_HEADING}\n{_TEAL}\n\n" in kickoff
+    assert (
+        f"## User preferences\n{RECALLED_PREFERENCES_HEADING}\n{_TEAL}\n{RECALLED_PREFERENCES_FOOTER}\n\n"
+    ) in kickoff
 
 
 def test_nothing_recalled_leaves_the_preferences_as_the_agent_wrote_them():
@@ -103,18 +111,28 @@ def test_nothing_recalled_leaves_the_preferences_as_the_agent_wrote_them():
     assert "## User preferences\n(none known)" in build_call_kickoff(_state(user_preferences=""))
 
 
-def test_the_recalled_heading_frames_them_as_instructions_and_keeps_operator_rules_binding():
+def test_the_recalled_heading_frames_them_as_instructions_and_says_what_wins():
     # The heading covers every recalled section, the operator's included, so
-    # "the request wins" must stop at the user's own rules, and nothing of
-    # the user's profile may be printed on a page that can be shared.
+    # "the request wins" must stop at the user's own rules. Nothing of the
+    # user's profile may be printed on a page that can be shared, or in the
+    # brief, PRD or spec the steps write into the project's artifacts folder,
+    # unless the request itself asks for it.
     text = preferences_text(_state(recalled_preferences=f"{_OPERATOR}\n\n{_TEAL}"))
     assert text.index(RECALLED_PREFERENCES_HEADING) < text.index(_OPERATOR)
-    assert "instructions to you, not content" in RECALLED_PREFERENCES_HEADING
-    assert "never print, quote or summarize them, or the user's name or profile" in RECALLED_PREFERENCES_HEADING
-    assert "The operator's rules always apply" in RECALLED_PREFERENCES_HEADING
-    assert "where the user's own saved rules or profile differ from the request, the request wins" in (
-        RECALLED_PREFERENCES_HEADING
-    )
+    assert text.endswith(f"{_TEAL}\n{RECALLED_PREFERENCES_FOOTER}")
+    heading = RECALLED_PREFERENCES_HEADING
+    assert "instructions to you, not content" in heading
+    assert "never print, quote or summarize them, or the user's name or profile" in heading
+    assert "unless the request itself contains or asks for it" in heading
+    assert "in the brief, PRD, spec or notes, in any file a step writes" in heading
+    assert "Write what a rule changes as a plain requirement" in heading
+    assert "never the rule itself or who the user is" in heading
+    assert "The operator's rules apply where they concern the page." in heading
+    assert "always apply" not in heading
+    assert (
+        "where the user's own saved rules or profile differ from the request or from the "
+        "preferences stated above for this request, the request and those preferences win"
+    ) in heading.replace("Where", "where")
 
 
 def test_the_gathering_step_asks_for_finish_gathering():

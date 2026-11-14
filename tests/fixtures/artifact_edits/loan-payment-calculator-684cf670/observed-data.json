@@ -1,0 +1,203 @@
+{
+  "units": {
+    "loan_amount": "USD",
+    "annual_interest_rate": "percent per year",
+    "term": "years",
+    "payment": "USD per month",
+    "amortization_amounts": "USD"
+  },
+  "filters": null,
+  "time_scope": "30-year loan; monthly payments aggregated by loan year",
+  "inputs": {
+    "loan_amount": 250000,
+    "annual_interest_rate_percent": 6.5,
+    "term_years": 30
+  },
+  "calculated_figures": {
+    "monthly_payment": 1580.17,
+    "total_interest": 318861.22,
+    "total_payments": 568861.22
+  },
+  "amortization_by_year": [
+    {
+      "year": 1,
+      "principal_paid": 2794.31,
+      "interest_paid": 16167.73,
+      "remaining_balance": 247205.69
+    },
+    {
+      "year": 2,
+      "principal_paid": 2981.45,
+      "interest_paid": 15980.59,
+      "remaining_balance": 244224.23
+    },
+    {
+      "year": 3,
+      "principal_paid": 3181.13,
+      "interest_paid": 15780.91,
+      "remaining_balance": 241043.1
+    },
+    {
+      "year": 4,
+      "principal_paid": 3394.17,
+      "interest_paid": 15567.87,
+      "remaining_balance": 237648.93
+    },
+    {
+      "year": 5,
+      "principal_paid": 3621.49,
+      "interest_paid": 15340.55,
+      "remaining_balance": 234027.44
+    },
+    {
+      "year": 6,
+      "principal_paid": 3864.03,
+      "interest_paid": 15098.02,
+      "remaining_balance": 230163.42
+    },
+    {
+      "year": 7,
+      "principal_paid": 4122.81,
+      "interest_paid": 14839.23,
+      "remaining_balance": 226040.61
+    },
+    {
+      "year": 8,
+      "principal_paid": 4398.92,
+      "interest_paid": 14563.12,
+      "remaining_balance": 221641.69
+    },
+    {
+      "year": 9,
+      "principal_paid": 4693.52,
+      "interest_paid": 14268.52,
+      "remaining_balance": 216948.17
+    },
+    {
+      "year": 10,
+      "principal_paid": 5007.86,
+      "interest_paid": 13954.18,
+      "remaining_balance": 211940.32
+    },
+    {
+      "year": 11,
+      "principal_paid": 5343.24,
+      "interest_paid": 13618.8,
+      "remaining_balance": 206597.07
+    },
+    {
+      "year": 12,
+      "principal_paid": 5701.09,
+      "interest_paid": 13260.95,
+      "remaining_balance": 200895.99
+    },
+    {
+      "year": 13,
+      "principal_paid": 6082.9,
+      "interest_paid": 12879.14,
+      "remaining_balance": 194813.09
+    },
+    {
+      "year": 14,
+      "principal_paid": 6490.28,
+      "interest_paid": 12471.76,
+      "remaining_balance": 188322.8
+    },
+    {
+      "year": 15,
+      "principal_paid": 6924.95,
+      "interest_paid": 12037.09,
+      "remaining_balance": 181397.85
+    },
+    {
+      "year": 16,
+      "principal_paid": 7388.73,
+      "interest_paid": 11573.31,
+      "remaining_balance": 174009.13
+    },
+    {
+      "year": 17,
+      "principal_paid": 7883.56,
+      "interest_paid": 11078.48,
+      "remaining_balance": 166125.56
+    },
+    {
+      "year": 18,
+      "principal_paid": 8411.54,
+      "interest_paid": 10550.5,
+      "remaining_balance": 157714.02
+    },
+    {
+      "year": 19,
+      "principal_paid": 8974.88,
+      "interest_paid": 9987.16,
+      "remaining_balance": 148739.15
+    },
+    {
+      "year": 20,
+      "principal_paid": 9575.94,
+      "interest_paid": 9386.1,
+      "remaining_balance": 139163.21
+    },
+    {
+      "year": 21,
+      "principal_paid": 10217.26,
+      "interest_paid": 8744.78,
+      "remaining_balance": 128945.95
+    },
+    {
+      "year": 22,
+      "principal_paid": 10901.53,
+      "interest_paid": 8060.51,
+      "remaining_balance": 118044.42
+    },
+    {
+      "year": 23,
+      "principal_paid": 11631.62,
+      "interest_paid": 7330.42,
+      "remaining_balance": 106412.8
+    },
+    {
+      "year": 24,
+      "principal_paid": 12410.61,
+      "interest_paid": 6551.43,
+      "remaining_balance": 94002.18
+    },
+    {
+      "year": 25,
+      "principal_paid": 13241.78,
+      "interest_paid": 5720.26,
+      "remaining_balance": 80760.41
+    },
+    {
+      "year": 26,
+      "principal_paid": 14128.6,
+      "interest_paid": 4833.44,
+      "remaining_balance": 66631.8
+    },
+    {
+      "year": 27,
+      "principal_paid": 15074.82,
+      "interest_paid": 3887.22,
+      "remaining_balance": 51556.98
+    },
+    {
+      "year": 28,
+      "principal_paid": 16084.41,
+      "interest_paid": 2877.63,
+      "remaining_balance": 35472.57
+    },
+    {
+      "year": 29,
+      "principal_paid": 17161.61,
+      "interest_paid": 1800.43,
+      "remaining_balance": 18310.96
+    },
+    {
+      "year": 30,
+      "principal_paid": 18310.96,
+      "interest_paid": 651.08,
+      "remaining_balance": 0
+    }
+  ]
+}

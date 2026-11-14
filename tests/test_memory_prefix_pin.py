@@ -242,10 +242,29 @@ async def test_recalled_preferences_are_pinned_with_the_prompt(tmp_path, memory_
 async def test_a_pin_without_recalled_preferences_reads_as_none(tmp_path, memory_dirs):
     _, project_dir = memory_dirs
     _add_rule(project_dir, "verify totals before writing them")
-    session = _session(tmp_path, memory_dirs)
-    await session._build_system_prompt("hello")
-    session._memory_pin().pop("preferences", None)
-    assert session.recalled_preferences() == ""
+    first = _session(tmp_path, memory_dirs)
+    await first._build_system_prompt("hello")
+    first._memory_pin().pop("preferences", None)
+
+    later = _session(tmp_path, memory_dirs)
+    await later._build_system_prompt("next")
+    assert later.recalled_preferences() == ""
+
+
+async def test_a_compaction_mid_turn_keeps_what_the_prompt_recalled(tmp_path, memory_dirs):
+    # The turn goes on with the system prompt it built, so a page built after
+    # a compaction must still get the rules that prompt holds.
+    global_dir, _ = memory_dirs
+    (global_dir / "rules.md").write_text("# Rules\n\n## Always\n- Always use teal (#008080) for chart bars\n")
+    history = [{"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 50} for i in range(10)]
+    session = _session(tmp_path, memory_dirs, initial_history=history)
+    await session._build_system_prompt("chart my sales")
+
+    session._llm.summarize = AsyncMock(return_value=LLMResponse(
+        content="## Goal\nx", usage=Usage(input_tokens=1, output_tokens=1)))
+    assert await session._summarize_history() is True
+    assert "preferences" not in session._memory_pin()              # the pin is gone
+    assert "Always use teal (#008080) for chart bars" in session.recalled_preferences()
 
 
 async def test_recalled_preferences_are_not_read_back_from_the_saved_pin(tmp_path, memory_dirs):

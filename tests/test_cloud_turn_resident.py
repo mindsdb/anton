@@ -273,9 +273,14 @@ def test_a_client_that_never_hands_off_does_not_block_other_turns(start_resident
 def test_a_launcher_that_gives_up_during_the_preload_never_gets_a_fork(start_resident, tmp_path):
     marker = tmp_path / "forked"
     res = start_resident("probe", preload="slow:1.5", ready=False, RESIDENT_TEST_MARKER=str(marker))
-    time.sleep(0.3)
 
-    sock, reason = launcher.connect_to_resident(res.name, res.proc.pid, timeout=0.3)
+    # A refused connect means the interpreter has not bound the name yet; it never reaches the resident.
+    deadline = time.monotonic() + 30
+    while True:
+        sock, reason = launcher.connect_to_resident(res.name, res.proc.pid, timeout=0.3)
+        if not reason.startswith("no resident process") or time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
     res.wait_ready()
     time.sleep(0.5)
 
@@ -286,7 +291,14 @@ def test_a_launcher_that_gives_up_during_the_preload_never_gets_a_fork(start_res
 
 def test_a_failed_preload_keeps_the_name_and_sends_turns_the_direct_way(start_resident):
     res = start_resident("turn", preload="fail", ready=False)
-    time.sleep(1)
+    # Wait until the name is bound and the preload has failed; neither connect forks a turn.
+    deadline = time.monotonic() + 30
+    while True:
+        sock, reason = launcher.connect_to_resident(res.name, res.proc.pid, timeout=5)
+        assert sock is None, "a failed preload must never declare itself ready"
+        if reason == "resident process is not ready" or time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
 
     code, events, stderr = res.launch(_REJECTED_REQUEST)
 

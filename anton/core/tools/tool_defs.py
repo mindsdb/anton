@@ -1,7 +1,10 @@
 from anton.core.tools.progress import ToolProgress as ToolProgress
 from anton.core.tools.tool_handlers import (
+    FORGET_MAX_ENTRIES,
+    MEMORY_ENTRY_KINDS,
     handle_ask_user,
     handle_create_artifact,
+    handle_forget,
     handle_generate_artifact,
     handle_launch_backend,
     handle_list_artifacts,
@@ -163,7 +166,9 @@ MEMORIZE_TOOL = ToolDef(
         "amounts in EUR' is 'project'. Choose 'global' only when the user says it "
         "applies to all their projects or everywhere ('In every project, answer in "
         "English'), or for general knowledge that holds in any project, such as a "
-        "library quirk. A profile entry always goes to global."
+        "library quirk. A profile entry always goes to global.\n\n"
+        "memorize only adds. To remove or replace a saved entry, call forget "
+        "with its line; a new rule that contradicts an old one leaves both saved."
     ),
     input_schema={
         "type": "object",
@@ -179,7 +184,7 @@ MEMORIZE_TOOL = ToolDef(
                         },
                         "kind": {
                             "type": "string",
-                            "enum": ["always", "never", "when", "lesson", "profile"],
+                            "enum": list(MEMORY_ENTRY_KINDS),
                         },
                         "scope": {
                             "type": "string",
@@ -202,6 +207,59 @@ MEMORIZE_TOOL = ToolDef(
         "required": ["entries"],
     },
     handler=handle_memorize,
+)
+
+
+FORGET_TOOL = ToolDef(
+    name="forget",
+    description=(
+        "Remove saved rules, lessons and profile facts from long-term memory, or "
+        "ask the host that keeps memory to remove them. Use this when the user "
+        "asks you to forget something, or to stop applying a saved rule or "
+        "preference.\n\n"
+        "Copy each entry's line exactly as it appears under a 'Your Memory' "
+        "heading of your instructions, one entry per line to remove, at most "
+        f"{FORGET_MAX_ENTRIES} per call. Case, extra spaces, the '- ' that starts "
+        "the line and a trailing <!-- ... --> note don't matter; any other "
+        "change, such as a paraphrase or part of a line, matches nothing. Lines "
+        "under an Operator Memory heading can't be removed.\n\n"
+        "The result says which entries were removed, which removals were only "
+        "asked of the host (it decides after this turn, and keeps an entry the "
+        "user may not change), and which lines matched nothing. Tell the user "
+        "only what it says: an asked-for removal is a request, not a removal, "
+        "and never say an entry is gone when the result doesn't say it was "
+        "removed. The user can also remove saved memory where the host's memory "
+        "settings allow it."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "entries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "The saved line, copied exactly from your instructions",
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["global", "project", "any"],
+                            "description": (
+                                "'global' for a line under an Identity or Global heading, "
+                                "'project' for one under a Project heading, 'any' to "
+                                "search both."
+                            ),
+                        },
+                    },
+                    "required": ["text", "scope"],
+                },
+            },
+        },
+        "required": ["entries"],
+    },
+    handler=handle_forget,
 )
 
 

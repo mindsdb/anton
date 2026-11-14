@@ -10,6 +10,8 @@ Two layers:
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -33,6 +35,7 @@ from anton.cloud_turn.session import (
     _ARTIFACTS_ROOT_ENV,
     _WORKSPACE_PATH_ENV,
     build_cloud_chat_session,
+    drain_pending_connectors,
     resolve_trusted_artifacts_root,
     resolve_trusted_workspace_path,
 )
@@ -737,6 +740,33 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
     )
 
 
+def test_connector_drafts_add_only_the_draft_tool(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {"create_connector_draft"}
+    assert [t.name for t in cfg.tools] == ["create_connector_draft"]
+
+
+def test_without_connector_drafts_there_is_no_draft_tool(tmp_path, monkeypatch):
+    session, cfg = _build(tmp_path, monkeypatch)
+    assert "create_connector_draft" not in cfg.tool_allowlist
+    assert cfg.tools == []
+    assert drain_pending_connectors(session) == []
+
+
+def test_a_real_turn_with_connector_drafts_registers_and_drains_the_tool(tmp_path, monkeypatch):
+    session = _real_cloud_session(tmp_path, monkeypatch, connector_drafts=True)
+    session._build_tools()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert names == set(CLOUD_TOOL_ALLOWLIST) | {"create_connector_draft"}
+
+    draft = {
+        "connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}],
+        "auth": {"type": "header", "headers": {"Authorization": "Bearer {api_key}"}},
+    }
+    tool = next(t for t in session._extra_tools if t.name == "create_connector_draft")
+    assert asyncio.run(tool.handler(session, draft)).ok is True
+    assert [d["connector_id"] for d in drain_pending_connectors(session)] == ["acme"]
+    assert drain_pending_connectors(session) == []
 # ── the browser: only the router block a turn carries ───────────────────────
 
 _ROUTER = "https://app.example.test/browser"
@@ -890,10 +920,32 @@ def test_empty_memory_still_allows_a_first_memory(tmp_path, monkeypatch, memory_
 def test_memory_block_builds_cortex_without_background_passes(tmp_path, monkeypatch, memory_dir):
     _, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY)
     assert cfg.cortex is not None
-    # Not "off" — that would make the memorize tool refuse. The passes it unlocks
-    # (identity extraction, vacuum, consolidation) are disabled separately.
+    # Not "off" on a writable turn: that would make the memorize tool refuse.
+    # The passes it unlocks (identity extraction, vacuum, consolidation) are
+    # disabled separately.
     assert cfg.cortex.mode == "autopilot"
     assert cfg.background_memory is False
+    assert (memory_dir / "global" / "profile.md").read_text() == "Name: Zoran"
+    assert (memory_dir / "project" / "lessons.md").is_file()
+
+
+@pytest.mark.parametrize(("field", "mode"), [
+    ({}, "autopilot"),                          # a server or controller that predates the field
+    ({"memory_writable": True}, "autopilot"),
+    ({"memory_writable": False}, "off"),
+])
+def test_memory_writable_from_the_wire_picks_the_cortex_mode(tmp_path, monkeypatch, memory_dir, field, mode):
+    """False is cowork saying it drops every save and removal the turn sends
+    (memory off, or a comparison side). The cortex then runs in "off", as an
+    in-process turn does there, so the memory tools answer read-only."""
+    request = TurnRequestV1.from_json(json.dumps({
+        "protocol_version": 1, "conversation_id": "conv_1", "input": "hi", "memory": _MEMORY, **field,
+    }))
+    _, cfg = _build(tmp_path, monkeypatch, memory=request.memory, memory_writable=request.memory_writable)
+
+    assert cfg.cortex.mode == mode
+    assert cfg.background_memory is False
+    # Staged either way: the mode decides the writes, not what is recalled.
     assert (memory_dir / "global" / "profile.md").read_text() == "Name: Zoran"
     assert (memory_dir / "project" / "lessons.md").is_file()
 
@@ -987,6 +1039,16 @@ async def test_encode_normalizes_and_drops_blanks(tmp_path, monkeypatch, memory_
     ]
 
 
+async def test_a_read_only_cortex_records_no_save(tmp_path, monkeypatch, memory_dir):
+    """Cortex.encode saves nothing in memory mode "off", and the session's
+    automatic passes rely on that. The cloud cortex keeps the rule, so no
+    caller puts a save on the wire that cowork would drop."""
+    _, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY, memory_writable=False)
+
+    assert await cfg.cortex.encode([_engram()]) == ["Memory encoding is disabled."]
+    assert cfg.cortex.pending_memory == []
+
+
 async def test_drain_is_idempotent(tmp_path, monkeypatch, memory_dir):
     from anton.cloud_turn.session import drain_pending_memory
 
@@ -1035,8 +1097,9 @@ def test_background_memory_passes_are_off_in_cloud(tmp_path, monkeypatch, memory
 
 
 def test_cerebellum_and_acc_do_not_fire_without_background_memory(tmp_path, monkeypatch):
-    """Both flushes guard on cortex.mode, which cloud must set to "autopilot" —
-    so background_memory is the only thing keeping their LLM passes off.
+    """Both flushes guard on cortex.mode, which a writable cloud turn sets to
+    "autopilot", so background_memory is the only thing keeping their LLM
+    passes off there.
     """
     from unittest.mock import MagicMock
 
@@ -1640,6 +1703,53 @@ def test_the_credential_context_states_parity_with_its_caveat(tmp_path, monkeypa
     assert "does not make it usable in this conversation" in suffix
 
 
+#: sha256 of the credential block and the whole suffix as they read before a
+#: turn could build connector templates. A turn without the tool keeps them.
+_CREDENTIAL_CONTEXT_SHA256 = "196e8bd8c4c555fd1f5b99a0771454a40cd3a46fb52ffa2802c9573be5929552"
+_POD_SUFFIX_SHA256 = "a61d2d5379b5dd2b4d5252931a8049cc116de52a5c5dfc8a16a0d863394408f0"
+
+
+def test_without_connector_drafts_the_credential_text_is_unchanged(tmp_path, monkeypatch):
+    from anton.cloud_turn.session import _CREDENTIAL_CONTEXT
+
+    _, cfg = _build(tmp_path, monkeypatch)
+    assert hashlib.sha256(_CREDENTIAL_CONTEXT.encode()).hexdigest() == _CREDENTIAL_CONTEXT_SHA256
+    assert hashlib.sha256(cfg.system_prompt_context.suffix.encode()).hexdigest() == _POD_SUFFIX_SHA256
+    assert "create_connector_draft" not in cfg.system_prompt_context.suffix
+
+
+def test_with_connector_drafts_the_turn_is_told_to_build_a_template(tmp_path, monkeypatch):
+    _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
+    suffix = cfg.system_prompt_context.suffix
+
+    assert "build its template with create_connector_draft" in suffix
+    assert "still never ask for a value" in suffix
+    assert "saves the template from its card" in suffix
+    assert "credentials for it in Connect Apps and Data" in suffix
+    # Drivers and redirect sign-ins still go to the desktop app, with the caveat.
+    assert "a database that needs a driver" in suffix
+    assert "Cowork Desktop App" in suffix
+    assert "not readable from this conversation" in suffix
+    # The rest of the rule is the same text.
+    assert "Never ask the user to type a password" in suffix
+    assert "no tool call, no file and no store" in suffix
+    assert "If the user reports that the connector they need is not offered, say" not in suffix
+
+
+def test_the_template_guidance_reaches_the_built_prompt(tmp_path, monkeypatch):
+    from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+
+    _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
+    prompt = ChatSystemPromptBuilder().build(
+        conversation_started="2026-09-10T12:00:00+00:00",
+        system_prompt_context=cfg.system_prompt_context,
+        proactive_dashboards=False,
+        output_dir="",
+        tool_defs=[],
+    )
+    assert "build its template with create_connector_draft" in prompt
+
+
 def test_the_credential_context_names_no_connector(tmp_path, monkeypatch):
     """The pod cannot see which connectors auth offers, so naming one risks
     sending the user to something this deployment does not have."""
@@ -1661,6 +1771,8 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
         "update_artifact",
         "read_text_file",
         "memorize",
+        # Takes only saved memory lines, and removes nothing in the pod.
+        "forget",
         "recall_skill",
         "create_skill_draft",
     }

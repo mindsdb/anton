@@ -23,12 +23,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from anton.core.llm.tracing import tagged_trace
 from anton.core.llm.structured import (
@@ -42,7 +43,11 @@ from anton.core.memory.base import (
     MemoryPresence,
     MemoryRead,
 )
-from anton.core.memory.hippocampus import Hippocampus
+from anton.core.memory.hippocampus import (
+    Hippocampus,
+    normalize_entry_text,
+    normalize_prompt_line,
+)
 
 if TYPE_CHECKING:
     from anton.core.llm.client import LLMClient
@@ -446,6 +451,77 @@ async def plan_compaction(llm: LLMClient, source: CompactionInput) -> Compaction
     return CompactionPlan(source=source, content=content, kept=len(kept))
 
 
+class ForgetRequest(BaseModel):
+    """One saved memory line the agent asks to remove, as the forget tool takes it.
+
+    `text` is the line as the prompt shows it (normalize_prompt_line). `scope`
+    names the tier to search: "global", "project", or "any" for both.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    scope: Literal["global", "project", "any"] = "any"
+
+    @field_validator("text")
+    @classmethod
+    def _names_a_line(cls, text: str) -> str:
+        if not normalize_prompt_line(text):
+            raise ValueError("text names no saved line")
+        return text
+
+
+class MemoryMatch(NamedTuple):
+    """A saved entry a forget request names: its tier, its slot and the entry."""
+
+    tier: Literal["global", "project"]
+    slot: Literal["rule", "lesson", "profile"]
+    entry: Engram
+
+
+class ForgetResult(NamedTuple):
+    """What Cortex.forget did with a list of requests.
+
+    `removed` holds the entries it deleted. `pending` holds the entries it
+    matched and left for the host to delete after the turn (a cloud turn's
+    cortex). `not_found` holds the requests that matched no saved entry.
+    """
+
+    removed: list[MemoryMatch]
+    pending: list[MemoryMatch]
+    not_found: list[ForgetRequest]
+
+
+#: A learned tier's section heading in the preferences build_memory_context
+#: renders, with the section's name; "Project Rules" shows the project tier
+#: and the other two the global tier.
+_LEARNED_PREFERENCE_HEADING = re.compile(
+    r"## (?:Your|Shared) Memory — (Identity|Global Rules|Project Rules)"
+)
+
+
+def drop_forgotten_lines(preferences: str, matches: list[MemoryMatch]) -> str:
+    """`preferences` (Cortex.prompt_preferences) without the lines that show `matches`.
+
+    A line goes only from a section of its match's own tier. The operator's
+    sections and the other tier's keep a line with the same text, since
+    those entries are still saved.
+    """
+    dropped = {(match.tier, normalize_entry_text(match.entry.text)) for match in matches}
+    kept: list[str] = []
+    tier: str | None = None
+    for line in preferences.splitlines():
+        heading = _LEARNED_PREFERENCE_HEADING.fullmatch(line.strip())
+        if heading:
+            tier = "project" if heading.group(1) == "Project Rules" else "global"
+        elif line.startswith("## Operator Memory"):
+            tier = None
+        elif tier is not None and (tier, normalize_prompt_line(line)) in dropped:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 class Cortex:
     """Executive coordinator for Anton's memory systems.
 
@@ -514,9 +590,11 @@ class Cortex:
         These are the operator's rules, the user's identity, and the global and
         project rules, as the same sections the system prompt holds. Lessons
         and the datasource topic are left out: they record what happened
-        before, not how the user wants the work done. Empty before
-        build_memory_context has run and when no such section applied; with
-        learned memory off or unavailable, only the operator's rules.
+        before, not how the user wants the work done. With learned memory
+        shared, the shared-memory notice leads them, as it leads the prompt's
+        sections. Empty before build_memory_context has run and when no such
+        section applied; with learned memory off or unavailable, only the
+        operator's rules.
         """
         return self._prompt_preferences
 
@@ -612,9 +690,11 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         # The rule and identity sections, also kept for prompt_preferences.
         preferences: list[str] = []
         read_learned = learned_memory_scope not in ("off", "unavailable")
+        notice = ""
         if learned_memory_scope is not None:
             presence = self._learned_memory_presence() if read_learned else "unavailable"
-            sections.append(learned_memory_notice(learned_memory_scope, presence))
+            notice = learned_memory_notice(learned_memory_scope, presence)
+            sections.append(notice)
         memory_label = "Shared Memory" if learned_memory_scope == "shared" else "Your Memory"
         operator_precedence = self._OPERATOR_PRECEDENCE.replace("Your Memory", memory_label)
 
@@ -733,6 +813,10 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             lessons=lessons,
             profile_lines=profile_lines,
         )
+        if learned_memory_scope == "shared" and preferences:
+            # Shared entries may be another person's. The page build reads
+            # these sections too, so it gets the notice the agent gets.
+            preferences.insert(0, notice)
         self._prompt_preferences = "\n\n".join(preferences)
 
         if not sections:
@@ -944,6 +1028,59 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                 actions.append(f"Encoded lesson: {engram.text}")
 
         return actions
+
+    def forget(self, requests: list[ForgetRequest]) -> ForgetResult:
+        """Delete the saved entries `requests` name, by id, from the tiers each names.
+
+        An entry matches a request when the request's line (normalize_prompt_line)
+        and the entry's text (normalize_entry_text) normalize the same. Every
+        match is found before any is deleted, so two requests that name one
+        entry both report it. The operator's managed layer is never searched.
+        The forget tool calls this only outside memory mode "off", as memorize
+        encodes only outside it.
+        """
+        matches, not_found = self._find_saved(requests)
+        for match in matches:
+            hc = self.global_hc if match.tier == "global" else self.project_hc
+            if match.slot == "rule":
+                hc.del_rule(match.entry.id)
+            elif match.slot == "lesson":
+                hc.del_lesson(match.entry.id)
+            else:
+                hc.del_identity(match.entry.id)
+        return ForgetResult(removed=matches, pending=[], not_found=not_found)
+
+    def _find_saved(
+        self, requests: list[ForgetRequest]
+    ) -> tuple[list[MemoryMatch], list[ForgetRequest]]:
+        """Each saved rule, lesson and profile fact the requests name, once, and
+        the requests that name none. Each tier a request names is read once
+        per call, however many requests there are."""
+        saved: dict[tuple[str, str], list[MemoryMatch]] = {}
+        for tier, hc in (("global", self.global_hc), ("project", self.project_hc)):
+            if not any(request.scope in (tier, "any") for request in requests):
+                continue
+            slots = (
+                ("rule", hc.get_rules()),
+                ("lesson", hc.get_lessons()),
+                ("profile", hc.get_identities()),
+            )
+            for slot, entries in slots:
+                for entry in entries:
+                    key = (tier, normalize_entry_text(entry.text))
+                    saved.setdefault(key, []).append(MemoryMatch(tier, slot, entry))
+
+        matches: dict[tuple[str, str, str], MemoryMatch] = {}
+        not_found: list[ForgetRequest] = []
+        for request in requests:
+            target = normalize_prompt_line(request.text)
+            tiers = ("global", "project") if request.scope == "any" else (request.scope,)
+            found = [match for tier in tiers for match in saved.get((tier, target), [])]
+            if not found:
+                not_found.append(request)
+            for match in found:
+                matches.setdefault((match.tier, match.slot, match.entry.id), match)
+        return list(matches.values()), not_found
 
     def _log_write_engram(self, engram: Engram) -> None:
         if self._episodic is None:

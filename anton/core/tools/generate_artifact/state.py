@@ -392,7 +392,9 @@ class GenState:
     user_preferences: str = ""
     # The rules and identity the calling conversation recalled from memory
     # (`ChatSession.recalled_preferences`), or "". Rendered after
-    # `user_preferences` by `prompts.preferences_text`. Kept apart from it
+    # `user_preferences` by `prompts.preferences_text`, and after them by
+    # `prompts.recalled_preferences_section` for the page writers and the
+    # cold tech spec. Kept apart from it
     # because a new process rebuilds this text from current memory, and the
     # call fingerprint must not see that as a corrected call.
     recalled_preferences: str = ""

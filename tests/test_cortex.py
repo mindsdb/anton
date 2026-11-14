@@ -1805,3 +1805,27 @@ class TestPromptPreferences:
     async def test_nothing_saved_keeps_nothing(self, cortex):
         await cortex.build_memory_context("hola")
         assert cortex.prompt_preferences == ""
+
+    async def test_shared_memory_leads_with_the_notice_the_agent_gets(self, person):
+        # Shared entries may be another person's, so the page build must not
+        # read the shared profile as this user's without the agent's warning.
+        g, p = person
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot")
+        prompt = await cortex.build_memory_context("hola", learned_memory_scope="shared")
+        kept = cortex.prompt_preferences
+
+        notice = prompt.split("\n\n## Shared Memory", 1)[0].strip()
+        assert notice.startswith("## Learned memory status\nLearned memory is shared across people")
+        assert kept.startswith(notice + "\n\n## Shared Memory — Identity")
+        assert "- Name: Ada" in kept and "- Use httpx" in kept
+
+    async def test_personal_memory_keeps_no_notice(self, person):
+        g, p = person
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot")
+        await cortex.build_memory_context("hola", learned_memory_scope="personal")
+        assert cortex.prompt_preferences.startswith("## Your Memory — Identity")
+        assert "Learned memory status" not in cortex.prompt_preferences
+
+    async def test_shared_memory_with_nothing_saved_keeps_nothing(self, cortex):
+        await cortex.build_memory_context("hola", learned_memory_scope="shared")
+        assert cortex.prompt_preferences == ""

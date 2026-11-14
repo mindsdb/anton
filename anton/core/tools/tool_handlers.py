@@ -15,6 +15,7 @@ from anton.core.artifacts.page_copies import FULLSTACK_TYPES as _FULLSTACK_TYPES
 from anton.core.artifacts.page_copies import display_name as _display_name
 from anton.core.backends.base import Cell
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
+from anton.core.llm.tracing import SURFACE_CLI
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.utils.scratchpad import (
@@ -483,12 +484,27 @@ def _primary_name(store, slug: str) -> str | None:
     return metadata.primary if metadata is not None else None
 
 
-def _repairs_left_line(left: int) -> str:
+def editor_offered(session: "ChatSession") -> bool:
+    """Whether this session offers `edit_artifact` (ENG-4207), so repairs are routed to it."""
+    registry = getattr(session, "tool_registry", None)
+    get = getattr(registry, "get_tool_defs", None)
+    if not callable(get):
+        return False
+    try:
+        return any(getattr(tool, "name", "") == "edit_artifact" for tool in get())
+    except Exception:
+        return False
+
+
+def _repairs_left_line(left: int, *, editor: bool = False) -> str:
     cells = "cell" if left == 1 else "cells"
+    how = (
+        "repair it with edit_artifact, naming each finding in the task" if editor
+        else "change it in a scratchpad cell to fix the code each finding names"
+    )
     return (
-        f"{left} repair {cells} left for this page this turn: change it in a scratchpad cell to fix "
-        "the code each finding names, and keep every view. Until a check passes it, do not call it or "
-        "any view in it browser-verified, tested or working"
+        f"{left} repair {cells} left for this page this turn: {how}, and keep every view. Until a check passes "
+        "it, do not call it or any view in it browser-verified, tested or working"
     )
 
 
@@ -556,6 +572,7 @@ def _check_pages(
     geography_request: str = "",
     geography_requirements: dict[PageKey, GeographyRequirement] | None = None,
     held_back: frozenset[PageKey] = frozenset(),
+    editor: bool = False,
 ) -> ArtifactLint:
     """Load the changed artifacts' pages in a browser.
 
@@ -728,7 +745,7 @@ def _check_pages(
                     messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                     continue
                 messages.append(f"{label} — {static_findings[page.key(store)]}")
-                messages.append(f"{label} — {_repairs_left_line(left)}")
+                messages.append(f"{label} — {_repairs_left_line(left, editor=editor)}")
                 continue
             if cell_sandbox is not None:
                 messages.append(f"{label} — {_SANDBOX_BROWSER_SKIP}")
@@ -759,7 +776,7 @@ def _check_pages(
                 messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                 continue
             messages += [f"{label} — {f.message()}" for f in findings]
-            messages.append(f"{label} — {_repairs_left_line(left)}")
+            messages.append(f"{label} — {_repairs_left_line(left, editor=editor)}")
         return ArtifactLint(
             messages=_lines(), page_checks=page_checks, repaired=frozenset(repaired), edited=edited,
             out_of_repairs=frozenset(out_of_repairs),
@@ -782,7 +799,7 @@ def _check_pages(
                     messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                 else:
                     messages.append(f"{label} — {static_findings[key]}")
-                    messages.append(f"{label} — {_repairs_left_line(left)}")
+                    messages.append(f"{label} — {_repairs_left_line(left, editor=editor)}")
             continue
         key = page.key(store)
         remaining = deadline - time.monotonic()
@@ -890,7 +907,7 @@ def _check_pages(
             messages.append(f"{label} — and {more} more distinct findings, not listed")
         if failed:
             messages += _comparison_lines(label, _notes(key, comparison))
-            messages.append(f"{label} — {_repairs_left_line(left)}")
+            messages.append(f"{label} — {_repairs_left_line(left, editor=editor)}")
     return ArtifactLint(
         messages=_lines(), screenshot=shot, screenshot_page=shot_page, page_checks=page_checks,
         findings_listed=frozenset(findings_listed), repaired=frozenset(repaired), failed_views=views_of_failed,
@@ -913,6 +930,7 @@ def lint_changed_artifact_files(
     geography_request: str = "",
     geography_requirements: dict[PageKey, GeographyRequirement] | None = None,
     held_back: frozenset[PageKey] = frozenset(),
+    editor: bool = False,
 ) -> ArtifactLint:
     """Run the format-appropriate checker on artifact folders this cell
     changed (any content file written, replaced, added or removed since
@@ -967,6 +985,7 @@ def lint_changed_artifact_files(
         findings_listed_earlier=findings_listed_earlier,
         failing=failing, repairs_used=repairs_used, failed_views=failed_views, turn_pages=turn_pages,
         geography_request=geography_request, geography_requirements=geography_requirements, held_back=held_back,
+        editor=editor,
     )
     return replace(checked, messages=messages + checked.messages)
 
@@ -1241,6 +1260,7 @@ async def check_cell_artifacts(
             failing=failing, repairs_used=repairs_used, failed_views=failed_views, turn_pages=turn_pages,
             geography_request=getattr(session, "_artifact_geography_request", ""),
             geography_requirements=geography_pages.requirements_of(session), held_back=held_back,
+            editor=editor_offered(session),
         )
     except Exception:
         # Best-effort: a lint crash must never fail the cell's own result.
@@ -2014,6 +2034,25 @@ _STATUS_INSTRUCTIONS = {
         "page still fails, tell the user it failed its browser check, and do "
         "not call it or any view in it browser-verified, tested or working."
     ),
+    # `browser_check_failed` when the session offers `edit_artifact` (ENG-4207):
+    # the repair goes through the editor, which checks and repairs in one call.
+    "browser_check_failed_editor": (
+        "The page passed the pipeline's static checks, but a browser loaded "
+        "`<path>/<page>` and found the problems `findings` lists, in the views "
+        "`views_measured` names. That page is on disk: repair it yourself now, "
+        "instead of asking the user how to proceed, by calling "
+        "`edit_artifact(slug, task)` with a task that names each finding and "
+        "says to fix the code it names and keep every view, its tab and its "
+        "`runView` call. Do not read the page with `read_text_file` or patch it "
+        "in a scratchpad cell first: edit_artifact reads it, edits it, loads it "
+        "in a browser and repairs it in one call, and this page gets "
+        "`repair_cells` repair calls this turn. Do NOT call generate_artifact "
+        "again for this page: it would rebuild the page from the spec instead of "
+        "repairing it. Once edit_artifact's check passes, say "
+        "\"browser-verified\" only of what that check names. If the page still "
+        "fails, tell the user it failed its browser check, and do not call it or "
+        "any view in it browser-verified, tested or working."
+    ),
     "stopped_over_budget": (
         "This turn reached its token budget and the pipeline stopped "
         "cleanly; what it had finished is on disk. Tell the user how far it "
@@ -2454,7 +2493,9 @@ async def _browser_check_failed_outcome(
         if turn_pages is not None:
             await asyncio.to_thread(turn_pages.hold, (key,), store)
         return ToolOutcome(content=json.dumps(body, indent=2), ok=True)
-    instruction = _STATUS_INSTRUCTIONS["browser_check_failed"]
+    instruction = _STATUS_INSTRUCTIONS[
+        "browser_check_failed_editor" if editor_offered(session) else "browser_check_failed"
+    ]
     # A rebuild of an existing page is compared with the page as the turn
     # found it: the repair starts knowing what the build broke or dropped.
     changes = render_check.comparison_notes(result.comparison)
@@ -2566,6 +2607,10 @@ async def handle_recall(session: ChatSession, tc_input: dict) -> str:
     return session._episodic.recall_formatted(query, **kwargs)
 
 
+# The kinds a memorize entry may have; the tool's schema offers the same list.
+MEMORY_ENTRY_KINDS = ("always", "never", "when", "lesson", "profile")
+
+
 async def handle_memorize(
     session: ChatSession, tc_input: dict
 ) -> "str | ToolOutcome":
@@ -2588,7 +2633,12 @@ async def handle_memorize(
         # not a failure — the user turned memory off, and the tool reported that
         # correctly. Marking it ok=False would nudge and then break the tool for
         # every user who has memory disabled on purpose.
-        return "Memory encoding is disabled. Change memory mode via /setup to enable."
+        # /setup is a CLI command. No other host has it, and on some of their
+        # turns (a model comparison side, a cloud turn whose saves the host
+        # drops) no setting would turn saving on, so they get no hint.
+        if getattr(session, "_surface", None) == SURFACE_CLI:
+            return "Memory encoding is disabled. Change memory mode via /setup to enable."
+        return "Saved memory is read-only in this conversation, so nothing was saved."
 
     from anton.core.memory.base import Engram
 
@@ -2601,13 +2651,18 @@ async def handle_memorize(
         )
 
     engrams: list[Engram] = []
+    # Entries whose kind is none of MEMORY_ENTRY_KINDS. They are never saved
+    # under a guessed kind: a "forget" kind saved as a lesson would save again
+    # the line the user asked to drop.
+    wrong_kind: list[str] = []
     for entry in raw_entries:
         if not isinstance(entry, dict) or "text" not in entry:
             continue
 
-        kind = entry.get("kind", "lesson")
-        if kind not in ("always", "never", "when", "lesson", "profile"):
-            kind = "lesson"
+        kind = entry.get("kind")
+        if kind not in MEMORY_ENTRY_KINDS:
+            wrong_kind.append(f"{entry['text']!r} (kind {kind!r})")
+            continue
 
         scope = entry.get("scope", "project")
         if scope not in ("global", "project"):
@@ -2625,11 +2680,19 @@ async def handle_memorize(
             )
         )
 
+    refused = ""
+    if wrong_kind:
+        refused = (
+            "Not saved: " + "; ".join(wrong_kind) + ". The kind must be one of "
+            + ", ".join(MEMORY_ENTRY_KINDS) + ". memorize only adds; to remove a "
+            "saved entry, call forget."
+        )
+
     if not engrams:
         # Tier 2: every entry was rejected by the shape checks above, so the
         # call carried nothing usable.
         return ToolOutcome(
-            content="No valid entries provided.",
+            content=refused or "No valid entries provided.",
             ok=False, reason="invalid_type",
         )
 
@@ -2647,9 +2710,141 @@ async def handle_memorize(
     session._track_memory_write(asyncio.create_task(_encode_bg(session._cortex, engrams)))
 
     descriptions = [f"Encoded {e.kind}: {e.text}" for e in engrams]
+    content = "Memory updated: " + "; ".join(descriptions)
+    if refused:
+        content += "\n" + refused
     # Tier 1: at least one entry was stored.
+    return ToolOutcome(content=content, ok=True)
+
+
+# What each slot's entry is called in the forget tool's reply.
+_FORGET_SLOT_NAMES = {"rule": "rule", "lesson": "lesson", "profile": "profile fact"}
+# The most entries one forget call reads; the tool's description names the
+# same number. The rest are counted as skipped, so a call that names thousands
+# of lines costs no more than one that names this many, and its reply stays
+# short.
+FORGET_MAX_ENTRIES = 100
+
+
+async def handle_forget(
+    session: ChatSession, tc_input: dict
+) -> "str | ToolOutcome":
+    """Process a forget tool call: remove the saved entries it names.
+
+    The reply lists the entries removed (on a cloud turn, the ones whose
+    removal it asked the host for) and the lines that matched nothing, so the
+    model never reports a removal that did not happen.
+    """
+    if session._cortex is None:
+        # Tier 2: no memory system wired, so nothing can be removed.
+        return ToolOutcome(
+            content="Memory system not available.",
+            ok=False, reason="store_unavailable",
+        )
+
+    if session._cortex.mode == "off":
+        # Tier 3, as memorize's: a configured state, not a failure. Mode "off"
+        # leaves saved memory as it is. A host relies on that for a model
+        # comparison side, which reads the person's own memory and must never
+        # change it, and a cloud host drops a removal in this mode too.
+        return (
+            "Saved memory is read-only in this conversation, so nothing was "
+            "removed. The user can remove saved entries where the host's memory "
+            "settings allow it."
+        )
+
+    if session._memory_shared:
+        # One store serves everyone on this deployment, so one person's request
+        # would remove an entry for all of them. The deployment's own memory
+        # page refuses a person that delete too.
+        return ToolOutcome(
+            content=(
+                "Saved memory here is shared by everyone on this deployment, so it "
+                "can't be removed from chat: removing an entry would remove it for "
+                "everyone. Nothing was removed."
+            ),
+            ok=False, reason="access_denied",
+        )
+
+    from pydantic import ValidationError
+
+    from anton.core.memory.cortex import ForgetRequest, MemoryMatch, drop_forgotten_lines
+
+    raw_entries = tc_input.get("entries")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        # Tier 2: a malformed call.
+        return ToolOutcome(content="No entries provided.", ok=False, reason="missing_name")
+
+    requests: list[ForgetRequest] = []
+    unreadable = 0
+    for entry in raw_entries[:FORGET_MAX_ENTRIES]:
+        try:
+            requests.append(ForgetRequest.model_validate(entry))
+        except ValidationError:
+            unreadable += 1
+    over_cap = len(raw_entries) - len(raw_entries[:FORGET_MAX_ENTRIES])
+
+    result = session._cortex.forget(requests)
+    if result.removed:
+        # This conversation's prompt is pinned with the removed lines in it;
+        # the next one is built from memory as it now is.
+        session._drop_memory_pin()
+    # A cloud turn's memory and pin keep these until the host removes them,
+    # so a prompt built again later in the turn leaves them out too.
+    session._forget_pending.extend(result.pending)
+    matched = [*result.removed, *result.pending]
+    if matched:
+        # A page this turn builds reads the preferences its prompt recalled, so
+        # the lines the user asked to drop leave them now.
+        session._prompt_preferences = drop_forgotten_lines(session._prompt_preferences, matched)
+
+    def _listed(matches: list[MemoryMatch]) -> str:
+        return "\n".join(
+            f'- "{m.entry.text}" ({m.tier} {_FORGET_SLOT_NAMES[m.slot]})' for m in matches
+        )
+
+    parts: list[str] = []
+    if result.removed:
+        parts.append("Removed from memory:\n" + _listed(result.removed))
+    if result.pending:
+        # A cloud turn: the host decides after the turn whether to remove each
+        # one, so the reply says what was asked for, never what will happen.
+        parts.append(
+            "Asked the host to remove these; it decides after this turn, and none "
+            "is removed now:\n"
+            + _listed(result.pending)
+            + "\nThe host keeps an entry this user may not change, such as a project "
+            "entry another member saved; only that member or an organization admin "
+            "can remove it, on the Memories page. Tell the user you asked for the "
+            "removal, not that it is done."
+        )
+    if result.not_found:
+        parts.append(
+            "Not found, so nothing was removed for these. Copy the line exactly as "
+            "it appears under a Your Memory heading:\n"
+            + "\n".join(f'- "{r.text}" (scope {r.scope})' for r in result.not_found)
+        )
+    if unreadable:
+        parts.append(
+            f"Skipped {unreadable} entr{'y' if unreadable == 1 else 'ies'}: each "
+            "needs a text and a scope of global, project or any."
+        )
+    if over_cap:
+        parts.append(
+            f"Skipped {over_cap} entr{'y' if over_cap == 1 else 'ies'} after the "
+            f"first {FORGET_MAX_ENTRIES}: one call reads at most "
+            f"{FORGET_MAX_ENTRIES}. Call forget again for the rest."
+        )
+    content = "\n\n".join(parts)
+
+    if matched:
+        # Tier 1: at least one entry is gone, or its removal is asked for.
+        return ToolOutcome(content=content, ok=True)
+    # Tier 2: the call removed nothing. Its own text or shape was wrong, and
+    # the reply says which.
     return ToolOutcome(
-        content="Memory updated: " + "; ".join(descriptions), ok=True
+        content=content, ok=False,
+        reason="invalid_fields" if result.not_found else "invalid_type",
     )
 
 
