@@ -4,6 +4,10 @@ Rules that reached the page writer only inside the brief or the PRD were read
 as content: pages printed the rules block as text. So the rules travel in each
 step's system prompt, under a heading that says to follow them and never show
 them, and never in a kickoff.
+
+The rules and identity the conversation recalled from memory reach the steps
+that never read the gathering kickoff (the two page writers and the cold tech
+spec) the same way.
 """
 from __future__ import annotations
 
@@ -166,6 +170,138 @@ async def test_the_cold_api_spec_gets_the_run_rules(tmp_path, monkeypatch):
         await orchestrator._make_api_spec(state)
 
     assert seen["project_rules"] == RULES
+
+
+TEAL = "## Your Memory — Global Rules\n## Always\n- Always use teal (#008080) for chart bars"
+
+
+@pytest.mark.parametrize(
+    ("builder", "fullstack"),
+    [("build_subagent_system_prompt", False), ("build_frontend_system_prompt", True)],
+)
+async def test_both_page_writers_carry_the_recalled_preferences(tmp_path, monkeypatch, builder, fullstack):
+    """The page writers read only the PRD and spec otherwise, and those may
+    leave a saved chart color out."""
+    real = getattr(prompts, builder)
+    built = {}
+
+    def spy(*args, **kwargs):
+        built["system"] = real(*args, **kwargs)
+        raise _Built
+
+    monkeypatch.setattr(prompts, builder, spy)
+    state = _state(
+        tmp_path, is_fullstack=fullstack, recalled_preferences=TEAL,
+        artifact_type="fullstack-stateless-app" if fullstack else "html-app",
+    )
+
+    with pytest.raises(_Built):
+        await orchestrator._gen_verify_frontend(state)
+
+    system = built["system"]
+    section = system[system.index(prompts.RECALLED_PREFERENCES_HEADER):]
+    assert "#008080" in section
+    assert "never print, quote or summarize them, or the user's name or profile" in section
+    assert prompts.OVER_DEFAULTS in section
+
+
+async def test_the_cold_tech_spec_carries_the_recalled_preferences(tmp_path, monkeypatch):
+    seen = {}
+
+    async def spy(*args, **kwargs):
+        seen.update(kwargs)
+        raise _Built
+
+    monkeypatch.setattr(engine, "_plan_whole_document", spy)
+    state = _state(tmp_path, recalled_preferences=TEAL)
+    assert not state.messages                                  # the cold path
+
+    with pytest.raises(_Built):
+        await orchestrator._write_tech_spec(state)
+
+    assert "#008080" in seen["system"]
+    assert "#008080" not in seen["user"]
+
+
+ORANGE = "Use orange chart bars this time"
+
+
+def _stated_then_recalled(system: str) -> None:
+    """The agent's stated preferences lead the recalled ones and win over them."""
+    section = system[system.index(prompts.RECALLED_PREFERENCES_HEADER):]
+    stated = section.index(f"Stated for this request:\n{ORANGE}")
+    assert stated < section.index(f"Recalled from memory:\n{TEAL}")
+    assert "or from the stated preferences, the request and the stated preferences win" in section
+
+
+@pytest.mark.parametrize(
+    ("builder", "fullstack"),
+    [("build_subagent_system_prompt", False), ("build_frontend_system_prompt", True)],
+)
+async def test_both_page_writers_put_the_stated_preferences_ahead_of_the_recalled(
+    tmp_path, monkeypatch, builder, fullstack,
+):
+    """The brief, PRD and spec may leave "orange this time" out; the page
+    writer then still reads it ahead of the saved teal rule."""
+    real = getattr(prompts, builder)
+    built = {}
+
+    def spy(*args, **kwargs):
+        built["system"] = real(*args, **kwargs)
+        raise _Built
+
+    monkeypatch.setattr(prompts, builder, spy)
+    state = _state(
+        tmp_path, is_fullstack=fullstack, recalled_preferences=TEAL, user_preferences=ORANGE,
+        artifact_type="fullstack-stateless-app" if fullstack else "html-app",
+    )
+
+    with pytest.raises(_Built):
+        await orchestrator._gen_verify_frontend(state)
+
+    _stated_then_recalled(built["system"])
+
+
+def test_the_cold_tech_spec_puts_the_stated_preferences_ahead_of_the_recalled(tmp_path):
+    system, _ = prompts.build_tech_spec_prompt(
+        _state(tmp_path, recalled_preferences=TEAL, user_preferences=ORANGE)
+    )
+    _stated_then_recalled(system)
+
+
+@pytest.mark.parametrize(
+    "build", [prompts.build_subagent_system_prompt, prompts.build_frontend_system_prompt]
+)
+def test_the_recalled_preferences_follow_the_rules_and_skills_and_the_language_stays_last(build):
+    skills = "## Artifact skills (follow, don't display)\nskill body"
+    plain = build(Path("/tmp/a"), user_language="English", project_rules=RULES, artifact_skills=skills)
+    recalled = build(
+        Path("/tmp/a"), user_language="English", project_rules=RULES, artifact_skills=skills,
+        recalled_preferences=TEAL,
+    )
+    cut = recalled.index(prompts.RECALLED_PREFERENCES_HEADER)
+    assert plain[:cut] == recalled[:cut]
+    assert recalled.index(skills) < cut < recalled.index("## UI language")
+    assert f"{TEAL}\n{prompts.RECALLED_PREFERENCES_FOOTER}" in recalled
+
+
+@pytest.mark.parametrize("recalled", ["", "   \n\t\n"])
+def test_nothing_recalled_leaves_the_page_writers_and_the_cold_spec_as_they_were(tmp_path, recalled):
+    # The stated preferences alone reach these steps through the PRD and spec.
+    path = Path("/tmp/a")
+    assert prompts.recalled_preferences_section(recalled, ORANGE) == ""
+    assert prompts.build_subagent_system_prompt(
+        path, recalled_preferences=recalled, stated_preferences=ORANGE,
+    ) == prompts.build_subagent_system_prompt(path)
+    assert prompts.build_frontend_system_prompt(
+        path, recalled_preferences=recalled, stated_preferences=ORANGE,
+    ) == prompts.build_frontend_system_prompt(path)
+    assert prompts.build_tech_spec_prompt(_state(tmp_path, recalled_preferences=recalled)) == (
+        prompts.build_tech_spec_prompt(_state(tmp_path))
+    )
+    assert prompts.build_tech_spec_prompt(
+        _state(tmp_path, recalled_preferences=recalled, user_preferences=ORANGE)
+    )[0] == prompts.build_tech_spec_prompt(_state(tmp_path))[0]
 
 
 async def test_generate_reads_anton_md_into_the_run_without_marking_it_read(tmp_path, monkeypatch):

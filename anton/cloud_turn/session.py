@@ -14,7 +14,8 @@ Safety posture (all internal — nothing here is on the wire):
   auth's turn-key endpoint) — ``None`` (connectors OFF) otherwise. Disk
   history stays OFF regardless.
 * Memory never persists pod-side: cowork sends the tenant's slots per turn, and
-  writes are reported back for cowork to apply (see :func:`_build_cortex`).
+  writes are reported back for cowork to apply, or refused read-only when the
+  request says cowork keeps none (see :func:`_build_cortex`).
 * Only reviewed, headless-safe tools are exposed (scratchpad + artifacts).
 """
 
@@ -23,22 +24,28 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import hmac
+import itertools
 import json
 import logging
 import os
 import shutil
 import sys
 import tempfile
+import unicodedata
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, NamedTuple
 from urllib.parse import urlsplit
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from anton.cloud_turn.contract import TurnRequestV1, TurnSkillEntry, parse_turn_skills
 from anton.core.llm.tracing import HARNESS_ANTON
 from anton.core.memory.always_on_skills import AlwaysOnSkill, render_always_on_skills
 from anton.core.tools.connector_draft import ConnectorDraftBox, connector_draft_tool
 from anton.core.tools.skill_format import SKILL_FILE
+from anton.utils.nofollow import opened_dir_nofollow, read_bytes_nofollow
 
 if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
@@ -76,6 +83,9 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         # Safe to list only because a cortex is always built — core registers
         # `memorize` with one, and an allowlist name matching no tool is fatal.
         "memorize",
+        # Same reason as `memorize`. Deletes nothing pod-side: the cortex
+        # records the request and cowork decides after the turn what to remove.
+        "forget",
         # Read-only over staged skills + builtins. The prompt mandates recalling
         # some builtins, so stripping the tool would point the model at a
         # missing tool. Only writes a stats counter in the discarded staging dir.
@@ -541,14 +551,39 @@ def _write_memory_slots(dest: Path, slots: dict | None) -> None:
 def _cloud_cortex_class():
     """Cortex that records writes for the entrypoint to emit instead of storing
     them. cowork applies them under its own scope; nothing persists pod-side."""
-    from anton.core.memory.cortex import Cortex
+    from anton.cloud_turn.contract import MemoryForgetEntry
+    from anton.core.memory.cortex import Cortex, ForgetRequest, ForgetResult
+    from anton.core.memory.hippocampus import normalize_entry_text
 
     class _CloudCortex(Cortex):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
             self.pending_memory: list[dict] = []
+            # The saved entries this turn asked to remove, each once.
+            self.pending_forget: list[MemoryForgetEntry] = []
+
+        def forget(self, requests: list[ForgetRequest]) -> ForgetResult:
+            # Nothing is deleted pod-side: cowork removes the entries when the
+            # turn ends, under its own access checks. The read-only copies here
+            # say which entries the requests name, and each is sent in the form
+            # cowork compares saved entries in, scoped to the tier it was found
+            # in. So cowork removes the entries the tool reported and no other:
+            # not the same line saved this turn to another tier, and not one
+            # the copies do not hold.
+            matches, not_found = self._find_saved(requests)
+            for match in matches:
+                entry = MemoryForgetEntry(
+                    text=normalize_entry_text(match.entry.text), scope=match.tier
+                )
+                if entry not in self.pending_forget:
+                    self.pending_forget.append(entry)
+            return ForgetResult(removed=[], pending=matches, not_found=not_found)
 
         async def encode(self, engrams: list) -> list[str]:
+            if self.mode == "off":
+                # As Cortex.encode: memory mode "off" records nothing, so the
+                # turn sends no `memory` event that cowork would drop.
+                return ["Memory encoding is disabled."]
             # Normalize only — cowork validates, being the trust boundary.
             accepted = [
                 {"text": e.text, "kind": e.kind, "scope": e.scope or "global",
@@ -582,9 +617,16 @@ def _global_memory_dir(memory: dict | None) -> Path:
     return global_dir
 
 
-def _build_cortex(memory: dict | None, llm_client):
+def _build_cortex(*, memory: dict | None, writable: bool, llm_client):
     """Cortex over cowork's memory. Built even for an empty store, or an org could
-    never record its first memory: core only registers `memorize` with a cortex."""
+    never record its first memory: core only registers `memorize` with a cortex.
+
+    ``writable`` is the request's ``memory_writable``. False builds memory mode
+    "off", as the in-process harness does when cowork keeps none of the turn's
+    writes: `memorize` and `forget` answer read-only, and the session's ACC
+    observes nothing. The slots are staged and recalled either way, since the
+    prompt's memory section does not read the mode.
+    """
     from anton.core.memory.hippocampus import Hippocampus
 
     memory = memory if isinstance(memory, dict) else {}
@@ -592,12 +634,12 @@ def _build_cortex(memory: dict | None, llm_client):
     global_dir = _global_memory_dir(memory)
     project_dir = _MEMORY_DIR / "project"
     _write_memory_slots(project_dir, memory.get("project"))
-    # Not "off", or `memorize` refuses to encode; the automatic passes that mode
-    # also unlocks are disabled via `background_memory`.
+    # Not "off" while writable, or `memorize` refuses to encode; the automatic
+    # passes that mode also unlocks are disabled via `background_memory`.
     return _cloud_cortex_class()(
         global_hc=Hippocampus(global_dir),
         project_hc=Hippocampus(project_dir),
-        mode="autopilot",
+        mode="autopilot" if writable else "off",
         llm_client=llm_client,
     )
 
@@ -610,6 +652,18 @@ def drain_pending_memory(session) -> list[dict]:
     if not pending:
         return []
     drained = list(pending)
+    pending.clear()
+    return drained
+
+
+def drain_pending_forget(session) -> list[dict]:
+    """The saved entries this turn asked to remove, as ``[{"text", "scope"}]``
+    (MemoryForgetEntry). Clears as it reads, so a second call can't repeat them."""
+    cortex = getattr(session, "_cortex", None)
+    pending = getattr(cortex, "pending_forget", None)
+    if not pending:
+        return []
+    drained = [entry.model_dump() for entry in pending]
     pending.clear()
     return drained
 
@@ -724,6 +778,28 @@ def resolve_trusted_artifacts_root() -> Path | None:
 
 #: Attachments cowork-server stages into the workspace for this conversation.
 _ATTACHMENTS_DIRNAME = "attachments"
+#: The project's shared files, which cowork-server copies into the workspace
+#: before every turn. A copy the pod edits is replaced on the next turn.
+_PROJECT_FILES_DIRNAME = "project-files"
+#: cowork-server's list of the project files a copy limit left out, inside the
+#: project-files folder. A dot name, so no project file can take it: the
+#: server never copies a dot path.
+_NOT_COPIED_NAME = ".not-copied.json"
+#: The largest not-copied list read. The pod can write the folder, so the
+#: list is untrusted and read with a bound.
+_NOT_COPIED_MAX_BYTES = 1024 * 1024
+#: The most entries one list in the turn message names before it says
+#: "and N more", and the most characters those lines may take.
+_LIST_CAP = 100
+_LIST_MAX_CHARS = 32_000
+#: How far a scan of one staged folder goes: the entries it examines, folders
+#: included, and the folder depth it descends to. The pod can write both
+#: folders, so the scan needs a bound. A copy the server made whole can still
+#: pass the entry bound, with its files spread over many folders or with a
+#: server file limit above it. The listing then says where it stopped, and
+#: the agent lists the folder itself.
+_SCAN_MAX_ENTRIES = 2000
+_SCAN_MAX_DEPTH = 32
 
 
 def _image_block_from_file(path: Path) -> dict | None:
@@ -752,51 +828,367 @@ def _image_block_from_file(path: Path) -> dict | None:
         return None
 
 
-def build_turn_content(base: Path, user_text: str) -> "str | list[dict]":
-    """Turn input augmented with the conversation's attachments.
+class _Listed(NamedTuple):
+    """One entry of a staged folder, and what it is."""
 
-    cowork-server stages uploads into ``<workspace>/attachments/`` on the shared
-    mount (they never cross the stdin wire). Returns the plain string when there
-    are none — unchanged behaviour. Otherwise a multimodal user message: an
-    image block per image (so the model can actually see it) plus a text block
-    that lists every attachment's path and carries the user's text. Never
-    raises: a bad attachment is skipped, the turn still runs.
-    """
-    attach_dir = base / _ATTACHMENTS_DIRNAME
+    name: str
+    #: ``gone`` means it vanished after the folder was listed (the server
+    #: pruned it); ``unreadable`` means reading what it is failed (ESTALE on
+    #: a warm pod, EIO, EACCES).
+    kind: Literal["dir", "file", "other", "gone", "unreadable"]
+
+
+def _classify(entry: os.DirEntry) -> _Listed:
     try:
-        files = sorted(p for p in attach_dir.rglob("*") if p.is_file()) if attach_dir.is_dir() else []
+        if entry.is_dir(follow_symlinks=False):
+            return _Listed(entry.name, "dir")
+        if entry.is_file(follow_symlinks=False):
+            return _Listed(entry.name, "file")
+        return _Listed(entry.name, "other")
+    except (FileNotFoundError, NotADirectoryError):
+        return _Listed(entry.name, "gone")
     except OSError:
-        files = []
-    if not files:
-        return user_text
+        logger.warning("cloud turn: could not read entry %s", entry.name, exc_info=True)
+        return _Listed(entry.name, "unreadable")
+
+
+def _list_entries(base: Path, parts: tuple[str, ...]) -> list[_Listed]:
+    """The entries of ``base/<parts...>``, at most one past _SCAN_MAX_ENTRIES.
+
+    Each folder below *base* is opened without following a link, so a link
+    the pod puts at any level is refused rather than listed. Raises OSError
+    when the folder cannot be opened or listed.
+    """
+    with opened_dir_nofollow(base, parts) as fd:
+        with os.scandir(fd if fd is not None else Path(base, *parts)) as entries:
+            return [_classify(entry) for entry in itertools.islice(entries, _SCAN_MAX_ENTRIES + 1)]
+
+
+class _ScannedFiles(NamedTuple):
+    """What a scan of one staged folder found."""
+
+    #: The regular files, sorted.
+    files: list[Path]
+    #: Entries skipped because they could not be read this turn, sorted.
+    unreadable: list[Path]
+    #: The folder itself could not be opened or listed, so the rest says nothing.
+    unlisted: bool
+    #: The scan stopped at _SCAN_MAX_ENTRIES or _SCAN_MAX_DEPTH.
+    truncated: bool
+
+
+def _scan_files(base: Path, dirname: str, *, skip_hidden: bool) -> _ScannedFiles:
+    """Every regular file under ``base/<dirname>``. Never raises.
+
+    A missing folder is no files. Any other error on the folder sets
+    ``unlisted`` rather than answering "empty". An entry that fails to read
+    is named in ``unreadable`` and the rest still list; an entry that went
+    away mid-scan is skipped. Links are never followed, and with
+    *skip_hidden* a dot-named entry is neither listed nor descended into.
+    """
+    files: list[Path] = []
+    unreadable: list[Path] = []
+    examined = 0
+    truncated = False
+    pending: list[tuple[str, ...]] = [(dirname,)]
+    while pending and not truncated:
+        parts = pending.pop()
+        try:
+            listed = _list_entries(base, parts)
+        except (FileNotFoundError, NotADirectoryError):
+            continue                      # absent, or gone since its parent was listed
+        except OSError:
+            logger.warning("cloud turn: could not list %s", Path(base, *parts), exc_info=True)
+            if len(parts) == 1:
+                return _ScannedFiles([], [], unlisted=True, truncated=False)
+            unreadable.append(Path(base, *parts))
+            continue
+        for item in sorted(listed):
+            if examined == _SCAN_MAX_ENTRIES:
+                truncated = True
+                break
+            examined += 1
+            if skip_hidden and item.name.startswith("."):
+                continue
+            if item.kind == "file":
+                files.append(Path(base, *parts, item.name))
+            elif item.kind == "unreadable":
+                unreadable.append(Path(base, *parts, item.name))
+            elif item.kind == "dir":
+                if len(parts) > _SCAN_MAX_DEPTH:
+                    truncated = True
+                else:
+                    pending.append((*parts, item.name))
+    return _ScannedFiles(sorted(files), sorted(unreadable), unlisted=False, truncated=truncated)
+
+
+class _NotCopiedReason(StrEnum):
+    """Which copy limit left a project file out. The kinds of file
+    cowork-server never copies are named once in the project-files header
+    (_project_files_section), never file by file, so none has a reason here."""
+
+    TOO_LARGE = "too_large"
+    TOO_MANY_FILES = "too_many_files"
+    OVER_TOTAL_BYTES = "over_total_bytes"
+    OUT_OF_TIME = "out_of_time"
+
+
+_NOT_COPIED_REASON_TEXT = {
+    _NotCopiedReason.TOO_LARGE: "over the per-file size limit",
+    _NotCopiedReason.TOO_MANY_FILES: "past the limit on how many files a conversation gets",
+    _NotCopiedReason.OVER_TOTAL_BYTES: "past the limit on how many bytes a conversation gets",
+    _NotCopiedReason.OUT_OF_TIME: "the turn's copy time ran out; a later turn may copy it",
+}
+
+
+class _NotCopiedFile(BaseModel):
+    """One project file cowork-server did not copy, and why."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The file's path below the project folder, ``/``-separated.
+    path: str = Field(max_length=4096)
+    size: int = Field(ge=0)
+    reason: _NotCopiedReason
+
+
+class _NotCopiedFiles(BaseModel):
+    """The list cowork-server writes into the project-files folder as
+    _NOT_COPIED_NAME. Any other shape is reported as unreadable, never as
+    "nothing left out"."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    files: list[_NotCopiedFile]
+    #: Files left out past the ones the list names, counted only.
+    unnamed: int = Field(ge=0)
+    #: The copy stopped before it reached every project file (too many
+    #: entries, folders too deep, or the turn's copy time ran out), so some
+    #: files were neither copied nor named.
+    listing_truncated: bool
+    #: The copy could not finish, so the server emptied the folder.
+    copy_failed: bool = False
+
+
+class _NotCopied(NamedTuple):
+    #: The server's list, or None when there is none or it could not be read.
+    listed: _NotCopiedFiles | None
+    #: The list exists but could not be read or does not parse.
+    unreadable: bool
+
+
+def _read_not_copied(base: Path) -> _NotCopied:
+    """The server's list of project files it did not copy. Never raises.
+
+    No list means nothing was left out. Only a missing file or folder means
+    that: a list that is a link, a FIFO, too large, or of the wrong shape
+    sets ``unreadable``.
+    """
+    path = base / _PROJECT_FILES_DIRNAME / _NOT_COPIED_NAME
+    try:
+        raw = read_bytes_nofollow(base, path, limit=_NOT_COPIED_MAX_BYTES)
+    except (FileNotFoundError, NotADirectoryError):
+        return _NotCopied(None, unreadable=False)
+    except OSError:
+        logger.warning("cloud turn: could not read %s", path, exc_info=True)
+        return _NotCopied(None, unreadable=True)
+    try:
+        return _NotCopied(_NotCopiedFiles.model_validate_json(raw), unreadable=False)
+    except ValueError:
+        # No exc_info: the validation error quotes the file's bytes, which
+        # the pod can choose.
+        logger.warning("cloud turn: %s is not a not-copied list", path)
+        return _NotCopied(None, unreadable=True)
+
+
+#: Unicode categories a turn message cannot carry as they are: Cc holds
+#: \n, \r and \x1c-\x1e, \x85; Zl and Zp hold U+2028 and U+2029, which can
+#: end a line or act as a control. Cs holds the lone surrogates that a file
+#: name's non-UTF-8 bytes decode to (surrogateescape), which the model call
+#: cannot encode, so one such name would fail the whole turn.
+_UNSHOWABLE_CATEGORIES = frozenset({"Cc", "Zl", "Zp", "Cs"})
+
+
+def _shown(text: str) -> str:
+    """*text* with each line-breaking, control or undecodable character
+    shown as ``?``, so a file name cannot start a line of its own in the
+    turn message and the message always encodes as UTF-8. Other characters,
+    such as the narrow no-break space in a macOS screenshot name, are kept
+    so the path still opens."""
+    return "".join("?" if unicodedata.category(ch) in _UNSHOWABLE_CATEGORIES else ch for ch in text)
+
+
+def _path_item(path: Path) -> str:
+    """How a file the agent can open is named: its absolute path, flagged
+    when the name had to be altered to fit on one line or to encode."""
+    shown = _shown(str(path))
+    if shown == str(path):
+        return shown
+    return (
+        f"{shown} (its real name has a line break, control character or non-UTF-8 byte "
+        "where this shows ?)"
+    )
+
+
+def _unreadable_item(path: Path) -> str:
+    return f"{_shown(str(path))} (could not be read this turn)"
+
+
+def _capped_lines(items: list[str], *, more: str, uncounted: int = 0) -> list[str]:
+    """One ``  - item`` line per item up to _LIST_CAP lines and
+    _LIST_MAX_CHARS characters, then ``  - and N more <more>``, where N
+    counts the items left off plus *uncounted*."""
+    lines: list[str] = []
+    used = 0
+    for item in items:
+        line = f"  - {item}"
+        if len(lines) == _LIST_CAP or used + len(line) > _LIST_MAX_CHARS:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    rest = len(items) - len(lines) + uncounted
+    if rest > 0:
+        lines.append(f"  - {'and ' if lines else ''}{rest} more {more}")
+    return lines
+
+
+class _AttachmentsSection(NamedTuple):
+    #: One inline image block per attached image that can be shown.
+    image_blocks: list[dict]
+    #: The listing text, or None when nothing is attached.
+    listing: str | None
+
+
+def _attachments_section(base: Path) -> _AttachmentsSection:
+    """The inline image blocks and the listing text for the conversation's
+    attachments."""
+    attach_dir = base / _ATTACHMENTS_DIRNAME
+    scanned = _scan_files(base, _ATTACHMENTS_DIRNAME, skip_hidden=False)
+    if scanned.unlisted:
+        return _AttachmentsSection([], (
+            f"The conversation's attachments folder {attach_dir} could not be listed "
+            "this turn; list it yourself to see what the user attached."
+        ))
+    if not scanned.files and not scanned.unreadable and not scanned.truncated:
+        return _AttachmentsSection([], None)
 
     from anton.clipboard import is_image_path
 
     image_blocks: list[dict] = []
+    # Every image shown above keeps its line, so each block has a name and a
+    # path: the agent needs the path to put the image in a page or hand it to
+    # a tool. The other paths stop at the list cap like the project files.
     lines: list[str] = []
-    for f in files:
-        # One bad attachment must never sink the whole set — degrade it to a
-        # path listing line so the docstring's "never raises" actually holds.
+    items: list[str] = []
+    for f in scanned.files:
+        # One bad attachment must never sink the whole set: degrade it to a
+        # path listing line so "never raises" actually holds.
         try:
             if is_image_path(f.name):
                 block = _image_block_from_file(f)
                 if block is not None:
                     image_blocks.append(block)
-                    lines.append(f"  - {f.name} (image, shown above)")
+                    lines.append(f"  - {_path_item(f)} (image, shown above)")
                 else:
-                    lines.append(f"  - {f} (image could not be shown inline; read from this path if needed)")
+                    items.append(f"{_path_item(f)} (image could not be shown inline; read from this path if needed)")
             else:
-                lines.append(f"  - {f}")
+                items.append(_path_item(f))
         except Exception:
             logger.warning("cloud turn: skipping unreadable attachment %s", f, exc_info=True)
-
+    items.extend(_unreadable_item(p) for p in scanned.unreadable)
+    lines.extend(_capped_lines(items, more=f"in {attach_dir}"))
+    if scanned.truncated:
+        lines.append(f"  - the listing stopped here; {attach_dir} holds more")
     listing = (
-        "The user attached the following files to this conversation. Any images "
-        "are included in this message; read other files from their absolute paths:\n"
+        "The user attached the following files to this conversation. Each image "
+        "marked shown above is also included in this message. Files are listed "
+        "at their absolute paths; use a path to read the file or to hand it to "
+        "a tool:\n"
         + "\n".join(lines)
     )
+    return _AttachmentsSection(image_blocks, listing)
+
+
+def _project_files_section(base: Path) -> str | None:
+    """The listing text for the project's shared files, or None when there
+    are none. Images are listed by path, never inlined: a project can hold
+    many, and they are not this turn's attachments."""
+    folder = base / _PROJECT_FILES_DIRNAME
+    header = (
+        "These are the project's shared files. They are copies refreshed every "
+        "turn, so any edit you make to them is discarded; save your own work "
+        "elsewhere. Read them before you search the web. Hidden files, OS files "
+        "(desktop.ini, Thumbs.db), node_modules and __pycache__ folders, links "
+        "(hard-linked files included), pipes and devices are not copied."
+    )
+    tell_the_user = "Tell the user so, rather than searching the web for what they hold."
+    scanned = _scan_files(base, _PROJECT_FILES_DIRNAME, skip_hidden=True)
+    if scanned.unlisted:
+        return (
+            f"{header} The project files folder {folder} could not be read this "
+            f"turn, so its files are not listed here. {tell_the_user}"
+        )
+    not_copied = _read_not_copied(base)
+    listed = not_copied.listed
+    named = (
+        listed is not None
+        and (listed.files or listed.unnamed or listed.listing_truncated or listed.copy_failed)
+    )
+    if not (scanned.files or scanned.unreadable or scanned.truncated or named or not_copied.unreadable):
+        return None
+
+    parts = [header]
+    if listed is not None and listed.copy_failed:
+        parts.append(f"The project's files could not be copied this turn, so none of them are here. {tell_the_user}")
+    items = sorted(
+        [(f, _path_item(f)) for f in scanned.files] + [(p, _unreadable_item(p)) for p in scanned.unreadable]
+    )
+    if items or scanned.truncated:
+        lines = _capped_lines([text for _, text in items], more=f"in {folder}")
+        if scanned.truncated:
+            lines.append(f"  - the listing stopped here; {folder} holds more")
+        parts.append("Read them from their absolute paths:\n" + "\n".join(lines))
+    if listed is not None and (listed.files or listed.unnamed):
+        names = [f"{_shown(f.path)} (not copied: {_NOT_COPIED_REASON_TEXT[f.reason]})" for f in listed.files]
+        parts.append(
+            "These project files were not copied into this conversation, so you "
+            "cannot read them here:\n"
+            + "\n".join(_capped_lines(names, more="not copied", uncounted=listed.unnamed))
+        )
+    if listed is not None and listed.listing_truncated:
+        parts.append(
+            "The copy stopped before it reached every project file (the project "
+            "is too large or too deep to copy whole, or this turn's copy time ran "
+            "out), so some files were neither copied nor named here."
+        )
+    if not_copied.unreadable:
+        parts.append("The list of project files that were not copied could not be read this turn.")
+    return "\n".join(parts)
+
+
+def build_turn_content(base: Path, user_text: str) -> "str | list[dict]":
+    """Turn input augmented with the conversation's attachments and the
+    project's shared files.
+
+    cowork-server stages uploads into ``<workspace>/attachments/`` and copies
+    the project's files into ``<workspace>/project-files/`` on the shared
+    mount (they never cross the stdin wire). Both folders are read again
+    every turn. Returns the plain string when neither holds a file.
+    Otherwise a multimodal user message: an image block per attached image
+    (so the model can actually see it) plus a text block that lists each
+    section and carries the user's text. Each section is scanned on its own,
+    so a failure in one never empties the other. Never raises: a bad entry
+    is named as unreadable, and the turn still runs. Blocking file reads on
+    a network mount: call it off the event loop.
+    """
+    attachments = _attachments_section(base)
+    project_files = _project_files_section(base)
+    sections = [s for s in (attachments.listing, project_files) if s is not None]
+    if not sections:
+        return user_text
+    listing = "\n\n".join(sections)
     text = f"{listing}\n\n{user_text}" if user_text.strip() else listing
-    return [*image_blocks, {"type": "text", "text": text}]
+    return [*attachments.image_blocks, {"type": "text", "text": text}]
 
 
 # What the web UI does with a finished file, told to the model because the pod
@@ -979,7 +1371,9 @@ def build_cloud_chat_session(
 
     llm_client = LLMClient.from_settings(settings)
 
-    cortex = _build_cortex(request.memory, llm_client)
+    cortex = _build_cortex(
+        memory=request.memory, writable=request.memory_writable, llm_client=llm_client
+    )
 
     # Connectors ON only when this turn carries an oauth block (Google
     # Drive/Gmail today) — clears+reinjects DS_* env before the sandbox subprocess inherits it.

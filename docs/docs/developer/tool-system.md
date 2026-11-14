@@ -63,6 +63,7 @@ conditionally:
 | `read_image` | Always | `handle_read_image` — returns image content blocks, with the media type the file's bytes show (PNG, JPEG, GIF or WebP), and a text error for a file that is none of those; under a sandbox policy, only paths the person's cells may read (`CellSandbox.allows_read`). Once the model refused a request carrying an image a tool returned, and took it without that image, it answers in text for the rest of the session |
 | `read_text_file` | Always | `handle_read_text_file` — a range of lines of a text file, under the read access policy (`file_access.py`), held under a sandbox policy to what the person's cells may read (`file_access.under_policy`) |
 | `memorize` | Cortex (or legacy self-awareness) present | `handle_memorize` → `cortex.encode()` |
+| `forget` | Cortex present | `handle_forget` → `cortex.forget()`: removes the saved entries whose normalized text equals a requested line; on a cloud turn it asks cowork to remove them, and cowork decides after the turn |
 | `recall` | Episodic memory enabled | `handle_recall` → `episodic.recall_formatted()` |
 | `recall_skill` | Always (no-op without skills) | `handle_recall_skill` → `SkillStore.load()` + counter |
 | `web_search` | Only when the provider does NOT execute it natively | `handle_web_search_fallback` |

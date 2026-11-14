@@ -400,6 +400,60 @@ async def test_the_handler_passes_the_user_language_to_the_pipeline(
     assert seen["user_language"] == "Brazilian Portuguese"
 
 
+_RECALLED = "## Your Memory — Global Rules\n## Always\n- Always use teal (#008080) for chart bars"
+
+
+async def _page_inputs(tmp_path: Path, monkeypatch, session, stated: str | None) -> dict:
+    slug = _make_artifact(tmp_path)
+    seen = {}
+
+    async def fake_generate(**kw):
+        seen.update(kw)
+        return {"files_written": [], "summary": "ok", "trace": []}
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    tc_input = {"slug": slug, "user_request": "chart sales", "agent_understanding": "a bar chart"}
+    if stated is not None:
+        tc_input["user_preferences"] = stated
+    await _collect(session, tc_input)
+    return seen
+
+
+async def test_the_page_build_gets_the_preferences_the_turn_recalled(tmp_path: Path, monkeypatch):
+    # The agent left `user_preferences` empty although its prompt held the
+    # saved chart color, so the page came out in the default color.
+    session = _session(tmp_path)
+    session.recalled_preferences = lambda: _RECALLED + "\n"
+    seen = await _page_inputs(tmp_path, monkeypatch, session, None)
+    assert seen["recalled_preferences"] == _RECALLED
+    assert seen["user_preferences"] == ""
+
+
+async def test_the_agents_own_preferences_reach_the_page_build_unchanged(tmp_path: Path, monkeypatch):
+    # Recalled text travels in its own field: a new process rebuilds it from
+    # current memory, and the call fingerprint over `user_preferences` must
+    # not see that as a corrected call.
+    session = _session(tmp_path)
+    session.recalled_preferences = lambda: _RECALLED
+    seen = await _page_inputs(tmp_path, monkeypatch, session, "  Use a dark theme ")
+    assert seen["user_preferences"] == "Use a dark theme"
+    assert seen["recalled_preferences"] == _RECALLED
+
+
+@pytest.mark.parametrize("recalled", [None, "", "  \n"], ids=["no-recall", "empty", "blank"])
+async def test_nothing_recalled_leaves_the_agents_preferences_as_they_were(
+    tmp_path: Path, monkeypatch, recalled
+):
+    session = _session(tmp_path)
+    if recalled is not None:
+        session.recalled_preferences = lambda: recalled
+    seen = await _page_inputs(tmp_path, monkeypatch, session, " Use a dark theme ")
+    assert seen["user_preferences"] == "Use a dark theme"
+    assert seen["recalled_preferences"] == ""
+    seen = await _page_inputs(tmp_path, monkeypatch, session, None)
+    assert seen["user_preferences"] == "" and seen["recalled_preferences"] == ""
+
+
 async def test_the_handler_rejects_a_user_language_longer_than_a_name(
     tmp_path: Path, monkeypatch
 ):

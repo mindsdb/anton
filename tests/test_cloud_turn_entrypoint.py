@@ -645,6 +645,71 @@ def test_failed_turn_emits_no_memory():
     assert kinds == ["turn_failed"]
 
 
+# ── memory removal events ────────────────────────────────────────────────────
+
+class _ForgetSession(_FakeSession):
+    """A session whose turn asks a real cloud cortex to forget saved lines, as
+    the forget tool does, then fails if told to."""
+
+    def __init__(self, cortex, texts, deltas=(), fail_after=None):
+        super().__init__(deltas=deltas)
+        self._cortex = cortex
+        self._texts = texts
+        self._fail_after = fail_after
+
+    async def turn_stream(self, user_input, **kwargs):
+        from anton.core.memory.cortex import ForgetRequest
+
+        self._cortex.forget([ForgetRequest(text=t, scope="any") for t in self._texts])
+        if self._fail_after:
+            raise self._fail_after
+        for d in self._deltas:
+            yield StreamTextDelta(text=d)
+
+
+def _cloud_cortex(tmp_path):
+    from anton.cloud_turn.session import _cloud_cortex_class
+    from anton.core.memory.hippocampus import Hippocampus
+
+    global_dir, project_dir = tmp_path / "global", tmp_path / "project"
+    global_dir.mkdir()
+    project_dir.mkdir()
+    (global_dir / "rules.md").write_text("# Rules\n\n## Always\n- Reply in Spanish\n")
+    return _cloud_cortex_class()(
+        global_hc=Hippocampus(global_dir), project_hc=Hippocampus(project_dir), mode="autopilot",
+    )
+
+
+def test_memory_forget_precedes_memory_and_the_terminal_event(tmp_path):
+    """cowork removes the entries on this event and stops reading at the
+    terminal one; the pod itself deletes nothing. cowork applies memory_forget
+    and memory in order, so the removal comes first: a line the turn saves
+    again stays saved."""
+    cortex = _cloud_cortex(tmp_path)
+    cortex.pending_memory.append(_ENTRY)
+    events = _drive(_ForgetSession(cortex, ["- REPLY in  spanish"], deltas=["ok"]))
+    assert events == [
+        {"kind": "delta", "text": "ok"},
+        {"kind": "memory_forget", "entries": [{"text": "reply in spanish", "scope": "global"}]},
+        {"kind": "memory", "entries": [_ENTRY]},
+        {"kind": "turn_completed"},
+    ]
+    assert "- Reply in Spanish" in (tmp_path / "global" / "rules.md").read_text()
+
+
+def test_no_memory_forget_event_when_nothing_matched(tmp_path):
+    events = _drive(_ForgetSession(_cloud_cortex(tmp_path), ["no such line"], deltas=["ok"]))
+    assert events == [{"kind": "delta", "text": "ok"}, {"kind": "turn_completed"}]
+
+
+def test_failed_turn_emits_no_memory_forget(tmp_path):
+    """Same rule as memory: a turn that raised removes nothing."""
+    session = _ForgetSession(
+        _cloud_cortex(tmp_path), ["Reply in Spanish"], fail_after=RuntimeError("boom"),
+    )
+    assert [e["kind"] for e in _drive(session)] == ["turn_failed"]
+
+
 _DRAFT_MD = "---\nname: my-skill\ndescription: d\n---\nsteps"
 
 
@@ -748,6 +813,26 @@ def test_entrypoint_wires_attachment_augmentation(tmp_path, monkeypatch):
     _drive(_S())
     assert isinstance(captured["input"], list)            # augmented, not the bare "hi"
     assert any(b.get("type") == "text" and "notes.txt" in b.get("text", "") for b in captured["input"])
+
+
+def test_turn_content_is_built_off_the_event_loop(tmp_path, monkeypatch):
+    """The scan reads a network mount; on the loop it would stall the
+    heartbeat, and the controller would see the turn go silent."""
+    import threading
+
+    import anton.cloud_turn.__main__ as entry
+
+    monkeypatch.setenv("ANTON_CLOUD_WORKSPACE_PATH", str(tmp_path))
+    seen = {}
+    real = entry.build_turn_content
+
+    def recording(base, user_text):
+        seen["thread"] = threading.current_thread()
+        return real(base, user_text)
+
+    monkeypatch.setattr(entry, "build_turn_content", recording)
+    _drive(_FakeSession(deltas=["ok"]))
+    assert seen["thread"] is not threading.main_thread()
 
 
 # ── turn-history rows ────────────────────────────────────────────────────────

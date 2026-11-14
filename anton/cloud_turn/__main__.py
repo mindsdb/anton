@@ -44,6 +44,7 @@ from anton.cloud_turn.session import (
     build_cloud_chat_session,
     build_turn_content,
     drain_pending_connectors,
+    drain_pending_forget,
     drain_pending_memory,
     resolve_trusted_workspace_path,
     drain_pending_skills,
@@ -342,12 +343,16 @@ async def _stream_turn(
         # `ready` goes out at turn start, before any model call, and only when
         # the stdin reader above is there to take the lines it invites.
         addons.attach(session, announce=stdin is not None)
-        # Fold in any attachments cowork-server staged into the workspace (read
-        # off the mount, so image bytes never crossed the stdin wire). Plain
-        # string when there are none. Never fail the turn over this — degrade to
-        # the plain input if the workspace can't be resolved or a file is bad.
+        # Fold in any attachments and project files cowork-server staged into
+        # the workspace (read off the mount, so image bytes never crossed the
+        # stdin wire). Plain string when there are none. The scan reads a
+        # network mount, so it runs off the event loop like the build above.
+        # Never fail the turn over this: degrade to the plain input if the
+        # workspace can't be resolved or a file is bad.
         try:
-            turn_content = build_turn_content(resolve_trusted_workspace_path(), req.input)
+            turn_content = await asyncio.to_thread(
+                build_turn_content, resolve_trusted_workspace_path(), req.input
+            )
         except Exception:
             logger.warning("cloud turn: attachment augmentation failed; using plain input", exc_info=True)
             turn_content = req.input
@@ -455,6 +460,14 @@ async def _stream_turn(
         # saw go back to cowork, which runs them as the next task.
         addons.return_unread()
         await _settle_memory(session)
+        forgets = drain_pending_forget(session)
+        if forgets:
+            # Before the terminal event: cowork removes these saved entries on
+            # this event, then stops reading at the terminal one. Before memory
+            # too, since cowork applies the two in order: the entries the turn
+            # started with go first, and a line the turn saves again stays.
+            logger.info("emitting %d memory removal(s)", len(forgets))
+            wire({"kind": "memory_forget", "entries": forgets})
         entries = drain_pending_memory(session)
         if entries:
             # Before the terminal event: cowork persists on this, then stops reading.

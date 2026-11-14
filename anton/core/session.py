@@ -120,6 +120,7 @@ from anton.core.tools.tool_defs import (
     ASK_USER_TOOL,
     CREATE_ARTIFACT_TOOL,
     CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
+    FORGET_TOOL,
     GENERATE_ARTIFACT_TOOL,
     GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     LAUNCH_BACKEND_TOOL,
@@ -425,7 +426,7 @@ if TYPE_CHECKING:
     from anton.core.artifacts.live_app_slots import LiveAppHost
     from anton.core.llm.client import LLMClient
     from anton.core.mcp.client import McpSession
-    from anton.core.memory.cortex import Cortex
+    from anton.core.memory.cortex import Cortex, MemoryMatch
     from anton.core.memory.episodes import EpisodicMemory
     from anton.memory.history_store import HistoryStore
     from anton.workspace import Workspace
@@ -1899,6 +1900,8 @@ class ChatSessionConfig:
     ui_locale: str | None = None
     # Trusted deployment facts supplied by the host. Omitted by desktop, hosted
     # web and CLI callers, whose identity and memory prompts stay unchanged.
+    # The prompts read `learned_memory_scope` only with a `deployment_identity`;
+    # the forget tool refuses on "shared" with or without one.
     deployment_identity: DeploymentIdentity | None = None
     learned_memory_scope: LearnedMemoryScope | None = None
     # Whether this host renders a streaming tool's live tail — the last lines
@@ -2087,6 +2090,14 @@ class ChatSession:
         self._limits_passed_by_message: set[str] = set()
         # Memory text the conversation's prompt was first built with (see _memory_pin).
         self._memory_pin_values: dict | None = None
+        # The recalled rules and identity the latest system prompt held (see
+        # recalled_preferences). Kept apart from the pin, which a compaction drops.
+        self._prompt_preferences = ""
+        # The saved entries the forget tool asked the host to remove (a cloud
+        # turn). The host removes them after the turn, so the memory this
+        # session reads and its pin still hold them: every prompt it builds
+        # leaves their lines out of the recalled text.
+        self._forget_pending: list[MemoryMatch] = []
         # Tally of classified tool failures (ENG-1492). MEASUREMENT ONLY —
         # nothing reads this to change behaviour. The control that will
         # (ENG-1531) is deliberately unbuilt until this has reported real
@@ -2219,6 +2230,10 @@ class ChatSession:
         )
         if config.learned_memory_scope not in (None, *get_args(LearnedMemoryScope)):
             raise ValueError("unrecognized learned_memory_scope")
+        # Read by the forget tool whatever the identity: a host can share one
+        # memory store without naming a deployment. The prompts read the
+        # scope only with an identity.
+        self._memory_shared = config.learned_memory_scope == "shared"
         self._learned_memory_scope = (
             config.learned_memory_scope or "unavailable"
             if self._deployment_identity is not None else None
@@ -2596,6 +2611,19 @@ class ChatSession:
             return None
         pinned = self._memory_pin().get("read")
         return pinned if pinned is not None else self._cortex.memory_read
+
+    def recalled_preferences(self) -> str:
+        """The rules and identity this conversation's system prompt recalled
+        from memory (Cortex.prompt_preferences, pinned with the prompt).
+
+        The text the latest prompt was built with, so a compaction later in
+        the turn, which drops the pin, leaves it as the prompt still has it.
+        "" without a Cortex, before the first turn built its prompt, and when
+        the pin that prompt used holds no such text.
+        """
+        if self._cortex is None:
+            return ""
+        return self._prompt_preferences
 
     def _memory_pin(self) -> dict:
         """The memory and workspace text this conversation's prompt was first built with, by part.
@@ -3239,6 +3267,19 @@ class ChatSession:
                         user_message, learned_memory_scope=learned_memory_scope
                     )
                 self._set_memory_pin("system", memory_section)
+                # Pinned with the prompt it came from, so the page build reads
+                # the same rules the agent was given.
+                self._set_memory_pin("preferences", self._cortex.prompt_preferences)
+            # Kept on the session as well: the turn goes on with this prompt
+            # after a compaction drops the pin.
+            preferences = pin.get("preferences")
+            self._prompt_preferences = preferences if isinstance(preferences, str) else ""
+            if self._forget_pending:
+                from anton.core.memory.cortex import drop_forgotten_lines
+
+                self._prompt_preferences = drop_forgotten_lines(
+                    self._prompt_preferences, self._forget_pending
+                )
         elif learned_memory_scope is not None:
             from anton.core.memory.cortex import learned_memory_notice
 
@@ -3542,6 +3583,11 @@ class ChatSession:
 
         if self._cortex is not None or self._self_awareness is not None:
             self.tool_registry.register_tool(MEMORIZE_TOOL)
+        # Only with a Cortex: it is what finds and removes saved entries. The
+        # legacy self-awareness path offers memorize, which answers "not
+        # available" there.
+        if self._cortex is not None:
+            self.tool_registry.register_tool(FORGET_TOOL)
 
         if self._episodic is not None and self._episodic.enabled:
             self.tool_registry.register_tool(RECALL_TOOL)

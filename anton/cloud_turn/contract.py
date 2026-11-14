@@ -42,7 +42,19 @@ Events written back on stdout (JSONL):
       while the session reports a call waiting on the provider. A tool, a
       cell or an open question reports none, so they still go quiet. A
       consumer shows it as a still-working line and does not save it.
-  {"kind": "memory", "entries": [...]}  - pre-terminal; cowork persists these
+  {"kind": "memory_forget", "entries": [{"text", "scope"}]}  - pre-terminal,
+      right before `memory`; the saved entries the `forget` tool matched this
+      turn (MemoryForgetEntry). `text` is the entry's text in the form
+      anton.core.memory.hippocampus.normalize_entry_text gives it, and `scope`
+      is the tier the pod found it in, global or project. Nothing is deleted
+      pod-side: cowork removes each entry of that tier whose normalized text
+      equals `text`, under its own access checks, which may refuse. It comes
+      before `memory` so the removal applies to memory as the turn found it:
+      a line the turn saves again, in another tier or under another kind,
+      stays saved. Omitted when the turn matched nothing, when the request
+      set `memory_writable` to false, and on failure.
+  {"kind": "memory", "entries": [...]}  - pre-terminal; cowork persists these.
+      Never sent when the request set `memory_writable` to false.
   {"kind": "skill", "entries": [...]}   - pre-terminal; skill drafts the agent
       built this turn, as [{"slug", "files": {name: text}}]. Staged only: cowork
       surfaces a card and the user saves it, so nothing reaches the skill store.
@@ -151,6 +163,16 @@ rendered as an agent message; the pod sends it only when the request set
 `tool_messages`.
 A request with `jev_decisions` set to false never asks Jev, MindsHub's
 decision model, whether the agent finished: the organization opted out.
+A request with `memory_writable` set to false keeps saved memory read-only
+for the turn. cowork-server sends false when it would drop every save and
+removal the turn sends: the user's memory is off or in mode "off", the turn
+is a model comparison side, or it is an organization's channel turn with no
+member. The pod then builds its Cortex in memory mode "off", as an
+in-process turn does there: `memorize` and `forget` answer that nothing
+changed, and no `memory` or `memory_forget` event goes out. The memory the
+request carries is still recalled in the prompt, exactly as with true. A
+missing field or a JSON `true` keeps memory writable, so a controller or
+server that does not send it changes nothing; anything else reads as false.
 A request with `ui_locale` (a tag in `anton.core.llm.ui_locale.UI_LOCALE_NAMES`:
 en, es, pt-BR, de, fr, it, ja, ko, zh-CN) tells the agent which
 language the user's app is set to (ENG-4149); absent or unsupported adds nothing.
@@ -187,6 +209,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -330,6 +353,21 @@ class TurnSkillEntry(BaseModel):
     always_on: bool = False
 
 
+class MemoryForgetEntry(BaseModel):
+    """One saved memory entry a ``memory_forget`` event asks cowork to remove.
+
+    ``text`` is the entry's own text as normalize_entry_text gives it
+    (anton/core/memory/hippocampus.py), the form cowork-server compares its
+    saved entries in. ``scope`` is the tier the pod found the entry in, so
+    cowork removes it there and nowhere else.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    scope: Literal["global", "project"]
+
+
 def parse_turn_skills(value: object) -> dict[str, TurnSkillEntry] | None:
     """The request's ``skills`` block as entries by slug, or None when it is absent.
 
@@ -449,6 +487,12 @@ class TurnRequestV1:
     #: Optional memory cowork resolved for this tenant: {"global": {slot: text},
     #: "project": {...}}, slot in profile|rules|lessons. Read-only in the pod.
     memory: dict | None = None
+    #: Whether cowork-server keeps the saves and removals this turn sends.
+    #: False builds the Cortex in memory mode "off", so `memorize` and `forget`
+    #: answer read-only rather than report a change cowork drops; `memory` is
+    #: still recalled. A missing field or a JSON `true` keeps it writable;
+    #: anything else reads as False, as for `jev_decisions`.
+    memory_writable: bool = True
     #: Optional skills cowork resolved for this turn's person and project:
     #: {slug: {"files": {relpath: text}, "always_on": true}}, kept as the JSON
     #: value; the session reads it through parse_turn_skills (TurnSkillEntry).
@@ -564,6 +608,7 @@ class TurnRequestV1:
             history=d.get("history") or [],
             llm=d.get("llm"),
             memory=d.get("memory"),
+            memory_writable=d.get("memory_writable", True) is True,
             skills=d.get("skills"),
             # A controller too old to forward it simply yields None, which reads
             # as "no attribution" rather than failing the turn.

@@ -920,10 +920,32 @@ def test_empty_memory_still_allows_a_first_memory(tmp_path, monkeypatch, memory_
 def test_memory_block_builds_cortex_without_background_passes(tmp_path, monkeypatch, memory_dir):
     _, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY)
     assert cfg.cortex is not None
-    # Not "off" — that would make the memorize tool refuse. The passes it unlocks
-    # (identity extraction, vacuum, consolidation) are disabled separately.
+    # Not "off" on a writable turn: that would make the memorize tool refuse.
+    # The passes it unlocks (identity extraction, vacuum, consolidation) are
+    # disabled separately.
     assert cfg.cortex.mode == "autopilot"
     assert cfg.background_memory is False
+    assert (memory_dir / "global" / "profile.md").read_text() == "Name: Zoran"
+    assert (memory_dir / "project" / "lessons.md").is_file()
+
+
+@pytest.mark.parametrize(("field", "mode"), [
+    ({}, "autopilot"),                          # a server or controller that predates the field
+    ({"memory_writable": True}, "autopilot"),
+    ({"memory_writable": False}, "off"),
+])
+def test_memory_writable_from_the_wire_picks_the_cortex_mode(tmp_path, monkeypatch, memory_dir, field, mode):
+    """False is cowork saying it drops every save and removal the turn sends
+    (memory off, or a comparison side). The cortex then runs in "off", as an
+    in-process turn does there, so the memory tools answer read-only."""
+    request = TurnRequestV1.from_json(json.dumps({
+        "protocol_version": 1, "conversation_id": "conv_1", "input": "hi", "memory": _MEMORY, **field,
+    }))
+    _, cfg = _build(tmp_path, monkeypatch, memory=request.memory, memory_writable=request.memory_writable)
+
+    assert cfg.cortex.mode == mode
+    assert cfg.background_memory is False
+    # Staged either way: the mode decides the writes, not what is recalled.
     assert (memory_dir / "global" / "profile.md").read_text() == "Name: Zoran"
     assert (memory_dir / "project" / "lessons.md").is_file()
 
@@ -1017,6 +1039,16 @@ async def test_encode_normalizes_and_drops_blanks(tmp_path, monkeypatch, memory_
     ]
 
 
+async def test_a_read_only_cortex_records_no_save(tmp_path, monkeypatch, memory_dir):
+    """Cortex.encode saves nothing in memory mode "off", and the session's
+    automatic passes rely on that. The cloud cortex keeps the rule, so no
+    caller puts a save on the wire that cowork would drop."""
+    _, cfg = _build(tmp_path, monkeypatch, memory=_MEMORY, memory_writable=False)
+
+    assert await cfg.cortex.encode([_engram()]) == ["Memory encoding is disabled."]
+    assert cfg.cortex.pending_memory == []
+
+
 async def test_drain_is_idempotent(tmp_path, monkeypatch, memory_dir):
     from anton.cloud_turn.session import drain_pending_memory
 
@@ -1065,8 +1097,9 @@ def test_background_memory_passes_are_off_in_cloud(tmp_path, monkeypatch, memory
 
 
 def test_cerebellum_and_acc_do_not_fire_without_background_memory(tmp_path, monkeypatch):
-    """Both flushes guard on cortex.mode, which cloud must set to "autopilot" —
-    so background_memory is the only thing keeping their LLM passes off.
+    """Both flushes guard on cortex.mode, which a writable cloud turn sets to
+    "autopilot", so background_memory is the only thing keeping their LLM
+    passes off there.
     """
     from unittest.mock import MagicMock
 
@@ -1738,6 +1771,8 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
         "update_artifact",
         "read_text_file",
         "memorize",
+        # Takes only saved memory lines, and removes nothing in the pod.
+        "forget",
         "recall_skill",
         "create_skill_draft",
     }
