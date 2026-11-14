@@ -301,6 +301,24 @@ Each turn writes its skills into a fresh folder in the system temp dir, outside 
 
 A request with no `skills` block at all stages no skills, with one rollout fallback. On a pod whose controller mounts the organization's whole skills tree and names it in `ANTON_CLOUD_SKILLS_ROOT`, such a request reads that mount instead, and the pod logs a warning. The mount holds every member's skills, so a request that carries a block never reads it.
 
+## Write-check card budget
+
+The write check asks the person to approve a cell before it changes a database, a listed endpoint or an existing file. A card on a cell that writes nothing costs a click, or an unattended answer the whole card timeout, so the check is measured both ways: what it catches and what it asks about for no reason.
+
+`scripts/write_check_replay.py` replays `tests/fixtures/write_check_replay_corpus.yaml` through one anton tree's write check, cell by cell with each chat's earlier cells. The corpus holds about 100 synthetic analysis chats. They mix pandas, SQL reads, helper modules, restarts between turns, page builds and real writes, and each cell is labeled by hand. Each must-hold cell is paired with must-stay-free cells that share its `pair` id. The replay prints cards per 100 cells and per 100 questions by kind, real writes carded, cards on cells that write nothing, each pair's result, and the causes the cards name. It takes a few seconds:
+
+```bash
+uv run python -I scripts/write_check_replay.py                         # this tree
+uv run python -I scripts/write_check_replay.py --tree /path/to/other/anton --commit <sha> --out other.json
+uv run python -I scripts/write_check_replay.py --tree . --compare other.json   # exit 1 on a lost hold or more noise
+```
+
+It runs any anton commit's write check, the older `earlier_code=` form included. It exits 2 when it refuses to score: Python imported the check from anywhere but `--tree`, it can't import one there, or `--compare` got a scorecard of another corpus. A failed `--compare` exits 1. `--accept <yaml>` maps cells that write nothing and may newly ask to the reason each must, under `no_write_cards`; `--compare` doesn't count those cards against the base. A lost real-write card can't be accepted. A check that raises counts as a card, as it does in a session. `--code-root` passes the project folder as a local pad's `code_root` on a tree that takes it.
+
+Every cell has an `id`, its key in scorecards and the budget: the chat's code and a number. A new cell takes its chat's next free number, so no other key moves.
+
+`tests/test_write_check_replay.py` holds this tree to `tests/fixtures/write_check_replay_budget.yaml`. Its lists are exact: the real writes carded on a rule of their own, those carded only by the "can't be checked" card, the known misses, the cells that write nothing but get a card, and the broken pairs. The test fails when the scorecard differs from any list in either direction, and names the cells. So a change that frees five cells and cards five others fails too. A change that frees cells or starts catching a write updates the lists. A change that adds cards says in its PR which cells gained one and why each must ask, and a change that narrows the "can't be checked" card says what holds each write it frees.
+
 ---
 
 ## Dev guidelines

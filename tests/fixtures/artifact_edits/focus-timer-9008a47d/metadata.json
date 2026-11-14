@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "9008a47d7d9c436aab5bbd39a0842e76",
+  "slug": "focus-timer-9008a47d",
+  "createdAt": "2026-11-12T08:36:28+00:00",
+  "updatedAt": "2026-11-12T08:37:16+00:00",
+  "name": "Focus Timer",
+  "description": "Build a client-side Pomodoro timer with 25-minute focus and 5-minute break modes, Start/Pause and Reset controls, a large mm:ss display, completed focus-session count, and a short log of completion times.",
+  "type": "html-app",
+  "primary": "index.html",
+  "datasources": [],
+  "files": [],
+  "provenance": [
+    {
+      "conversation": "gen-ws_timer",
+      "title": null,
+      "turns": [
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:36:28+00:00",
+          "summary": "Created artifact: Focus Timer",
+          "files_touched": []
+        },
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:37:16+00:00",
+          "summary": "Generated artifact files",
+          "files_touched": []
+        }
+      ]
+    }
+  ]
+}

@@ -8,7 +8,7 @@ import httpx2 as httpx
 import inspect
 import random
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
@@ -29,6 +29,12 @@ from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.datasources.data_vault import DataVault
+from anton.core.idle_scratchpad import (
+    IDLE_ROUNDS_BEFORE_WITHHOLD,
+    IDLE_SCRATCHPAD_NOTICE,
+    round_is_idle,
+    without_scratchpad,
+)
 from anton.core.llm import jev as _jev
 from anton.core.llm.effort import (
     TRUNCATION_RETRY_NOTE,
@@ -1981,6 +1987,13 @@ class ChatSessionConfig:
     # browser, and the cloud pod for the MindsHub browser router. None means no
     # browser tool, and nothing falls back to settings or the environment.
     browser: "BrowserConfig | None" = None
+    # Asks the user's open preview of an artifact whether it runs (ENG-4207):
+    # `await preview_checker(artifact_slug, timeout_s)` returns the host's
+    # answer, `{"status": "passed" | "failed" | "unavailable", "errors": [...],
+    # "ms": int}`, or None when no preview answered. `edit_artifact` asks it
+    # after its own checks; None or "unavailable" counts as unverified, never
+    # as passed. None (the default) asks no preview.
+    preview_checker: "Callable[[str, float], Awaitable[dict | None]] | None" = None
 
 
 class ChatSession:
@@ -2015,6 +2028,7 @@ class ChatSession:
         # ``external_search_provider`` / ``exa_api_key`` via getattr so the
         # session stays decoupled from the host's settings shape.
         self._settings = config.settings
+        self._preview_checker = config.preview_checker
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._verify_min_tool_rounds = s.verify_min_tool_rounds
@@ -3586,6 +3600,17 @@ class ChatSession:
             )
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
+            # The artifact editor (ENG-4207): changes to an existing artifact go
+            # to edit_artifact, and generate_artifact keeps rebuilds.
+            from anton.core.tools.edit_artifact import (
+                EDIT_ARTIFACT_TOOL,
+                editor_enabled,
+                route_edits_to_editor,
+            )
+
+            if editor_enabled(self._settings):
+                generate = route_edits_to_editor(generate)
+                self.tool_registry.register_tool(EDIT_ARTIFACT_TOOL)
             self.tool_registry.register_tool(generate)
 
         # The shared browser: only when the host gave one. The credential is
@@ -4980,8 +5005,7 @@ class ChatSession:
         first check, before any tool had been dispatched, and the turn still
         paid for two calls. Measured at a 100k ceiling with 190k contexts: zero
         tools run, 400k spent, 300% over the number the user asked for. The cap
-        binds only below ~2x the reserve; at the 1.25M default it changes
-        nothing.
+        binds only below ~2x the reserve; at the default it changes nothing.
 
         The bound this produces is close, not exact: the reserve is derived from
         `peak_context_tokens` (input + cache_read + cache_creation) but compared
@@ -5093,15 +5117,26 @@ class ChatSession:
 
         `limit` is "spend_ceiling", "round_cap" or "time_limit". Yields
         ``("event", ev)``, then ``("result", granted)``. Granted raises that
-        limit for the rest of the turn (`_grant_limit`). Two ways to grant, in order:
+        limit for the rest of the turn (`_grant_limit`). Only a turn that can
+        ask a person grants anything. With no one to ask (no elicitor that
+        takes a choice, or no emitter, as in `turn()`), even a message saying
+        "don't stop" grants nothing: it returns False and the caller hands back
+        at the configured limit. "Can ask" is read from the elicitor the host
+        injects, so this holds for `turn()` and cloud turns, which inject none
+        when no one is there; a host that injects a choice elicitor on an
+        unattended turn still lets that turn's message grant.
+        Otherwise, two ways to grant, in order:
 
         1. The message that started this turn already says to keep going or
            finish. Honored once per limit per turn, with a progress line
            naming the limit, so the user is not asked what they just said.
         2. A "Keep going / Stop here" question naming the limit. "Stop
-           here", Skip, a timeout, or a host that cannot ask returns False
-           and the caller hands back as before.
+           here", Skip or a timeout returns False and the caller hands back
+           as before.
         """
+        if not self._can_ask_a_choice():
+            yield "result", False
+            return
         if limit == "time_limit" and self._max_turn_seconds > 0 and (
             self._time_limit_continued_s
             >= _TIME_LIMIT_MAX_CONTINUES * _TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds
@@ -5110,7 +5145,7 @@ class ChatSession:
             return
         # The time limit always asks: "don't stop" in the message can't speak
         # for the extra hour, and the host extends the turn's credentials only
-        # when the question is answered. With nobody to ask it hands back.
+        # when the question is answered.
         if limit != "time_limit" and limit not in self._limits_passed_by_message and await self._user_authorized_finishing(
             user_message
         ):
@@ -5123,11 +5158,6 @@ class ChatSession:
             yield "event", StreamTaskProgress(phase="analyzing", message=note)
             yield "result", True
             return
-        if self.emitter is None:
-            # `turn()` runs without an emitter, so there is no one to ask and
-            # nothing to drain; the caller hands back as it always did.
-            yield "result", False
-            return
         inner = self._run_draining(self._continue_question(limit))
         try:
             async for kind, item in inner:
@@ -5138,6 +5168,17 @@ class ChatSession:
                 yield kind, item
         finally:
             await inner.aclose()
+
+    def _can_ask_a_choice(self) -> bool:
+        """Whether a "choice" question can reach a person this turn: the same
+        test `elicit` applies before publishing one. Inferred from what the
+        host injects, so a host whose turn has no one to answer must not
+        inject an elicitor."""
+        return (
+            self.emitter is not None
+            and self.elicitor is not None
+            and "choice" in self.elicitor.supported_kinds
+        )
 
     async def _user_authorized_finishing(self, user_message: str) -> bool:
         """Whether this turn's own message tells the agent to keep going.
@@ -5241,7 +5282,7 @@ class ChatSession:
     def _spend_ceiling_notice(self) -> str:
         """The SYSTEM injection for a ceiling stop.
 
-        Mirrors the 25-round cap's pause-and-ask wording deliberately: the user
+        Mirrors the round cap's pause-and-ask wording deliberately: the user
         already meets that shape when a long turn stops, and two different
         "I stopped, shall I go on?" behaviours would read as two different
         products. `Do NOT retry automatically` is what keeps this a question
@@ -7191,6 +7232,7 @@ class ChatSession:
             _carried_rounds = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
+            idle_scratchpad_rounds = 0
 
             while llm_response.tool_calls:
                 # Only the last round's refusals count: an earlier one was asked
@@ -7952,6 +7994,21 @@ class ChatSession:
                 # so the LLM sees the alarm before its next decision.
                 self._acc_maybe_nudge(tool_results)
 
+                # Only on turns with MCP tools: without them the scratchpad is
+                # the only way to the data, and the notice points at tools the
+                # turn does not have.
+                idle_scratchpad_rounds = (
+                    idle_scratchpad_rounds + 1
+                    if self._mcp_sessions and round_is_idle(llm_response.tool_calls)
+                    else 0
+                )
+                withhold_scratchpad = idle_scratchpad_rounds >= IDLE_ROUNDS_BEFORE_WITHHOLD
+                if withhold_scratchpad:
+                    logger.info(
+                        "idle scratchpad loop: %d rounds — withholding scratchpad for the next round",
+                        idle_scratchpad_rounds,
+                    )
+                    tool_results.append({"type": "text", "text": IDLE_SCRATCHPAD_NOTICE})
                 # Text the user added while this round ran (ENG-4194), in the
                 # same message so turns still alternate. Not after a question
                 # nobody answered: the turn ends below with no model call.
@@ -7982,6 +8039,8 @@ class ChatSession:
                 # Rebuild: a tool this round (e.g. recall_skill) may have
                 # registered new tools the follow-up must see.
                 tools = self._build_tools()
+                if withhold_scratchpad:
+                    tools = without_scratchpad(tools)
 
                 # Signal that tools are done and LLM is now reasoning
                 _reasoning_t0 = _time.monotonic()
@@ -8757,7 +8816,9 @@ class ChatSession:
                 message=f"Task incomplete — continuing ({self._turn_continuations}/{self._max_continuations})...",
             )
 
-            # Re-enter tool loop: get next LLM response with tools available
+            # Re-enter tool loop: get next LLM response with tools available.
+            # Rebuilt so a scratchpad withheld for the last round is back.
+            tools = self._build_tools()
             response = None
             async for event in self.plan_stream_with_recovery(
                 system=system, tools=tools
