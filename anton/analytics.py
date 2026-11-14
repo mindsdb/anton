@@ -267,13 +267,6 @@ _pending_lock = threading.Lock()
 #                    value as a pre-ENG-2243 build, never as "no parent".
 #                    (anton/core/session.py::_emit_tool_completed)
 #
-#   browser_jev_shadow  jev_action, llm_action, agree_action, agree_target,
-#                    p_action, p_target: in shadow mode, the step Jev picked
-#                    for a page against the step the model then took on that
-#                    same page, and Jev's probabilities. Action names and
-#                    numbers only, never page content
-#                    (anton/core/browser/tool.py::_record_shadow_agreement)
-#
 #   browser_jev_step jev_action, p_action, ms: one step Jev took in `run`
 #                    when browser_jev is "on". Not `action`: send_event's own
 #                    parameter has that name
@@ -282,6 +275,11 @@ _pending_lock = threading.Lock()
 #   browser_human_check kind ("Cloudflare", "reCAPTCHA", "hCaptcha" or "a
 #                    security check"): the tool handed a human check to the
 #                    user (anton/core/browser/tool.py::_unless_human_check)
+#
+#   browser_hand_over_waits state ("checked" or "filled"): the model handed
+#                    the browser to the user with wait_for naming one element,
+#                    a checkbox or toggle to be checked or a field to be
+#                    filled (anton/core/browser/tool.py::_do_hand_to_user)
 #
 # Every event listed here also carries `environment`: the deployment that sent
 # it, from ANTON_DEPLOYMENT_ENV (`prod`, `staging`, `dev`, ...). It is "" wherever
@@ -296,9 +294,9 @@ _POSTHOG_EVENTS = frozenset(
         "rule_retrieval",
         "scratchpad_package_installed",
         "tool_completed",
-        "browser_jev_shadow",
         "browser_jev_step",
         "browser_human_check",
+        "browser_hand_over_waits",
     }
 )
 

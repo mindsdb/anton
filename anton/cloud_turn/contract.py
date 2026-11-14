@@ -533,10 +533,13 @@ class TurnRequestV1:
     #: Absent, null, blank, or non-string keeps the configured default.
     reasoning_effort: str | None = None
     #: The MindsHub browser router, when cowork-server turned the browser on for
-    #: this turn: {"base_url", "profile", "project"?}, read by
-    #: BrowserConfig.from_dict. The pod reaches the router with this turn's
+    #: this turn: {"base_url", "profile", "project"?, "decisions_proxy"?}, read
+    #: by BrowserConfig.from_dict. The pod reaches the router with this turn's
     #: `llm` key. A block with a `token`, or with any address but the https
     #: router, is refused. Absent or malformed means no browser tool this turn.
+    #: `decisions_proxy` ({"url", "model"}, no key) is cowork-server's route
+    #: to the organization's own decision model, which the pod calls with the
+    #: same `llm` key.
     browser: BrowserConfig | None = None
     #: The tenant's per-task limits cowork-server resolved: any of
     #: ``max_tool_rounds``, ``max_continuations``, ``max_turn_tokens``,
