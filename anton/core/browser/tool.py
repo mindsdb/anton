@@ -957,9 +957,10 @@ def _frames_moved(seen: Page, current: Page) -> bool:
     too, so it reads as in its place. A sticky element that starts holding
     one frame partway through the page's scroll while another frame
     scrolls on moves the two boxes by different rows, so the boxes say a
-    frame moved, and at says so too: that scroll moved the frames. A frame
-    that came or went moved before either comparison runs, and one that
-    changed address or size moved by both.
+    frame moved, and at says so too: that scroll moved the frames, and
+    ``_moved_focus`` refuses a step to the focus the person approved, which
+    the model sends again. A frame that came or went moved before either
+    comparison runs, and one that changed address or size moved by both.
 
     The boxes are in screenshot pixels and the list goes on-screen first, so
     a scroll moves every box and may reorder the list. The frames are
@@ -1024,7 +1025,8 @@ def _moved_focus(*, seen: Page, current: Page, body: dict) -> str | None:
     page's scroll, or holds one stuck in a scrolling column, runs the step.
     A scroll that the boxes and at both take for a move refuses it, as on a
     read without at: one during which a sticky element starts holding one
-    frame while another frame scrolls on."""
+    frame while another frame scrolls on refuses the step the person
+    approved, and the model sends it again."""
     to_focus = body.get("focused") is True or (body.get("action") == "press" and body.get("element") is None)
     if not to_focus:
         return None
