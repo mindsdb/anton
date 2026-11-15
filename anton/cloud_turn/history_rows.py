@@ -40,10 +40,12 @@ def sanitize_tool_result(block: dict) -> dict:
 def split_turn_into_rows(history_slice: list) -> list[dict]:
     """Extract the tool block-rows of one turn from anton's raw history slice.
 
-    Keeps only `tool_use` (assistant) / `tool_result` (user) blocks as
-    `{role, content}` rows. Text blocks are dropped — the assistant's visible
-    text is persisted once in the display row — so a pure-text message yields
-    no row. Images inside tool_result are replaced with a replay marker.
+    Keeps `tool_use` (assistant) / `tool_result` (user) blocks as
+    `{role, content}` rows, and the text an assistant message carries beside
+    its tool calls, in order, so the replayed history matches what the model
+    saw and its prompt cache holds across turns. A pure-text message yields no
+    row; its text is persisted in the display row. Images inside tool_result
+    are replaced with a replay marker.
     """
     rows: list[dict] = []
     for msg in history_slice:
@@ -54,11 +56,15 @@ def split_turn_into_rows(history_slice: list) -> list[dict]:
         if not isinstance(content, list):
             continue
         keep_type = "tool_use" if role == "assistant" else "tool_result"
+        if not any(isinstance(b, dict) and b.get("type") == keep_type for b in content):
+            continue
         blocks = [
             sanitize_tool_result(b) if keep_type == "tool_result" else b
             for b in content
-            if isinstance(b, dict) and b.get("type") == keep_type
+            if isinstance(b, dict) and (
+                b.get("type") == keep_type
+                or (role == "assistant" and b.get("type") == "text" and isinstance(b.get("text"), str))
+            )
         ]
-        if blocks:
-            rows.append({"role": role, "content": blocks})
+        rows.append({"role": role, "content": blocks})
     return rows

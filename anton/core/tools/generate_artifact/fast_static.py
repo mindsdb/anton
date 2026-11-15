@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import os
 import re
 
 from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
@@ -56,7 +55,7 @@ def fits(state):
     if path is None:
         return False
     page = observed_data.strip_binding(_existing_page(state, path))
-    program = component_page.existing_program(page) if os.environ.get("ANTON_STATIC_COMPONENT_WRITER") == "on" else None
+    program = component_page.existing_program(page)
     return len(program if program is not None else page) <= MAX_EXISTING_CHARS
 
 
@@ -241,7 +240,7 @@ async def run(state):
         evidence = contract + "\n" + places.CONTRACT
         existing = observed_data.strip_binding(existing)
     # The component program reads window.ARTIFACT_DATA, so it needs bound data.
-    components = bool(bound_data) and os.environ.get("ANTON_STATIC_COMPONENT_WRITER") == "on"
+    components = bool(bound_data)
     existing_html = existing
     if components and (program := component_page.existing_program(existing)):
         existing = "Existing presentation program (preserve correct views and interactions):\n" + program

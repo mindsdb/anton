@@ -29,7 +29,7 @@ def test_a_non_mapping_attribute_is_treated_as_no_host_notes(vault, monkeypatch)
     assert "REGISTRY-NOTE" not in ctx
 
 
-async def test_generate_gives_the_run_the_session_catalog_and_notes(vault, tmp_path, monkeypatch):
+async def test_generate_gives_the_run_the_session_catalog_and_notes(vault, tmp_path, monkeypatch, decline_fast_path):
     from unittest.mock import AsyncMock
 
     from anton.core.tools.generate_artifact import engine, orchestrator

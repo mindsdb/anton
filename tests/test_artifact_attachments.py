@@ -443,7 +443,6 @@ async def test_fast_path_accepts_validated_data_uploads_but_keeps_asset_staging(
     prepare = AsyncMock(return_value=True)
     fast = AsyncMock(return_value=result)
     normal = AsyncMock(return_value=result)
-    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
     monkeypatch.setattr(fast_static, "prepare", prepare)
     monkeypatch.setattr(fast_static, "run", fast)
     monkeypatch.setattr(orchestrator, "run", normal)
@@ -475,7 +474,6 @@ async def test_a_page_the_direct_writer_cannot_finish_goes_through_the_normal_pi
         state.gathering_complete = True
         return True
 
-    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
     monkeypatch.setattr(fast_static, "prepare", prepare)
     monkeypatch.setattr(fast_static, "run", AsyncMock(return_value=None))
     monkeypatch.setattr(orchestrator, "run", normal)
@@ -487,7 +485,7 @@ async def test_a_page_the_direct_writer_cannot_finish_goes_through_the_normal_pi
     assert seen == [([], False)]
 
 
-async def test_generate_records_kept_and_dropped_attachments(tmp_path: Path, monkeypatch):
+async def test_generate_records_kept_and_dropped_attachments(tmp_path: Path, monkeypatch, decline_fast_path):
     csv, _ = _files(tmp_path)
     art = tmp_path / "art"
     art.mkdir()
@@ -519,7 +517,7 @@ async def test_generate_records_kept_and_dropped_attachments(tmp_path: Path, mon
     assert f"{secret}: {att_mod.REFUSED_HIDDEN}" in rec.detail
 
 
-async def test_generate_without_a_workspace_refuses_plain_files(tmp_path: Path, monkeypatch):
+async def test_generate_without_a_workspace_refuses_plain_files(tmp_path: Path, monkeypatch, decline_fast_path):
     """An `AsyncMock` session has a Mock `_workspace.base`, not a Path: that
     must read as "no workspace", i.e. strict, never as a permissive fence."""
     csv, _ = _files(tmp_path)

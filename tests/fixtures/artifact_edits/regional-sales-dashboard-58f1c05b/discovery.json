@@ -1,0 +1,30 @@
+{
+  "request_fingerprint": "b94fab07cdf5f84f5cbb56157d0af63f563b73e20e3cb1695a4269138aaf151a",
+  "call_fingerprint": "2af76737fd4054a77185848b624b49d0331c0bc9cb3cdaae9ef4eb8e437dba04",
+  "pipeline_stage": "generated",
+  "artifact_type": "html-app",
+  "gathering_complete": true,
+  "declared_sources": [
+    "the supplied sales.csv file"
+  ],
+  "unverified_sources": [],
+  "brief_markdown": "",
+  "data_notes": "",
+  "web_notes": "",
+  "assumptions": [
+    "The CSV's gross_margin_usd field is used to derive gross margin percentage as gross margin dollars divided by revenue dollars."
+  ],
+  "open_points": [],
+  "attachments": [
+    {
+      "path": "/workspace/sales.csv",
+      "name": "sales.csv",
+      "size": 1522,
+      "kind": "data",
+      "staged": "",
+      "skipped": ""
+    }
+  ],
+  "known_data": "",
+  "known_data_verified": []
+}

@@ -1,0 +1,544 @@
+{
+  "source": {
+    "type": "local CSV",
+    "path": "/workspace/sales.csv",
+    "fields": [
+      "month",
+      "region",
+      "revenue_usd",
+      "orders",
+      "gross_margin_usd"
+    ],
+    "record_count": 48
+  },
+  "filters": {
+    "initial_region": "All regions",
+    "region_filter": "All regions or one region"
+  },
+  "time_scope": {
+    "months": [
+      "2026-01",
+      "2026-02",
+      "2026-03",
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07",
+      "2026-08",
+      "2026-09",
+      "2026-10",
+      "2026-11",
+      "2026-12"
+    ],
+    "year": 2026
+  },
+  "units": {
+    "revenue_usd": "USD",
+    "orders": "orders count",
+    "gross_margin_usd": "USD",
+    "gross_margin_pct": "gross margin dollars / revenue dollars * 100"
+  },
+  "aggregation_methods": {
+    "total_revenue_usd": "sum revenue_usd",
+    "total_orders": "sum orders",
+    "gross_margin_pct": "sum gross_margin_usd / sum revenue_usd * 100 (revenue-weighted)"
+  },
+  "records": [
+    {
+      "month": "2026-01",
+      "region": "North",
+      "revenue_usd": 121000.0,
+      "orders": 59,
+      "gross_margin_usd": 29424.0,
+      "gross_margin_pct": 24.317355371900824
+    },
+    {
+      "month": "2026-01",
+      "region": "South",
+      "revenue_usd": 86000.0,
+      "orders": 49,
+      "gross_margin_usd": 26781.0,
+      "gross_margin_pct": 31.140697674418604
+    },
+    {
+      "month": "2026-01",
+      "region": "East",
+      "revenue_usd": 92000.0,
+      "orders": 86,
+      "gross_margin_usd": 25139.0,
+      "gross_margin_pct": 27.325
+    },
+    {
+      "month": "2026-01",
+      "region": "West",
+      "revenue_usd": 196000.0,
+      "orders": 104,
+      "gross_margin_usd": 42013.0,
+      "gross_margin_pct": 21.43520408163265
+    },
+    {
+      "month": "2026-02",
+      "region": "North",
+      "revenue_usd": 91000.0,
+      "orders": 95,
+      "gross_margin_usd": 22469.0,
+      "gross_margin_pct": 24.69120879120879
+    },
+    {
+      "month": "2026-02",
+      "region": "South",
+      "revenue_usd": 110000.0,
+      "orders": 51,
+      "gross_margin_usd": 29498.0,
+      "gross_margin_pct": 26.81636363636364
+    },
+    {
+      "month": "2026-02",
+      "region": "East",
+      "revenue_usd": 87000.0,
+      "orders": 145,
+      "gross_margin_usd": 23531.0,
+      "gross_margin_pct": 27.04712643678161
+    },
+    {
+      "month": "2026-02",
+      "region": "West",
+      "revenue_usd": 108000.0,
+      "orders": 120,
+      "gross_margin_usd": 30282.0,
+      "gross_margin_pct": 28.03888888888889
+    },
+    {
+      "month": "2026-03",
+      "region": "North",
+      "revenue_usd": 87000.0,
+      "orders": 113,
+      "gross_margin_usd": 23811.0,
+      "gross_margin_pct": 27.368965517241378
+    },
+    {
+      "month": "2026-03",
+      "region": "South",
+      "revenue_usd": 86000.0,
+      "orders": 68,
+      "gross_margin_usd": 16121.0,
+      "gross_margin_pct": 18.745348837209303
+    },
+    {
+      "month": "2026-03",
+      "region": "East",
+      "revenue_usd": 189000.0,
+      "orders": 57,
+      "gross_margin_usd": 42778.0,
+      "gross_margin_pct": 22.633862433862433
+    },
+    {
+      "month": "2026-03",
+      "region": "West",
+      "revenue_usd": 98000.0,
+      "orders": 109,
+      "gross_margin_usd": 19487.0,
+      "gross_margin_pct": 19.884693877551022
+    },
+    {
+      "month": "2026-04",
+      "region": "North",
+      "revenue_usd": 119000.0,
+      "orders": 111,
+      "gross_margin_usd": 36959.0,
+      "gross_margin_pct": 31.057983193277312
+    },
+    {
+      "month": "2026-04",
+      "region": "South",
+      "revenue_usd": 103000.0,
+      "orders": 53,
+      "gross_margin_usd": 28125.0,
+      "gross_margin_pct": 27.305825242718445
+    },
+    {
+      "month": "2026-04",
+      "region": "East",
+      "revenue_usd": 161000.0,
+      "orders": 64,
+      "gross_margin_usd": 38573.0,
+      "gross_margin_pct": 23.958385093167703
+    },
+    {
+      "month": "2026-04",
+      "region": "West",
+      "revenue_usd": 150000.0,
+      "orders": 131,
+      "gross_margin_usd": 28507.0,
+      "gross_margin_pct": 19.004666666666665
+    },
+    {
+      "month": "2026-05",
+      "region": "North",
+      "revenue_usd": 87000.0,
+      "orders": 119,
+      "gross_margin_usd": 18527.0,
+      "gross_margin_pct": 21.295402298850576
+    },
+    {
+      "month": "2026-05",
+      "region": "South",
+      "revenue_usd": 167000.0,
+      "orders": 108,
+      "gross_margin_usd": 41485.0,
+      "gross_margin_pct": 24.84131736526946
+    },
+    {
+      "month": "2026-05",
+      "region": "East",
+      "revenue_usd": 120000.0,
+      "orders": 99,
+      "gross_margin_usd": 32843.0,
+      "gross_margin_pct": 27.369166666666665
+    },
+    {
+      "month": "2026-05",
+      "region": "West",
+      "revenue_usd": 138000.0,
+      "orders": 86,
+      "gross_margin_usd": 31459.0,
+      "gross_margin_pct": 22.7963768115942
+    },
+    {
+      "month": "2026-06",
+      "region": "North",
+      "revenue_usd": 181000.0,
+      "orders": 63,
+      "gross_margin_usd": 52823.0,
+      "gross_margin_pct": 29.183977900552488
+    },
+    {
+      "month": "2026-06",
+      "region": "South",
+      "revenue_usd": 111000.0,
+      "orders": 50,
+      "gross_margin_usd": 30182.0,
+      "gross_margin_pct": 27.190990990990993
+    },
+    {
+      "month": "2026-06",
+      "region": "East",
+      "revenue_usd": 147000.0,
+      "orders": 103,
+      "gross_margin_usd": 47043.0,
+      "gross_margin_pct": 32.002040816326534
+    },
+    {
+      "month": "2026-06",
+      "region": "West",
+      "revenue_usd": 173000.0,
+      "orders": 97,
+      "gross_margin_usd": 39110.0,
+      "gross_margin_pct": 22.606936416184972
+    },
+    {
+      "month": "2026-07",
+      "region": "North",
+      "revenue_usd": 89000.0,
+      "orders": 55,
+      "gross_margin_usd": 23310.0,
+      "gross_margin_pct": 26.19101123595506
+    },
+    {
+      "month": "2026-07",
+      "region": "South",
+      "revenue_usd": 101000.0,
+      "orders": 136,
+      "gross_margin_usd": 23708.0,
+      "gross_margin_pct": 23.47326732673267
+    },
+    {
+      "month": "2026-07",
+      "region": "East",
+      "revenue_usd": 199000.0,
+      "orders": 102,
+      "gross_margin_usd": 49247.0,
+      "gross_margin_pct": 24.747236180904522
+    },
+    {
+      "month": "2026-07",
+      "region": "West",
+      "revenue_usd": 165000.0,
+      "orders": 49,
+      "gross_margin_usd": 49885.0,
+      "gross_margin_pct": 30.233333333333334
+    },
+    {
+      "month": "2026-08",
+      "region": "North",
+      "revenue_usd": 153000.0,
+      "orders": 141,
+      "gross_margin_usd": 48972.0,
+      "gross_margin_pct": 32.0078431372549
+    },
+    {
+      "month": "2026-08",
+      "region": "South",
+      "revenue_usd": 120000.0,
+      "orders": 83,
+      "gross_margin_usd": 34950.0,
+      "gross_margin_pct": 29.125
+    },
+    {
+      "month": "2026-08",
+      "region": "East",
+      "revenue_usd": 156000.0,
+      "orders": 103,
+      "gross_margin_usd": 42554.0,
+      "gross_margin_pct": 27.27820512820513
+    },
+    {
+      "month": "2026-08",
+      "region": "West",
+      "revenue_usd": 138000.0,
+      "orders": 48,
+      "gross_margin_usd": 43386.0,
+      "gross_margin_pct": 31.43913043478261
+    },
+    {
+      "month": "2026-09",
+      "region": "North",
+      "revenue_usd": 200000.0,
+      "orders": 74,
+      "gross_margin_usd": 51171.0,
+      "gross_margin_pct": 25.5855
+    },
+    {
+      "month": "2026-09",
+      "region": "South",
+      "revenue_usd": 165000.0,
+      "orders": 48,
+      "gross_margin_usd": 31302.0,
+      "gross_margin_pct": 18.970909090909092
+    },
+    {
+      "month": "2026-09",
+      "region": "East",
+      "revenue_usd": 169000.0,
+      "orders": 79,
+      "gross_margin_usd": 47918.0,
+      "gross_margin_pct": 28.353846153846153
+    },
+    {
+      "month": "2026-09",
+      "region": "West",
+      "revenue_usd": 167000.0,
+      "orders": 145,
+      "gross_margin_usd": 41968.0,
+      "gross_margin_pct": 25.130538922155687
+    },
+    {
+      "month": "2026-10",
+      "region": "North",
+      "revenue_usd": 171000.0,
+      "orders": 89,
+      "gross_margin_usd": 55049.0,
+      "gross_margin_pct": 32.19239766081871
+    },
+    {
+      "month": "2026-10",
+      "region": "South",
+      "revenue_usd": 124000.0,
+      "orders": 42,
+      "gross_margin_usd": 40982.0,
+      "gross_margin_pct": 33.050000000000004
+    },
+    {
+      "month": "2026-10",
+      "region": "East",
+      "revenue_usd": 125000.0,
+      "orders": 61,
+      "gross_margin_usd": 34718.0,
+      "gross_margin_pct": 27.7744
+    },
+    {
+      "month": "2026-10",
+      "region": "West",
+      "revenue_usd": 143000.0,
+      "orders": 47,
+      "gross_margin_usd": 30733.0,
+      "gross_margin_pct": 21.49160839160839
+    },
+    {
+      "month": "2026-11",
+      "region": "North",
+      "revenue_usd": 116000.0,
+      "orders": 56,
+      "gross_margin_usd": 34584.0,
+      "gross_margin_pct": 29.813793103448276
+    },
+    {
+      "month": "2026-11",
+      "region": "South",
+      "revenue_usd": 130000.0,
+      "orders": 90,
+      "gross_margin_usd": 42470.0,
+      "gross_margin_pct": 32.669230769230765
+    },
+    {
+      "month": "2026-11",
+      "region": "East",
+      "revenue_usd": 143000.0,
+      "orders": 50,
+      "gross_margin_usd": 29546.0,
+      "gross_margin_pct": 20.661538461538463
+    },
+    {
+      "month": "2026-11",
+      "region": "West",
+      "revenue_usd": 131000.0,
+      "orders": 110,
+      "gross_margin_usd": 29404.0,
+      "gross_margin_pct": 22.445801526717556
+    },
+    {
+      "month": "2026-12",
+      "region": "North",
+      "revenue_usd": 97000.0,
+      "orders": 144,
+      "gross_margin_usd": 24142.0,
+      "gross_margin_pct": 24.888659793814433
+    },
+    {
+      "month": "2026-12",
+      "region": "South",
+      "revenue_usd": 150000.0,
+      "orders": 75,
+      "gross_margin_usd": 43954.0,
+      "gross_margin_pct": 29.302666666666667
+    },
+    {
+      "month": "2026-12",
+      "region": "East",
+      "revenue_usd": 125000.0,
+      "orders": 127,
+      "gross_margin_usd": 40184.0,
+      "gross_margin_pct": 32.1472
+    },
+    {
+      "month": "2026-12",
+      "region": "West",
+      "revenue_usd": 109000.0,
+      "orders": 59,
+      "gross_margin_usd": 21067.0,
+      "gross_margin_pct": 19.327522935779818
+    }
+  ],
+  "aggregates": {
+    "all_regions": {
+      "total_revenue_usd": 6394000.0,
+      "total_orders": 4153,
+      "gross_margin_pct": 26.152236471692213,
+      "gross_margin_usd": 1672174.0,
+      "monthly": {
+        "2026-01": {
+          "revenue_usd": 495000.0,
+          "orders": 298,
+          "gross_margin_usd": 123357.0
+        },
+        "2026-02": {
+          "revenue_usd": 396000.0,
+          "orders": 411,
+          "gross_margin_usd": 105780.0
+        },
+        "2026-03": {
+          "revenue_usd": 460000.0,
+          "orders": 347,
+          "gross_margin_usd": 102197.0
+        },
+        "2026-04": {
+          "revenue_usd": 533000.0,
+          "orders": 359,
+          "gross_margin_usd": 132164.0
+        },
+        "2026-05": {
+          "revenue_usd": 512000.0,
+          "orders": 412,
+          "gross_margin_usd": 124314.0
+        },
+        "2026-06": {
+          "revenue_usd": 612000.0,
+          "orders": 313,
+          "gross_margin_usd": 169158.0
+        },
+        "2026-07": {
+          "revenue_usd": 554000.0,
+          "orders": 342,
+          "gross_margin_usd": 146150.0
+        },
+        "2026-08": {
+          "revenue_usd": 567000.0,
+          "orders": 375,
+          "gross_margin_usd": 169862.0
+        },
+        "2026-09": {
+          "revenue_usd": 701000.0,
+          "orders": 346,
+          "gross_margin_usd": 172359.0
+        },
+        "2026-10": {
+          "revenue_usd": 563000.0,
+          "orders": 239,
+          "gross_margin_usd": 161482.0
+        },
+        "2026-11": {
+          "revenue_usd": 520000.0,
+          "orders": 306,
+          "gross_margin_usd": 136004.0
+        },
+        "2026-12": {
+          "revenue_usd": 481000.0,
+          "orders": 405,
+          "gross_margin_usd": 129347.0
+        }
+      },
+      "revenue_by_region": {
+        "East": {
+          "revenue_usd": 1713000.0,
+          "orders": 1076,
+          "gross_margin_usd": 454074.0
+        },
+        "North": {
+          "revenue_usd": 1512000.0,
+          "orders": 1119,
+          "gross_margin_usd": 421241.0
+        },
+        "South": {
+          "revenue_usd": 1453000.0,
+          "orders": 853,
+          "gross_margin_usd": 389558.0
+        },
+        "West": {
+          "revenue_usd": 1716000.0,
+          "orders": 1105,
+          "gross_margin_usd": 407301.0
+        }
+      }
+    },
+    "regions": [
+      "East",
+      "North",
+      "South",
+      "West"
+    ],
+    "months": [
+      "2026-01",
+      "2026-02",
+      "2026-03",
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07",
+      "2026-08",
+      "2026-09",
+      "2026-10",
+      "2026-11",
+      "2026-12"
+    ]
+  }
+}

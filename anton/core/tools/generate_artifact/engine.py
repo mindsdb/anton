@@ -20,7 +20,6 @@ import asyncio
 import functools
 import json
 import logging
-import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -517,7 +516,7 @@ async def generate(
     try:
         from . import fast_static
 
-        if (os.environ.get("ANTON_STATIC_FAST_PATH") == "direct" and state.act_first
+        if (state.act_first
                 and all(attachment.kind == KIND_DATA for attachment in state.attachments)
                 and fast_static.fits(state) and await fast_static.prepare(state)):
             result = await fast_static.run(state)

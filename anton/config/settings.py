@@ -223,7 +223,14 @@ class AntonSettings(CoreSettings):
         return v
 
     def model_post_init(self, __context) -> None:
-        """Derive openai vars from minds credentials when appropriate."""
+        """Derive openai vars from minds credentials when appropriate, then the decisions model."""
+        self._derive_openai_from_minds()
+        if self.decisions_model is None:
+            from anton.core.llm.jev import default_decisions_model
+
+            self.decisions_model = default_decisions_model(self)
+
+    def _derive_openai_from_minds(self) -> None:
         if (
             self.minds_api_key
             and not self.openai_api_key

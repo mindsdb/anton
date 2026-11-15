@@ -58,6 +58,29 @@ def is_secret_key(field_name: str, secure_keys: list[str] | None = None) -> bool
     return any(token in name_lc for token in _SECRET_KEY_TOKENS)
 
 
+def withheld_from_env(fields: dict[str, Any], key: str, secure_keys: list[str] | None = None) -> bool:
+    """True for a secret of an MCP connection (`_method == "mcp"`).
+
+    Its access mode only limits which MCP tools anton registers. With the
+    token in the environment, code could call the provider's API directly
+    and get past that limit, so the token never leaves the vault this way.
+    """
+    if fields.get("_method") != "mcp":
+        return False
+    return is_secret_key(key, secure_keys)
+
+
+def withheld_fields(record: dict[str, Any] | None) -> list[str]:
+    """The fields of a saved connection that ``withheld_from_env`` keeps out
+    of every environment, so a caller can say which ones an app won't get."""
+    fields = (record or {}).get("fields") or {}
+    secure_keys = (record or {}).get("secure_keys")
+    return sorted(
+        key for key in fields
+        if not key.startswith("_") and withheld_from_env(fields, key, secure_keys)
+    )
+
+
 def _sanitize(value: str) -> str:
     """Strip characters unsafe for file names, keep alphanumeric, dash, underscore."""
     return re.sub(r"[^\w\-]", "_", value).strip("_")
@@ -329,25 +352,28 @@ class LocalDataVault:
         `_`-prefixed fields (bookkeeping: `_user_label`, `_label`,
         `_connector_id`, `_method`, `_picked_files`, ...) are never injected —
         they aren't credentials and nothing reads them from an env var.
+        Neither are an MCP connection's secrets (see `withheld_from_env`).
 
         Returns the {var: value} mapping, or None if connection not found.
         Use this when the env should reach only a specific subprocess (pass
         the result as an explicit `env`); use `inject_env` when the variables
         must be visible in the current process.
         """
-        fields = self.load(engine, name)
-        if fields is None:
+        record = self.read_record(engine, name)
+        if record is None:
             return None
+        fields = record.get("fields") or {}
+        secure_keys = record.get("secure_keys")
         env: dict[str, str] = {}
         if flat:
             for key, value in fields.items():
-                if key.startswith("_"):
+                if key.startswith("_") or withheld_from_env(fields, key, secure_keys):
                     continue
                 env[f"DS_{key.upper()}"] = value
         else:
             prefix = _slug_env_prefix(engine, name)
             for key, value in fields.items():
-                if key.startswith("_"):
+                if key.startswith("_") or withheld_from_env(fields, key, secure_keys):
                     continue
                 env[f"{prefix}__{key.upper()}"] = value if isinstance(value, str) else str(value)
         return env
@@ -474,16 +500,17 @@ class TurnKeyDataVault:
         fields = self._fetch(engine, name)
         if fields is None:
             return None
+        secure_keys = [k for k in _TURNKEY_SECURE_KEYS if k in fields]
         env: dict[str, str] = {}
         if flat:
             for key, value in fields.items():
-                if key.startswith("_"):
+                if key.startswith("_") or withheld_from_env(fields, key, secure_keys):
                     continue
                 env[f"DS_{key.upper()}"] = value
         else:
             prefix = _slug_env_prefix(engine, name)
             for key, value in fields.items():
-                if key.startswith("_"):
+                if key.startswith("_") or withheld_from_env(fields, key, secure_keys):
                     continue
                 env[f"{prefix}__{key.upper()}"] = value
         return env

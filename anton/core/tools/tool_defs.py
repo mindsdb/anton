@@ -19,7 +19,6 @@ from anton.core.utils.scratchpad import SCRATCHPAD_ACTIONS
 from anton.core.utils.write_hold import handle_approve_held_write
 from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
-import os
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
@@ -71,7 +70,9 @@ SCRATCHPAD_TOOL = ToolDef(
         "sizes the total budget (roughly 2x the estimate; without one the default "
         "budget is small). Call progress(message) to narrate long phases — it is "
         "user-visible status, not a survival requirement.\n\n"
-        "Use print() to produce output. Host Python packages are available by default. "
+        "Use print() to produce output; printed output stops at 10,000 characters, so read "
+        "text files with read_text_file rather than printing them. Host Python packages are "
+        "available by default. "
         "Include a 'packages' array on exec calls for any libraries your code needs — "
         "they'll be auto-installed before the cell runs (already-installed ones are skipped).\n"
         "get_llm() returns a pre-configured LLM client (sync) — call "
@@ -724,41 +725,46 @@ STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_C
 GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(GENERATE_ARTIFACT_TOOL)
 STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_GENERATE_ARTIFACT_TOOL)
 
+_single_call_instructions = (
+    "For a NEW web artifact, call generate_artifact directly with name, user_request, "
+    "user_language and agent_understanding; omit slug. It registers the artifact and "
+    "runs source discovery, generation and the normal verifiers in one operation. "
+    "Do not make a separate create_artifact call or pre-fetch data solely for this "
+    "handoff. Preserve the user's request verbatim. For an EDIT, pass the existing "
+    "slug instead of name so the existing artifact is updated."
+)
 
 
-if os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on":
-    _single_call_instructions = (
-        "For a NEW web artifact, call generate_artifact directly with name, user_request, "
-        "user_language and agent_understanding; omit slug. It registers the artifact and "
-        "runs source discovery, generation and the normal verifiers in one operation. "
-        "Do not make a separate create_artifact call or pre-fetch data solely for this "
-        "handoff. Preserve the user's request verbatim. For an EDIT, pass the existing "
-        "slug instead of name so the existing artifact is updated."
+# No top-level anyOf: providers reject it in tool schemas. The handler requires slug or name.
+def _single_call(tool: ToolDef) -> ToolDef:
+    return replace(
+        tool,
+        description=_single_call_instructions + "\n\n" + tool.description,
+        input_schema={
+            **tool.input_schema,
+            "properties": {**tool.input_schema["properties"],
+                           "name": {"type": "string", "description": "Name of a NEW artifact; omit for an existing-slug edit."}},
+            "required": [key for key in tool.input_schema["required"] if key != "slug"],
+        },
+        prompt="ARTIFACT GENERATION:\n" + _single_call_instructions +
+               "\n`user_language` is the language the user writes to you in; talk to the user in that "
+               "language while the artifact is built and when you report the result. "
+               "`needs_confirmation` means show `brief_summary` and, if the user agrees, call again "
+               "with the SAME `user_request` and `user_language`."
+               "\nFollow the returned instruction; the existing approval and verification rules still apply.",
     )
 
-    # No top-level anyOf: providers reject it in tool schemas. The handler requires slug or name.
-    def _single_call(tool: ToolDef) -> ToolDef:
-        return replace(
-            tool,
-            description=_single_call_instructions + "\n\n" + tool.description,
-            input_schema={
-                **tool.input_schema,
-                "properties": {**tool.input_schema["properties"],
-                               "name": {"type": "string", "description": "Name of a NEW artifact; omit for an existing-slug edit."}},
-                "required": [key for key in tool.input_schema["required"] if key != "slug"],
-            },
-            prompt="ARTIFACT GENERATION:\n" + _single_call_instructions +
-                   "\nFollow the returned instruction; the existing approval and verification rules still apply.",
-        )
 
-    def _registration_only(tool: ToolDef) -> ToolDef:
-        return replace(tool, description="For end-to-end generation, prefer generate_artifact(name=...) directly. "
-                                         "Use this registration-only tool when writing the files manually.\n\n" + tool.description)
+def _registration_only(tool: ToolDef) -> ToolDef:
+    return replace(tool, description="For end-to-end generation, prefer generate_artifact(name=...) directly. "
+                                     "Use this registration-only tool when writing the files manually.\n\n" + tool.description)
 
-    GENERATE_ARTIFACT_TOOL = _single_call(GENERATE_ARTIFACT_TOOL)
-    STATIC_GENERATE_ARTIFACT_TOOL = _single_call(STATIC_GENERATE_ARTIFACT_TOOL)
-    CREATE_ARTIFACT_TOOL = _registration_only(CREATE_ARTIFACT_TOOL)
-    STATIC_CREATE_ARTIFACT_TOOL = _registration_only(STATIC_CREATE_ARTIFACT_TOOL)
+
+GENERATE_ARTIFACT_TOOL = _single_call(GENERATE_ARTIFACT_TOOL)
+STATIC_GENERATE_ARTIFACT_TOOL = _single_call(STATIC_GENERATE_ARTIFACT_TOOL)
+CREATE_ARTIFACT_TOOL = _registration_only(CREATE_ARTIFACT_TOOL)
+STATIC_CREATE_ARTIFACT_TOOL = _registration_only(STATIC_CREATE_ARTIFACT_TOOL)
+
 
 RECALL_TOOL = ToolDef(
     name="recall",
@@ -828,7 +834,8 @@ READ_TEXT_FILE_TOOL = ToolDef(
         f"Returns the first {DEFAULT_LINE_COUNT} lines unless you pass a range; "
         f"`end_line=-1` reads to the end. One call returns at most {MAX_OUTPUT_CHARS:,} "
         "characters. The first line of the result is a header naming the lines "
-        "returned and where to continue; the file's text starts on the next line."
+        "returned and where to continue; the file's text starts on the next line. To read "
+        "several files, call it once per file in the same response."
     ),
     input_schema={
         "type": "object",

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -192,6 +191,7 @@ class ChatSystemPromptBuilder:
         fullstack_offered: bool = True,
         direct_reports: bool = True,
         internet_research: bool = True,
+        ui_locale_context: str = "",
     ) -> str:
         """``fullstack_offered`` False (`live_app_slots.fullstack_offered`)
         leaves out the fullstack types, the backend section and the backend
@@ -199,11 +199,12 @@ class ChatSystemPromptBuilder:
         backend. ``internet_research`` False
         (`ChatSessionConfig.internet_research_enabled`) swaps the internet
         guidance for "use the connected data only" and leaves out the
-        public-data-sources skill's line."""
-        direct_generation = (os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on"
-                             and any(getattr(tool, "name", "") == "generate_artifact"
-                                     and "name" in tool.input_schema.get("properties", {})
-                                     for tool in tool_defs or []))
+        public-data-sources skill's line. ``ui_locale_context`` is the
+        language line (`anton.core.llm.ui_locale.ui_locale_line`); empty adds
+        nothing."""
+        direct_generation = any(getattr(tool, "name", "") == "generate_artifact"
+                                and "name" in tool.input_schema.get("properties", {})
+                                for tool in tool_defs or [])
         visualizations_section = self._build_visualizations_section(
             proactive_dashboards=proactive_dashboards,
             output_dir=output_dir,
@@ -217,9 +218,14 @@ class ChatSystemPromptBuilder:
                                  else NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT)
         # The single-call path has its own artifact instructions, which have no direct report path
         if direct_generation:
-            from .static_artifact_prompt import ARTIFACTS
+            from .static_artifact_prompt import ARTIFACTS, STATIC_ARTIFACTS
 
-            artifacts_section = ARTIFACTS
+            artifacts_section = ARTIFACTS if fullstack_offered else STATIC_ARTIFACTS
+        # With the artifact editor offered (ENG-4207), changes and repairs go to it.
+        if any(getattr(tool, "name", "") == "edit_artifact" for tool in tool_defs or []):
+            from anton.core.tools.edit_artifact import route_section_to_editor
+
+            artifacts_section = route_section_to_editor(artifacts_section)
 
         prompt = ""
 
@@ -297,6 +303,12 @@ class ChatSystemPromptBuilder:
         suffix = system_prompt_context.suffix.strip()
         if suffix:
             session += f"\n\n{suffix}"
+
+        # The user's UI language (ENG-4149). Per user, so not in the shared
+        # part; fixed for the session, so ahead of the volatile tail; last of
+        # the stable lines, so switching language re-caches the least.
+        if ui_locale_context:
+            session += f"\n\n{ui_locale_context}"
 
         # Volatile tail — LAST so everything above can be cached. Only the
         # relevance-filtered memory snapshot remains here; it changes every turn.

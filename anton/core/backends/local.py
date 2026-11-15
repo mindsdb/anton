@@ -34,6 +34,7 @@ from anton.core.backends.wire import (
     INSTALL_START_MARKER,
     INTERNET_RESEARCH_ENV,
     MAX_OUTPUT,
+    truncation_note,
     NOTHING_KEPT,
     PROGRESS_MARKER,
     RESULT_END,
@@ -247,7 +248,7 @@ def _clip_stdout(raw: str, total: int, cwd_note: str) -> str:
             unsafe_tail = max(STDOUT_SCRUB_MARGIN, longest_exact_secret())
             keep = min(keep, max(len(text) - unsafe_tail, 0))
         if keep:
-            text = text[:keep] + f"\n\n... (truncated, {total} chars total)"
+            text = text[:keep] + truncation_note(total)
         else:
             text = f"... (output withheld: it could not be scrubbed safely, {total} chars total)"
     if cwd_note:

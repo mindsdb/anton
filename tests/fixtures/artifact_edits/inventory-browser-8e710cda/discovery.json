@@ -1,0 +1,28 @@
+{
+  "request_fingerprint": "659baf4a7a9aa40ba5bda51b67e92fba957e6657290b642af410e4d3828a4ec4",
+  "call_fingerprint": "eac2f8fd67125cb9839d8eb303abc056fcdace5d72a9cedf5b6e0d240d527028",
+  "pipeline_stage": "generated",
+  "artifact_type": "html-app",
+  "gathering_complete": true,
+  "declared_sources": [
+    "the supplied inventory.csv file"
+  ],
+  "unverified_sources": [],
+  "brief_markdown": "",
+  "data_notes": "",
+  "web_notes": "",
+  "assumptions": [],
+  "open_points": [],
+  "attachments": [
+    {
+      "path": "/workspace/inventory.csv",
+      "name": "inventory.csv",
+      "size": 1310,
+      "kind": "data",
+      "staged": "",
+      "skipped": ""
+    }
+  ],
+  "known_data": "",
+  "known_data_verified": []
+}
