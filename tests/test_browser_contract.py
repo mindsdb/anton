@@ -231,6 +231,24 @@ def test_anton_holds_the_payment_frame_hosts_no_host_reads():
     assert list(PAYMENT_FRAME_HOSTS) == _load("page").limits["payment_frame_hosts"]
 
 
+def test_a_frame_its_host_marks_secret_takes_the_watch_away():
+    """A card field in a frame on the shop's own host, or a payment frame
+    inside a frame the host read, looks to anton like an ad's frame. The
+    host marks it secret, and anton watches no hand-over on that page
+    (tool.py _wait_for), while the ad's frame alone keeps the watch."""
+    assert "A host sends secret: true with each frame it lists, read or not" in _load("page").description
+    page = Page.model_validate(_load("page").examples["a checkout whose card number sits in another frame"].body)
+    assert [(frame.read, frame.secret) for frame in page.frames] == [(False, True), (True, True), (False, False)]
+    # A payment provider's frame is marked too.
+    framed = Page.model_validate(_load("page").examples["a page with a frame"].body)
+    assert [frame.secret for frame in framed.frames] == [False, True, False]
+    state = browser_tool._BrowserState(client=_client(_Recorder()), session_id=PROFILE, page=page)
+    with pytest.raises(ValueError, match="this page has a frame with a secret or sign-in field in it"):
+        browser_tool._wait_for(state, {"element": 2, "state": "filled"})
+    state.page = page.model_copy(update={"frames": page.frames[2:]})
+    assert browser_tool._wait_for(state, {"element": 2, "state": "filled"}) is not None
+
+
 def test_the_page_fixture_names_every_frame_limit_the_hosts_hold():
     """Each host pins its frame constants against these, the time a host
     gives a read's frames included, and the card-field rule that keeps a
@@ -1709,7 +1727,7 @@ def test_the_page_fixture_places_each_frame_on_its_page_whatever_scrolls():
             placed += 1
             assert set(frame["at"]) == {"x", "y"}, (name, frame["url"])
             assert all(type(frame["at"][axis]) is int for axis in ("x", "y")), (name, frame["url"])
-    assert placed == 3
+    assert placed == 6
     framed = fixture.examples["a page with a frame"].body
     assert [frame.get("at") for frame in framed["frames"]] == [{"x": 112, "y": 1500}, {"x": 112, "y": 1720}, None]
     assert [frame.model_dump().get("at") for frame in Page.model_validate(framed).frames] == [

@@ -1801,10 +1801,16 @@ def _wait_for(state: _BrowserState, raw: object) -> _ElementWait | None:
         raise ValueError(f"wait_for: element [{wait_for.element}] isn't on the latest page you read. Read the page, then hand over.")
     # The other fields of a sign-in or a payment aren't secret (the email,
     # "Remember me", the ZIP code), and a wait on one comes back before the
-    # secret one is done. A checkout whose card fields sit in a payment
-    # provider's frame lists no secret element, but lists that frame.
+    # secret one is done. A checkout whose card fields sit in a frame lists
+    # no secret element, but lists that frame: the host marks it secret, or
+    # it is on a payment provider's host.
     if any(e.secret for e in state.page.elements):
         raise ValueError(f"wait_for: this page has a secret field, so it is a sign-in, a code or a payment. {_LEAVE_WAIT_FOR_OUT}")
+    if any(frame.secret for frame in state.page.frames or []):
+        raise ValueError(
+            f"wait_for: this page has a frame with a secret or sign-in field in it, so it is a sign-in, a code or a payment. "
+            f"{_LEAVE_WAIT_FOR_OUT}"
+        )
     if _payment_frame(state.page):
         raise ValueError(f"wait_for: this page has a payment provider's frame, so it is a payment. {_LEAVE_WAIT_FOR_OUT}")
     if el.role in _CHOICE_ROLES:

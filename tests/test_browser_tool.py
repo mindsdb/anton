@@ -3039,6 +3039,41 @@ async def test_no_wait_for_on_a_page_with_a_payment_frame(done_in_the_browser, f
     assert host.posted("/control") == []
 
 
+@pytest.mark.parametrize("frames", [
+    # The card number in a frame on the shop's own host, or a card
+    # tokenizer's that isn't on payment_frame_hosts: the host found a card
+    # field in it, so it marked the frame secret.
+    [_framed("https://secure.shop.example.test/payments/card", secret=True)],
+    [_framed("https://js.verygoodvault.com/vgs-collect/2.27.0/vgs-collect-frame.html", secret=True)],
+    [_framed("https://htp.tokenex.com/iframe/v3", secret=True)],
+    [_framed("https://checkout.clover.com/iframe/card-number", secret=True)],
+    # A payment provider's frame inside a frame the host read: listed alone,
+    # or with the frame inside it listed after it.
+    [_framed("https://pay.shop.example.test/embed", read=True, text="Card details", secret=True)],
+    [_framed("https://pay.shop.example.test/embed", read=True, text="Card details", secret=True),
+     _framed("https://js.stripe.com/v3/elements-inner-card", box=None, at=None)],
+    # A sign-in another site frames.
+    [_framed("https://sso.partner.example.test/embedded-login", secret=True)],
+])
+@pytest.mark.parametrize("wait_for", [{"element": 2, "state": "filled"}, {"element": 3, "state": "checked"}])
+async def test_no_wait_for_on_a_page_with_a_frame_its_host_marks_secret(done_in_the_browser, frames, wait_for):
+    """A card field in a frame anton can't tell from an ad's by its address:
+    watched, the browser comes back once the person fills the ZIP code and
+    pauses, before they type the card number."""
+    page = {**FRAMED_CHECKOUT, "frames": frames}
+    host = FakeHost(pages=[page])
+    host.done_after_hand_over = True
+    session = make_session(host, elicitor=FakeElicitor())
+    await read(session, host, page)
+    result = await browser_tool.handle_browser(session, {"action": "hand_to_user", "reason": "Pay", "wait_for": wait_for})
+    assert result.ok is False and result.reason == "browser_bad_input"
+    assert (
+        "wait_for: this page has a frame with a secret or sign-in field in it, so it is a sign-in, a code or a payment. "
+        "For a sign-in, a code, a payment, a choice among options or anything with several steps, leave wait_for out"
+    ) in result.content
+    assert host.posted("/control") == []
+
+
 #: Frames an ordinary page shows: an ad, a video, a newsletter form the host
 #: read, hosts that only look like a provider's, and an identity provider's
 #: or a social network's button, prompt or embed. Identity providers don't
@@ -3057,6 +3092,8 @@ ORDINARY_FRAMES = [
     _framed("https://www.facebook.com/plugins/video.php"),
     _framed("https://www.facebook.com/plugins/like.php"),
     _framed("https://www.facebook.com/plugins/post.php"),
+    # A frame on the shop's own host that its host found no secret in.
+    _framed("https://secure.shop.example.test/reviews", secret=False),
 ]
 
 

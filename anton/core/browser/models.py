@@ -124,6 +124,12 @@ class Frame(_Answer):
     #: host that predates it.
     at: PagePoint | None = None
     offscreen: bool = False
+    #: True when the host found that this frame, read or not, or a frame
+    #: inside it is on a payment_frame_hosts host or holds a secret,
+    #: card-named or sign-in field: a card field on the shop's own host, say,
+    #: which anton can't tell from an ad's frame by its address. False when
+    #: the host found neither, couldn't look in time, or predates it.
+    secret: bool = False
     elements: list[FrameElement] = []
     text: str = ""
     truncated: bool = False
