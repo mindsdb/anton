@@ -3,6 +3,9 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
+# The values of `write_approval_unchecked`.
+UncheckedMode = Literal["all", "own", "off"]
+
 
 #
 class CoreSettings(BaseSettings):
@@ -78,8 +81,24 @@ class CoreSettings(BaseSettings):
     # (ANTON_WRITE_APPROVAL_UNCHECKED). "all": the cell that runs it, a later
     # cell that may call what it defined, and the first cell after a restart
     # once a cell may have written a startup hook. "own": only the cell that
-    # runs it. "off": none, while SQL, file and HTTP writes still wait.
-    write_approval_unchecked: Literal["all", "own", "off"] = "all"
+    # runs it. "off": none. Under both, a cell the check stopped short on (a
+    # depth limit, a cell too deep to parse, a check that failed) still
+    # waits, and a cell held for a write the check reads shows its whole
+    # card. Literal code past the check's exec limits
+    # (`write_check._EXEC_LIMIT`, `_LITERAL_CODE_LIMIT`) counts as code it
+    # can't read, not as a stop. So a write inside code the check can't
+    # read gets no card of its own: under "own", one a later cell makes
+    # through what such code defined, or a startup hook makes as the pad
+    # starts again; under "off", any. The write relay holds such a write
+    # only when it sends a method other than GET or HEAD to a host the
+    # relay holds, and nothing holds any other, such as a file change or a
+    # request to an https:// host. So "own" and "off" apply only while the
+    # relay holds every listed write:
+    # `write_relay_url` set, `write_relay_hosts` naming a host, and each
+    # `write_approval_http` rule an http:// rule to one of those hosts for
+    # one method other than GET or HEAD (not *, which takes in GET and HEAD).
+    # Otherwise anton uses "all" and logs a WARNING (`write_hold.unchecked_mode`).
+    write_approval_unchecked: UncheckedMode = "all"
     # The write relay's control address, where anton reads and cancels the
     # requests it holds (ANTON_WRITE_RELAY_URL, as in
     # "http://write-relay:8090"). When set, a session that can ask the user
