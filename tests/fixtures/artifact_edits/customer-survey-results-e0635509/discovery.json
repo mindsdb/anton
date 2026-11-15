@@ -1,0 +1,28 @@
+{
+  "request_fingerprint": "ed5a9b8b0947cc6a45be142718b5929e2ff41eb8dca816f9f924692929c07c80",
+  "call_fingerprint": "73264829fd1e8844daf413779a39cd60adccc6ab7f98e84cf32448450ed0a423",
+  "pipeline_stage": "generated",
+  "artifact_type": "html-app",
+  "gathering_complete": true,
+  "declared_sources": [
+    "survey.csv"
+  ],
+  "unverified_sources": [],
+  "brief_markdown": "",
+  "data_notes": "",
+  "web_notes": "",
+  "assumptions": [],
+  "open_points": [],
+  "attachments": [
+    {
+      "path": "/workspace/survey.csv",
+      "name": "survey.csv",
+      "size": 774,
+      "kind": "data",
+      "staged": "",
+      "skipped": ""
+    }
+  ],
+  "known_data": "",
+  "known_data_verified": []
+}

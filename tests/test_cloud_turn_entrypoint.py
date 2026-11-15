@@ -15,6 +15,7 @@ import pytest
 
 from anton.cloud_turn.contract import ARTIFACTS_TOUCHED_KEY, MAX_ARTIFACTS_TOUCHED, TurnRequestV1
 from anton.cloud_turn.__main__ import _clip_result_content, stream_turn
+from anton.core.tools.connector_draft import ConnectorDraftBox, parse_connector_draft
 from anton.core.llm.provider import (
     AllowanceExhaustedError,
     FreeServingPausedError,
@@ -687,6 +688,40 @@ def test_failed_turn_emits_no_skill_draft(tmp_path):
     assert [e["kind"] for e in _drive(session)] == ["turn_failed"]
 
 
+class _ConnectorSession(_FakeSession):
+    """A session whose turn builds a connector template, like the tool would."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._connector_drafts = ConnectorDraftBox()
+
+    async def turn_stream(self, user_input, **kwargs):
+        self._connector_drafts.put(parse_connector_draft(_CONNECTOR_DRAFT))
+        async for event in super().turn_stream(user_input, **kwargs):
+            yield event
+
+
+_CONNECTOR_DRAFT = {
+    "connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}],
+    "auth": {"type": "header", "headers": {"Authorization": "Bearer {api_key}"}},
+}
+
+
+def test_connector_draft_emitted_before_the_terminal_event():
+    events = _drive(_ConnectorSession(deltas=["ok"]))
+    assert events == [
+        {"kind": "delta", "text": "ok"},
+        {"kind": "connector", "entries": [parse_connector_draft(_CONNECTOR_DRAFT).to_dict()]},
+        {"kind": "turn_completed"},
+    ]
+
+
+def test_failed_turn_emits_no_connector_draft():
+    session = _ConnectorSession(deltas=["ok"])
+    session._raise = RuntimeError("boom")
+    assert [e["kind"] for e in _drive(session)] == ["turn_failed"]
+
+
 def test_untracked_late_write_is_not_awaited():
     """Settling is explicit: only registered writes are awaited, so the entrypoint
     never blocks on unrelated live tasks (scratchpad readers, the heartbeat)."""
@@ -730,6 +765,7 @@ _HISTORY_TURN = [
 
 _EXPECTED_ROWS = [
     {"role": "assistant", "content": [
+        {"type": "text", "text": "looking"},
         {"type": "tool_use", "id": "t1", "name": "recall_skill", "input": {"name": "pdf"}}]},
     {"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": "t1", "content": "BODY"}]},

@@ -29,12 +29,10 @@ def _turn_slice():
     ]
 
 
-def test_split_strips_text_and_keeps_tool_blocks():
+def test_split_keeps_the_text_beside_a_tool_call_in_order():
     rows = split_turn_into_rows(_turn_slice())
     assert len(rows) == 2
-    assert rows[0]["role"] == "assistant"
-    assert [b["type"] for b in rows[0]["content"]] == ["tool_use"]
-    assert rows[0]["content"][0]["input"] == {"name": "pdf"}
+    assert rows[0] == _turn_slice()[0]
     assert rows[1]["role"] == "user"
     assert rows[1]["content"][0]["type"] == "tool_result"
     assert rows[1]["content"][0]["tool_use_id"] == "t1"
@@ -44,9 +42,10 @@ def test_split_drops_a_pure_text_message():
     # The trailing "final answer" message carries no tool block -> no row.
     rows = split_turn_into_rows(_turn_slice())
     assert all(
-        b["type"] in ("tool_use", "tool_result")
-        for row in rows for b in row["content"]
+        any(b["type"] in ("tool_use", "tool_result") for b in row["content"])
+        for row in rows
     )
+    assert {"type": "text", "text": "final answer"} not in [b for row in rows for b in row["content"]]
 
 
 def test_split_ignores_non_dict_entries_and_string_content():
@@ -87,3 +86,17 @@ def test_split_sanitizes_images_inside_tool_results():
     assert rows[1]["content"][0]["content"] == [
         {"type": "text", "text": REPLAY_IMAGE_PLACEHOLDER}
     ]
+
+
+def test_split_drops_text_beside_a_tool_result():
+    slice_ = [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "scratchpad", "input": {"code": "1"}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "BODY"},
+            {"type": "text", "text": "self-check note"},
+        ]},
+    ]
+    rows = split_turn_into_rows(slice_)
+    assert rows[1] == {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "BODY"}]}

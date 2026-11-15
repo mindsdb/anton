@@ -110,7 +110,7 @@ scratchpad code — do not import them.
 - Connected data source credentials are injected as namespaced environment \
 variables in the form DS_<ENGINE>_<NAME>__<FIELD> \
 (e.g. DS_POSTGRES_PROD_DB__HOST, DS_POSTGRES_PROD_DB__PASSWORD, \
-DS_HUBSPOT_MAIN__ACCESS_TOKEN). Use those variables directly in scratchpad \
+DS_SHOPIFY_MAIN__CLIENT_SECRET). Use those variables directly in scratchpad \
 code and never read ~/.anton/data_vault/ files directly.
 - Flat variables like DS_HOST or DS_PASSWORD are used only temporarily \
 during internal connection test snippets. Do not assume they exist during \

@@ -1,0 +1,100 @@
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 808, "message": "make the monthly revenue line purple (#7B3FA0) instead of teal"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 742, "message": "rename the 'Total orders' KPI to 'Orders placed' and change the subtit"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.97, "reason": "jev", "ms": 677, "message": "add a table below the charts that lists each month with its revenue an"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.99, "reason": "jev", "ms": 527, "message": "when I pick a region in the Region selector every KPI and both charts"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 617, "message": "change the score colors so score 1 is red #B22222 and score 5 is dark"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 634, "message": "rename the 'Lowest-rated question' card to 'Needs attention'"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.98, "reason": "jev", "ms": 602, "message": "add an 'All teams' option to the Team selector that combines the respo"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.93, "reason": "jev", "ms": 658, "message": "nothing shows up under the Team selector anymore, no cards, no chart."}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 511, "message": "show the status filter as a dropdown instead of tabs"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 569, "message": "change the overview sentence to 'Eight milestones take the product fro"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.91, "reason": "jev", "ms": 497, "message": "add a filter for the owner team next to the status filter"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 545, "message": "clicking Done, In progress or Planned shows no milestones at all, only"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 899, "message": "change the green accent color to dark blue #1d4ed8"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 525, "message": "change the heading 'Stock overview' to 'Warehouse stock' and make the"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.94, "reason": "jev", "ms": 599, "message": "add a Location dropdown filter (Warehouse A, B, C) next to the categor"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.93, "reason": "jev", "ms": 569, "message": "the table is empty and typing in the search box does nothing"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 557, "message": "make the Calculate button green (#2ea043) instead of blue"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 651, "message": "rename 'Total interest' to 'Total interest paid' and change the page h"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 560, "message": "add a 'Total cost' result next to the monthly payment and total intere"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 1074, "message": "pressing Calculate does nothing and the monthly payment never updates"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 606, "message": "make the Start button orange, using the orange already in the page (#d"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 577, "message": "change the big heading 'One thing at a time.' to 'Deep work, one block"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 546, "message": "add a third mode 'Long break \u00b7 15 min' next to Focus and Break"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.99, "reason": "jev", "ms": 519, "message": "the Start button does nothing when I click it"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 496, "message": "make the Convert button green (#238636)"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 584, "message": "change the main heading to 'Exchange Rate Converter' and the rates tab"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 1005, "message": "add a button that swaps the From and To currencies"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.97, "reason": "jev", "ms": 599, "message": "converting 100 USD to EUR returns 100 instead of 92, fix it"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.97, "reason": "jev", "ms": 612, "message": "sort the table by on-hand quantity, highest first"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "agent", "confidence": 0.58, "reason": "uncertain", "ms": 697, "message": "add a gross margin chart by month"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.97, "reason": "jev", "ms": 569, "message": "show revenue in thousands, like $120k"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.98, "reason": "jev", "ms": 535, "message": "show each region's share of total revenue as a percentage on the bar c"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.96, "reason": "jev", "ms": 514, "message": "show the number of responses next to each question's average"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.99, "reason": "jev", "ms": 688, "message": "add a total stock value at the bottom of the table"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.96, "reason": "jev", "ms": 527, "message": "highlight milestones whose date has passed but are not done in red"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 553, "message": "make the focus session 50 minutes instead of 25"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 1084, "message": "add a dark mode toggle"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 646, "message": "the amortization table is too long, collapse it by default with a show"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.94, "reason": "jev", "ms": 1133, "message": "bigger"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.98, "reason": "jev", "ms": 543, "message": "undo that, put it back to teal"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.99, "reason": "jev", "ms": 561, "message": "add last quarter's numbers"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.91, "reason": "jev", "ms": 648, "message": "add 2025 so I can compare year over year"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 1.0, "reason": "jev", "ms": 550, "message": "refresh this with the latest data from the sales database"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.99, "reason": "jev", "ms": 677, "message": "why did revenue drop in the West in June?"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 1.0, "reason": "jev", "ms": 792, "message": "forecast next quarter's revenue for each region"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.65, "reason": "uncertain", "ms": 1039, "message": "break revenue down by product category"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.96, "reason": "jev", "ms": 931, "message": "which region is growing fastest?"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 1.0, "reason": "jev", "ms": 991, "message": "add the West region's orders from the CRM"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.98, "reason": "jev", "ms": 563, "message": "check these totals against the database, they look off"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.96, "reason": "jev", "ms": 622, "message": "include the responses from the Q3 survey too"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.68, "reason": "uncertain", "ms": 603, "message": "summarize the main complaints from the free-text comments"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.96, "reason": "jev", "ms": 564, "message": "what's our overall NPS?"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "edit", "confidence": 0.84, "reason": "jev", "ms": 578, "message": "add a filter by customer segment"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 1.0, "reason": "jev", "ms": 561, "message": "pull in current stock levels from the warehouse system"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.9, "reason": "jev", "ms": 687, "message": "add supplier lead times for each item"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.96, "reason": "jev", "ms": 531, "message": "which items should I reorder this week, and how many of each?"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.82, "reason": "jev", "ms": 580, "message": "clean up the duplicate SKUs in the source CSV and rebuild this"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 1.0, "reason": "jev", "ms": 653, "message": "compare this with current mortgage rates from my bank's website"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.93, "reason": "jev", "ms": 783, "message": "is a 15-year loan better for me than a 30-year one?"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.48, "reason": "uncertain", "ms": 610, "message": "can you explain how the monthly payment is calculated?"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 1.0, "reason": "jev", "ms": 559, "message": "sync the milestones with our Jira project"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.95, "reason": "jev", "ms": 671, "message": "add the marketing team's milestones from the launch plan doc"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.95, "reason": "jev", "ms": 574, "message": "how many focus sessions did I do last week?"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.97, "reason": "jev", "ms": 548, "message": "log my sessions to a Google Sheet every day"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.77, "reason": "uncertain", "ms": 535, "message": "use live exchange rates from an API instead of the fixed ones"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.45, "reason": "uncertain", "ms": 560, "message": "add the Mexican peso"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 1.0, "reason": "jev", "ms": 721, "message": "what was the EUR rate a year ago?"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.84, "reason": "jev", "ms": 581, "message": "make me a new dashboard for marketing spend"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.99, "reason": "jev", "ms": 567, "message": "share this with the finance team"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 1.0, "reason": "jev", "ms": 548, "message": "export this as a PDF and email it to me every Monday"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.99, "reason": "jev", "ms": 643, "message": "join this with the customer table and show the average score per accou"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.92, "reason": "jev", "ms": 790, "message": "hi"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.98, "reason": "jev", "ms": 561, "message": "make the unicorns poop rainbow"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.93, "reason": "jev", "ms": 635, "message": "slow down the stars"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.99, "reason": "jev", "ms": 599, "message": "make the unicorns bigger and leave a sparkle trail"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 664, "message": "add a shooting star every few seconds"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "agent", "confidence": 0.76, "reason": "uncertain", "ms": 868, "message": "can they flap their wings?"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 0.96, "reason": "jev", "ms": 530, "message": "make the moon glow more"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 0.94, "reason": "jev", "ms": 627, "message": "replace the random stars with the real constellations from a star cata"}
+{"variant": "contract", "run": 1, "label": "agent", "route": "agent", "confidence": 1.0, "reason": "jev", "ms": 648, "message": "how many people looked at this page this week?"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 595, "message": "make the progress ring thicker"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 603, "message": "make the low-stock dot pulse"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 624, "message": "animate the monthly payment number when it changes"}
+{"variant": "contract", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 630, "message": "put the rates table above the converter"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 605, "message": "make the monthly revenue line purple (#7B3FA0) instead of teal"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 570, "message": "rename the 'Total orders' KPI to 'Orders placed' and change the subtit"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 0.99, "reason": "jev", "ms": 597, "message": "add a table below the charts that lists each month with its revenue an"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 0.98, "reason": "jev", "ms": 582, "message": "when I pick a region in the Region selector every KPI and both charts"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 611, "message": "change the score colors so score 1 is red #B22222 and score 5 is dark"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 576, "message": "rename the 'Lowest-rated question' card to 'Needs attention'"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 0.98, "reason": "jev", "ms": 607, "message": "add an 'All teams' option to the Team selector that combines the respo"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 0.98, "reason": "jev", "ms": 539, "message": "nothing shows up under the Team selector anymore, no cards, no chart."}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 602, "message": "show the status filter as a dropdown instead of tabs"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 0.99, "reason": "jev", "ms": 657, "message": "change the overview sentence to 'Eight milestones take the product fro"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 541, "message": "add a filter for the owner team next to the status filter"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 0.99, "reason": "jev", "ms": 576, "message": "clicking Done, In progress or Planned shows no milestones at all, only"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 591, "message": "change the green accent color to dark blue #1d4ed8"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 1.0, "reason": "jev", "ms": 646, "message": "change the heading 'Stock overview' to 'Warehouse stock' and make the"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 0.99, "reason": "jev", "ms": 657, "message": "add a Location dropdown filter (Warehouse A, B, C) next to the categor"}
+{"variant": "no-outline", "run": 1, "label": "edit", "route": "edit", "confidence": 0.97, "reason": "jev", "ms": 570, "message": "the table is empty and typing in the search box does nothing"}

@@ -1,0 +1,865 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8" data-cowork-observed><script id="cowork-figure-checks" type="application/json" data-cowork-observed>{"doubleCounts":[]}</script><script id="cowork-observed-json" type="application/json" data-cowork-observed>{"data-3a63c8981add":{"source":{"type":"local CSV","path":"/workspace/sales.csv","fields":["month","region","revenue_usd","orders","gross_margin_usd"],"record_count":48},"filters":{"initial_region":"All regions","region_filter":"All regions or one region"},"time_scope":{"months":["2026-01","2026-02","2026-03","2026-04","2026-05","2026-06","2026-07","2026-08","2026-09","2026-10","2026-11","2026-12"],"year":2026},"units":{"revenue_usd":"USD","orders":"orders count","gross_margin_usd":"USD","gross_margin_pct":"gross margin dollars / revenue dollars * 100"},"aggregation_methods":{"total_revenue_usd":"sum revenue_usd","total_orders":"sum orders","gross_margin_pct":"sum gross_margin_usd / sum revenue_usd * 100 (revenue-weighted)"},"records":[{"month":"2026-01","region":"North","revenue_usd":121000.0,"orders":59,"gross_margin_usd":29424.0,"gross_margin_pct":24.317355371900824},{"month":"2026-01","region":"South","revenue_usd":86000.0,"orders":49,"gross_margin_usd":26781.0,"gross_margin_pct":31.140697674418604},{"month":"2026-01","region":"East","revenue_usd":92000.0,"orders":86,"gross_margin_usd":25139.0,"gross_margin_pct":27.325},{"month":"2026-01","region":"West","revenue_usd":196000.0,"orders":104,"gross_margin_usd":42013.0,"gross_margin_pct":21.43520408163265},{"month":"2026-02","region":"North","revenue_usd":91000.0,"orders":95,"gross_margin_usd":22469.0,"gross_margin_pct":24.69120879120879},{"month":"2026-02","region":"South","revenue_usd":110000.0,"orders":51,"gross_margin_usd":29498.0,"gross_margin_pct":26.81636363636364},{"month":"2026-02","region":"East","revenue_usd":87000.0,"orders":145,"gross_margin_usd":23531.0,"gross_margin_pct":27.04712643678161},{"month":"2026-02","region":"West","revenue_usd":108000.0,"orders":120,"gross_margin_usd":30282.0,"gross_margin_pct":28.03888888888889},{"month":"2026-03","region":"North","revenue_usd":87000.0,"orders":113,"gross_margin_usd":23811.0,"gross_margin_pct":27.368965517241378},{"month":"2026-03","region":"South","revenue_usd":86000.0,"orders":68,"gross_margin_usd":16121.0,"gross_margin_pct":18.745348837209303},{"month":"2026-03","region":"East","revenue_usd":189000.0,"orders":57,"gross_margin_usd":42778.0,"gross_margin_pct":22.633862433862433},{"month":"2026-03","region":"West","revenue_usd":98000.0,"orders":109,"gross_margin_usd":19487.0,"gross_margin_pct":19.884693877551022},{"month":"2026-04","region":"North","revenue_usd":119000.0,"orders":111,"gross_margin_usd":36959.0,"gross_margin_pct":31.057983193277312},{"month":"2026-04","region":"South","revenue_usd":103000.0,"orders":53,"gross_margin_usd":28125.0,"gross_margin_pct":27.305825242718445},{"month":"2026-04","region":"East","revenue_usd":161000.0,"orders":64,"gross_margin_usd":38573.0,"gross_margin_pct":23.958385093167703},{"month":"2026-04","region":"West","revenue_usd":150000.0,"orders":131,"gross_margin_usd":28507.0,"gross_margin_pct":19.004666666666665},{"month":"2026-05","region":"North","revenue_usd":87000.0,"orders":119,"gross_margin_usd":18527.0,"gross_margin_pct":21.295402298850576},{"month":"2026-05","region":"South","revenue_usd":167000.0,"orders":108,"gross_margin_usd":41485.0,"gross_margin_pct":24.84131736526946},{"month":"2026-05","region":"East","revenue_usd":120000.0,"orders":99,"gross_margin_usd":32843.0,"gross_margin_pct":27.369166666666665},{"month":"2026-05","region":"West","revenue_usd":138000.0,"orders":86,"gross_margin_usd":31459.0,"gross_margin_pct":22.7963768115942},{"month":"2026-06","region":"North","revenue_usd":181000.0,"orders":63,"gross_margin_usd":52823.0,"gross_margin_pct":29.183977900552488},{"month":"2026-06","region":"South","revenue_usd":111000.0,"orders":50,"gross_margin_usd":30182.0,"gross_margin_pct":27.190990990990993},{"month":"2026-06","region":"East","revenue_usd":147000.0,"orders":103,"gross_margin_usd":47043.0,"gross_margin_pct":32.002040816326534},{"month":"2026-06","region":"West","revenue_usd":173000.0,"orders":97,"gross_margin_usd":39110.0,"gross_margin_pct":22.606936416184972},{"month":"2026-07","region":"North","revenue_usd":89000.0,"orders":55,"gross_margin_usd":23310.0,"gross_margin_pct":26.19101123595506},{"month":"2026-07","region":"South","revenue_usd":101000.0,"orders":136,"gross_margin_usd":23708.0,"gross_margin_pct":23.47326732673267},{"month":"2026-07","region":"East","revenue_usd":199000.0,"orders":102,"gross_margin_usd":49247.0,"gross_margin_pct":24.747236180904522},{"month":"2026-07","region":"West","revenue_usd":165000.0,"orders":49,"gross_margin_usd":49885.0,"gross_margin_pct":30.233333333333334},{"month":"2026-08","region":"North","revenue_usd":153000.0,"orders":141,"gross_margin_usd":48972.0,"gross_margin_pct":32.0078431372549},{"month":"2026-08","region":"South","revenue_usd":120000.0,"orders":83,"gross_margin_usd":34950.0,"gross_margin_pct":29.125},{"month":"2026-08","region":"East","revenue_usd":156000.0,"orders":103,"gross_margin_usd":42554.0,"gross_margin_pct":27.27820512820513},{"month":"2026-08","region":"West","revenue_usd":138000.0,"orders":48,"gross_margin_usd":43386.0,"gross_margin_pct":31.43913043478261},{"month":"2026-09","region":"North","revenue_usd":200000.0,"orders":74,"gross_margin_usd":51171.0,"gross_margin_pct":25.5855},{"month":"2026-09","region":"South","revenue_usd":165000.0,"orders":48,"gross_margin_usd":31302.0,"gross_margin_pct":18.970909090909092},{"month":"2026-09","region":"East","revenue_usd":169000.0,"orders":79,"gross_margin_usd":47918.0,"gross_margin_pct":28.353846153846153},{"month":"2026-09","region":"West","revenue_usd":167000.0,"orders":145,"gross_margin_usd":41968.0,"gross_margin_pct":25.130538922155687},{"month":"2026-10","region":"North","revenue_usd":171000.0,"orders":89,"gross_margin_usd":55049.0,"gross_margin_pct":32.19239766081871},{"month":"2026-10","region":"South","revenue_usd":124000.0,"orders":42,"gross_margin_usd":40982.0,"gross_margin_pct":33.050000000000004},{"month":"2026-10","region":"East","revenue_usd":125000.0,"orders":61,"gross_margin_usd":34718.0,"gross_margin_pct":27.7744},{"month":"2026-10","region":"West","revenue_usd":143000.0,"orders":47,"gross_margin_usd":30733.0,"gross_margin_pct":21.49160839160839},{"month":"2026-11","region":"North","revenue_usd":116000.0,"orders":56,"gross_margin_usd":34584.0,"gross_margin_pct":29.813793103448276},{"month":"2026-11","region":"South","revenue_usd":130000.0,"orders":90,"gross_margin_usd":42470.0,"gross_margin_pct":32.669230769230765},{"month":"2026-11","region":"East","revenue_usd":143000.0,"orders":50,"gross_margin_usd":29546.0,"gross_margin_pct":20.661538461538463},{"month":"2026-11","region":"West","revenue_usd":131000.0,"orders":110,"gross_margin_usd":29404.0,"gross_margin_pct":22.445801526717556},{"month":"2026-12","region":"North","revenue_usd":97000.0,"orders":144,"gross_margin_usd":24142.0,"gross_margin_pct":24.888659793814433},{"month":"2026-12","region":"South","revenue_usd":150000.0,"orders":75,"gross_margin_usd":43954.0,"gross_margin_pct":29.302666666666667},{"month":"2026-12","region":"East","revenue_usd":125000.0,"orders":127,"gross_margin_usd":40184.0,"gross_margin_pct":32.1472},{"month":"2026-12","region":"West","revenue_usd":109000.0,"orders":59,"gross_margin_usd":21067.0,"gross_margin_pct":19.327522935779818}],"aggregates":{"all_regions":{"total_revenue_usd":6394000.0,"total_orders":4153,"gross_margin_pct":26.152236471692213,"gross_margin_usd":1672174.0,"monthly":{"2026-01":{"revenue_usd":495000.0,"orders":298,"gross_margin_usd":123357.0},"2026-02":{"revenue_usd":396000.0,"orders":411,"gross_margin_usd":105780.0},"2026-03":{"revenue_usd":460000.0,"orders":347,"gross_margin_usd":102197.0},"2026-04":{"revenue_usd":533000.0,"orders":359,"gross_margin_usd":132164.0},"2026-05":{"revenue_usd":512000.0,"orders":412,"gross_margin_usd":124314.0},"2026-06":{"revenue_usd":612000.0,"orders":313,"gross_margin_usd":169158.0},"2026-07":{"revenue_usd":554000.0,"orders":342,"gross_margin_usd":146150.0},"2026-08":{"revenue_usd":567000.0,"orders":375,"gross_margin_usd":169862.0},"2026-09":{"revenue_usd":701000.0,"orders":346,"gross_margin_usd":172359.0},"2026-10":{"revenue_usd":563000.0,"orders":239,"gross_margin_usd":161482.0},"2026-11":{"revenue_usd":520000.0,"orders":306,"gross_margin_usd":136004.0},"2026-12":{"revenue_usd":481000.0,"orders":405,"gross_margin_usd":129347.0}},"revenue_by_region":{"East":{"revenue_usd":1713000.0,"orders":1076,"gross_margin_usd":454074.0},"North":{"revenue_usd":1512000.0,"orders":1119,"gross_margin_usd":421241.0},"South":{"revenue_usd":1453000.0,"orders":853,"gross_margin_usd":389558.0},"West":{"revenue_usd":1716000.0,"orders":1105,"gross_margin_usd":407301.0}}},"regions":["East","North","South","West"],"months":["2026-01","2026-02","2026-03","2026-04","2026-05","2026-06","2026-07","2026-08","2026-09","2026-10","2026-11","2026-12"]}}}</script><script data-cowork-observed>window.ARTIFACT_DATA=JSON.parse(document.getElementById("cowork-observed-json").textContent);</script><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Artifact</title><style>:root{color-scheme:dark;--bg:#0d1117;--fg:#e6edf3;--muted:#9baabc;--line:#293440;--blue:#83b6f5;--warn:#edbb62;--danger:#f18686;--good:#85cbb5}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,select,input{font:inherit;color:inherit}button,select{background:#15202c;border:1px solid #3a4b5e;border-radius:5px;min-height:42px;padding:8px 12px;cursor:pointer}button:focus-visible,select:focus-visible{outline:2px solid var(--blue);outline-offset:3px}button[aria-pressed=true]{border-color:var(--blue);background:#20364b}button:hover{border-color:var(--blue)}main{max-width:1280px;margin:auto;padding:28px 34px 60px}h1,h2,h3,p{margin:0}h1{font-size:27px;line-height:1.22;letter-spacing:-.6px}h2{font-size:20px;line-height:1.3;letter-spacing:-.25px}h3{font-size:16px}header>p,.caption,.metric-detail{color:var(--muted);font-size:13px}.subtitle{margin-top:9px;max-width:90ch}.controls{display:flex;gap:12px;flex-wrap:wrap;margin:22px 0 0}.control{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.control label{color:var(--muted);font-size:13px}.tabs{display:flex;flex-wrap:wrap;gap:6px}.lead{border-left:3px solid var(--blue);padding:2px 0 2px 17px;margin:25px 0 0;max-width:100ch}.lead h2{font-size:23px}.lead p{margin-top:7px;color:var(--muted)}.lead-value{display:block;font-size:34px;font-weight:650;letter-spacing:-.6px;line-height:1.25;margin-top:8px;font-variant-numeric:tabular-nums}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:18px 26px;padding:22px 0;margin-top:9px;border-bottom:1px solid var(--line)}.metric{min-width:0}.metric-label{font-size:12px;color:var(--muted);min-height:3em}.metric-value{font-size:25px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.25;margin:5px 0;overflow-wrap:anywhere}.metric-detail{font-size:12px}.section{min-width:0;margin-top:28px}.section-header{margin-bottom:15px}.caption{margin-top:5px;max-width:100ch}.view{width:100%;height:370px;min-width:0;background:transparent}.geo-view{height:430px;background:#101923;border:1px solid var(--line);border-radius:6px;overflow:hidden}.geo-view>svg{display:block;width:100%;height:100%}.text-block{max-width:95ch;white-space:pre-line}.table-wrap{min-width:0}table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums}th,td{padding:11px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}th{font-weight:500;color:var(--muted);background:#131c26}td{max-width:360px}td>span{min-width:0;overflow-wrap:anywhere}.timeline{list-style:none;padding:0;border-left:1px solid #47647e;margin:0 0 0 7px}.timeline li{position:relative;padding:0 0 23px 22px}.timeline li:before{content:"";position:absolute;width:9px;height:9px;background:var(--blue);border-radius:50%;left:-5px;top:6px}.timeline time{color:var(--muted);font-size:12px}.timeline p{margin-top:4px;color:var(--muted);font-size:13px}.empty,.loading{padding:18px 0;color:var(--muted)}.failure{padding:20px;border-left:3px solid var(--danger)}.tone-warning{color:var(--warn)}.tone-danger{color:var(--danger)}.tone-good{color:var(--good)}.lead.tone-warning{border-color:var(--warn)}.lead.tone-danger{border-color:var(--danger)}.lead.tone-good{border-color:var(--good)}.lead.tone-warning h2,.lead.tone-danger h2,.lead.tone-good h2{color:var(--fg)}
+@media(max-width:599px){main{padding:21px 18px 40px}h1{font-size:23px}.lead{padding-left:13px;margin-top:21px}.lead h2{font-size:21px}.lead-value{font-size:29px}.metrics{grid-template-columns:repeat(var(--phone-metric-columns,2),minmax(0,1fr));gap:17px 20px;padding:19px 0}.metric-value{font-size:22px}.view{height:310px}.geo-view{height:340px}.section{margin-top:24px}h2{font-size:18px}.controls{gap:10px}.control{align-items:flex-start;flex-direction:column;max-width:100%}select{max-width:100%}table,thead,tbody,tr,td{display:block}thead{display:none}tr{padding:8px 0;border-bottom:1px solid #3d4b5a}td{max-width:none;display:grid;grid-template-columns:minmax(0,.85fr) minmax(0,1.15fr);gap:12px;padding:7px 0;border:0}td:before{content:attr(data-label);color:var(--muted)}.metric-label{line-height:1.4}.tabs{width:100%}}
+.section-header:has(.data-toggle){display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px}.section-header:has(.data-toggle) .caption{flex-basis:100%;order:2}.data-toggle{margin-left:auto;font-size:13px;min-height:36px;padding:5px 12px}.data-panel{max-height:440px;overflow:auto;border-top:1px solid var(--line);margin-top:12px;padding-top:14px}.data-panel[hidden],.data-toggle[hidden]{display:none}.data-group+ .data-group{margin-top:24px}.data-group h3{margin-bottom:10px;font-size:14px}.data-pager{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;margin-top:12px}.data-pager span{font-size:12px;color:var(--muted)}button:disabled{opacity:.4;cursor:default}
+@media(prefers-reduced-motion:no-preference){button,select{transition:background-color .12s,border-color .12s}}
+.section-header:has(.data-toggle){display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 16px}.section-header:has(.data-toggle) .caption{grid-column:1/-1;grid-row:2}.data-toggle{grid-column:2;grid-row:1;margin-left:0}.data-panel{max-height:none;overflow:visible}.table-wrap{overflow:auto}
+@media(min-width:600px){.table-wrap table{min-width:var(--table-width,0px)}.table-wrap th,.table-wrap td{overflow-wrap:normal;word-break:normal}}
+.geo-legend{display:flex;flex-wrap:wrap;gap:8px 20px;list-style:none;padding:0;margin:12px 0 0;font-size:13px;color:var(--muted)}.geo-legend li{display:inline-flex;gap:8px;align-items:center}.legend-key{display:inline-block;width:22px;height:4px;border-radius:2px;flex-shrink:0}
+.geo-view{position:relative}.point-annotations{position:absolute;inset:0;pointer-events:none}.point-note{position:absolute;font-size:11px;line-height:16px;white-space:nowrap;color:#e6edf3;text-shadow:-1px 0 #101923,1px 0 #101923,0 -1px #101923,0 1px #101923}.point-leader{position:absolute;height:0;border-top:1px solid #8ba7bc;transform-origin:left center}
+@keyframes cowork-route-flow{from{stroke-dashoffset:0}to{stroke-dashoffset:-30}}
+@media(prefers-reduced-motion:no-preference){.route-motion{stroke-dasharray:5 5;animation:cowork-route-flow 2s linear infinite}}
+</style></head><body><main id="cowork-page"></main><script>/* Fail clearly when a presentation treats control state as a scalar or prints an object. */
+(() => {
+  window.CoworkSelection = selected => {
+    const values = Object.freeze({...selected}), keys = Object.keys(values);
+    const usage = keys.map(key => 'selection[' + JSON.stringify(key) + ']').join(', ') || 'an empty selection';
+    return new Proxy(values, {get(target, key, receiver) {
+      if (key === Symbol.toPrimitive) return () => {
+        throw new TypeError('render receives a selection object. Read ' + usage + '; do not use the entire object as a string, dictionary key or value.');
+      };
+      if (typeof key === 'string' && !Reflect.has(target, key) && key !== 'toJSON') {
+        throw new TypeError('Unknown control ' + JSON.stringify(key) + '. Available control values: ' + usage + '.');
+      }
+      return Reflect.get(target, key, receiver);
+    }});
+  };
+  window.CoworkText = value => {
+    if (typeof value === 'object' && value !== null || typeof value === 'function') {
+      throw new TypeError('Presentation text needs a specific string or number. Select and format a source field instead of printing an object.');
+    }
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      throw new TypeError('Presentation text contains a non-finite number. Check the calculation and retain unavailable values as null.');
+    }
+    return value;
+  };
+})();
+
+/* Self-contained presentation primitives. Data, scope and conclusions come from the caller. */
+(() => {
+  const library = new Map();
+  const urls = {
+    echarts: 'https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js',
+    d3: 'https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js',
+    topojson: 'https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js',
+    globe: 'https://cdn.jsdelivr.net/npm/globe.gl@2.34.2/dist/globe.gl.min.js',
+  };
+  const atlas = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json';
+  const normalized = value => String(value).normalize('NFKD').toLowerCase().replace(/[^\p{L}\p{N}]/gu,'');
+  function load(name) {
+    if (!library.has(name)) {
+      const pending = new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = urls[name]; script.onload = resolve;
+        script.onerror = () => {script.remove(); reject(new Error('Could not load ' + name));};
+        document.head.append(script);
+      });
+      library.set(name, pending.catch(error => {library.delete(name); throw error;}));
+    }
+    return library.get(name);
+  }
+  function el(tag, text, className) {
+    const node = document.createElement(tag);
+    text = CoworkText(text);
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    if (className) node.className = className;
+    return node;
+  }
+  function tone(node, value) {
+    if (['warning', 'danger', 'good'].includes(value)) node.classList.add('tone-' + value);
+  }
+  window.CoworkNumber = (value, unit = '', lang = document.documentElement.lang || 'en') => {
+    if (value === null || value === undefined || typeof value === 'number' && !Number.isFinite(value)) return '—';
+    if (typeof value !== 'number') {CoworkText(value);return String(value);}
+    // Keep cards readable while preserving small nonzero measurements.
+    const precision = value && Math.abs(value) < .01 ? {maximumSignificantDigits: 2} : {maximumFractionDigits: 2};
+    if (/^[A-Z]{3}$/.test(unit)) return new Intl.NumberFormat(lang, {style: 'currency', currency: unit, ...precision}).format(value);
+    return new Intl.NumberFormat(lang, precision).format(value) + (unit ? (unit === '%' ? '' : ' ') + unit : '');
+  };
+  const escape = text => String(text ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let countries;
+  async function geography() {
+    await Promise.all([load('d3'), load('topojson')]);
+    if (!countries) countries = d3.json(atlas).then(world => topojson.feature(world, world.objects.countries))
+      .catch(error => {countries = undefined; throw error;});
+    return countries;
+  }
+  function coordinate(pair) {
+    if (!Array.isArray(pair) || pair.length !== 2 || !pair.every(v => typeof v === 'number' && Number.isFinite(v)) || Math.abs(pair[0]) > 180 || Math.abs(pair[1]) > 90) throw new Error('A geographic coordinate must be a real [longitude, latitude] pair.');
+    return pair;
+  }
+  window.CoworkMapProjection = (section, land, w, h) => {
+    const projection = d3.geoNaturalEarth1().fitExtent([[12,12],[w-12,h-12]], land);
+    const worldScale = projection.scale();
+    const coordinates = [
+      ...(section.points || []).map(p => [p.lon, p.lat]),
+      ...(section.routes || []).flatMap(r => [r.from, r.to]),
+      ...(section.center ? [section.center] : []),
+    ];
+    if (!coordinates.length) return projection;
+    const longitude = coordinates.map(pair => pair[0]), latitude = coordinates.map(pair => pair[1]);
+    const west = Math.min(...longitude), east = Math.max(...longitude);
+    const south = Math.min(...latitude), north = Math.max(...latitude);
+    if (east-west > 80 || north-south > 50) return projection;
+    const lonPad = Math.max(4, (east-west)*.15), latPad = Math.max(4, (north-south)*.15);
+    const focus = {type:'MultiPoint',coordinates:[[west-lonPad,south-latPad],[east+lonPad,north+latPad]]};
+    projection.fitExtent([[20,20],[w-20,h-20]], focus);
+    if (projection.scale() > worldScale*24) {
+      projection.scale(worldScale*24);
+      const center = [(west+east)/2,(south+north)/2], point = projection(center), shift = projection.translate();
+      projection.translate([shift[0]+w/2-point[0],shift[1]+h/2-point[1]]);
+    }
+    return projection;
+  };
+  async function drawGeography(node, section, cleanup) {
+    const land = await geography();
+    const points = section.points || [], routes = section.routes || [];
+    for (const p of points) coordinate([p.lon, p.lat]);
+    for (const r of routes) { coordinate(r.from); coordinate(r.to); }
+    if (!node.isConnected) return;
+    if (section.type === 'globe') {
+      await load('globe'); if (!node.isConnected) return;
+      node.replaceChildren();
+      const globe = Globe({animateIn: false})(node).width(node.clientWidth).height(node.clientHeight)
+        .backgroundColor('#101923').showAtmosphere(false).globeImageUrl(null).bumpImageUrl(null)
+        .polygonsData(land.features).polygonCapColor(() => '#29445a').polygonSideColor(() => '#182b3b')
+        .polygonStrokeColor(() => '#6d8b9f').polygonAltitude(.002)
+        .pointsData(points).pointLat(p => p.lat).pointLng(p => p.lon).pointRadius(.7).pointAltitude(.02)
+        .pointColor(p => p.color || '#f0bc62').pointLabel(p => escape(p.label || p.name))
+        .labelsData([])
+        .arcsData(routes).arcStartLat(r => r.from[1]).arcStartLng(r => r.from[0])
+        .arcEndLat(r => r.to[1]).arcEndLng(r => r.to[0]).arcColor(r => r.color || '#83b6f5')
+        .arcStroke(.45).arcLabel(r => escape(r.label || ''));
+      const focus=points.length?points:routes.flatMap(route=>[route.from,route.to].map(pair=>({lon:pair[0],lat:pair[1]})));
+      const center=section.center||window.CoworkGeoCenter?.(focus);
+      if (center) { coordinate(center); globe.pointOfView({lng: center[0], lat: center[1], altitude: 2.2}, 0); }
+      const observer = new ResizeObserver(() => globe.width(node.clientWidth).height(node.clientHeight));
+      observer.observe(node); cleanup.push(() => {observer.disconnect(); globe._destructor();});
+      CoworkGlobeLabels(node,globe,points,cleanup);
+      CoworkGeoMotion(node,section,globe);
+    } else if (section.library === 'echarts') {
+      await load('echarts'); if (!node.isConnected) return;
+      echarts.registerMap('cowork-world', land);
+      await drawChart(node, {option: {geo: {map: 'cowork-world', roam: true, itemStyle: {areaColor:'#233b50',borderColor:'#728a9b'}, label:{show:false}},
+        tooltip: {formatter: p => escape(p.data?.displayLabel || (typeof p.data?.label==='string'?p.data.label:p.name) || '')}, series: [
+          {type:'scatter',coordinateSystem:'geo',data:points.map(p=>({name:p.name,displayLabel:p.label,value:[p.lon,p.lat],
+            itemStyle:{color:p.color||'#f0bc62'},label:{show:!!p.label,formatter:()=>p.label,position:'right',color:'#e6edf3'}})),
+            symbolSize:9,labelLayout:{hideOverlap:true}},
+          {type:'lines',coordinateSystem:'geo',data:routes.map(r=>({coords:[r.from,r.to],label:r.label,lineStyle:{color:r.color||'#83b6f5'}})),
+            lineStyle:{color:'#83b6f5',width:2,opacity:.85},
+            effect:{show:!!section.routeMotion&&!matchMedia('(prefers-reduced-motion: reduce)').matches,
+              constantSpeed:24,symbol:'circle',symbolSize:5}}
+        ]}}, cleanup);
+    } else {
+      node.replaceChildren();
+      const w = node.clientWidth, h = node.clientHeight;
+      const projection = CoworkMapProjection(section, land, w, h);
+      const path = d3.geoPath(projection), svg = d3.select(node).append('svg').attr('viewBox', `0 0 ${w} ${h}`).attr('aria-label', section.title || '');
+      const group = svg.append('g');
+      group.selectAll('path.land').data(land.features).join('path').attr('class','land').attr('d',path).attr('fill','#233b50').attr('stroke','#647f93').attr('stroke-width',.55);
+      group.selectAll('path.route').data(routes).join('path').attr('class','route').attr('d',r=>path({type:'LineString',coordinates:[r.from,r.to]})).attr('fill','none').attr('stroke',r=>r.color||'#83b6f5').attr('stroke-width',2).append('title').text(r=>r.label||'');
+      group.selectAll('circle').data(points).join('circle').attr('cx',p=>projection([p.lon,p.lat])[0]).attr('cy',p=>projection([p.lon,p.lat])[1]).attr('r',4).attr('fill',p=>p.color||'#f0bc62').append('title').text(p=>p.label||p.name||'');
+      CoworkMapLabels(group,points,projection,w,h);
+      svg.call(d3.zoom().filter(event=>event.type!=='wheel'||event.ctrlKey).scaleExtent([1,8]).on('zoom',event=>group.attr('transform',event.transform)));
+      CoworkGeoMotion(node,section);
+    }
+  }
+  async function drawChart(node, section, cleanup) {
+    await load('echarts'); if (!node.isConnected) return;
+    const given = section.option || {};
+    const seriesList=Array.isArray(given.series)?given.series:given.series?[given.series]:[];
+    const geos=given.geo?(Array.isArray(given.geo)?given.geo:[given.geo]):[];
+    const geographicMaps=[...new Set([...geos.map(g=>g.map),...seriesList.filter(s=>s.type==='map').map(s=>s.map)].filter(Boolean))];
+    for(const name of geographicMaps){
+      if(echarts.getMap(name))continue;
+      if(!['world','world-map','cowork-world'].includes(name))throw new Error('Unregistered map geometry '+name+'. Use the map component or provide actual supported geography.');
+      echarts.registerMap(name,await geography());
+    }
+    if(!node.isConnected)return;
+    node.replaceChildren();
+    const chart = echarts.init(node, 'dark');
+    const observer = new ResizeObserver(() => chart.resize()); observer.observe(node);
+    cleanup.push(() => {observer.disconnect();chart.dispose();});
+    const base = {backgroundColor:'transparent',color:['#83b6f5','#efbd67','#86cdb5','#cf9ada','#ed8b8b'],
+      animationDuration:250,textStyle:{fontFamily:'system-ui',color:'#d4dfe9'},
+      grid:{left:14,right:22,top:48,bottom:58,containLabel:true},
+      tooltip:{trigger:'axis',confine:true},legend:{type:'scroll',bottom:0,textStyle:{color:'#b5c4d2'}}};
+    const compact=node.clientWidth<600;
+    const axis = (a, vertical=false) => a ? {...a, nameLocation:vertical?'end':'middle',nameGap:vertical?10:37,
+      ...(vertical?{nameRotate:0,nameTextStyle:{...a.nameTextStyle,align:'left',width:Math.max(120,node.clientWidth*.8),overflow:'break',lineHeight:14}}:{}),
+      ...(compact&&a.type==='value'?{splitNumber:3}:{}),
+      axisLabel:{hideOverlap:true,...a.axisLabel,...(vertical&&a.type==='category'&&compact
+        ?{width:Math.max(70,Math.min(110,node.clientWidth*.27)),overflow:'break'}:{})}} : a;
+    const option = {...base,...given,grid:{...base.grid,...given.grid}};
+    if(compact){option.grid={...base.grid,left:8,right:18};option.legend={...base.legend,...given.legend,top:null,bottom:0,orient:'horizontal',type:'scroll'};}
+    if (given.xAxis) option.xAxis = Array.isArray(given.xAxis) ? given.xAxis.map(axis) : axis(given.xAxis);
+    if (given.yAxis) option.yAxis = Array.isArray(given.yAxis) ? given.yAxis.map(a=>axis(a,true)) : axis(given.yAxis,true);
+    chart.setOption(option);
+    if(geographicMaps.length){
+      for(const series of seriesList)if(series.coordinateSystem==='geo')for(const item of series.data||[]){
+        const pairs=series.type==='lines'?item.coords:[Array.isArray(item)?item:item.value];
+        for(const pair of pairs||[])if(Array.isArray(pair))coordinate(pair.slice(0,2));
+      }
+    }
+    return chart;
+  }
+  function summary(parent, page, prefix) {
+    if (page.lead) {
+      const lead=el('section',null,'lead');lead.id=prefix+'-finding';tone(lead,page.lead.tone);lead.append(el('h2',page.lead.text));
+      if(page.lead.value!==undefined)lead.append(el('strong',page.lead.value,'lead-value'));
+      if(page.lead.detail)lead.append(el('p',page.lead.detail));parent.append(lead);
+    }
+    if(page.metrics?.length){const strip=el('section',null,'metrics');strip.id=prefix+'-metrics';
+      for(const m of page.metrics){const cell=el('div',null,'metric');cell.append(el('div',m.label,'metric-label'));const value=el('div',CoworkNumber(m.value,m.unit),'metric-value');tone(value,m.tone);cell.append(value);if(m.detail)cell.append(el('div',m.detail,'metric-detail'));strip.append(cell);}parent.append(strip);}
+  }
+  window.CoworkPage = async config => {
+    if (!config || typeof config.title !== 'string') throw new Error('The page needs a title.');
+    document.documentElement.lang = config.lang || document.documentElement.lang || 'en';
+    document.title = config.title;
+    const root = document.getElementById('cowork-page'); root.replaceChildren();
+    const header = el('header'); header.id = 'page-header'; header.append(el('h1',config.title));
+    if (config.subtitle) header.append(el('p',config.subtitle,'subtitle')); root.append(header);
+    if (config.overview) summary(root, config.overview, 'overview');
+    const selected = Object.create(null), openData = new Set(), controls = el('div',null,'controls'); controls.id = 'page-controls';
+    const body = el('div'); body.id = 'page-content'; let version = 0, cleanup = [];
+    function dispose(){cleanup.forEach(fn=>fn());cleanup=[];}
+    function failed(error) {
+      dispose();
+      const message=el('p',config.errorText||error.message,'failure');message.setAttribute('role','alert');
+      body.replaceChildren(message);console.error(error);
+    }
+    for (const control of config.controls || []) {
+      selected[control.id] = control.value ?? control.options?.[0]?.value ?? '';
+      const wrap = el('div',null,'control');
+      if (control.type === 'tabs') {
+        wrap.append(el('span',control.label)); const tabs = el('div',null,'tabs');
+        for (const item of control.options) {
+          const button = el('button',item.label); button.type='button';button.setAttribute('aria-pressed',String(item.value===selected[control.id]));
+          button.onclick=()=>{selected[control.id]=item.value;for(const b of tabs.children)b.setAttribute('aria-pressed',String(b===button));update().catch(failed);};tabs.append(button);
+        }
+        wrap.append(tabs);
+      } else {
+        const label = el('label',control.label); label.htmlFor='control-'+control.id;
+        const select = el('select'); select.id=label.htmlFor;
+        for(const item of control.options){const option=el('option',item.label);option.value=item.value;select.append(option);}
+        select.value=selected[control.id];select.onchange=()=>{selected[control.id]=select.value;update().catch(failed);};wrap.append(label,select);
+      }
+      controls.append(wrap);
+    }
+    if (controls.children.length) root.append(controls);
+    root.append(body);
+    async function update() {
+      const current=++version;dispose();body.replaceChildren();
+      try {
+      const page = config.render ? config.render(CoworkSelection(selected)) : config;
+      summary(body, page, 'page');
+      for(const [index,s] of (page.sections||[]).entries()){
+        const section=el('section',null,'section');section.id=s.id||'section-'+index;
+        const head=el('div',null,'section-header');head.append(el('h2',s.title));if(s.caption)head.append(el('p',s.caption,'caption'));section.append(head);body.append(section);
+        if(s.type==='text'){section.append(el('p',s.text,'text-block'));continue;}
+        if(s.type==='table'){
+          const wrap=el('div',null,'table-wrap'),table=el('table'),thead=el('thead'),tr=el('tr'),tbody=el('tbody');table.id='table-'+index;
+          wrap.style.setProperty('--table-width',s.columns.length*104+'px');wrap.tabIndex=0;wrap.setAttribute('role','region');wrap.setAttribute('aria-label',s.title||'');
+          for(const c of s.columns)tr.append(el('th',c.label));thead.append(tr);table.append(thead,tbody);
+          for(const row of s.rows||[]){const tr=el('tr');for(const c of s.columns){const td=el('td');td.dataset.label=c.label;const raw=row[c.key],value=c.format?c.format(raw,row):CoworkNumber(raw,c.unit);td.append(el('span',value));tr.append(td);}tbody.append(tr);}
+          if(!(s.rows||[]).length)section.append(el('p',config.emptyText||'—','empty'));else{wrap.append(table);section.append(wrap);}continue;
+        }
+        if(s.type==='timeline'){
+          const list=el('ol',null,'timeline');for(const item of s.items||[]){const li=el('li');li.append(el('time',item.time),el('h3',item.label));if(item.detail)li.append(el('p',item.detail));list.append(li);}section.append(list);continue;
+        }
+        const view=el('div',null,s.type==='chart'?'view':'view geo-view');section.append(view);
+        view.setAttribute('aria-busy','true');view.append(el('p',config.loadingText||'…','loading'));
+        let placed;
+        try {
+          let chart;
+          if(s.type==='chart')chart=await drawChart(view,s,cleanup);
+          else if(s.type==='map'||s.type==='globe'){placed=window.CoworkPlaces?CoworkPlaces(s):{section:s,unplaced:[]};await drawGeography(view,placed.section,cleanup);}
+          else throw new Error('Unsupported section type: '+s.type);
+          if(!view.isConnected||current!==version)return;
+          if(!view.querySelector('canvas,svg'))throw new Error('The requested view did not draw.');
+          view.setAttribute('aria-busy','false');
+          if(chart&&window.CoworkChartData)CoworkChartData(chart,head,section,config,section.id,openData,cleanup);
+          if(['map','globe'].includes(s.type)&&window.CoworkGeoLegend)CoworkGeoLegend(section,s);
+          if(placed&&window.CoworkPlaceNotes)CoworkPlaceNotes(section,placed,config);
+        } catch(error) {
+          if(!view.isConnected||current!==version)return;
+          const message=el('p',config.errorText||error.message,'failure');message.setAttribute('role','alert');
+          view.replaceChildren(message);view.setAttribute('aria-busy','false');console.error(error);
+        }
+        if(current!==version)return;
+      }
+      } catch(error) {
+        // A superseded render must not replace the currently selected view with its error.
+        if(current===version)throw error;
+      }
+    }
+    try{await update();}catch(error){dispose();throw error;}
+  };
+})();
+
+/* Readable details of the actual ECharts series, including transformed and filtered data. */
+(() => {
+  const translations = {
+    en: ['Data', 'Series', 'Item', 'Value', 'Source', 'Target', 'Previous', 'Next'],
+    es: ['Datos', 'Serie', 'Elemento', 'Valor', 'Origen', 'Destino', 'Anterior', 'Siguiente'],
+    fr: ['Données', 'Série', 'Élément', 'Valeur', 'Source', 'Cible', 'Précédent', 'Suivant'],
+    de: ['Daten', 'Reihe', 'Eintrag', 'Wert', 'Quelle', 'Ziel', 'Zurück', 'Weiter'],
+    pt: ['Dados', 'Série', 'Item', 'Valor', 'Origem', 'Destino', 'Anterior', 'Próximo'],
+    it: ['Dati', 'Serie', 'Elemento', 'Valore', 'Origine', 'Destinazione', 'Precedente', 'Successivo'],
+  };
+  const names = ['data', 'series', 'item', 'value', 'source', 'target', 'previous', 'next'];
+  function node(tag, text, className) {
+    const element = document.createElement(tag);
+    if (text != null) element.textContent = String(text);
+    if (className) element.className = className;
+    return element;
+  }
+  function readSeries(chart, labels) {
+    const groups = [];
+    chart.getModel().eachSeries(series => {
+      const data = series.getData();
+      const label = series.name && !series.name.startsWith('series\u0000')
+        ? series.name : labels.series + ' ' + (series.seriesIndex + 1);
+      if (['sankey', 'graph'].includes(series.subType)) {
+        const edges = series.getEdgeData?.();
+        if (!edges || !edges.count()) return;
+        const endpoint = value => typeof value === 'number' ? data.getName(value) : value;
+        const rows = [];
+        for (let i = 0; i < edges.count(); i++) {
+          const raw = edges.getRawDataItem(i);
+          rows.push([endpoint(raw.source), endpoint(raw.target), edges.get('value', i)]);
+        }
+        groups.push({label, columns: [labels.source, labels.target, labels.value], rows});
+        return;
+      }
+      const dimensions = data.dimensions.map(name => data.getDimensionInfo(name))
+        .filter(info => info && !info.isExtraCoord && !info.isCalculationCoord);
+      if (!dimensions.length || !data.count()) return;
+      const columns = dimensions.map(info => {
+        const axisName = series.coordinateSystem?.getAxis?.(info.coordDim)?.model?.get('name');
+        return axisName || info.displayName || (info.name === 'value' ? labels.value : info.name);
+      });
+      const rows = [];
+      for (let i = 0; i < data.count(); i++) {
+        rows.push(dimensions.map(info => {
+          const value = data.get(info.name, i);
+          if (info.ordinalMeta) return info.ordinalMeta.categories[value] ?? value;
+          if (info.type === 'time' && Number.isFinite(value)) return new Date(value).toISOString();
+          return value;
+        }));
+      }
+      // Named pie/funnel items do not have a category coordinate dimension.
+      if (data.getName(0) && !dimensions.some(info => info.ordinalMeta)) {
+        columns.unshift(labels.item);
+        rows.forEach((row, i) => row.unshift(data.getName(i)));
+      }
+      groups.push({label, columns, rows});
+    });
+    return groups;
+  }
+  window.CoworkChartData = (chart, header, section, config, id, openSections, cleanup) => {
+    const language = document.documentElement.lang || 'en';
+    const words = translations[language.split('-')[0]] || translations.en;
+    const labels = Object.fromEntries(names.map((name, i) => [name, config.dataLabels?.[name] || words[i]]));
+    const button = node('button', labels.data, 'data-toggle'); button.type = 'button';
+    const panel = node('div', null, 'data-panel'); panel.id = 'values-' + id;
+    panel.setAttribute('role', 'region'); panel.setAttribute('aria-label', labels.data);
+    button.setAttribute('aria-controls', panel.id);
+    const formatter = new Intl.NumberFormat(language, {maximumSignificantDigits: 15});
+    const format = value => value == null || typeof value === 'number' && !Number.isFinite(value)
+      ? '—' : typeof value === 'number' ? formatter.format(value) : String(value);
+    function render(groups) {
+      panel.replaceChildren();
+      for (const group of groups) {
+        const wrap = node('div', null, 'data-group'); wrap.append(node('h3', group.label));
+        const table = node('table'), head = node('thead'), tr = node('tr'), body = node('tbody');
+        group.columns.forEach(label => {const th = node('th', label); th.scope = 'col'; tr.append(th);});
+        head.append(tr); table.append(head, body); wrap.append(table);
+        let start = 0;
+        const pager = node('div', null, 'data-pager'), range = node('span');
+        const previous = node('button', labels.previous), next = node('button', labels.next);
+        previous.type = next.type = 'button';
+        function page() {
+          body.replaceChildren();
+          for (const row of group.rows.slice(start, start + 100)) {
+            const tr = node('tr'); row.forEach((value, i) => {
+              const td = node('td'); td.dataset.label = group.columns[i]; td.append(node('span', format(value))); tr.append(td);
+            }); body.append(tr);
+          }
+          previous.disabled = start === 0; next.disabled = start + 100 >= group.rows.length;
+          range.textContent = `${start + 1}–${Math.min(start + 100, group.rows.length)} / ${group.rows.length}`;
+        }
+        previous.onclick = () => {start = Math.max(0, start - 100); page();};
+        next.onclick = () => {start += 100; page();};
+        if (group.rows.length > 100) {pager.append(previous, range, next); wrap.append(pager);}
+        page(); panel.append(wrap);
+      }
+    }
+    function refresh() {
+      let groups;
+      try { groups = readSeries(chart, labels); }
+      catch (error) { button.hidden = panel.hidden = true; panel.replaceChildren(); console.warn('Chart data details unavailable', error); return; }
+      const open = openSections.has(id);
+      button.hidden = !groups.length; panel.hidden = !open || !groups.length;
+      button.setAttribute('aria-expanded', String(open && !!groups.length));
+      // Create numeric details only when the user opens the panel.
+      if (open && groups.length) render(groups); else panel.replaceChildren();
+    }
+    button.onclick = () => {openSections.has(id) ? openSections.delete(id) : openSections.add(id); refresh();};
+    header.append(button); section.append(panel); refresh();
+    for (const event of ['legendselectchanged', 'datazoom']) chart.on(event, refresh);
+    cleanup.unshift(() => {for (const event of ['legendselectchanged', 'datazoom']) chart.off(event, refresh);});
+  };
+})();
+
+/* Explicit legends and requested geographic motion; source coordinates stay unchanged. */
+(() => {
+  window.CoworkGeoCenter = points => {
+    if(!points.length)return undefined;
+    let x=0,y=0,z=0;
+    for(const point of points){const lat=point.lat*Math.PI/180,lon=point.lon*Math.PI/180;x+=Math.cos(lat)*Math.cos(lon);y+=Math.cos(lat)*Math.sin(lon);z+=Math.sin(lat);}
+    if(Math.hypot(x,y,z)<1e-8)return [points[0].lon,points[0].lat];
+    return [Math.atan2(y,x)*180/Math.PI,Math.atan2(z,Math.hypot(x,y))*180/Math.PI];
+  };
+  window.CoworkGeoLegend = (section, source) => {
+    if (!source.legend?.length) return;
+    const legend = document.createElement('ul'); legend.className = 'geo-legend';
+    for (const item of source.legend) {
+      if (typeof item.label !== 'string' || !CSS.supports('color', item.color)) {
+        throw new TypeError('A geographic legend needs a text label and a valid color matching the plotted marks.');
+      }
+      const entry = document.createElement('li'), swatch = document.createElement('span'), label = document.createElement('span');
+      swatch.className = 'legend-key'; swatch.style.backgroundColor = item.color; swatch.setAttribute('aria-hidden', 'true');
+      label.textContent = item.label; entry.append(swatch, label); legend.append(entry);
+    }
+    section.append(legend);
+  };
+  const unplacedWords = {
+    en: 'Not on the map (the place name has no single match)',
+    es: 'Fuera del mapa (el nombre del lugar no tiene una única coincidencia)',
+    fr: 'Absents de la carte (aucune correspondance unique pour le nom du lieu)',
+    de: 'Nicht auf der Karte (kein eindeutiger Treffer für den Ortsnamen)',
+    pt: 'Fora do mapa (o nome do local não tem uma única correspondência)',
+    it: 'Fuori dalla mappa (il nome del luogo non ha una corrispondenza univoca)',
+  };
+  // Points and route ends may name a source place; the host resolved the unambiguous ones offline.
+  window.CoworkPlaces = section => {
+    const known = window.ARTIFACT_PLACES || {}, unplaced = [];
+    let looked = false;
+    const where = place => {
+      looked = true;
+      const hit = typeof place === 'string' && Object.hasOwn(known, place) ? known[place] : null;
+      if (!hit) unplaced.push(String(place));
+      return hit && [hit.lon, hit.lat];
+    };
+    const points = [];
+    for (const point of section.points || []) {
+      if (point.place == null || point.lat != null && point.lon != null) {points.push(point); continue;}
+      const pair = where(point.place);
+      if (pair) points.push({...point, lon: pair[0], lat: pair[1]});
+    }
+    const routes = [];
+    for (const route of section.routes || []) {
+      const [from, to] = [route.from, route.to].map(end => typeof end === 'string' ? where(end) : end);
+      if (from && to) routes.push({...route, from, to});
+    }
+    return {section: {...section, points, routes}, unplaced: [...new Set(unplaced)], looked};
+  };
+  window.CoworkPlaceNotes = (section, placed, config) => {
+    if (!placed.looked) return;
+    const lang = (document.documentElement.lang || 'en').split('-')[0];
+    if (placed.unplaced.length) {
+      const note = document.createElement('p'); note.className = 'caption geo-unplaced';
+      note.textContent = (config.unplacedText || unplacedWords[lang] || unplacedWords.en) + ': ' + placed.unplaced.join(', ');
+      section.append(note);
+    }
+    const credit = document.createElement('p'); credit.className = 'caption geo-credit';
+    credit.textContent = 'GeoNames (CC BY 4.0)'; section.append(credit);
+  };
+  window.CoworkGeoMotion = (node, source, globe) => {
+    for (const name of ['routeMotion', 'autoRotate']) if (source[name] != null && typeof source[name] !== 'boolean') {
+      throw new TypeError(name + ' must be a boolean.');
+    }
+    if (globe && source.routeMotion) throw new TypeError('Animated route flow uses the D3 map. A globe can use autoRotate for a turning geographic view.');
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    if (source.routeMotion) for (const path of node.querySelectorAll('path.route')) path.classList.add('route-motion');
+    if (!globe) return;
+    const controls = globe.controls(); controls.autoRotate = !!source.autoRotate;
+    if (source.autoRotate) {
+      const speed = source.rotationSpeed ?? .5;
+      if (typeof speed !== 'number' || !Number.isFinite(speed) || Math.abs(speed) > 4) {
+        throw new TypeError('Globe rotationSpeed must be a finite number between -4 and 4.');
+      }
+      controls.autoRotateSpeed = speed;
+    }
+  };
+  function placeLabels(points, projection, width, height, measure) {
+    const placed=[];
+    for(const point of points.filter(point=>point.label)) {
+      const [px,py]=projection([point.lon,point.lat]);
+      const length=measure(point),preferredX=px+8,preferredY=py-8;
+      let best;
+      for(let offset=0;offset<height;offset+=18) for(const direction of offset?[1,-1]:[1]) {
+        const y=Math.max(14,Math.min(height-8,preferredY+direction*offset));
+        for(const candidateX of [preferredX,px-length-8,8,width-length-8]) {
+          const x=Math.max(8,Math.min(width-length-8,candidateX));
+          const overlap=placed.reduce((area,box)=>area+Math.max(0,Math.min(x+length+5,box.x+box.w+5)-Math.max(x-5,box.x-5))*Math.max(0,16-Math.abs(y-box.y)),0);
+          const distance=(x-preferredX)**2+(y-preferredY)**2;
+          const score=overlap*1e6+distance;
+          if(!best||score<best.score)best={x,y,score};
+        }
+      }
+      placed.push({...best,w:length,point,px,py});
+    }
+    return placed;
+  }
+  window.CoworkMapLabels = (group, points, projection, width, height) => {
+    const texts=new Map();
+    const placements=placeLabels(points,projection,width,height,point=>{
+      const text=group.append('text').text(point.label).attr('font-size',11).attr('fill','#e6edf3').attr('stroke','#101923').attr('stroke-width',3).attr('paint-order','stroke');
+      texts.set(point,text);return text.node().getComputedTextLength();
+    });
+    for(const {point,px,py,x,y} of placements){
+      const text=texts.get(point);
+      group.insert('line',()=>text.node()).attr('x1',px).attr('y1',py).attr('x2',x).attr('y2',y-4).attr('stroke','#8ba7bc').attr('stroke-width',.7);
+      text.attr('x',x).attr('y',y);
+    }
+  };
+  window.CoworkGlobeLabels = (node, globe, points, cleanup) => {
+    const overlay=document.createElement('div');overlay.className='point-annotations';node.append(overlay);
+    function draw(){
+      if(!node.isConnected)return;
+      const width=node.clientWidth,height=node.clientHeight,view=globe.pointOfView();
+      const lat=view.lat*Math.PI/180,lon=view.lng*Math.PI/180;
+      const visible=points.filter(point=>{
+        const p=point.lat*Math.PI/180,l=point.lon*Math.PI/180;
+        return Math.sin(p)*Math.sin(lat)+Math.cos(p)*Math.cos(lat)*Math.cos(l-lon)>1/(1+view.altitude)+.02;
+      });
+      overlay.replaceChildren();const labels=new Map();
+      const project=pair=>{const p=globe.getScreenCoords(pair[1],pair[0],.02);return [p.x,p.y];};
+      const placements=placeLabels(visible,project,width,height,point=>{
+        const label=document.createElement('span');label.className='point-note';label.textContent=point.label;overlay.append(label);labels.set(point,label);return label.getBoundingClientRect().width;
+      });
+      for(const {point,px,py,x,y} of placements){
+        const label=labels.get(point);label.style.left=x+'px';label.style.top=y-12+'px';
+        const leader=document.createElement('span');leader.className='point-leader';leader.setAttribute('aria-hidden','true');
+        Object.assign(leader.style,{left:px+'px',top:py+'px',width:Math.hypot(x-px,y-4-py)+'px',transform:`rotate(${Math.atan2(y-4-py,x-px)}rad)`});overlay.prepend(leader);
+      }
+    }
+    let frame;
+    const schedule=()=>{if(frame)return;frame=requestAnimationFrame(()=>{frame=undefined;draw();});};
+    const controls=globe.controls();controls.addEventListener('change',schedule);
+    const observer=new ResizeObserver(schedule);observer.observe(node);schedule();
+    cleanup.unshift(()=>{cancelAnimationFrame(frame);observer.disconnect();controls.removeEventListener('change',schedule);overlay.remove();});
+  };
+})();
+
+/* Reconcile shown figures with the bound data. Findings are console errors so the browser check returns them for repair. */
+(() => {
+  const draw = window.CoworkPage, format = window.CoworkNumber, formatted = new Map();
+  window.CoworkNumber = (value, ...rest) => {
+    const text = format(value, ...rest);
+    if (typeof value === 'number' && formatted.size < 20000) formatted.set(text, value);
+    return text;
+  };
+  // A formatted string read back as the number it shows.
+  function amount(value) {
+    if (typeof value === 'number') return value;
+    if (typeof value !== 'string') return undefined;
+    if (formatted.has(value)) return formatted.get(value);
+    const plain = value.trim();
+    return /^-?\d{1,3}(,\d{3})*(\.\d+)?$|^-?\d+(\.\d+)?$/.test(plain) ? Number(plain.replace(/,/g, '')) : undefined;
+  }
+  const blank = value => typeof value === 'number' && (value === 0 || !Number.isFinite(value)) || value === '' || amount(value) === 0;
+  const english = new Intl.NumberFormat('en', {maximumFractionDigits: 2});
+  const quote = text => JSON.stringify(String(text ?? '').slice(0, 80));
+  const join = (text, reason) => [text, reason].filter(Boolean).join(' · ');
+  const list = items => items.slice(0, 4).join(', ') + (items.length > 4 ? ' and ' + (items.length - 4) + ' more' : '');
+  function hasRows(value, depth = 0) {
+    if (Array.isArray(value)) return value.length > 0;
+    return depth < 7 && !!value && typeof value === 'object' && Object.values(value).some(item => hasRows(item, depth + 1));
+  }
+  function facts() {
+    let found = [];
+    try { found = JSON.parse(document.getElementById('cowork-figure-checks')?.textContent || '{}').doubleCounts || []; }
+    catch {}
+    return new Map(found.map(fact => [Math.round(fact.value), fact]));
+  }
+  function chartValues(option) {
+    const values = [], series = Array.isArray(option?.series) ? option.series : option?.series ? [option.series] : [];
+    let items = 0;
+    for (const s of series) {
+      const entries = (s.links || s.edges)?.length ? (s.links || s.edges) : s.data || [];
+      items += entries.length;
+      for (const item of entries) {
+        const value = item && typeof item === 'object' && !Array.isArray(item) ? item.value : item;
+        const last = Array.isArray(value) ? value[value.length - 1] : value;
+        if (typeof last === 'number') values.push(last);
+      }
+    }
+    return {items, values};
+  }
+  const ZERO = ' while the bound data has rows. Check the filter, join, key or date match behind it against the '
+    + 'observed values in the data contract. If this is the true answer, add zeroReason (why, in the page language) ';
+
+  // Shows a true zero's reason and records unexplained zeros and double counts.
+  function review(page, where, findings, doubled, sourced) {
+    if (!page || typeof page !== 'object') return page;
+    const shown = [], result = {...page};
+    const zero = (what, owner) => sourced && findings.push(what + where + ZERO + 'to the ' + owner + '; the page shows it.');
+    const lead = page.lead;
+    if (lead && lead.value !== undefined) {
+      if (!blank(lead.value)) shown.push([lead.value, 'headline ' + quote(lead.text)]);
+      else if (lead.zeroReason) result.lead = {...lead, detail: join(lead.detail, lead.zeroReason)};
+      else zero('headline ' + quote(lead.text) + ' shows ' + (lead.value === '' ? 'nothing' : String(lead.value)), 'lead');
+    }
+    result.metrics = (page.metrics || []).map(metric => {
+      if (!blank(metric?.value)) { shown.push([metric?.value, 'metric ' + quote(metric?.label)]); return metric; }
+      if (metric.zeroReason) return {...metric, detail: join(metric.detail, metric.zeroReason)};
+      zero('metric ' + quote(metric.label) + ' shows ' + (metric.value === '' ? 'nothing' : String(metric.value)), 'metric');
+      return metric;
+    });
+    if (!page.metrics) delete result.metrics;
+    result.sections = (page.sections || []).map(section => {
+      if (!section || typeof section !== 'object') return section;
+      const name = section.type + ' ' + quote(section.title), reasons = [];
+      if (section.type === 'table') {
+        const rows = section.rows || [];
+        if (!rows.length) section.zeroReason ? reasons.push(section.zeroReason) : zero(name + ' has no rows', 'section');
+        const zeros = [], blocks = new Map();
+        for (const column of rows.length ? section.columns || [] : []) {
+          const values = rows.map(row => amount(row?.[column.key])).filter(value => value !== undefined);
+          values.forEach(value => shown.push([value, name + ', column ' + quote(column.label)]));
+          if (!values.length) continue;
+          blocks.set(column.unit ?? '', [...blocks.get(column.unit ?? '') || [], column]);
+          if (values.every(value => value === 0 || !Number.isFinite(value))) {
+            column.zeroReason ? reasons.push(column.zeroReason) : zeros.push(quote(column.label));
+          }
+        }
+        if (zeros.length) zero(name + ' shows 0 in every row of column' + (zeros.length > 1 ? 's ' : ' ') + list(zeros), 'column');
+        // A row of zeros across a block of same-unit columns, such as weeks, while other rows have values.
+        for (const [unit, block] of blocks) {
+          if (block.length < 3) continue;
+          const empty = rows.filter(row => block.every(column => amount(row?.[column.key]) === 0));
+          if (!empty.length || empty.length === rows.length) continue;
+          const names = empty.map(row => quote(Object.values(row).find(value => typeof value === 'string' && amount(value) === undefined) ?? '?'));
+          section.zeroReason ? reasons.push(section.zeroReason)
+            : zero(name + ' shows 0 in all ' + block.length + (unit ? ' ' + quote(unit) : '') + ' columns for row'
+              + (names.length > 1 ? 's ' : ' ') + list(names), 'section');
+        }
+      } else if (section.type === 'chart' && !section.option?.dataset) {
+        const {items, values} = chartValues(section.option);
+        values.forEach(value => shown.push([value, name]));
+        // Items without numbers, such as a graph's unweighted links, are not judged.
+        if (!items || values.length === items && values.every(value => value === 0 || !Number.isFinite(value))) {
+          section.zeroReason ? reasons.push(section.zeroReason) : zero(name + (items ? ' plots only 0' : ' plots no values'), 'section');
+        }
+      } else if (['map', 'globe'].includes(section.type) && !(section.points?.length || section.routes?.length)) {
+        section.zeroReason ? reasons.push(section.zeroReason) : zero(name + ' shows no points or routes', 'section');
+      } else if (section.type === 'timeline' && !section.items?.length) {
+        section.zeroReason ? reasons.push(section.zeroReason) : zero(name + ' has no items', 'section');
+      }
+      return reasons.length ? {...section, caption: join(section.caption, [...new Set(reasons)].join(' · '))} : section;
+    });
+    if (!page.sections) delete result.sections;
+    for (const [value, label] of shown) {
+      const number = amount(value);
+      if (typeof number !== 'number' || !Number.isFinite(number)) continue;
+      const fact = doubled.get(Math.round(number));
+      if (fact && Math.abs(fact.value - number) <= 1e-6 * Math.max(1, Math.abs(fact.value))) findings.push({fact, place: label + where});
+    }
+    return result;
+  }
+
+  const twice = (fact, places) => english.format(fact.value) + ' (shown in ' + places.slice(0, 3).join('; ')
+    + (places.length > 3 ? '; and ' + (places.length - 3) + ' more places' : '') + ') counts rows twice: it sums '
+    + fact.measure + ' over every element of ' + fact.path + (fact.scope ? ' where ' + fact.scope : '')
+    + ', including elements where ' + fact.field + ' = ' + JSON.stringify(fact.marker)
+    + ', which hold the sum of the other elements. Counted once it is ' + english.format(fact.parts)
+    + '. Sum the other elements, or use only the total elements.';
+
+  // Each control option, the others at their defaults.
+  function states(config) {
+    const defaults = Object.fromEntries((config.controls || []).map(c => [c.id, c.value ?? c.options?.[0]?.value ?? '']));
+    const found = [{selection: defaults, where: ''}];
+    for (const control of config.controls || []) for (const option of control.options || []) {
+      if (option.value !== defaults[control.id] && found.length < 24) {
+        found.push({selection: {...defaults, [control.id]: option.value}, where: ' (' + control.label + ': ' + option.label + ')'});
+      }
+    }
+    return found;
+  }
+
+  window.CoworkPage = async config => {
+    if (!config || typeof config !== 'object') return draw(config);
+    const findings = [], doubled = facts(), sourced = hasRows(window.ARTIFACT_DATA);
+    const shown = typeof config.render === 'function'
+      ? {...config, render: selection => review(config.render(selection), '', [], doubled, sourced)}
+      : review(config, '', findings, doubled, sourced);
+    if (config.overview) shown.overview = review(config.overview, '', findings, doubled, sourced);
+    await draw(shown);
+    if (typeof config.render === 'function') {
+      for (const {selection, where} of states(config)) {
+        // A state that throws is reported by the page itself when it is opened.
+        try { review(config.render(CoworkSelection(selection)), where, findings, doubled, sourced); } catch {}
+      }
+    }
+    // One message per wrong figure, naming where it is shown.
+    const places = new Map(), messages = [];
+    for (const item of findings) {
+      if (typeof item === 'string') messages.push(item);
+      else if (places.has(item.fact)) places.get(item.fact).add(item.place);
+      else { places.set(item.fact, new Set([item.place])); messages.push(item.fact); }
+    }
+    const distinct = [...new Set(messages.map(item => typeof item === 'string' ? item : twice(item, [...places.get(item)])))];
+    distinct.slice(0, 8).forEach(message => console.error('Figure check: ' + message));
+    if (distinct.length > 8) console.error('Figure check: ' + (distinct.length - 8) + ' more figures have the same problems.');
+  };
+})();
+</script><script>(async()=>{
+/* cowork-presentation-begin */
+const data = window.ARTIFACT_DATA["data-3a63c8981add"];
+const regions = data.aggregates.regions;
+const months = data.aggregates.months;
+const formatUSD = value => CoworkNumber(value, "USD", "en");
+const formatNumber = value => CoworkNumber(value, undefined, "en");
+
+await CoworkPage({
+  title: "Regional Sales Dashboard",
+  lang: "en",
+  subtitle: "2026 sales performance by month and region",
+  controls: [
+    {
+      id: "region",
+      label: "Region",
+      type: "select",
+      value: data.filters.initial_region,
+      options: [
+        { value: data.filters.initial_region, label: data.filters.initial_region },
+        ...regions.map(region => ({ value: region, label: region }))
+      ]
+    }
+  ],
+  render: ({ region }) => {
+    const rows = data.records.filter(row =>
+      region === data.filters.initial_region || row.region === region
+    );
+
+    let totalRevenue = 0;
+    let totalOrders = 0;
+    let totalGrossMargin = 0;
+    const monthlyRevenue = new Map(months.map(month => [month, 0]));
+    const regionalRevenue = new Map();
+
+    for (const row of rows) {
+      totalRevenue += row.revenue_usd;
+      totalOrders += row.orders;
+      totalGrossMargin += row.gross_margin_usd;
+      monthlyRevenue.set(
+        row.month,
+        (monthlyRevenue.get(row.month) || 0) + row.revenue_usd
+      );
+      regionalRevenue.set(
+        row.region,
+        (regionalRevenue.get(row.region) || 0) + row.revenue_usd
+      );
+    }
+
+    const grossMarginPct = totalRevenue
+      ? (totalGrossMargin / totalRevenue) * 100
+      : 0;
+    const regionRows = [...regionalRevenue.entries()]
+      .map(([name, revenue]) => ({ name, revenue }))
+      .sort((a, b) => b.revenue - a.revenue);
+
+    return {
+      metrics: [
+        { label: "Total revenue", value: formatUSD(totalRevenue) },
+        { label: "Total orders", value: formatNumber(totalOrders), unit: "orders count" },
+        { label: "Average gross margin", value: CoworkNumber(grossMarginPct, "%", "en") }
+      ],
+      sections: [
+        {
+          type: "chart",
+          title: "Monthly revenue",
+          caption: "Revenue by month for the selected region scope.",
+          option: {
+            color: ["#247A78"],
+            tooltip: {
+              trigger: "axis",
+              formatter: params => {
+                const point = Array.isArray(params) ? params[0] : params;
+                return `${point.axisValue}<br/>${point.marker || ""}${point.seriesName}: ${formatUSD(point.value)}`;
+              }
+            },
+            grid: { left: 78, right: 28, top: 28, bottom: 52 },
+            xAxis: {
+              type: "category",
+              name: "Month",
+              nameLocation: "middle",
+              nameGap: 34,
+              data: months,
+              axisLabel: { rotate: 35 }
+            },
+            yAxis: {
+              type: "value",
+              name: "Revenue (USD)",
+              axisLabel: { formatter: value => formatUSD(value) }
+            },
+            series: [
+              {
+                name: "Revenue",
+                type: "line",
+                data: months.map(month => monthlyRevenue.get(month) || 0),
+                smooth: false,
+                symbol: "circle",
+                symbolSize: 7,
+                lineStyle: { width: 3 },
+                itemStyle: { color: "#247A78" }
+              }
+            ]
+          }
+        },
+        {
+          type: "chart",
+          title: "Revenue by region",
+          caption: "Total revenue by region for the selected region scope.",
+          option: {
+            color: ["#D18B45"],
+            tooltip: {
+              trigger: "axis",
+              axisPointer: { type: "shadow" },
+              formatter: params => {
+                const point = Array.isArray(params) ? params[0] : params;
+                return `${point.name}<br/>${point.marker || ""}${point.seriesName}: ${formatUSD(point.value)}`;
+              }
+            },
+            grid: { left: 90, right: 32, top: 24, bottom: 38 },
+            xAxis: {
+              type: "value",
+              name: "Revenue (USD)",
+              axisLabel: { formatter: value => formatUSD(value) }
+            },
+            yAxis: {
+              type: "category",
+              name: "Region",
+              data: regionRows.map(row => row.name),
+              inverse: true
+            },
+            series: [
+              {
+                name: "Revenue",
+                type: "bar",
+                data: regionRows.map(row => row.revenue),
+                barMaxWidth: 36,
+                itemStyle: { borderRadius: [0, 5, 5, 0] }
+              }
+            ]
+          }
+        }
+      ]
+    };
+  }
+});
+/* cowork-presentation-end */
+})().catch(error=>{const box=document.createElement('p');box.className='failure';box.setAttribute('role','alert');box.textContent=error.message;(document.getElementById('page-content')||document.getElementById('cowork-page')).replaceChildren(box);console.error(error);throw error;});</script></body></html>

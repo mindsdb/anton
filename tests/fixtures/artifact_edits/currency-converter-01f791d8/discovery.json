@@ -1,0 +1,19 @@
+{
+  "request_fingerprint": "b8cb2a9d2ae95fb152305417e5338f9efe7a2f9f286073911a950fe35676e5b5",
+  "call_fingerprint": "35072a98dbf34e09ea10c8d7178c4a4808eaf938c322a948871b0fb94c8c76e7",
+  "pipeline_stage": "generated",
+  "artifact_type": "fullstack-stateless-app",
+  "gathering_complete": true,
+  "declared_sources": [],
+  "unverified_sources": [],
+  "brief_markdown": "Here’s the proposal for the Currency Converter.\n\n### Goal\nConvert an amount between supported currencies using fixed synthetic exchange rates, and view the full rate table.\n\n### Artifact type\nStateless fullstack app.\n\n### Data model\n- A fixed table of synthetic currency rates against USD, supplied in the request.\n\n### Requirements\n- Provide a small Python backend and a static frontend.\n- Include amount entry, source and destination currency selectors, a Convert button, the conversion result, and a table of all rates.\n- Use the specified rates: EUR 0.92, GBP 0.79, JPY 151.2, CAD 1.36, AUD 1.52, and CHF 0.88.\n- Do not use external services.\n\n### Assumptions\n- Include USD as a supported currency at a rate of 1.0.\n\nThe artifact is being built with this assumption; you can ask for changes once it’s ready.",
+  "data_notes": "### Code executed while fetching\nScratchpad `currency-converter-gather`:\n```python\nfrom pathlib import Path\nimport json\nfolder = Path('/workspace/.anton/artifacts/currency-converter-01f791d8')\nfolder.mkdir(parents=True, exist_ok=True)\ndata = {\"dataset\":\"synthetic_exchange_rates_against_USD\", \"units\":\"currency units per 1 USD\", \"scope\":\"fixed table supplied in the user request; no time filter\", \"records\":[{\"currency\":\"USD\",\"rate\":1.0},{\"currency\":\"EUR\",\"rate\":0.92},{\"currency\":\"GBP\",\"rate\":0.79},{\"currency\":\"JPY\",\"rate\":151.2},{\"currency\":\"CAD\",\"rate\":1.36},{\"currency\":\"AUD\",\"rate\":1.52},{\"currency\":\"CHF\",\"rate\":0.88}], \"calculation\":\"amount_from / rate_from * rate_to; rates are units per USD\"}\np = folder / 'observed-data.json'\np.write_text(json.dumps(data, indent=2) + '\\n')\nprint(json.dumps({\"file\":str(p),\"record_count\":len(data['records']),\"source\":\"known_data (user request)\",\"external_sources\":0}))\nprint('complete_static_artifact_available', callable(globals().get('complete_static_artifact')))\nif callable(globals().get('complete_static_artifact')):\n    complete_static_artifact(str(p))\n```\nOutput: [output] {\"file\": \"/workspace/.anton/artifacts/currency-converter-01f791d8/observed-data.json\", \"record_count\": 7, \"source\": \"known_data (user request)\", \"external_sources\": 0} co …",
+  "web_notes": "",
+  "assumptions": [
+    "Include USD at a rate of 1.0 as a supported currency so the specified exchange rates can be interpreted and conversions involving USD work."
+  ],
+  "open_points": [],
+  "attachments": [],
+  "known_data": "",
+  "known_data_verified": []
+}

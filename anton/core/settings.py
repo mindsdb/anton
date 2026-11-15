@@ -29,9 +29,29 @@ class CoreSettings(BaseSettings):
     # ends at 1280 s with a read-timeout error instead. Must be a finite number.
     model_call_idle_timeout_s: float = Field(600.0, allow_inf_nan=False)
 
-    # Session orchestration tuning
-    max_tool_rounds: int = 25
-    max_continuations: int = 3
+    # Session orchestration tuning. These and `max_turn_tokens` are safety limits
+    # for a turn that never finishes, not budgets for normal work: 30 days of
+    # production (2026-10-14) had no runaway turn, and the largest legitimate one
+    # used 34.4M tokens, 171 tool rounds and 6 continuations. Hosts that want a
+    # tighter limit set their own. `max_tool_rounds` counts across the whole
+    # turn, continuations included.
+    # The artifact editor (ENG-4207): `edit_artifact` changes an existing
+    # artifact with one patch-writing model conversation and checks it in a
+    # browser, instead of scratchpad surgery or a generate_artifact rebuild.
+    # ANTON_ARTIFACT_EDITOR=off removes the tool and its routing prompts.
+    artifact_editor: Literal["off", "on"] = "on"
+    # Which of the client's models edits: "planning" (the agent's own) or
+    # "coding" (ANTON_ARTIFACT_EDITOR_ROLE).
+    artifact_editor_role: Literal["planning", "coding"] = "planning"
+    # The decisions model (MindsHub's /v1/decisions) that routes a message typed
+    # in the artifact viewer's quick-edit bar (ENG-4227): ANTON_DECISIONS_MODEL.
+    # Unset (None) means automatic: "jev-1.13.0" when the LLM is MindsHub
+    # (api.mindshub.ai), otherwise none. An explicit empty value turns it off.
+    # With none, the bar never edits directly: every message goes to the agent
+    # (whose edit_artifact tool does not need it).
+    decisions_model: str | None = None
+    max_tool_rounds: int = 250
+    max_continuations: int = 10
     # Skip the completion verifier when a turn used fewer than this many tool
     # rounds. At 2, pure Q&A and single-tool-round turns skip it: prod data showed
     # it sent back fewer than 2.5% of single-round turns, so the call rarely pays.
@@ -94,11 +114,9 @@ class CoreSettings(BaseSettings):
     # weighting IS a defect (ENG-1132) because it guards money — same arithmetic,
     # opposite verdict, because they protect different things.
     #
-    # 1.25M measured against 30 days of production (2026-08-12): trips ~15% of
-    # external turns at a median of 16 LLM calls in. Set above the worst turn
-    # of the runaway session this exists for (1,480,766) and you stop catching
-    # it — 1.5M misses it by 20k tokens.
-    max_turn_tokens: int = 1_250_000
+    # 25M stopped 6 of 9,145 production turns in 30 days (2026-10-14), all
+    # legitimate long work that a user can continue past.
+    max_turn_tokens: int = 25_000_000
     # Wall-clock limit per turn, in seconds, asked about like the other limits
     # and ended with a summary. 0 is no limit: desktop has none. The cloud pod
     # sets it from the request, since a web turn otherwise meets the hosting

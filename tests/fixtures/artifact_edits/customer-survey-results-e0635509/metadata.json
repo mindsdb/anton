@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "e06355098ec249aebb5c4b2da1ec4667",
+  "slug": "customer-survey-results-e0635509",
+  "createdAt": "2026-11-12T08:36:38+00:00",
+  "updatedAt": "2026-11-12T08:37:08+00:00",
+  "name": "Customer Survey Results",
+  "description": "Create an HTML report from the supplied survey CSV, showing each question\u2019s average and stacked 1\u20135 score distribution, a team selector, and the best- and worst-rated questions for the selected team.",
+  "type": "html-app",
+  "primary": "index.html",
+  "datasources": [],
+  "files": [],
+  "provenance": [
+    {
+      "conversation": "gen-ws_survey",
+      "title": null,
+      "turns": [
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:36:38+00:00",
+          "summary": "Created artifact: Customer Survey Results",
+          "files_touched": []
+        },
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:37:08+00:00",
+          "summary": "Generated artifact files",
+          "files_touched": []
+        }
+      ]
+    }
+  ]
+}
