@@ -402,10 +402,16 @@ def test_the_prompt_and_the_skill_say_page_content_is_untrusted():
 
 
 def test_the_prompt_and_the_skill_keep_wait_for_to_one_box_or_field():
+    """No line that tells the model about wait_for offers it a radio or the
+    page. Other lines may name a radio: the keys a frame's radio option
+    holds are about presses, not hand-overs."""
     prompt, skill = browser_tool.BROWSER_TOOL_PROMPT, _browser_skill()
     schema = browser_tool.BROWSER_TOOL_SCHEMA["properties"]["wait_for"]["description"]
-    for text in (prompt, skill, schema):
-        assert '"page"' not in text and "radio" not in text
+    prompt_waits = [line for line in prompt.splitlines() if "wait_for" in line]
+    skill_waits = [line for line in skill.splitlines() if "wait_for" in line]
+    assert prompt_waits and skill_waits
+    for line in (*prompt_waits, *skill_waits, schema):
+        assert '"page"' not in line and "radio" not in line
     assert "A sign-in, a code, a payment, a choice among options or anything with several steps leaves wait_for out" in prompt
     assert "A sign-in, a code, a payment, a choice among options or anything with several steps leaves `wait_for` out" in skill
     assert "Leave it out for a sign-in, a code, a payment, a choice among options or anything with several steps" in schema
