@@ -2990,6 +2990,88 @@ async def test_no_wait_for_on_a_page_with_a_secret_field(done_in_the_browser, wa
     assert host.posted("/control") == []
 
 
+def _framed(url: str, **frame) -> dict:
+    """An unread frame at ``url`` as both hosts list one."""
+    return {"url": url, "read": False, "box": {"x": 10, "y": 200, "width": 400, "height": 40}, "at": {"x": 10, "y": 200}, **frame}
+
+
+#: A checkout that keeps its card fields in a payment provider's frame: the
+#: page lists no secret element, and the ZIP code is an ordinary text field.
+FRAMED_CHECKOUT = {
+    "url": "https://shop.example.test/checkout",
+    "title": "Checkout",
+    "elements": [
+        {"id": 1, "role": "textbox", "name": "Name on card"},
+        {"id": 2, "role": "textbox", "name": "ZIP code"},
+        {"id": 3, "role": "checkbox", "name": "Save my details", "checked": False},
+        {"id": 4, "role": "button", "name": "Pay $42.00"},
+    ],
+    "frames": [_framed("https://js.stripe.com/v3/elements-inner-card")],
+    "text": "Checkout",
+}
+
+
+@pytest.mark.parametrize("frames", [
+    [_framed("https://js.stripe.com/v3/elements-inner-card")],
+    [_framed("https://pay.google.com/gp/p/ui/pay")],
+    # Below the view, or listed after a frame the host read, it is still the page's.
+    [_framed("https://forms.example.test/address", read=True, text="Address"),
+     _framed("https://checkoutshopper-live.adyen.com/checkoutshopper/securedfields", box=None, at=None, offscreen=True)],
+    # A host name may end in a dot.
+    [_framed("https://js.stripe.com./v3/elements-inner-card")],
+    [_framed("https://accounts.google.com/gsi/iframe/select")],
+    [_framed("https://www.facebook.com/plugins/login_button.php")],
+])
+@pytest.mark.parametrize("wait_for", [{"element": 2, "state": "filled"}, {"element": 3, "state": "checked"}])
+async def test_no_wait_for_on_a_page_with_a_payment_or_sign_in_frame(done_in_the_browser, frames, wait_for):
+    """A checkout that puts its card fields in a payment provider's frame
+    lists no secret element: watched, the browser comes back once the person
+    fills the ZIP code and pauses, before they type the card number."""
+    page = {**FRAMED_CHECKOUT, "frames": frames}
+    host = FakeHost(pages=[page])
+    host.done_after_hand_over = True
+    session = make_session(host, elicitor=FakeElicitor())
+    await read(session, host, page)
+    result = await browser_tool.handle_browser(session, {"action": "hand_to_user", "reason": "Pay", "wait_for": wait_for})
+    assert result.ok is False and result.reason == "browser_bad_input"
+    assert (
+        "wait_for: this page has a payment or sign-in provider's frame, so it is a sign-in or a payment. "
+        "For a sign-in, a code, a payment, a choice among options or anything with several steps, leave wait_for out"
+    ) in result.content
+    assert host.posted("/control") == []
+
+
+#: Frames an ordinary page shows: an ad, a video, a newsletter form the host
+#: read, and hosts that only look like a provider's.
+ORDINARY_FRAMES = [
+    _framed("https://googleads.g.doubleclick.net/pagead/ads"),
+    _framed("https://www.youtube.com/embed/abc123"),
+    _framed("https://forms.example.test/newsletter", read=True, text="Get the weekly digest."),
+    _framed("https://notstripe.com/widget"),
+    _framed("https://stripe.com.ads.example.test/banner"),
+    _framed("https://google.com/maps/embed"),
+    _framed("about:srcdoc"),
+]
+
+
+async def test_an_ordinary_page_with_frames_keeps_its_watched_hand_over(done_in_the_browser):
+    """Only a payment or sign-in provider's frame takes the watch away: an
+    ordinary page's ad frame and the like keep the browser coming back by
+    itself once the box is checked."""
+    page, then = {**POLICY, "frames": ORDINARY_FRAMES}, {**CHECKED, "frames": ORDINARY_FRAMES}
+    host = FakeHost(pages=[page])
+    session = make_session(host, elicitor=FakeElicitor())
+    seen = handed_back_after(host, session, 2, then=then)
+    await read(session, host, page)
+    result = await browser_tool.handle_browser(session, {
+        "action": "hand_to_user", "reason": "Check the policy box", "wait_for": {"element": 12, "state": "checked"},
+    })
+    assert result.ok is True and seen["n"] == 2
+    assert host.posted("/control")[0]["wait_for"] == {"element": 12, "state": "checked"}
+    assert done_in_the_browser.requests[0].prompt.endswith(HAND_BACK_BY_ITSELF)
+    assert "Element [12] (checkbox \"I've read and understood the unaccompanied minor policy\") is checked now." in result.content
+
+
 @pytest.mark.parametrize(("page", "wait_for", "says"), [
     (PHONE_FILLED, {"element": 14, "state": "filled"}, "wait_for: element [14] is textbox \"Guardian's phone\", already filled."),
     (CHECKED, {"element": 12, "state": "checked"}, (

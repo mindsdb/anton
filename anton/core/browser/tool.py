@@ -73,7 +73,14 @@ from anton.core.browser.models import (
     Tab,
     WaitFor,
 )
-from anton.core.browser.page import CAPTCHA_NAME, format_page, human_check, signature
+from anton.core.browser.page import (
+    CAPTCHA_NAME,
+    PAYMENT_FRAME_HOSTS,
+    SIGN_IN_FRAME_HOSTS,
+    format_page,
+    human_check,
+    signature,
+)
 from anton.core.browser.policy import (
     StepDecision,
     parse_step,
@@ -1733,6 +1740,17 @@ def _page_host(url: str | None) -> str | None:
     return urlparse(url or "").hostname
 
 
+def _provider_frame(page: Page) -> bool:
+    """Whether the page lists a frame on a payment or sign-in provider's host
+    (PAYMENT_FRAME_HOSTS, SIGN_IN_FRAME_HOSTS), matched as the hosts match
+    them: that host or a name under it, with any trailing dot dropped."""
+    for frame in page.frames or []:
+        host = (_page_host(frame.url) or "").rstrip(".")
+        if host and any(host == h or host.endswith(f".{h}") for h in (*PAYMENT_FRAME_HOSTS, *SIGN_IN_FRAME_HOSTS)):
+            return True
+    return False
+
+
 #: A choice among options: one option of it (a radio), a select, or a field
 #: with suggestions to pick from (combobox). The choice is the user's, so a
 #: hand-over for it ends with their Done.
@@ -1782,9 +1800,14 @@ def _wait_for(state: _BrowserState, raw: object) -> _ElementWait | None:
         raise ValueError(f"wait_for: element [{wait_for.element}] isn't on the latest page you read. Read the page, then hand over.")
     # The other fields of a sign-in or a payment aren't secret (the email,
     # "Remember me", the ZIP code), and a wait on one comes back before the
-    # secret one is done.
+    # secret one is done. A checkout whose card fields sit in a payment
+    # provider's frame lists no secret element, but lists that frame.
     if any(e.secret for e in state.page.elements):
         raise ValueError(f"wait_for: this page has a secret field, so it is a sign-in, a code or a payment. {_LEAVE_WAIT_FOR_OUT}")
+    if _provider_frame(state.page):
+        raise ValueError(
+            f"wait_for: this page has a payment or sign-in provider's frame, so it is a sign-in or a payment. {_LEAVE_WAIT_FOR_OUT}"
+        )
     if el.role in _CHOICE_ROLES:
         raise ValueError(f"wait_for: element [{el.id}] is {_named(el)}, part of a choice among options. {_LEAVE_WAIT_FOR_OUT}")
     # Only an element whose state the page read shows: the hosts send

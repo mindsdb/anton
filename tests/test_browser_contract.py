@@ -43,7 +43,15 @@ from anton.core.browser.models import (
     TabsAnswer,
     WaitFor,
 )
-from anton.core.browser.page import FRAME_TEXT_HEADING, PAGE_TEXT_HEADING, TEXT_PER_FRAME, format_page, human_check
+from anton.core.browser.page import (
+    FRAME_TEXT_HEADING,
+    PAGE_TEXT_HEADING,
+    PAYMENT_FRAME_HOSTS,
+    SIGN_IN_FRAME_HOSTS,
+    TEXT_PER_FRAME,
+    format_page,
+    human_check,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "browser_contract"
 ROUTER = "https://app.example.test/browser"
@@ -216,6 +224,14 @@ def test_the_frame_fixture_reads_as_the_model_sees_it():
 
 def test_the_model_reads_as_much_of_a_frame_as_a_host_sends():
     assert TEXT_PER_FRAME == _load("page").limits["text_per_frame"]
+
+
+def test_anton_holds_the_frame_hosts_no_host_reads():
+    """A frame on one of these hosts is a payment or a sign-in, so anton
+    watches no hand-over on a page that lists one (tool.py _wait_for)."""
+    limits = _load("page").limits
+    assert list(PAYMENT_FRAME_HOSTS) == limits["payment_frame_hosts"]
+    assert list(SIGN_IN_FRAME_HOSTS) == limits["sign_in_frame_hosts"]
 
 
 def test_the_page_fixture_names_every_frame_limit_the_hosts_hold():

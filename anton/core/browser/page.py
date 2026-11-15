@@ -28,6 +28,19 @@ FRAMES_TEXT_CHARS = 2000
 #: The most frames listed as not read: a page of ad frames says little more
 #: after this many.
 MAX_UNREAD_FRAME_LINES = 10
+#: Hosts whose frames hold a payment provider's card fields, page.json's
+#: ``payment_frame_hosts``, and identity providers' sign-in hosts, its
+#: ``sign_in_frame_hosts``. Both hosts hold the same lists and never read a
+#: frame on one of these hosts or under one.
+PAYMENT_FRAME_HOSTS = (
+    "stripe.com", "braintreegateway.com", "braintree-api.com", "adyen.com", "checkout.com", "squareup.com",
+    "squarecdn.com", "recurly.com", "chargebee.com", "spreedly.com", "authorize.net", "cybersource.com",
+    "worldpay.com", "paddle.com", "paypal.com", "shopifycs.com", "shopifyinc.com", "pay.google.com", "mollie.com",
+    "razorpay.com", "nmi.com", "klarna.com",
+)
+SIGN_IN_FRAME_HOSTS = (
+    "accounts.google.com", "appleid.apple.com", "login.microsoftonline.com", "login.live.com", "facebook.com",
+)
 
 
 # What a "prove you're a person" page looks like from the snapshot. These are
