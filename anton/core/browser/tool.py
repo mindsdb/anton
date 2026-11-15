@@ -76,7 +76,6 @@ from anton.core.browser.models import (
 from anton.core.browser.page import (
     CAPTCHA_NAME,
     PAYMENT_FRAME_HOSTS,
-    SIGN_IN_FRAME_HOSTS,
     format_page,
     human_check,
     signature,
@@ -1740,13 +1739,15 @@ def _page_host(url: str | None) -> str | None:
     return urlparse(url or "").hostname
 
 
-def _provider_frame(page: Page) -> bool:
-    """Whether the page lists a frame on a payment or sign-in provider's host
-    (PAYMENT_FRAME_HOSTS, SIGN_IN_FRAME_HOSTS), matched as the hosts match
-    them: that host or a name under it, with any trailing dot dropped."""
+def _payment_frame(page: Page) -> bool:
+    """Whether the page lists a frame on a payment provider's host
+    (PAYMENT_FRAME_HOSTS), matched as the hosts match it: that host or a
+    name under it, with any trailing dot dropped. page.json's
+    sign_in_frame_hosts aren't counted: those providers let a page frame
+    their buttons, prompts and embeds, never their password step."""
     for frame in page.frames or []:
         host = (_page_host(frame.url) or "").rstrip(".")
-        if host and any(host == h or host.endswith(f".{h}") for h in (*PAYMENT_FRAME_HOSTS, *SIGN_IN_FRAME_HOSTS)):
+        if host and any(host == h or host.endswith(f".{h}") for h in PAYMENT_FRAME_HOSTS):
             return True
     return False
 
@@ -1804,10 +1805,8 @@ def _wait_for(state: _BrowserState, raw: object) -> _ElementWait | None:
     # provider's frame lists no secret element, but lists that frame.
     if any(e.secret for e in state.page.elements):
         raise ValueError(f"wait_for: this page has a secret field, so it is a sign-in, a code or a payment. {_LEAVE_WAIT_FOR_OUT}")
-    if _provider_frame(state.page):
-        raise ValueError(
-            f"wait_for: this page has a payment or sign-in provider's frame, so it is a sign-in or a payment. {_LEAVE_WAIT_FOR_OUT}"
-        )
+    if _payment_frame(state.page):
+        raise ValueError(f"wait_for: this page has a payment provider's frame, so it is a payment. {_LEAVE_WAIT_FOR_OUT}")
     if el.role in _CHOICE_ROLES:
         raise ValueError(f"wait_for: element [{el.id}] is {_named(el)}, part of a choice among options. {_LEAVE_WAIT_FOR_OUT}")
     # Only an element whose state the page read shows: the hosts send

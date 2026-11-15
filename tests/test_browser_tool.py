@@ -3019,11 +3019,9 @@ FRAMED_CHECKOUT = {
      _framed("https://checkoutshopper-live.adyen.com/checkoutshopper/securedfields", box=None, at=None, offscreen=True)],
     # A host name may end in a dot.
     [_framed("https://js.stripe.com./v3/elements-inner-card")],
-    [_framed("https://accounts.google.com/gsi/iframe/select")],
-    [_framed("https://www.facebook.com/plugins/login_button.php")],
 ])
 @pytest.mark.parametrize("wait_for", [{"element": 2, "state": "filled"}, {"element": 3, "state": "checked"}])
-async def test_no_wait_for_on_a_page_with_a_payment_or_sign_in_frame(done_in_the_browser, frames, wait_for):
+async def test_no_wait_for_on_a_page_with_a_payment_frame(done_in_the_browser, frames, wait_for):
     """A checkout that puts its card fields in a payment provider's frame
     lists no secret element: watched, the browser comes back once the person
     fills the ZIP code and pauses, before they type the card number."""
@@ -3035,14 +3033,17 @@ async def test_no_wait_for_on_a_page_with_a_payment_or_sign_in_frame(done_in_the
     result = await browser_tool.handle_browser(session, {"action": "hand_to_user", "reason": "Pay", "wait_for": wait_for})
     assert result.ok is False and result.reason == "browser_bad_input"
     assert (
-        "wait_for: this page has a payment or sign-in provider's frame, so it is a sign-in or a payment. "
+        "wait_for: this page has a payment provider's frame, so it is a payment. "
         "For a sign-in, a code, a payment, a choice among options or anything with several steps, leave wait_for out"
     ) in result.content
     assert host.posted("/control") == []
 
 
 #: Frames an ordinary page shows: an ad, a video, a newsletter form the host
-#: read, and hosts that only look like a provider's.
+#: read, hosts that only look like a provider's, and an identity provider's
+#: or a social network's button, prompt or embed. Identity providers don't
+#: let a page frame their password step, so a frame on their host is one of
+#: these, and the person signs in through it without typing a secret there.
 ORDINARY_FRAMES = [
     _framed("https://googleads.g.doubleclick.net/pagead/ads"),
     _framed("https://www.youtube.com/embed/abc123"),
@@ -3051,13 +3052,19 @@ ORDINARY_FRAMES = [
     _framed("https://stripe.com.ads.example.test/banner"),
     _framed("https://google.com/maps/embed"),
     _framed("about:srcdoc"),
+    _framed("https://accounts.google.com/gsi/iframe/select"),
+    _framed("https://accounts.google.com/gsi/button"),
+    _framed("https://www.facebook.com/plugins/video.php"),
+    _framed("https://www.facebook.com/plugins/like.php"),
+    _framed("https://www.facebook.com/plugins/post.php"),
 ]
 
 
 async def test_an_ordinary_page_with_frames_keeps_its_watched_hand_over(done_in_the_browser):
-    """Only a payment or sign-in provider's frame takes the watch away: an
-    ordinary page's ad frame and the like keep the browser coming back by
-    itself once the box is checked."""
+    """Only a payment provider's frame takes the watch away: an ordinary
+    page's ad frame, a Sign in with Google button or One Tap prompt and a
+    social embed keep the browser coming back by itself once the box is
+    checked."""
     page, then = {**POLICY, "frames": ORDINARY_FRAMES}, {**CHECKED, "frames": ORDINARY_FRAMES}
     host = FakeHost(pages=[page])
     session = make_session(host, elicitor=FakeElicitor())
