@@ -3098,7 +3098,8 @@ ORDINARY_FRAMES = [
 
 
 async def test_an_ordinary_page_with_frames_keeps_its_watched_hand_over(done_in_the_browser):
-    """Only a payment provider's frame takes the watch away: an ordinary
+    """Only a payment provider's frame, or one its host marks secret, takes
+    the watch away: an ordinary
     page's ad frame, a Sign in with Google button or One Tap prompt and a
     social embed keep the browser coming back by itself once the box is
     checked."""
