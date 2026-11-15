@@ -397,6 +397,23 @@ def parse_http_write_rules(text: str) -> tuple[HttpWriteRule, ...]:
     return tuple(rules)
 
 
+class UncheckedCause(BaseModel):
+    """Why the check couldn't read all of a step, for its card: it runs code
+    the check can't read (`runs`, the line in `code`); uses `name`, which
+    code an earlier step ran that the check couldn't read may have made
+    (`uses`, that step's line in `earlier`); the pad starts again before it
+    once a step may have written a startup hook (`restart`); a depth limit
+    stopped the read (`limit`, the start of the function it stopped at in
+    `code`, where there is one); or the check failed (`failed`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["runs", "uses", "restart", "limit", "failed"]
+    code: str = ""
+    name: str = ""
+    earlier: str = ""
+
+
 class CellWrites(BaseModel):
     """What a cell would change. ``unchecked`` means the check couldn't read
     all the code the cell runs: code it hands ``exec`` or a runner, a module
@@ -404,7 +421,14 @@ class CellWrites(BaseModel):
     hook a cell wrote that a new Python process runs, the cell's own or the
     pad's as it starts again before the cell, or a read a depth limit
     stopped short; or the check itself failed. The card then says the step
-    can't be checked before it runs, beside what it did read."""
+    can't be checked before it runs, beside what it did read. `stopped` says
+    the check stopped before it read all of the cell: a depth limit, a cell
+    too deep to parse, or the check failing. `unread_here` says the cell, or
+    an earlier function it calls, runs code the check can't read, as
+    against a hold carried from code an earlier cell ran or from a restart.
+    `writes_startup_hook` says that code includes a write of a startup hook
+    a later Python process runs. The `write_approval_unchecked` setting
+    reads all three (`hold_unapproved_write`)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -413,6 +437,11 @@ class CellWrites(BaseModel):
     files: tuple[FileChange, ...] = ()
     http: tuple[HttpWrite, ...] = ()
     unchecked: bool = False
+    stopped: bool = False
+    unread_here: bool = False
+    writes_startup_hook: bool = False
+    # Why it is `unchecked`, where the check can say: at most `_CAUSES_SHOWN`.
+    causes: tuple[UncheckedCause, ...] = ()
 
     @property
     def held_files(self) -> tuple[FileChange, ...]:
@@ -15961,6 +15990,8 @@ class _CellRead:
         self.unread: list[ast.AST] = []
         self.reaches_defined: list[ast.AST] = []
         self.past_cap: list[ast.AST] = []
+        # The functions in `unread` only because a depth limit stopped the read there.
+        self.past_depth: list[ast.AST] = []
         # The shortest chain each function was read at for one set of
         # arguments, so a self-recursive function is read once per set, not
         # once per call that reaches it (`_Visit`); and how many times each
@@ -16031,8 +16062,11 @@ class _CellRead:
             if self.files_only:
                 if self.past_the_limit(callee, report=report, chain=chain, guessed=guessed):
                     self.past_cap.append(func)
-            elif not self.unread and self.past_the_limit(callee, report=report, chain=chain, guessed=guessed):
+            elif not self.past_depth and self.past_the_limit(callee, report=report, chain=chain, guessed=guessed):
+                # Read past the limit even when the cell runs code the check
+                # can't read, so the stop is known (`CellWrites.stopped`).
                 self.unread.append(func)
+                self.past_depth.append(func)
             return
         if again:
             self._reread[visit.func] = self._reread.get(visit.func, 0) + 1
@@ -16158,7 +16192,14 @@ def find_cell_writes(
     write may lie past it, a function past `_CALL_DEPTH` calls among them
     (`_Reader.stopped`). Whatever else it read stays on the card. A reset
     of the pad clears its cells, so a hook a cell wrote before one is
-    outside what this reads.
+    outside what this reads. A depth limit, or a cell too deep to parse,
+    also sets `stopped`; code the check can't read that the cell itself
+    runs, or an earlier function it calls runs, sets `unread_here`, and a
+    write of a startup hook among that code sets `writes_startup_hook`.
+    `hold_unapproved_write` reads all three for `write_approval_unchecked`:
+    under `own` or `off`, a cell held only because the check can't read all
+    of it may run with no card, so a write inside code the check can't read
+    may get none.
 
     A cell that doesn't parse returns nothing to hold: the runner compiles it
     the same way and refuses it before any of it runs. After a cell that
@@ -16173,7 +16214,7 @@ def find_cell_writes(
         return CellWrites()
     except (RecursionError, MemoryError):
         # Too deep for this Python's parser, and the pad may run another Python (remote backend): hold it.
-        return CellWrites(unchecked=True)
+        return CellWrites(unchecked=True, stopped=True, causes=(UncheckedCause(kind="limit"),))
     cells: list[_Cell] = []
     errored: set[int] = set()
     stopped_at: dict[int, int] = {}
@@ -16279,6 +16320,9 @@ def find_cell_writes(
     files = read.files
     # Where the cell runs code the check can't read (`_unread_code`).
     unread = read.unread
+    # A function the read stopped at for depth is its own reason, not code the check can't read.
+    runs = [node for node in read.unread if node not in read.past_depth]
+    stops = list(read.past_depth)
     if _errored_names_read(reader.cells, errored=frozenset(errored)):
         # Read again with each errored cell as maybe stopped anywhere, for
         # the files only that reading holds. Nothing else is taken from it:
@@ -16293,15 +16337,17 @@ def find_cell_writes(
         if not wide.past_limit:
             files += _added_holds(found=files, maybe=maybe.files)
             unread += maybe.past_cap
+            stops += maybe.past_cap
     # A call that reaches what code the check couldn't read may have defined
     # holds the cell only when such code ran.
     if first_unread is not None:
         unread += read.reaches_defined
-    if earlier and earlier[-1].ended_process and modules.hooks_may_run:
+    restarts = bool(earlier) and earlier[-1].ended_process and modules.hooks_may_run
+    if restarts:
         # The pad starts a new process before this cell runs, and that start
         # runs the startup hooks a cell wrote, which the check doesn't read.
         unread.append(current.tree)
-    return CellWrites(
+    writes = CellWrites(
         sql=tuple(sorted(read.sql, key=lambda w: w.line)),
         calls=tuple(sorted(read.calls, key=lambda c: c.line)),
         files=tuple(files),
@@ -16309,4 +16355,65 @@ def find_cell_writes(
         # A depth limit that may have stopped a read short of a write
         # (`_Reader.stopped`) leaves the cell unchecked too.
         unchecked=bool(unread) or reader.stopped,
+        # Set here, not with the reasons below, so an error building those can't lose them.
+        stopped=bool(stops) or reader.stopped,
+        unread_here=bool(runs),
+        writes_startup_hook=any(
+            isinstance(node, ast.Call) and _hook_write(node, reader, reader.cell_of(node)).runs_at_start
+            for node in runs
+        ),
     )
+    # The reasons only explain the card, so an error building them loses them, not what the check found.
+    try:
+        causes = [UncheckedCause(kind="runs", code=_quoted(node, reader)) for node in runs]
+        if first_unread is not None and read.reaches_defined:
+            earlier_sites = _unread_code(reader, first_unread.tree, first_unread, read=literal_code,
+                                         modules=modules, spelled_only=True)
+            earlier_line = _quoted(earlier_sites[0], reader) if earlier_sites else ""
+            causes += [UncheckedCause(kind="uses", code=_quoted(site, reader), name=_used_name(site),
+                                      earlier=earlier_line) for site in read.reaches_defined]
+        # Reasons about the whole step go first, so the cap on reasons never drops them.
+        whole = [UncheckedCause(kind="restart")] if restarts else []
+        if writes.stopped:
+            whole.append(UncheckedCause(kind="limit", code=_stopped_at(stops[0], reader) if stops else ""))
+        reasons = (*whole, *dict.fromkeys(c for c in causes if c.code or c.name))[:_CAUSES_SHOWN]
+    except Exception as exc:
+        logger.warning("write approval: the card's reasons failed (%s)", type(exc).__name__)
+        return writes
+    return writes.model_copy(update={"causes": reasons})
+
+
+# How many reasons a card gives for a step the check couldn't read.
+_CAUSES_SHOWN = 3
+# How much of the function a depth limit stopped the read at a card quotes.
+_STOPPED_LINES = 6
+_STOPPED_CHARS = 400
+
+
+def _quoted(node: ast.AST, reader: _Reader) -> str:
+    """The line of a step `node` sits on, for the card, credentials
+    scrubbed: for code a step hands exec(), the step's own line that runs
+    it. Empty for a whole cell."""
+    cell = reader.cell_of(node)
+    if isinstance(node, ast.Module):
+        return ""
+    if cell.index != cell.host and cell.host_line is not None:
+        host = next((c for c in reader.cells if c.index == cell.host), None)
+        if host is not None and 0 < cell.host_line <= len(host.lines):
+            return scrub_output(host.lines[cell.host_line - 1].strip())
+    return scrub_output(cell.source(node).strip())
+
+
+def _stopped_at(node: ast.AST, reader: _Reader) -> str:
+    """The start of the function `node` a depth limit stopped the read at,
+    for the card, credentials scrubbed: at most `_STOPPED_LINES` lines and
+    `_STOPPED_CHARS` characters, ending in "..." when cut."""
+    text = scrub_output(reader.cell_of(node).source(node).strip())
+    kept = "\n".join(text.split("\n")[:_STOPPED_LINES])[:_STOPPED_CHARS]
+    return kept if kept == text else kept[:_STOPPED_CHARS - 3] + "..."
+
+
+def _used_name(site: ast.AST) -> str:
+    """The name a use of what unread code made starts from: `orders` in `orders.mean()`."""
+    head = _root_of(site.func if isinstance(site, ast.Call) else site)
+    return head.id if isinstance(head, ast.Name) else ""

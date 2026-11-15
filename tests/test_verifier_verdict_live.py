@@ -252,7 +252,9 @@ _NARRATING_MODEL = os.environ.get("VERIFIER_EVAL_NARRATING_MODEL", "mindshub_air
 _MODELS = [_FIRST_PARTY_MODEL, _NARRATING_MODEL]
 
 # The model each alias resolved to when its slot was last justified. Measured
-# 2026-09-03 against prod through this file's own call path.
+# 2026-09-03 against prod through this file's own call path. The auth catalog
+# moved `haiku` to `claude-haiku-5-5` in November 2026; it is still the
+# Anthropic-native shape, which is all its slot covers.
 #
 # An alias is a CATALOG POINTER, not a model and not a behaviour. The auth
 # catalog can repoint one with no PR in this repo and no drift detection
@@ -280,7 +282,7 @@ _MODELS = [_FIRST_PARTY_MODEL, _NARRATING_MODEL]
 # family-preserving bump still deserves a human glance, and a prefix match would
 # have stayed green through kimi's move.
 _EXPECTED_SERVED: dict[str, str] = {
-    "haiku": "claude-haiku-4-5-20251001",
+    "haiku": "claude-haiku-5-5",
     "mindshub_air": "gpt-5.6-luna",
 }
 
