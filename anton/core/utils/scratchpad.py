@@ -531,9 +531,10 @@ def _unchecked_hold_dropped(writes: CellWrites, mode: UncheckedMode) -> bool:
     can't read all of it run with no card: under `own`, when the hold is
     carried from code an earlier cell ran or from a restart, not code the
     cell itself runs; under `off`, whatever it comes from. Never when the
-    check stopped short (`CellWrites.stopped`), and never when the cell
-    holds for anything else, so a card that shows, shows whole."""
-    if mode == "all" or not writes.unchecked or writes.stopped:
+    check stopped short (`CellWrites.stopped`) or the cell writes a startup
+    hook, which every later Python process runs unchecked, and never when
+    the cell holds for anything else, so a card that shows, shows whole."""
+    if mode == "all" or not writes.unchecked or writes.stopped or writes.writes_startup_hook:
         return False
     if mode == "own" and writes.unread_here:
         return False

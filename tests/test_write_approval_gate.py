@@ -930,6 +930,28 @@ async def test_off_keeps_the_card_on_a_chain_past_the_depth_limit_in_a_cell_that
     assert "Its code goes too deep for the check to follow all of it." in elicitor.prompts[0]
 
 
+PTH_CELL = (
+    "import os, site\n"
+    "open(os.path.join(site.getsitepackages()[0], 'zz_boot.pth'), 'w').write('import boot\\n')\n"
+)
+USERCUSTOMIZE_CELL = (
+    "import os, site\n"
+    "open(os.path.join(site.getusersitepackages(), 'usercustomize.py'), 'w').write('import boot\\n')\n"
+)
+
+
+@pytest.mark.parametrize("unchecked", ["all", "own", "off"])
+@pytest.mark.parametrize("code", [PTH_CELL, USERCUSTOMIZE_CELL], ids=["pth", "usercustomize"])
+async def test_a_startup_hook_write_keeps_its_card(project, unchecked, code):
+    """Every later Python process runs the hook unchecked, so no setting lets its write run unasked."""
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    outcome = await _hold()(session, pad=_Pad(), code=code)
+    assert elicitor.asked == 1 and outcome is not None
+    assert "This step can't be checked before it runs." in elicitor.prompts[0]
+
+
 @pytest.mark.parametrize("unchecked", ["own", "off"])
 async def test_a_cell_too_deep_to_parse_keeps_its_card(project, unchecked):
     """The check's parser gives up on the cell, which may still run (the pad

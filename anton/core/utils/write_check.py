@@ -426,8 +426,9 @@ class CellWrites(BaseModel):
     too deep to parse, or the check failing. `unread_here` says the cell, or
     an earlier function it calls, runs code the check can't read, as
     against a hold carried from code an earlier cell ran or from a restart.
-    The `write_approval_unchecked` setting reads both
-    (`hold_unapproved_write`)."""
+    `writes_startup_hook` says that code includes a write of a startup hook
+    a later Python process runs. The `write_approval_unchecked` setting
+    reads all three (`hold_unapproved_write`)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -438,6 +439,7 @@ class CellWrites(BaseModel):
     unchecked: bool = False
     stopped: bool = False
     unread_here: bool = False
+    writes_startup_hook: bool = False
     # Why it is `unchecked`, where the check can say: at most `_CAUSES_SHOWN`.
     causes: tuple[UncheckedCause, ...] = ()
 
@@ -16355,6 +16357,10 @@ def find_cell_writes(
         # Set here, not with the reasons below, so an error building those can't lose them.
         stopped=bool(stops) or reader.stopped,
         unread_here=bool(runs),
+        writes_startup_hook=any(
+            isinstance(node, ast.Call) and _hook_write(node, reader, reader.cell_of(node)).runs_at_start
+            for node in runs
+        ),
     )
     # The reasons only explain the card, so an error building them loses them, not what the check found.
     try:
