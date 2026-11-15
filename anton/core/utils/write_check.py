@@ -16194,8 +16194,9 @@ def find_cell_writes(
     of the pad clears its cells, so a hook a cell wrote before one is
     outside what this reads. A depth limit, or a cell too deep to parse,
     also sets `stopped`; code the check can't read that the cell itself
-    runs, or an earlier function it calls runs, sets `unread_here`.
-    `hold_unapproved_write` reads both for `write_approval_unchecked`:
+    runs, or an earlier function it calls runs, sets `unread_here`, and a
+    write of a startup hook among that code sets `writes_startup_hook`.
+    `hold_unapproved_write` reads all three for `write_approval_unchecked`:
     under `own` or `off`, a cell held only because the check can't read all
     of it may run with no card, so a write inside code the check can't read
     may get none.

@@ -82,9 +82,9 @@ class CoreSettings(BaseSettings):
     # cell that may call what it defined, and the first cell after a restart
     # once a cell may have written a startup hook. "own": only the cell that
     # runs it. "off": none. Under both, a cell the check stopped short on (a
-    # depth limit, a cell too deep to parse, a check that failed) still
-    # waits, and a cell held for a write the check reads shows its whole
-    # card. Literal code past the check's exec limits
+    # depth limit, a cell too deep to parse, a check that failed) or that
+    # writes a startup hook still waits, and a cell held for a write the
+    # check reads shows its whole card. Literal code past the check's exec limits
     # (`write_check._EXEC_LIMIT`, `_LITERAL_CODE_LIMIT`) counts as code it
     # can't read, not as a stop. So a write inside code the check can't
     # read gets no card of its own: under "own", one a later cell makes

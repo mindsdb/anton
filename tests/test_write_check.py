@@ -647,6 +647,16 @@ def test_unread_here_is_code_the_cell_runs_not_a_hold_carried_from_an_earlier_ce
     assert [c.kind for c in uses.causes] == ["uses"]
 
 
+@pytest.mark.parametrize(("code", "hook"), [
+    ("import site\nopen(site.getsitepackages()[0] + '/x.pth', 'w').write('import boot')", True),
+    ("import site, subprocess\nsubprocess.run(['cp', 'h.txt', site.getsitepackages()[0] + '/x.pth'])", True),
+    ("exec(input())", False),
+], ids=["pth-open", "pth-cp", "exec"])
+def test_writes_startup_hook_is_a_hook_write_among_the_code_the_cell_runs(code, hook):
+    writes = find_cell_writes(code=code, earlier=(), snapshots=())
+    assert writes.unchecked and writes.unread_here and writes.writes_startup_hook is hook
+
+
 def test_an_error_building_the_reasons_keeps_what_the_check_found(monkeypatch):
     from anton.core.utils import write_check
 
