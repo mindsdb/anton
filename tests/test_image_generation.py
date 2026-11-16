@@ -769,10 +769,10 @@ async def test_a_failed_image_sends_no_tool_result():
 
 
 
-async def _first_request(tmp_path: Path, llm) -> tuple[str, set[str]]:
+async def _first_request(tmp_path: Path, llm, **config) -> tuple[str, set[str]]:
     workspace = Workspace(tmp_path / "workspace")
     workspace.initialize()
-    session = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace))
+    session = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace, **config))
     try:
         await run_turn(session, "Draw me a cat.")
     finally:
@@ -890,18 +890,20 @@ def test_catalog_offers_images_only_for_a_usable_image_row():
         assert images.catalog_offers_images(MINDSHUB, "k") is False
 
 
-@pytest.mark.parametrize("flavor, base_url, offered", [
-    (OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH, MINDSHUB, True),
-    (OpenAIProvider.FLAVOR_OPENAI, "https://api.openai.com/v1", True),
+@pytest.mark.parametrize("flavor, base_url, image_model, offered", [
+    (OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH, MINDSHUB, None, True),
+    (OpenAIProvider.FLAVOR_OPENAI, "https://api.openai.com/v1", None, True),
     # Reports "openai" like every OpenAIProvider, but has no images API.
-    (OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC, "http://localhost:11434/v1", False),
-], ids=["mindshub", "openai", "generic"])
+    (OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC, "http://localhost:11434/v1", None, False),
+    # A configured image model serves the tool on MindsHub, not the pad on a local server.
+    (OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC, "http://localhost:11434/v1", "gpt-image-2.6-flare", False),
+], ids=["mindshub", "openai", "generic", "generic-configured"])
 async def test_the_pad_helper_is_offered_only_where_the_coding_connection_has_images(
-    tmp_path, flavor, base_url, offered,
+    tmp_path, flavor, base_url, image_model, offered,
 ):
     llm = make_mock_llm()
     llm.image_provider = OpenAIProvider(api_key="k", base_url=MINDSHUB)
-    llm.image_model = None
+    llm.image_model = image_model
     coding = OpenAIProvider(api_key="k", base_url=base_url, flavor=flavor)
     assert coding.export_connection_info().provider == "openai"
     llm.coding_provider = MagicMock(wraps=coding)
@@ -912,6 +914,25 @@ async def test_the_pad_helper_is_offered_only_where_the_coding_connection_has_im
         system, tools = await _first_request(tmp_path, llm)
     assert "generate_image" in tools
     assert ("in the scratchpad instead" in system) is offered
+
+
+async def test_a_remote_scratchpad_gets_no_pad_helper(tmp_path):
+    """Only the local runtime sends a cell the turn's image allowance."""
+    from functools import partial
+
+    from anton.core.backends.remote import remote_scratchpad_runtime_factory
+
+    llm = make_mock_llm()
+    llm.image_provider = OpenAIProvider(api_key="k", base_url=MINDSHUB)
+    llm.image_model = None
+    llm.coding_provider = llm.image_provider
+    with _catalog():
+        system, tools = await _first_request(
+            tmp_path, llm,
+            runtime_factory=partial(remote_scratchpad_runtime_factory, endpoint_url="https://x", api_key="k"),
+        )
+    assert "generate_image" in tools
+    assert "in the scratchpad instead" not in system
 
 
 async def test_the_offer_is_rechecked_at_each_turn(tmp_path):

@@ -129,6 +129,8 @@ class ScratchpadManager:
         # pad to resolve it itself (`anton.core.llm.images.resolve_image_model`).
         self._image_model = image_model.strip() if isinstance(image_model, str) and image_model.strip() else None
         self._factory_takes_image_model = self._probe_factory_kwarg(runtime_factory, "image_model")
+        # Only a runtime that names `image_model` (the local one) speaks the pad's image protocol.
+        self.pads_offer_images = self._factory_names_kwarg(runtime_factory, "image_model")
         global _warned_no_internet_research_kwarg
         if (not internet_research_enabled and not self._factory_takes_internet_research
                 and not _warned_no_internet_research_kwarg):

@@ -3694,9 +3694,11 @@ class ChatSession:
         offered = pad_offered = False
         try:
             offered = await self._provider_offers_images(getattr(self._llm, "image_provider", None))
-            if offered:
+            # The pad's helper calls the coding endpoint itself, and only the local
+            # runtime sends it the turn's allowance.
+            if offered and getattr(self._scratchpads, "pads_offer_images", False):
                 coding = getattr(self._llm, "coding_provider", None)
-                pad_offered = await self._provider_offers_images(coding)
+                pad_offered = await self._provider_offers_images(coding, generic_ok=False)
         except Exception:
             logger.warning("could not decide whether to offer generate_image", exc_info=True)
         self._image_offer = offered
@@ -3714,33 +3716,36 @@ class ChatSession:
         if wanted is not None and current is not wanted:
             self.tool_registry.register_tool(wanted)
 
-    async def _provider_offers_images(self, provider: object) -> bool:
+    async def _provider_offers_images(self, provider: object, *, generic_ok: bool = True) -> bool:
         """Whether image calls on ``provider`` can work.
 
         - only an `OpenAIProvider` has the images API;
-        - an image model configured (settings, ANTON_IMAGE_MODEL, a cloud
-          turn's `llm["image_model"]`) turns it on;
         - direct OpenAI serves the images API;
-        - on MindsHub, its catalogue must list an image model this key may use
-          (read off the event loop, cached by `images.catalog_offers_images`);
-        - another OpenAI-compatible server is assumed to have none.
+        - on MindsHub, an image model configured (settings, ANTON_IMAGE_MODEL,
+          a cloud turn's `llm["image_model"]`) or one its catalogue lists for
+          this key (read off the event loop, cached by `catalog_offers_images`);
+        - another OpenAI-compatible server is assumed to have none, unless an
+          image model is configured and ``generic_ok`` (not for the pad's helper).
         """
         from anton.core.llm.images import catalog_offers_images, is_mindshub_endpoint
         from anton.core.llm.openai import OpenAIProvider
 
         if not isinstance(provider, OpenAIProvider):
             return False
-        if _named_model(getattr(self._llm, "image_model", None)) is not None:
-            return True
+        configured = _named_model(getattr(self._llm, "image_model", None)) is not None
         conn = provider.export_connection_info()
         if is_mindshub_endpoint(conn.flavor, conn.base_url):
+            if configured:
+                return True
             api_key = await provider.current_api_key()
             if not conn.base_url or not api_key:
                 return False
             return await asyncio.to_thread(
                 catalog_offers_images, conn.base_url, api_key, verify=conn.ssl_verify,
             )
-        return conn.flavor == OpenAIProvider.FLAVOR_OPENAI
+        if conn.flavor == OpenAIProvider.FLAVOR_OPENAI:
+            return True
+        return configured and generic_ok
 
     def _pad_image_allowance(self) -> int | None:
         """Images the pad may still make this turn, or None when its helper is not offered."""
