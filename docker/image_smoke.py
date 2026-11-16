@@ -190,10 +190,10 @@ def check_scratchpad_boot() -> list[str]:
 
 
 def check_runtime_uv() -> list[str]:
-    """scratchpad_boot shells out to `uv pip install` for a package a cell imports.
+    """Each pad's venv is created and installed into with uv.
 
     ANTON_UV_PATH points at this exact path, so a uv that moved or lost its
-    execute bit turns every missing-package recovery into a failed cell.
+    execute bit breaks every pad package install.
     """
     uv = "/usr/local/bin/uv"
     if not os.access(uv, os.X_OK):
@@ -203,7 +203,9 @@ def check_runtime_uv() -> list[str]:
 
 #: Code the agent process loads. Cell code runs as the same uid, so any of it
 #: that uid can write is code a cell can change under the agent.
-AGENT_CODE_ROOTS = ("/app/anton", "/usr/local/lib/python3.12")
+#: ``/app`` is the turn's working directory, which ``python -m`` puts first on
+#: ``sys.path``. ``/usr/local/bin`` holds Python, uv and the entrypoint scripts.
+AGENT_CODE_ROOTS = ("/app", "/usr/local/lib/python3.12", "/usr/local/bin")
 #: Listing more than this many writable paths adds nothing to the verdict.
 MAX_WRITABLE_REPORTED = 10
 
@@ -225,7 +227,8 @@ def writable_paths(roots) -> list[str]:
 def check_agent_code_read_only() -> list[str]:
     """The runtime user can write nothing the agent process loads.
 
-    That covers the venv, anton's own source and the standard library. Pads
+    That covers the venv, ``/app`` (anton's source and the turn's working
+    directory), the standard library and the binaries the pod runs. Pads
     install into venvs of their own under the workspace, so nothing at turn
     time needs to write here.
     """

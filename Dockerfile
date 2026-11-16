@@ -4,8 +4,8 @@
 # `/usr/local/bin/scratchpad-boot.sh` (single cell) inside a gVisor pod running as UID 1000.
 FROM python:3.12-slim
 
-# uv is required at RUNTIME: scratchpad_boot shells out to `uv pip install` for missing packages
-# via ANTON_UV_PATH=/usr/local/bin/uv, so uv must be present at exactly that path.
+# uv is required at RUNTIME: each pad's venv is created and installed into with it, through
+# ANTON_UV_PATH=/usr/local/bin/uv, so uv must be present at exactly that path.
 COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /usr/local/bin/uv
 
 # The version, supplied by the caller because hatch-vcs cannot derive it here:
