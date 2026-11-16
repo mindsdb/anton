@@ -102,8 +102,9 @@ def _pad(gateway: _Gateway, workspace: Path, *, image_model: str | None) -> Loca
 class _Turn:
     """The session's side of a turn: an image cap the tool and the pad share."""
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, spend_limited: bool = False) -> None:
         self.limit = limit
+        self.spend_limited = spend_limited
         self.taken = 0
         self.usage: list = []
 
@@ -112,6 +113,7 @@ class _Turn:
             allowance=lambda: max(0, self.limit - self.taken),
             take=self._take,
             record_usage=lambda model, usage: self.usage.append((model, usage)),
+            spend_limited=lambda: self.spend_limited,
         )
 
     def _take(self) -> None:
@@ -119,8 +121,8 @@ class _Turn:
 
 
 @contextmanager
-def _turn(limit: int = 8) -> Iterator[_Turn]:
-    turn = _Turn(limit)
+def _turn(limit: int = 8, spend_limited: bool = False) -> Iterator[_Turn]:
+    turn = _Turn(limit, spend_limited)
     token = arm_turn_images(turn.budget())
     try:
         yield turn
@@ -201,6 +203,19 @@ async def test_the_cap_is_the_turns_across_cells(tmp_path, host_env):
     assert "no request was sent" in capped.error
     assert len(gateway.requests) == 2 and turn.taken == 2
     assert json.loads(gateway.requests[0][2])["model"] == "gpt-image-2.6-sunburst"
+
+
+async def test_a_spent_turn_says_its_spend_limit_was_reached(tmp_path, host_env):
+    with _serving() as gateway, _turn(limit=0, spend_limited=True):
+        pad = _pad(gateway, tmp_path, image_model="m")
+        await pad.start()
+        try:
+            cell = await pad.execute("generate_image('a fox')\n")
+        finally:
+            await pad.close()
+    assert cell.error is not None and "spend limit" in cell.error
+    assert "ANTON_MAX_IMAGES_PER_TURN" not in cell.error
+    assert gateway.requests == []
 
 
 async def test_the_helper_is_withheld_when_the_turn_does_not_offer_it(tmp_path, host_env):

@@ -144,6 +144,8 @@ class TurnImageBudget:
     take: Callable[[], None]
     #: Book one pad image call's usage (model, usage) in the turn's cost.
     record_usage: Callable[[str, Usage], None]
+    #: Whether the turn's spend ceiling is what stopped it.
+    spend_limited: Callable[[], bool] = lambda: False
 
 
 _turn_images: ContextVar[TurnImageBudget | None] = ContextVar("anton_turn_images", default=None)

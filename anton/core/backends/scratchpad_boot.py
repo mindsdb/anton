@@ -473,7 +473,7 @@ _cell_trace = None
 # The turn's image allowance for the running cell (CELL_IMAGES_MARKER), and the
 # images generate_image() took from it. "allowed" None: not offered this cell.
 # Taken under the lock: a cell can call the helper from several threads at once.
-_cell_images = {"made": 0, "allowed": None}
+_cell_images = {"made": 0, "allowed": None, "spend_limit": False}
 _cell_images_lock = threading.Lock()
 
 # --- Inject get_llm() for LLM access from scratchpad code ---
@@ -991,10 +991,13 @@ if _scratchpad_model:
             with _cell_images_lock:
                 allowed = _cell_images["allowed"] or 0
                 if _cell_images["made"] >= allowed:
+                    why = (
+                        "this turn reached its spend limit" if _cell_images["spend_limit"]
+                        else "this turn has used up its images (ANTON_MAX_IMAGES_PER_TURN)"
+                    )
                     raise RuntimeError(
-                        "generate_image() refused: this turn has used up its images "
-                        "(ANTON_MAX_IMAGES_PER_TURN), so no request was sent. Use the images "
-                        "made so far and ask the user before making more."
+                        f"generate_image() refused: {why}, so no request was sent. Use the "
+                        "images made so far and ask the user before making more."
                     )
                 _cell_images["made"] += 1
             _send_image_event({"event": "sent"})
@@ -1704,9 +1707,12 @@ while True:
         break
 
     _cell_image_allowance = None
+    _cell_spend_limit = False
     if lines and lines[0].startswith(CELL_IMAGES_MARKER + " {"):
         try:
-            _allowed = json.loads(lines.pop(0)[len(CELL_IMAGES_MARKER):]).get("allowed")
+            _images_line = json.loads(lines.pop(0)[len(CELL_IMAGES_MARKER):])
+            _allowed = _images_line.get("allowed")
+            _cell_spend_limit = _images_line.get("spend_limit") is True
         except (ValueError, AttributeError):
             _allowed = None
         if isinstance(_allowed, int) and not isinstance(_allowed, bool):
@@ -1756,6 +1762,7 @@ while True:
         with _cell_images_lock:
             _cell_images["made"] = 0
             _cell_images["allowed"] = _cell_image_allowance
+            _cell_images["spend_limit"] = _cell_spend_limit
         # Bound only while the host offers it this turn; an agent's own binding of the name stays.
         _image_helper = _INJECTED_HELPERS.get("generate_image")
         if _image_helper is not None:

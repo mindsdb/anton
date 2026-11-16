@@ -6513,6 +6513,7 @@ class ChatSession:
             allowance=self._pad_image_allowance,
             take=self._take_pad_image,
             record_usage=functools.partial(_turn_cost_books.add, IMAGE_ROLE),
+            spend_limited=self.spend_ceiling_reached,
         ))
 
         _turn_exc: BaseException | None = None

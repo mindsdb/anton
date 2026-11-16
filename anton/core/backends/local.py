@@ -1614,7 +1614,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         images = current_turn_images()
         allowed = images.allowance() if images is not None else None
         if allowed is not None:
-            payload = f"{CELL_IMAGES_MARKER} {json.dumps({'allowed': allowed})}\n" + payload
+            line = {"allowed": allowed}
+            if allowed == 0 and images.spend_limited():
+                line["spend_limit"] = True
+            payload = f"{CELL_IMAGES_MARKER} {json.dumps(line)}\n" + payload
         try:
             self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
             self._running_code = code
