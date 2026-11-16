@@ -210,18 +210,42 @@ def test_the_catalogue_is_cached_per_key():
     assert not any("key-a" in key for key in images._catalog_cache)
 
 
-@pytest.mark.parametrize("payload, reread", [
-    (_CATALOG, False),
-    ({"data": [{"id": "sonnet", "kind": "chat"}]}, True),
-], ids=["images", "no-images"])
-def test_a_catalogue_without_image_models_is_asked_again_soon(monkeypatch, payload, reread):
+def test_a_read_catalogue_is_kept_an_hour_even_without_image_models(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(images.time, "monotonic", lambda: clock[0])
-    with _catalog(payload) as request:
-        images.catalog_offers_images(MINDSHUB, "k")
+    with _catalog({"data": [{"id": "sonnet", "kind": "chat"}]}) as request:
+        assert images.catalog_offers_images(MINDSHUB, "k") is False
         clock[0] += images._CATALOG_FAILURE_TTL_S + 1
-        images.catalog_offers_images(MINDSHUB, "k")
-    assert request.call_count == (2 if reread else 1)
+        assert images.catalog_offers_images(MINDSHUB, "k") is False
+    assert request.call_count == 1
+
+
+def test_a_failed_read_keeps_the_last_good_answer_and_retries_soon(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(images.time, "monotonic", lambda: clock[0])
+    with _catalog():
+        assert images.catalog_offers_images(MINDSHUB, "k") is True
+    clock[0] += images._CATALOG_TTL_S + 1
+    with patch("anton.minds_client.minds_request", side_effect=OSError("down")) as failing:
+        assert images.catalog_offers_images(MINDSHUB, "k") is True
+        assert images.catalog_offers_images(MINDSHUB, "k") is True
+    assert failing.call_count == 1
+    clock[0] += images._CATALOG_FAILURE_TTL_S + 1
+    with _catalog({"data": []}) as request:
+        assert images.catalog_offers_images(MINDSHUB, "k") is False
+    assert request.call_count == 1
+
+
+def test_the_catalogue_cache_is_bounded():
+    with _catalog():
+        for i in range(images._CATALOG_CACHE_MAX + 5):
+            images.catalog_offers_images(MINDSHUB, f"key-{i}")
+        assert len(images._catalog_cache) == images._CATALOG_CACHE_MAX
+    # The oldest keys went first: the first key is read again, the newest is not.
+    with _catalog() as request:
+        images.catalog_offers_images(MINDSHUB, f"key-{images._CATALOG_CACHE_MAX + 4}")
+        images.catalog_offers_images(MINDSHUB, "key-0")
+    assert [c.args[1] for c in request.call_args_list] == ["key-0"]
 
 
 def test_role_default_model_skips_rows_the_key_may_not_use():

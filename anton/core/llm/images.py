@@ -24,6 +24,7 @@ import re
 import struct
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -71,10 +72,12 @@ _SUFFIX_FORMATS = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".webp": "web
 _REFERENCE_FORMATS = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
 
 _CATALOG_TTL_S = 3600.0
-# A catalogue that could not be read, or offers no image model, is asked again
-# sooner: until then the image tool is not offered on MindsHub.
+# A catalogue that could not be read is asked again sooner; meanwhile the key's
+# last good answer stands.
 _CATALOG_FAILURE_TTL_S = 300.0
-_catalog_cache: dict[str, tuple[float, "_CatalogImages | None"]] = {}
+# key -> (read at, last good answer or None, whether that read succeeded); LRU-bounded.
+_catalog_cache: "OrderedDict[str, tuple[float, _CatalogImages | None, bool]]" = OrderedDict()
+_CATALOG_CACHE_MAX = 64
 _catalog_lock = threading.Lock()
 
 
@@ -585,9 +588,9 @@ def _catalog_images(base_url: str, api_key: str, *, verify: bool = True) -> _Cat
     """The catalogue's image facts, or None when it cannot be read.
 
     Read through `anton.minds_client` — the catalogue reader setup already
-    uses — and kept per base URL and key: an hour when it offers images, five
-    minutes when it offers none or could not be read, so a host that builds a
-    client per turn asks rarely. Blocking: call it off the event loop.
+    uses — and kept per base URL and key: an hour once read, five minutes
+    after a failed read, which keeps the key's last good answer. Blocking:
+    call it off the event loop.
     """
     import hashlib
 
@@ -603,8 +606,10 @@ def _catalog_images(base_url: str, api_key: str, *, verify: bool = True) -> _Cat
     now = time.monotonic()
     with _catalog_lock:
         cached = _catalog_cache.get(key)
+        if cached is not None:
+            _catalog_cache.move_to_end(key)
     if cached is not None:
-        ttl = _CATALOG_TTL_S if cached[1] is not None and cached[1].offered else _CATALOG_FAILURE_TTL_S
+        ttl = _CATALOG_TTL_S if cached[2] else _CATALOG_FAILURE_TTL_S
         if now - cached[0] < ttl:
             return cached[1]
     try:
@@ -615,11 +620,15 @@ def _catalog_images(base_url: str, api_key: str, *, verify: bool = True) -> _Cat
             default=role_default_model(entries, IMAGE_ROLE, kind="image") or (usable[0] if usable else None),
             offered=bool(usable),
         )
+        ok = True
     except Exception as exc:
         logger.info("image models: MindsHub catalogue unreadable (%s)", type(exc).__name__)
-        found = None
+        found, ok = (cached[1] if cached is not None else None), False
     with _catalog_lock:
-        _catalog_cache[key] = (now, found)
+        _catalog_cache[key] = (now, found, ok)
+        _catalog_cache.move_to_end(key)
+        while len(_catalog_cache) > _CATALOG_CACHE_MAX:
+            _catalog_cache.popitem(last=False)
     return found
 
 
