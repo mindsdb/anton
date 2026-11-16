@@ -190,6 +190,41 @@ async def test_the_client_resolves_the_default_with_its_mindshub_key():
     assert request.call_args.args[1] == "test-key"
 
 
+def test_a_disabled_role_default_falls_back_to_the_first_enabled_image_model():
+    payload = {"data": [
+        {"id": "sonnet", "kind": "chat"},
+        {"id": "gpt-image-2.6-sunburst", "kind": "image", "default_for": ["image"], "enabled": False},
+        {"id": "gpt-image-2.6-ember", "kind": "image"},
+    ]}
+    with _catalog(payload):
+        model = images.resolve_image_model(None, base_url=MINDSHUB, api_key="k", mindshub=True)
+    assert model == "gpt-image-2.6-ember"
+
+
+def test_the_catalogue_is_cached_per_key():
+    with _catalog() as request:
+        images.catalog_offers_images(MINDSHUB, "key-a")
+        images.catalog_offers_images(MINDSHUB, "key-a")
+        images.catalog_offers_images(MINDSHUB, "key-b")
+    assert [c.args[1] for c in request.call_args_list] == ["key-a", "key-b"]
+    # The key itself is never part of the cache key.
+    assert not any("key-a" in key for key in images._catalog_cache)
+
+
+@pytest.mark.parametrize("payload, reread", [
+    (_CATALOG, False),
+    ({"data": [{"id": "sonnet", "kind": "chat"}]}, True),
+], ids=["images", "no-images"])
+def test_a_catalogue_without_image_models_is_asked_again_soon(monkeypatch, payload, reread):
+    clock = [1000.0]
+    monkeypatch.setattr(images.time, "monotonic", lambda: clock[0])
+    with _catalog(payload) as request:
+        images.catalog_offers_images(MINDSHUB, "k")
+        clock[0] += images._CATALOG_FAILURE_TTL_S + 1
+        images.catalog_offers_images(MINDSHUB, "k")
+    assert request.call_count == (2 if reread else 1)
+
+
 def test_role_default_model_skips_rows_the_key_may_not_use():
     from anton.minds_client import role_default_model
 

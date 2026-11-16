@@ -69,8 +69,8 @@ _SUFFIX_FORMATS = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".webp": "web
 _REFERENCE_FORMATS = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
 
 _CATALOG_TTL_S = 3600.0
-# A catalogue that could not be read is asked again sooner: until it is, the
-# image tool is not offered on MindsHub (`catalog_offers_images`).
+# A catalogue that could not be read, or offers no image model, is asked again
+# sooner: until then the image tool is not offered on MindsHub.
 _CATALOG_FAILURE_TTL_S = 300.0
 _catalog_cache: dict[str, tuple[float, "_CatalogImages | None"]] = {}
 _catalog_lock = threading.Lock()
@@ -536,7 +536,7 @@ def image_call_error(exc: "openai.APIStatusError", model: str) -> Exception:
 class _CatalogImages:
     """What MindsHub's ``/v1/models`` says about images, for one base URL."""
 
-    #: The alias marked ``default_for: ["image"]``, if any.
+    #: The alias marked ``default_for: ["image"]``, else the first usable image model.
     default: str | None
     #: Whether any ``kind: "image"`` row is usable by this key.
     offered: bool
@@ -546,10 +546,12 @@ def _catalog_images(base_url: str, api_key: str, *, verify: bool = True) -> _Cat
     """The catalogue's image facts, or None when it cannot be read.
 
     Read through `anton.minds_client` — the catalogue reader setup already
-    uses — and kept per base URL: an hour when read, five minutes when not,
-    so a host that builds a client per turn asks rarely. Blocking: call it
-    off the event loop.
+    uses — and kept per base URL and key: an hour when it offers images, five
+    minutes when it offers none or could not be read, so a host that builds a
+    client per turn asks rarely. Blocking: call it off the event loop.
     """
+    import hashlib
+
     from anton.minds_client import (
         fetch_model_catalog,
         minds_v1_base,
@@ -557,19 +559,22 @@ def _catalog_images(base_url: str, api_key: str, *, verify: bool = True) -> _Cat
         usable_models_of_kind,
     )
 
-    key = minds_v1_base(base_url)
+    # Keyed by the key too: two keys on one gateway can see different catalogues.
+    key = f"{minds_v1_base(base_url)}|{hashlib.sha256(api_key.encode()).hexdigest()[:16]}"
     now = time.monotonic()
     with _catalog_lock:
         cached = _catalog_cache.get(key)
     if cached is not None:
-        ttl = _CATALOG_TTL_S if cached[1] is not None else _CATALOG_FAILURE_TTL_S
+        ttl = _CATALOG_TTL_S if cached[1] is not None and cached[1].offered else _CATALOG_FAILURE_TTL_S
         if now - cached[0] < ttl:
             return cached[1]
     try:
         entries = fetch_model_catalog(base_url, api_key, verify=verify, timeout=5)
+        usable = usable_models_of_kind(entries, "image")
+        # A disabled role default falls back to the first image model the key may use.
         found: _CatalogImages | None = _CatalogImages(
-            default=role_default_model(entries, IMAGE_ROLE, kind="image"),
-            offered=bool(usable_models_of_kind(entries, "image")),
+            default=role_default_model(entries, IMAGE_ROLE, kind="image") or (usable[0] if usable else None),
+            offered=bool(usable),
         )
     except Exception as exc:
         logger.info("image models: MindsHub catalogue unreadable (%s)", type(exc).__name__)
@@ -580,9 +585,10 @@ def _catalog_images(base_url: str, api_key: str, *, verify: bool = True) -> _Cat
 
 
 def catalog_image_model(base_url: str, api_key: str, *, verify: bool = True) -> str | None:
-    """The alias MindsHub's ``/v1/models`` marks ``default_for: ["image"]``, or
-    None (none marked, or the catalogue unreadable: the caller then falls back
-    to `DEFAULT_IMAGE_MODEL`). Blocking: call it off the event loop."""
+    """The alias MindsHub's ``/v1/models`` marks ``default_for: ["image"]``, else
+    its first usable image model, or None (none usable, or the catalogue
+    unreadable: the caller then falls back to `DEFAULT_IMAGE_MODEL`).
+    Blocking: call it off the event loop."""
     info = _catalog_images(base_url, api_key, verify=verify)
     return info.default if info is not None else None
 
