@@ -1,24 +1,27 @@
 ---
 title: Static artifact fast path
-description: Opt-in direct generation for self-contained HTML pages, its three settings, and what each one changes.
+description: Direct generation for self-contained HTML pages, and what it changes.
 ---
 
 # Static artifact fast path
 
-An opt-in path for self-contained HTML pages built from data the agent can fetch now.
+The default path for self-contained HTML pages built from data the agent can fetch now.
 It skips the brief, PRD and spec steps, binds the exact source JSON into the page, and
-keeps the normal static and browser checks. Everything is off unless a setting below is
-set; with all three unset, generation is the same as without this code.
+keeps the normal static and browser checks. It has three parts:
 
-## Settings
-
-| Variable | Value | Effect |
-|---|---|---|
-| `ANTON_STATIC_FAST_PATH` | `direct` | In act-first mode, with no attachments other than data files, discovery saves the complete data to `observed-data.json` in the artifact folder and a single writer call builds the page. Read at call time. |
-| `ANTON_STATIC_SINGLE_CALL` | `on` | `generate_artifact` takes `name` for a new page and registers it in the same call, and the chat prompt uses the shorter single-call artifact instructions. Read when `anton.core.tools.tool_defs` is imported, so set it before the process starts. |
-| `ANTON_STATIC_COMPONENT_WRITER` | `on` | With bound data, the writer returns a small program for the built-in presentation runtime (`presentation.js`: charts, tables, maps, globes, timelines and text, each chart with a Data table) instead of a whole HTML document. It answers `USE_HTML_WRITER` when the runtime can't express the request. |
-
-`ANTON_STATIC_FAST_PATH` is the core; the other two are independent of it.
+- **Direct generation.** In act-first mode, with no attachments other than data files,
+  discovery saves the complete data to `observed-data.json` in the artifact folder and a
+  single writer call builds the page.
+- **Single call.** `generate_artifact` takes `name` for a new page and registers it in the
+  same call, and the chat prompt uses the shorter single-call artifact instructions (a
+  static-only variant where the deployment offers no live apps). With
+  direct reports off (`ANTON_DIRECT_REPORTS=false`) the page tools keep `slug` and the
+  register-first instructions.
+- **Component writer.** With bound data, the writer returns a small program for the
+  built-in presentation runtime (`presentation.js`: charts, tables, maps, globes, timelines
+  and text, each chart with a Data table) instead of a whole HTML document. It answers
+  `USE_HTML_WRITER` when the runtime can't express the request, and the ordinary HTML
+  writer builds the page.
 
 ## How a page is built
 

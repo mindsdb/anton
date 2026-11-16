@@ -217,7 +217,8 @@ async def test_a_saved_secret_cut_by_the_output_limit_is_still_redacted(tmp_path
     cell = await _print_saved_secret(tmp_path, secret, printed)
 
     assert "chars total)" in cell.stdout
-    assert len(cell.stdout) < 10_100
+    # The cut output plus the truncation note, which points at read_text_file.
+    assert len(cell.stdout) < 10_300
     for start in range(len(secret) - 7):
         assert secret[start : start + 8] not in cell.stdout
 

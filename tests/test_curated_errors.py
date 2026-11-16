@@ -29,6 +29,7 @@ from anton.core.llm.provider import (
     ContextOverflowError,
     EndpointConfigurationError,
     FreeServingPausedError,
+    BudgetExceededError,
     MindsHubBillingStop,
     ModelCallTimeoutError,
     ModelRestrictedError,
@@ -310,6 +311,9 @@ _CURATED_SAMPLES = {
     FreeServingPausedError: lambda: FreeServingPausedError(
         "free serving paused", reason="free_air_daily_spend_fuse_exceeded",
         status_code=429, reset_at="2026-09-25T00:00:00Z",
+    ),
+    BudgetExceededError: lambda: BudgetExceededError(
+        "budget used up", reason="budget_exceeded", status_code=402,
     ),
     ProviderAuthError: lambda: ProviderAuthError("Invalid API key"),
     StructuredOutputError: lambda: StructuredOutputError("no tool call"),

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "684cf6701bcd42bf916acd021197e30a",
+  "slug": "loan-payment-calculator-684cf670",
+  "createdAt": "2026-11-12T08:36:29+00:00",
+  "updatedAt": "2026-11-12T08:38:06+00:00",
+  "name": "Loan Payment Calculator",
+  "description": "Build a single-page HTML loan calculator with inputs for loan amount, annual interest rate, and term in years; show monthly payment, total interest, and yearly amortization. Use defaults 250000, 6.5%, and 30 years, and recalculate only when Calculate is pressed.",
+  "type": "html-app",
+  "primary": "index.html",
+  "datasources": [],
+  "files": [],
+  "provenance": [
+    {
+      "conversation": "gen-ws_loan",
+      "title": null,
+      "turns": [
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:36:29+00:00",
+          "summary": "Created artifact: Loan Payment Calculator",
+          "files_touched": []
+        },
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:38:06+00:00",
+          "summary": "Generated artifact files",
+          "files_touched": []
+        }
+      ]
+    }
+  ]
+}

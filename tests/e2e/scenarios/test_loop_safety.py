@@ -5,14 +5,15 @@ from __future__ import annotations
 import json
 import pytest
 
-from anton.core.session import _ROUND_CAP_GRACE_ROUNDS
 from tests.e2e.harness import (
     assert_exit_ok, assert_not_output, assert_output, base_env, run_anton,
 )
 
 
+# Pinned rather than read from the defaults, which are high safety limits that
+# a scripted turn can't reasonably reach.
 _MAX_TOOL_ROUNDS = 25
-_EFFECTIVE_CAP = _MAX_TOOL_ROUNDS + _ROUND_CAP_GRACE_ROUNDS  # ENG-1893 grace
+_MAX_CONTINUATIONS = 3
 
 
 def _verified_env(stub):
@@ -20,11 +21,15 @@ def _verified_env(stub):
     return {**base_env(stub), "ANTON_VERIFY_MIN_TOOL_ROUNDS": "1"}
 
 
+def _round_cap_env(stub):
+    return {**base_env(stub), "ANTON_MAX_TOOL_ROUNDS": str(_MAX_TOOL_ROUNDS)}
+
+
 @pytest.mark.stub_only
 def test_keep_going_at_the_round_cap_finishes_the_turn(cfg, stub, tmp_path):
     """Answering 1 ("Keep going") at the cap raises it, and the same turn
     finishes: no hand-back, no second prompt from the user."""
-    for i in range(_EFFECTIVE_CAP + 1):
+    for i in range(_MAX_TOOL_ROUNDS + 1):
         stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"loop_{i}", "code": f"print({i})"})
     stub.queue_finish_authorization(False)
     for i in range(3):
@@ -32,7 +37,7 @@ def test_keep_going_at_the_round_cap_finishes_the_turn(cfg, stub, tmp_path):
     stub.queue_text("All done. FINISHED_AFTER_KEEP_GOING")
     stub.queue_verification_ok()
     result = run_anton(["--folder", str(tmp_path)], ["run until done", "1", "exit"],
-                       env=base_env(stub), timeout=cfg.timeout(60))
+                       env=_round_cap_env(stub), timeout=cfg.timeout(60))
 
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")
@@ -45,24 +50,22 @@ def test_keep_going_at_the_round_cap_finishes_the_turn(cfg, stub, tmp_path):
 
 @pytest.mark.stub_only
 def test_max_tool_rounds_circuit_breaker_fires(cfg, stub, tmp_path):
-    # Backstop fires at effective_cap + 1 — the one-time grace extension
-    # (ENG-1893) runs first, so it takes effective_cap + 1 queued tool calls
-    # to actually reach the cap. There the turn checks whether the user already
-    # said "keep going" (queued: no) and asks; answering 2 ("Stop here") must
-    # still hand back.
-    for i in range(_EFFECTIVE_CAP + 1):
+    # Backstop fires at the cap + 1 queued tool calls. There the turn checks
+    # whether the user already said "keep going" (queued: no) and asks;
+    # answering 2 ("Stop here") must still hand back.
+    for i in range(_MAX_TOOL_ROUNDS + 1):
         stub.queue_tool_call("scratchpad", {"action": "exec", "name": f"loop_{i}", "code": f"print({i})"})
     stub.queue_finish_authorization(False)
     stub.queue_text("Summarising. CIRCUIT_FIRED")
     result = run_anton(["--folder", str(tmp_path)], ["run forever", "2", "exit"],
-                       env=base_env(stub), timeout=cfg.timeout(60))
+                       env=_round_cap_env(stub), timeout=cfg.timeout(60))
 
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")
     assert_output(result, "Keep going?")
     assert_output(result, "CIRCUIT_FIRED")
     assert any(
-        f"You have used {_EFFECTIVE_CAP} tool-call rounds" in json.dumps(r.get("messages", []))
+        f"You have used {_MAX_TOOL_ROUNDS} tool-call rounds" in json.dumps(r.get("messages", []))
         for r in stub.requests
     ), f"Max-rounds message not found. Request count: {stub.request_count}"
 
@@ -70,15 +73,16 @@ def test_max_tool_rounds_circuit_breaker_fires(cfg, stub, tmp_path):
 @pytest.mark.stub_only
 def test_continuation_limit_respected(cfg, stub, tmp_path):
     _tool = lambda i: {"action": "exec", "name": f"c{i}", "code": f"print({i})"}
-    for i in range(3):
+    for i in range(_MAX_CONTINUATIONS):
         stub.queue_tool_call("scratchpad", _tool(i))
         stub.queue_text(f"Round {i} done.")
         stub.queue_verification_incomplete(f"not done, attempt {i}")
-    stub.queue_tool_call("scratchpad", _tool(3))
-    stub.queue_text("Round 3 done.")
+    stub.queue_tool_call("scratchpad", _tool(_MAX_CONTINUATIONS))
+    stub.queue_text(f"Round {_MAX_CONTINUATIONS} done.")
     stub.queue_text("BUDGET_EXHAUSTED")
+    env = {**_verified_env(stub), "ANTON_MAX_CONTINUATIONS": str(_MAX_CONTINUATIONS)}
     result = run_anton(["--folder", str(tmp_path)], ["do continuations", "exit"],
-                       env=_verified_env(stub), timeout=cfg.timeout(60))
+                       env=env, timeout=cfg.timeout(60))
 
     assert_exit_ok(result)
     assert_not_output(result, "Traceback (most recent call last)")

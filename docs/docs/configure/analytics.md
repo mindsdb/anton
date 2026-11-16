@@ -60,10 +60,13 @@ Two transports, depending on the event:
 
 - **Most events** are a single HTTP GET to a MindsDB-operated collector, at
   `ANTON_ANALYTICS_URL`. That collector forwards them to PostHog.
-- **The measurement events, and the scratchpad package-install event,** are
-  an HTTPS POST directly to **PostHog Inc.** (`us.i.posthog.com`), a US
-  analytics processor. A body rather than a query string, so the values do
-  not end up in intermediate access logs.
+- **The measurement events, the scratchpad package-install event and the
+  browser tool's events** are an HTTPS POST directly to **PostHog Inc.**
+  (`us.i.posthog.com`), a US analytics processor. A body rather than a query
+  string, so the values do not end up in intermediate access logs. The
+  browser tool's events carry step names and probabilities (which step Jev
+  picked against the step the agent took) and the kind of human check a site
+  showed, never page content or addresses.
 
 Either way the data ends up in PostHog; the difference is whether it passes
 through MindsDB's collector on the way.
@@ -87,8 +90,8 @@ That switch covers every event on every transport.
 ### Turning off one transport only
 
 `ANTON_ANALYTICS_URL` set empty stops **every** event. Re-pointing it moves only
-the collector-path events; the measurement and package-install events still
-go to PostHog. To disable just those, set an empty key:
+the collector-path events; the measurement, package-install and browser events
+still go to PostHog. To disable just those, set an empty key:
 
 ```text
 ANTON_POSTHOG_KEY=

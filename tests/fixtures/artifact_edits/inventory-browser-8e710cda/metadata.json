@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "8e710cdae21c44a7b3931f3a7b6786dc",
+  "slug": "inventory-browser-8e710cda",
+  "createdAt": "2026-11-12T08:36:32+00:00",
+  "updatedAt": "2026-11-12T08:37:33+00:00",
+  "name": "Inventory Browser",
+  "description": "Create an HTML app named Inventory Browser from the provided inventory CSV, with item-name search, category filtering, a below-reorder-point toggle that highlights matching rows, and a footer showing total stock value calculated as on_hand \u00d7 unit_cost.",
+  "type": "html-app",
+  "primary": "index.html",
+  "datasources": [],
+  "files": [],
+  "provenance": [
+    {
+      "conversation": "gen-ws_inventory",
+      "title": null,
+      "turns": [
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:36:32+00:00",
+          "summary": "Created artifact: Inventory Browser",
+          "files_touched": []
+        },
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:37:33+00:00",
+          "summary": "Generated artifact files",
+          "files_touched": []
+        }
+      ]
+    }
+  ]
+}

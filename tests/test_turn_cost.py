@@ -647,9 +647,9 @@ class TestScriptTrafficIsNotReported:
     per-turn median to ZERO, which is impossible for a completed turn. ENG-1286's
     spend ceiling would have been derived from it.
 
-    The four cases below are the 2x2 that made the discriminator measurable, and
-    they exist to stop the conjunction being "simplified" to one condition later:
-    each half alone deletes real data.
+    The cases below, plus the ordinary turn in TestEmitTurnCost, are the 2x2 that
+    made the discriminator measurable, and they exist to stop the conjunction
+    being "simplified" to one condition later: each half alone deletes real data.
     """
 
     def test_no_session_and_no_llm_call_is_dropped(self):
@@ -696,13 +696,6 @@ class TestScriptTrafficIsNotReported:
             s._emit_turn_cost()
         assert send.called
         assert send.call_args.kwargs["ended_by"] == "error"
-
-    def test_an_ordinary_turn_still_emits(self):
-        s = _bare_session()
-        s._turn_cost.add("planning", "planner", _usage(100, 10, 0, 0))
-        with patch("anton.analytics.send_event") as send:
-            s._emit_turn_cost()
-        assert send.called
 
     def test_a_dropped_turn_still_closes_its_books(self):
         """Position matters: the guard must sit BELOW the books-closing block.

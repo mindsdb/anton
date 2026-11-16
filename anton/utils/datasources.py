@@ -24,6 +24,7 @@ from anton.core.datasources.data_vault import (
     _slug_env_prefix,
     _sweep_ds_env_vars,
     is_secret_key,
+    withheld_from_env,
 )
 from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML_BLOCK_RE
 
@@ -1329,9 +1330,11 @@ def collect_datasource_catalog(
         prefix = _slug_env_prefix(engine, c["name"])
         # Skip `_`-prefixed bookkeeping (`_connector_id`, `_method`, `_label`,
         # `_user_label`) — they're not credential env vars the agent should
-        # reference.
+        # reference — and an MCP connection's secrets, which env_for withholds.
         var_names = [
-            f"{prefix}__{k.upper()}" for k in fields if not k.startswith("_")
+            f"{prefix}__{k.upper()}"
+            for k in fields
+            if not k.startswith("_") and not withheld_from_env(fields, k, secure_keys)
         ]
         user_label = str(fields.get("_user_label", "")).strip() or str(
             fields.get("_label", "")
@@ -1526,6 +1529,7 @@ def _rebuild_ds_registries(vault: DataVault) -> None:
             )
         try:
             env_values.update(vault.env_for(engine, name) or {})
+            env_values.update(_withheld_values(vault, engine, name))
         except Exception:
             # Must not block the rest, but it leaves that connection
             # unscrubbable for this turn, so say so. Names only, never a value.
@@ -1536,6 +1540,21 @@ def _rebuild_ds_registries(vault: DataVault) -> None:
             )
     _ds_env_values.set(env_values)
     _hold_exact_secrets()
+
+
+def _withheld_values(vault: DataVault, engine: str, name: str) -> dict[str, str]:
+    """The MCP secrets env_for withholds, under the names it would have used,
+    for the scrub map only: the token never reaches a pad, but an MCP error
+    that echoes it must still be redacted."""
+    record = (vault.read_record(engine, name) if hasattr(vault, "read_record") else None) or {}
+    fields = record.get("fields") or {}
+    secure_keys = record.get("secure_keys")
+    prefix = _slug_env_prefix(engine, name)
+    return {
+        f"{prefix}__{key.upper()}": str(value)
+        for key, value in fields.items()
+        if value and not key.startswith("_") and withheld_from_env(fields, key, secure_keys)
+    }
 
 
 def find_matching_connection(

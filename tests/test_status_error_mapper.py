@@ -37,6 +37,7 @@ from anton.core.llm.provider import (
     EndpointConfigurationError,
     ErrorBodyFields,
     FreeServingPausedError,
+    BudgetExceededError,
     ModelRestrictedError,
     ModelUnavailableError,
     ProviderAuthError,
@@ -721,6 +722,10 @@ def test_wallet_denial_code_reads_both_dialects():
         wallet_denial_code({"code": "free_air_daily_spend_fuse_exceeded"})
         == "free_air_daily_spend_fuse_exceeded"
     )
+    assert (
+        wallet_denial_code({"code": "budget_exceeded"})
+        == "budget_exceeded"
+    )
     assert wallet_denial_code({"error": {"code": "rate_limited"}}) is None
     assert wallet_denial_code({"code": 402}) is None
     assert wallet_denial_code(None) is None
@@ -1151,6 +1156,17 @@ _RESET_AT_NORMALIZED = "2026-09-25T00:00:00+00:00"
 _BILLING_CTA = (
     "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
 )
+_BUDGET_CTA = (
+    "An organization owner or admin can raise it at "
+    "https://console.mindshub.ai/settings/organization/billing?tab=budgets."
+)
+
+
+def _cta(code):
+    """Credits lift every billing stop but a budget, which points at the Budgets tab."""
+    return _BUDGET_CTA if code == "budget_exceeded" else _BILLING_CTA
+
+
 _BILLING_STOPS = [
     pytest.param("wallet_empty", 402, WalletEmptyError,
                  "your MindsHub credits are used up.", id="wallet_empty"),
@@ -1159,6 +1175,8 @@ _BILLING_STOPS = [
     pytest.param("free_air_daily_spend_fuse_exceeded", 429, FreeServingPausedError,
                  "free MindsHub Air is paused for everyone until the daily budget resets.",
                  id="fuse"),
+    pytest.param("budget_exceeded", 402, BudgetExceededError,
+                 "your organization's MindsHub spending budget is used up.", id="budget"),
 ]
 
 
@@ -1167,7 +1185,7 @@ def _assert_billing_stop(exc, *, code, status, cls, what):
     assert isinstance(exc, TokenLimitExceeded)  # every existing catch still holds
     assert exc.reason == code
     assert exc.status_code == status
-    assert str(exc) == f"Server returned {status}: {what} {_BILLING_CTA}"
+    assert str(exc) == f"Server returned {status}: {what} {_cta(code)}"
 
 
 @pytest.mark.parametrize("code,status,cls,what", _BILLING_STOPS)
@@ -1392,7 +1410,7 @@ async def test_the_midstream_lanes_raise_the_same_type(lane, code, status, cls, 
     assert err.value.reason == code
     assert err.value.status_code is None
     assert err.value.reset_at is None
-    assert str(err.value) == f"{what[:1].upper()}{what[1:]} {_BILLING_CTA}"
+    assert str(err.value) == f"{what[:1].upper()}{what[1:]} {_cta(code)}"
 
 
 @pytest.mark.parametrize("lane", ["chat", "responses"])
@@ -1697,3 +1715,13 @@ def test_the_anthropic_twin_gives_a_third_party_no_restriction(carrier):
         _raise_anthropic(exc, model="opus")
     assert type(err.value) is ConnectionError
     assert "admin" not in str(err.value).lower()
+
+
+def test_the_budget_stop_sends_the_user_to_budgets_not_to_buy_credits():
+    """Credits do not lift a budget, so its copy never asks for them."""
+    exc = _sdk_error(402, json_body={"error": {"code": "budget_exceeded"}})
+    with pytest.raises(BudgetExceededError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert "Add credits" not in str(err.value)
+    assert "tab=budgets" in str(err.value)
+    assert err.value.reset_at is None

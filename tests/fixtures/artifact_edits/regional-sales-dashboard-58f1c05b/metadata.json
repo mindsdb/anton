@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "58f1c05b87404c119009ef503bd8266f",
+  "slug": "regional-sales-dashboard-58f1c05b",
+  "createdAt": "2026-11-12T08:36:30+00:00",
+  "updatedAt": "2026-11-12T08:37:12+00:00",
+  "name": "Regional Sales Dashboard",
+  "description": "Build an HTML dashboard from the provided synthetic 2026 monthly regional sales CSV, with the requested three KPI cards, monthly revenue line chart, revenue-by-region bar chart, and a region selector that filters all displayed metrics.",
+  "type": "html-app",
+  "primary": "index.html",
+  "datasources": [],
+  "files": [],
+  "provenance": [
+    {
+      "conversation": "gen-ws_sales",
+      "title": null,
+      "turns": [
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:36:30+00:00",
+          "summary": "Created artifact: Regional Sales Dashboard",
+          "files_touched": []
+        },
+        {
+          "index": 1,
+          "timestamp": "2026-11-12T08:37:12+00:00",
+          "summary": "Generated artifact files",
+          "files_touched": []
+        }
+      ]
+    }
+  ]
+}

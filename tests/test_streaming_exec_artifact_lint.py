@@ -98,11 +98,22 @@ def _scratchpad_exec_response(text: str) -> LLMResponse:
     )
 
 
-async def test_turn_stream_surfaces_a_lint_finding_from_inline_exec(workspace):
+async def test_turn_stream_surfaces_a_lint_finding_from_inline_exec(workspace, monkeypatch):
     artifact = ArtifactStore(workspace.artifacts_dir).create(
         name="Forecast", description="d", type="document"
     )
     workbook_path = workspace.artifacts_dir / artifact.slug / "forecast.xlsx"
+
+    # The checkers shell out with multi-second timeouts; calling them directly
+    # would block the event loop shared with other requests.
+    to_thread_funcs = []
+    real_to_thread = asyncio.to_thread
+
+    async def spying_to_thread(func, *args, **kwargs):
+        to_thread_funcs.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", spying_to_thread)
 
     mock_llm = make_mock_llm()
     mock_llm.generate_object_code = AsyncMock(
@@ -138,58 +149,6 @@ async def test_turn_stream_surfaces_a_lint_finding_from_inline_exec(workspace):
 
     assert "[artifact lint]" in result_content
     assert "E6" in result_content
-
-
-async def test_lint_call_is_routed_through_asyncio_to_thread(workspace, monkeypatch):
-    """The xlsx/html checkers shell out with multi-second timeouts; this turn
-    runs as a plain asyncio task sharing the host's event loop with every
-    other request. Calling `lint_changed_artifact_files` directly (no
-    `asyncio.to_thread`) would block that shared loop for as long as the
-    checker takes — asserted structurally (which primitive the call goes
-    through), not by timing: a wall-clock race is exactly as flaky as the
-    bug it's meant to catch, since `turn_stream` has plenty of its own
-    unrelated await points a slow lint call doesn't interfere with.
-    """
-    artifact = ArtifactStore(workspace.artifacts_dir).create(
-        name="Forecast", description="d", type="document"
-    )
-    workbook_path = workspace.artifacts_dir / artifact.slug / "forecast.xlsx"
-
-    to_thread_funcs = []
-    real_to_thread = asyncio.to_thread
-
-    async def spying_to_thread(func, *args, **kwargs):
-        to_thread_funcs.append(func)
-        return await real_to_thread(func, *args, **kwargs)
-
-    monkeypatch.setattr(asyncio, "to_thread", spying_to_thread)
-
-    mock_llm = make_mock_llm()
-    mock_llm.generate_object_code = AsyncMock(
-        return_value=_VerifierVerdict(status="COMPLETE", reason="task done")
-    )
-    call_count = 0
-
-    def fake_plan_stream(**kwargs):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return _FakeAsyncIter(
-                [StreamComplete(response=_scratchpad_exec_response("Building the workbook."))]
-            )
-        return _FakeAsyncIter([StreamComplete(response=_text_response("Done."))])
-
-    mock_llm.plan_stream = fake_plan_stream
-
-    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
-    session._scratchpads.get_or_create = AsyncMock(return_value=_FakePad(workbook_path))
-    try:
-        async for _ in session.turn_stream("build the forecast workbook"):
-            pass
-    finally:
-        await session.close()
-
     assert any(f.__name__ == "lint_changed_artifact_files" for f in to_thread_funcs), (
-        "lint_changed_artifact_files must run via asyncio.to_thread, not "
-        "called directly on the event loop"
+        "lint_changed_artifact_files must run via asyncio.to_thread"
     )

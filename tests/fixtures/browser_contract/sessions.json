@@ -1,0 +1,43 @@
+{
+  "description": "Opening the browser session for a conversation. Anton sends the session id and, optionally, the first address, and discards the answer. Both hosts answer the same shape: 201 for a new session, 200 with resumed true for one that already exists, and url null before a page loads.",
+  "examples": {
+    "open a session": {
+      "where": "POST /sessions",
+      "kind": "request",
+      "body": {
+        "session_id": "t-0123456789abcdef01234567",
+        "url": "https://shop.example.test/"
+      }
+    },
+    "a new session": {
+      "where": "POST /sessions",
+      "kind": "response",
+      "status": 201,
+      "body": {
+        "session_id": "t-0123456789abcdef01234567",
+        "resumed": false,
+        "url": "https://shop.example.test/"
+      }
+    },
+    "a new session before its page loads": {
+      "where": "POST /sessions",
+      "kind": "response",
+      "status": 201,
+      "body": {
+        "session_id": "t-0123456789abcdef01234567",
+        "resumed": false,
+        "url": null
+      }
+    },
+    "the session already open": {
+      "where": "POST /sessions",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "session_id": "t-0123456789abcdef01234567",
+        "resumed": true,
+        "url": "https://shop.example.test/cart"
+      }
+    }
+  }
+}

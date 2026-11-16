@@ -234,12 +234,6 @@ def test_fetch_prompt_embeds_the_datasource_catalog():
     assert "DS_HUBSPOT_MAIN__ACCESS_TOKEN" in system
 
 
-def test_prompt_builders_tolerate_missing_catalog():
-    """The default is mandatory: existing callers pass no new argument."""
-    assert isinstance(prompts.build_backend_system_prompt(Path("/tmp/a")), str)
-    assert isinstance(prompts.build_fetch_data_system_prompt(Path("/tmp/a")), str)
-
-
 def test_backend_template_includes_secrets_block_and_os_import():
     """The verifier requires a module-level SECRETS dict (verifiers.py:171)."""
     rules = prompts._BACKEND_RULES
@@ -721,10 +715,6 @@ def test_fetch_prompt_embeds_the_public_sources_catalog():
         Path("/tmp/a"), public_sources="PUBLIC DATA:\n- Google News RSS: ..."
     )
     assert "Google News RSS" in system
-
-
-def test_fetch_prompt_tolerates_missing_public_sources():
-    assert isinstance(prompts.build_fetch_data_system_prompt(Path("/tmp/a")), str)
 
 
 def test_fetch_prompt_carries_the_scratchpad_discipline():

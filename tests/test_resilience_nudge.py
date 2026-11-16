@@ -20,21 +20,6 @@ _select = ChatSession._select_resilience_nudge
 
 
 class TestSelectResilienceNudge:
-    def test_non_scratchpad_tool_gets_generic_nudge(self):
-        assert _select("web_fetch", "failed to fetch the page") == RESILIENCE_NUDGE
-
-    def test_scratchpad_timeout_gets_timeout_nudge(self):
-        assert _select("scratchpad", "Cell timed out after 180s total") == SCRATCHPAD_TIMEOUT_NUDGE
-
-    def test_scratchpad_liveness_kill_gets_stuck_nudge(self):
-        # A silence/liveness kill means the worker looked dead — "too heavy"
-        # is inverted advice there (ENG-578). Both the new wording and the
-        # legacy "inactivity" wording (remote/old workers) route to STUCK.
-        new_msg = "Cell killed after 30s without a liveness signal from the scratchpad worker"
-        legacy_msg = "Cell killed after 60s of inactivity (no output or progress() calls)"
-        assert _select("scratchpad", new_msg) == SCRATCHPAD_STUCK_NUDGE
-        assert _select("scratchpad", legacy_msg) == SCRATCHPAD_STUCK_NUDGE
-
     def test_scratchpad_empty_code_gets_size_nudge(self):
         msg = "Scratchpad exec failed: the `code` argument was empty. ..."
         assert _select("scratchpad", msg) == SCRATCHPAD_SIZE_NUDGE

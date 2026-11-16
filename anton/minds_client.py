@@ -57,16 +57,21 @@ def minds_v1_base(base_url: str) -> str:
     return f"{base}/v1"
 
 
-def minds_request(
+# urllib timeout on every Minds API call, including POST /upload. cowork-server
+# imports it to size its lock TTL around a publish.
+DEFAULT_REQUEST_TIMEOUT_S = 30
+
+
+def minds_request_with_status(
     url: str,
     api_key: str,
     *,
     method: str = "GET",
     payload: bytes | None = None,
     verify: bool = True,
-    timeout: int = 30,
-) -> bytes:
-    """HTTP transport for all Minds API calls.
+    timeout: int = DEFAULT_REQUEST_TIMEOUT_S,
+) -> tuple[int, bytes]:
+    """HTTP transport for all Minds API calls; returns (status, body).
 
     Sets browser-like headers to pass through Cloudflare bot detection.
     This is why we use raw urllib instead of the minds-sdk (which uses
@@ -97,7 +102,7 @@ def minds_request(
 
     try:
         with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
-            return resp.read()
+            return resp.status, resp.read()
     except urllib.error.HTTPError as err:
         raise MindsHTTPError(err, method=method) from err
     except OSError as err:
@@ -105,6 +110,12 @@ def minds_request(
         # the request they belong to.
         err.request_line = f"{method} {url}"
         raise
+
+
+def minds_request(url: str, api_key: str, **kwargs) -> bytes:
+    """Body-only wrapper over minds_request_with_status (the historical API);
+    takes the same keyword arguments."""
+    return minds_request_with_status(url, api_key, **kwargs)[1]
 
 
 # Callers in this package and in cowork-server read at most this much of an

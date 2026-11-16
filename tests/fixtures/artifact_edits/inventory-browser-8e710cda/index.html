@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8" data-cowork-observed><script id="cowork-observed-json" type="application/json" data-cowork-observed>{"data-583f1c722016":{"source":{"path":"/workspace/inventory.csv","format":"CSV"},"filters":{"none":"All rows in supplied inventory CSV"},"time_scope":"Not time-based; supplied inventory snapshot","units":{"on_hand":"units","reorder_point":"units","unit_cost_usd":"USD per unit","total_stock_value":"USD"},"fields":["sku","item","category","location","on_hand","reorder_point","unit_cost_usd"],"rows":[{"sku":"SKU-1001","item":"Hex Bolts","category":"Hardware","location":"Warehouse A","on_hand":118,"reorder_point":75,"unit_cost_usd":22.53},{"sku":"SKU-1002","item":"Desk Lamp","category":"Office","location":"Warehouse B","on_hand":301,"reorder_point":20,"unit_cost_usd":25.12},{"sku":"SKU-1003","item":"Stapler","category":"Kitchen","location":"Warehouse A","on_hand":74,"reorder_point":50,"unit_cost_usd":49.04},{"sku":"SKU-1004","item":"Kettle","category":"Garden","location":"Warehouse C","on_hand":289,"reorder_point":50,"unit_cost_usd":85.87},{"sku":"SKU-1005","item":"Trowel","category":"Hardware","location":"Warehouse C","on_hand":263,"reorder_point":75,"unit_cost_usd":59.64},{"sku":"SKU-1006","item":"Cable Ties","category":"Office","location":"Warehouse C","on_hand":27,"reorder_point":50,"unit_cost_usd":81.16},{"sku":"SKU-1007","item":"Notebook","category":"Kitchen","location":"Warehouse C","on_hand":286,"reorder_point":50,"unit_cost_usd":37.03},{"sku":"SKU-1008","item":"Chef Knife","category":"Garden","location":"Warehouse B","on_hand":53,"reorder_point":50,"unit_cost_usd":57.82},{"sku":"SKU-1009","item":"Hose Reel","category":"Hardware","location":"Warehouse A","on_hand":97,"reorder_point":20,"unit_cost_usd":88.65},{"sku":"SKU-1010","item":"Drill Bits","category":"Office","location":"Warehouse B","on_hand":83,"reorder_point":20,"unit_cost_usd":31.92},{"sku":"SKU-1011","item":"Paper Clips","category":"Kitchen","location":"Warehouse A","on_hand":52,"reorder_point":20,"unit_cost_usd":51.88},{"sku":"SKU-1012","item":"Mug Set","category":"Garden","location":"Warehouse C","on_hand":51,"reorder_point":50,"unit_cost_usd":56.01},{"sku":"SKU-1013","item":"Pruning Shears","category":"Hardware","location":"Warehouse A","on_hand":106,"reorder_point":75,"unit_cost_usd":35.11},{"sku":"SKU-1014","item":"Wrench","category":"Office","location":"Warehouse C","on_hand":129,"reorder_point":50,"unit_cost_usd":55.0},{"sku":"SKU-1015","item":"Whiteboard","category":"Kitchen","location":"Warehouse B","on_hand":62,"reorder_point":20,"unit_cost_usd":76.71},{"sku":"SKU-1016","item":"Toaster","category":"Garden","location":"Warehouse B","on_hand":245,"reorder_point":50,"unit_cost_usd":29.44},{"sku":"SKU-1017","item":"Seed Tray","category":"Hardware","location":"Warehouse A","on_hand":52,"reorder_point":75,"unit_cost_usd":32.15},{"sku":"SKU-1018","item":"Tape Measure","category":"Office","location":"Warehouse B","on_hand":245,"reorder_point":75,"unit_cost_usd":16.21},{"sku":"SKU-1019","item":"Pen Pack","category":"Kitchen","location":"Warehouse A","on_hand":105,"reorder_point":75,"unit_cost_usd":33.83},{"sku":"SKU-1020","item":"Colander","category":"Garden","location":"Warehouse C","on_hand":278,"reorder_point":20,"unit_cost_usd":68.72},{"sku":"SKU-1021","item":"Rake","category":"Hardware","location":"Warehouse B","on_hand":329,"reorder_point":20,"unit_cost_usd":63.27},{"sku":"SKU-1022","item":"Sandpaper","category":"Office","location":"Warehouse B","on_hand":265,"reorder_point":50,"unit_cost_usd":81.93},{"sku":"SKU-1023","item":"Folder Set","category":"Kitchen","location":"Warehouse B","on_hand":395,"reorder_point":20,"unit_cost_usd":48.87},{"sku":"SKU-1024","item":"Blender","category":"Garden","location":"Warehouse C","on_hand":168,"reorder_point":75,"unit_cost_usd":21.63}],"aggregates":{"total_stock_value_usd":203549.22,"calculation":"sum(on_hand × unit_cost_usd) over all inventory rows","row_count":24,"categories":["Garden","Hardware","Kitchen","Office"]}}}</script><script data-cowork-observed>window.ARTIFACT_DATA=JSON.parse(document.getElementById("cowork-observed-json").textContent);</script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inventory Browser</title>
+  <style>
+    :root{color-scheme:light;--ink:#17251f;--muted:#718078;--line:#e5ebe7;--bg:#f5f7f5;--green:#176c4b;--green-bg:#eaf5ef;--amber:#a65f16;--amber-bg:#fff4e5}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    .shell{max-width:1240px;margin:auto;padding:36px 30px 48px}
+    .topline{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px}
+    .brand{display:flex;align-items:center;gap:11px;font-weight:700;letter-spacing:-.02em}
+    .mark{width:32px;height:32px;display:grid;place-items:center;background:var(--green);border-radius:9px;color:white}
+    .mark svg{width:18px;height:18px}
+    .snapshot{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:8px}
+    .dot{width:7px;height:7px;background:#46a879;border-radius:50%}
+    h1{font-size:30px;line-height:1.15;letter-spacing:-.045em;margin:0 0 7px}
+    .subtitle{color:var(--muted);margin:0}
+    .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:25px 0 24px}
+    .stat{background:#fff;border:1px solid var(--line);border-radius:12px;padding:17px 19px;min-height:93px}
+    .stat-label{color:var(--muted);font-size:12px;font-weight:600}
+    .stat-value{font-size:23px;font-weight:700;letter-spacing:-.04em;margin-top:8px}
+    .stat-value.money{color:var(--green)}
+    .panel{background:#fff;border:1px solid var(--line);border-radius:13px;overflow:hidden;box-shadow:0 2px 8px #193b2606}
+    .toolbar{padding:17px 18px;display:flex;gap:12px;align-items:center;border-bottom:1px solid var(--line)}
+    .search-wrap{position:relative;flex:1;max-width:365px}
+    .search-wrap svg{position:absolute;left:12px;top:50%;transform:translateY(-50%);width:16px;height:16px;color:#839088;pointer-events:none}
+    input[type=search],select{height:39px;border:1px solid #dce4df;border-radius:8px;background:#fff;color:var(--ink);font:inherit;outline:none}
+    input[type=search]{width:100%;padding:0 12px 0 38px}
+    select{padding:0 34px 0 12px;min-width:155px}
+    input:focus,select:focus{border-color:#5b9b7b;box-shadow:0 0 0 3px #176c4b14}
+    .toggle{margin-left:auto;display:flex;align-items:center;gap:9px;color:#44534b;font-weight:600;white-space:nowrap;cursor:pointer}
+    .toggle input{position:absolute;opacity:0;width:1px;height:1px}
+    .switch{width:36px;height:21px;border-radius:20px;background:#d8e0db;position:relative;transition:.18s}
+    .switch:after{content:"";position:absolute;width:15px;height:15px;left:3px;top:3px;border-radius:50%;background:white;box-shadow:0 1px 3px #0002;transition:.18s}
+    .toggle input:checked+.switch{background:var(--green)}
+    .toggle input:checked+.switch:after{transform:translateX(15px)}
+    .toggle input:focus-visible+.switch{outline:3px solid #176c4b35}
+    .results-line{padding:12px 19px 10px;display:flex;align-items:center;justify-content:space-between;color:var(--muted);font-size:12px}
+    .results-line strong{color:#34443b;font-weight:650}
+    .scroll{overflow-x:auto}
+    table{width:100%;border-collapse:collapse;min-width:790px}
+    thead th{padding:11px 16px;text-align:left;background:#fafcfb;border-top:1px solid #f0f3f1;border-bottom:1px solid var(--line);color:#7b8981;font-size:10px;letter-spacing:.075em;text-transform:uppercase;font-weight:700;white-space:nowrap}
+    tbody td{padding:13px 16px;border-bottom:1px solid #eef2ef;white-space:nowrap}
+    tbody tr:last-child td{border-bottom:0}
+    tbody tr.low-highlight{background:#fff9f0}
+    tbody tr.low-highlight td:first-child{box-shadow:inset 3px 0 #e5a14b}
+    .item-name{font-weight:650;color:#203229}
+    .sku{font-size:11px;color:#8a968f;margin-top:2px}
+    .category{display:inline-flex;padding:4px 8px;border-radius:6px;background:#f1f4f2;color:#536158;font-size:12px}
+    .num{text-align:right;font-variant-numeric:tabular-nums}
+    th.num{text-align:right}
+    .low-number{color:var(--amber);font-weight:700}
+    .status{display:inline-flex;align-items:center;gap:6px;color:#66766d;font-size:12px}
+    .status:before{content:"";width:6px;height:6px;border-radius:50%;background:#7eb391}
+    .status.low{color:var(--amber);font-weight:650}
+    .status.low:before{background:#e7a14b}
+    tfoot td{padding:15px 16px;background:#fafcfb;border-top:1px solid var(--line);font-weight:700}
+    .tfoot-label{color:#536158;font-size:12px}
+    .tfoot-value{color:var(--green);font-size:16px}
+    .empty{padding:42px 20px;text-align:center;color:var(--muted)}
+    .empty strong{display:block;color:#35483d;margin-bottom:4px}
+    .footnote{padding:12px 19px;color:#829087;font-size:11px;border-top:1px solid #f0f3f1}
+    @media(max-width:760px){
+      .shell{padding:23px 16px 34px}.topline{margin-bottom:24px}.snapshot{font-size:11px}
+      h1{font-size:26px}.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:20px 0}
+      .stat{padding:14px 15px;min-height:83px}.stat-value{font-size:20px}
+      .toolbar{flex-wrap:wrap;padding:13px}.search-wrap{max-width:none;flex-basis:100%}
+      select{flex:1}.toggle{margin-left:0}
+      .results-line{padding:11px 14px}
+      tbody td,thead th,tfoot td{padding-left:12px;padding-right:12px}
+    }
+    @media(max-width:390px){.snapshot{max-width:110px;text-align:right}.stat-value{font-size:18px}.toggle{font-size:12px}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <div class="topline">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m4.5 7.7 7.5 4.4 7.5-4.4M12 12v8.5" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg></span>
+        <span>Inventory Browser</span>
+      </div>
+      <div class="snapshot"><span class="dot"></span>Inventory snapshot</div>
+    </div>
+
+    <header>
+      <h1>Stock overview</h1>
+      <p class="subtitle">Browse inventory, check reorder levels, and review stock value.</p>
+    </header>
+
+    <section class="stats" aria-label="Inventory summary">
+      <article class="stat"><div class="stat-label">Items in inventory</div><div class="stat-value" id="stat-items">—</div></article>
+      <article class="stat"><div class="stat-label">Below reorder point</div><div class="stat-value" id="stat-low">—</div></article>
+      <article class="stat"><div class="stat-label">Categories</div><div class="stat-value" id="stat-categories">—</div></article>
+      <article class="stat"><div class="stat-label">Total stock value</div><div class="stat-value money" id="stat-value">—</div></article>
+    </section>
+
+    <section class="panel" aria-label="Inventory table">
+      <div class="toolbar">
+        <label class="search-wrap">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8" stroke="currentColor" stroke-width="1.8"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <input id="search" type="search" placeholder="Search item names…" aria-label="Search item names">
+        </label>
+        <select id="category" aria-label="Filter by category"><option value="">All categories</option></select>
+        <label class="toggle" for="highlight">
+          <input id="highlight" type="checkbox">
+          <span class="switch" aria-hidden="true"></span>
+          <span>Highlight below reorder</span>
+        </label>
+      </div>
+      <div class="results-line"><span id="result-count"></span><span>Stock value = on hand × unit cost</span></div>
+      <div class="scroll">
+        <table>
+          <thead><tr>
+            <th>Item</th><th>Category</th><th>Location</th>
+            <th class="num">On hand</th><th class="num">Reorder point</th>
+            <th class="num">Unit cost</th><th class="num">Stock value</th><th>Status</th>
+          </tr></thead>
+          <tbody id="rows"></tbody>
+          <tfoot id="table-foot"></tfoot>
+        </table>
+        <div class="empty" id="empty" hidden><strong>No matching inventory</strong>Try another item name or category.</div>
+      </div>
+      <div class="footnote">Unit costs in USD per unit. Stock values are calculated from the supplied inventory.</div>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      const data = window.ARTIFACT_DATA["data-583f1c722016"];
+      const rows = data.rows;
+      const money = n => new Intl.NumberFormat("en-US", {style:"currency",currency:"USD"}).format(n);
+      const number = n => new Intl.NumberFormat("en-US").format(n);
+      const isLow = row => row.on_hand < row.reorder_point;
+      const allValue = rows.reduce((sum, row) => sum + row.on_hand * row.unit_cost_usd, 0);
+      const categories = [...new Set(rows.map(row => row.category))].sort((a,b) => a.localeCompare(b));
+      const $ = id => document.getElementById(id);
+
+      $("stat-items").textContent = number(rows.length);
+      $("stat-low").textContent = number(rows.filter(isLow).length);
+      $("stat-categories").textContent = number(categories.length);
+      $("stat-value").textContent = money(allValue);
+
+      const categorySelect = $("category");
+      categories.forEach(category => {
+        const option = document.createElement("option");
+        option.value = category;
+        option.textContent = category;
+        categorySelect.appendChild(option);
+      });
+
+      function cell(text, className) {
+        const td = document.createElement("td");
+        if (className) td.className = className;
+        td.textContent = text;
+        return td;
+      }
+
+      function render() {
+        const query = $("search").value.trim().toLocaleLowerCase();
+        const category = categorySelect.value;
+        const emphasize = $("highlight").checked;
+        const visible = rows.filter(row =>
+          row.item.toLocaleLowerCase().includes(query) &&
+          (!category || row.category === category)
+        );
+        const body = $("rows");
+        body.replaceChildren();
+        let units = 0, value = 0;
+
+        visible.forEach(row => {
+          const low = isLow(row);
+          units += row.on_hand;
+          value += row.on_hand * row.unit_cost_usd;
+          const tr = document.createElement("tr");
+          if (emphasize && low) tr.className = "low-highlight";
+
+          const item = document.createElement("td");
+          const name = document.createElement("div");
+          name.className = "item-name";
+          name.textContent = row.item;
+          const sku = document.createElement("div");
+          sku.className = "sku";
+          sku.textContent = row.sku;
+          item.append(name, sku);
+          tr.appendChild(item);
+
+          const cat = document.createElement("td");
+          const badge = document.createElement("span");
+          badge.className = "category";
+          badge.textContent = row.category;
+          cat.appendChild(badge);
+          tr.append(cat, cell(row.location));
+          tr.append(
+            cell(number(row.on_hand), "num" + (low ? " low-number" : "")),
+            cell(number(row.reorder_point), "num"),
+            cell(money(row.unit_cost_usd), "num"),
+            cell(money(row.on_hand * row.unit_cost_usd), "num")
+          );
+          const status = document.createElement("td");
+          const label = document.createElement("span");
+          label.className = "status" + (low ? " low" : "");
+          label.textContent = low ? "Below reorder" : "In range";
+          status.appendChild(label);
+          tr.appendChild(status);
+          body.appendChild(tr);
+        });
+
+        $("empty").hidden = visible.length !== 0;
+        $("table-foot").replaceChildren();
+        $("table-foot").hidden = visible.length === 0;
+        if (visible.length) {
+          const tr = document.createElement("tr");
+          const label = document.createElement("td");
+          label.colSpan = 3;
+          label.className = "tfoot-label";
+          label.textContent = "TOTAL · " + number(units) + " units";
+          tr.append(label, cell("", "num"), cell("", "num"), cell("", "num"));
+          const total = cell(money(value), "num tfoot-value");
+          total.setAttribute("aria-label", "Total stock value " + money(value));
+          tr.append(total, cell(""));
+          $("table-foot").appendChild(tr);
+        }
+        $("result-count").innerHTML = "<strong>" + number(visible.length) + "</strong> of " + number(rows.length) + " items";
+      }
+
+      $("search").addEventListener("input", render);
+      categorySelect.addEventListener("change", render);
+      $("highlight").addEventListener("change", render);
+      render();
+    })();
+  </script>
+</body>
+</html>

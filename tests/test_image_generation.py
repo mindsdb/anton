@@ -577,7 +577,7 @@ def test_a_cell_created_artifact_is_this_turns_when_its_provenance_says_so(tmp_p
         "unstamped": _artifact(store, "unstamped", None),
     }
     session = SimpleNamespace(_artifacts_touched=set(), _session_id=session_id, _turn_count=0)
-    th.track_edits_since(session, store, before)
+    th.track_edits_since(session, store, before, after=th.snapshot_existing_artifacts(store))
     assert session._artifacts_touched == {slugs[name] for name in claimed}
     assert existing not in session._artifacts_touched
 

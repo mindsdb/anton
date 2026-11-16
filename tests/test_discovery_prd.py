@@ -55,11 +55,13 @@ def _state(artifact_path: Path, **over) -> PrdState:
 async def test_write_prd_saves_the_file_and_returns_its_text(tmp_path):
     artifact_dir = tmp_path / "artifacts" / "s"
     artifact_dir.mkdir(parents=True)
-    state = _state(artifact_dir)
+    state = _state(artifact_dir, prd="# Stale PRD from the previous call")
     state.session._llm.plan = AsyncMock(return_value=_response("## Goal\nFull PRD text.\n"))
     text = await prd.write_prd(state)
     assert text == "## Goal\nFull PRD text."
     assert (artifact_dir / "prd.md").read_text(encoding="utf-8") == text
+    # The spec node renders state.prd, so a rewritten PRD must reach it too.
+    assert state.prd == text
 
 
 async def test_write_prd_restarts_the_spinner_before_the_llm_call(tmp_path):
@@ -84,27 +86,18 @@ async def test_write_prd_logs_an_llm_call_and_a_done_node(tmp_path):
     trace.node.assert_called_once_with("write_prd", "done", detail=str(artifact_dir / "prd.md"))
 
 
-async def test_write_prd_logs_a_fail_node_before_raising(tmp_path):
-    artifact_dir = tmp_path / "artifacts" / "s"
-    artifact_dir.mkdir(parents=True)
-    trace = MagicMock()
-    state = _state(artifact_dir, trace_log=trace)
-    state.session._llm.plan = AsyncMock(return_value=_response(""))
-    with pytest.raises(RuntimeError):
-        await prd.write_prd(state)
-    trace.node.assert_called_once_with("write_prd", "fail", detail="model replied with no text")
-
-
 async def test_write_prd_raises_on_an_empty_reply_instead_of_writing_an_empty_file(tmp_path):
     """Same failure shape as draft_brief's guard: an empty reply must never
     become an empty prd.md on disk reported back as `prd_written`."""
     artifact_dir = tmp_path / "artifacts" / "s"
     artifact_dir.mkdir(parents=True)
-    state = _state(artifact_dir)
+    trace = MagicMock()
+    state = _state(artifact_dir, trace_log=trace)
     state.session._llm.plan = AsyncMock(return_value=_response(""))
     with pytest.raises(RuntimeError, match="no text"):
         await prd.write_prd(state)
     assert not (artifact_dir / "prd.md").exists()
+    trace.node.assert_called_once_with("write_prd", "fail", detail="model replied with no text")
 
 
 async def test_write_prd_updates_the_artifact_type_when_it_changed(tmp_path):
@@ -155,6 +148,7 @@ def test_write_prd_instruction_promotes_accepted_proposals_and_defaults():
     text = prd._WRITE_PRD_INSTRUCTION
     assert "Proposals are accepted" in text
     assert "the stated default is the decision" in text
+    assert "Its Assumptions are decisions" in text
     assert "expanding the same five sections" not in text
 
 
@@ -202,21 +196,7 @@ def test_the_prd_no_longer_demands_connection_code():
     # The new framing: this document records the agreement, it is not the
     # only thing downstream reads.
     assert "not the only thing the build step reads" in _WRITE_PRD_INSTRUCTION
-
-
-async def test_write_prd_updates_the_state_not_only_the_file(tmp_path):
-    """`prd_section` renders `state.prd` and declares it authoritative. A PRD
-    rewritten during this call — which is what every user correction produces
-    — has to reach the spec node, or the correction is lost inside one run."""
-    artifact_dir = tmp_path / "artifacts" / "s"
-    artifact_dir.mkdir(parents=True)
-    state = _state(artifact_dir, prd="# Stale PRD from the previous call")
-    state.session._llm.plan = AsyncMock(
-        return_value=_response("## Goal\nWeekly, not daily.\n")
-    )
-    await prd.write_prd(state)
-    assert state.prd != "# Stale PRD from the previous call"
-    assert state.prd == (artifact_dir / "prd.md").read_text(encoding="utf-8")
+    assert "the user agreed to" not in _WRITE_PRD_INSTRUCTION
 
 
 def test_write_prd_instruction_names_the_latest_brief_as_the_source():
@@ -270,13 +250,3 @@ def test_write_prd_instruction_asks_for_brevity_without_a_line_count():
     assert "language of the user request" not in text
     assert "as short as the requirements allow" in text
     assert "lines" not in text.lower()
-
-
-def test_write_prd_turns_assumptions_into_requirements():
-    """The act-first brief has an Assumptions section instead of Proposals
-    and Questions; without this rule `write_prd` could drop what the user saw."""
-    assert "Its Assumptions are decisions" in prd._WRITE_PRD_INSTRUCTION
-
-
-def test_write_prd_does_not_claim_an_agreement():
-    assert "the user agreed to" not in prd._WRITE_PRD_INSTRUCTION

@@ -50,12 +50,9 @@ class TestPalettes:
 
 
 class TestBuildRichTheme:
-    def test_returns_theme_object(self):
-        theme = build_rich_theme("dark")
-        assert isinstance(theme, Theme)
-
     def test_theme_has_anton_keys(self):
         theme = build_rich_theme("dark")
+        assert isinstance(theme, Theme)
         assert "anton.cyan" in theme.styles
         assert "anton.glow" in theme.styles
         assert "phase.planning" in theme.styles

@@ -9,13 +9,16 @@ import httpx2 as httpx
 import inspect
 import random
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
 import logging
 import re
+import secrets
 import sys
+import threading
+import time
 from typing import TYPE_CHECKING, List, Literal, get_args
 import os
 import uuid
@@ -27,6 +30,12 @@ from anton.core.backends.base import Cell, ScratchpadRuntimeFactory
 from anton.core.backends.local import local_scratchpad_runtime_factory
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.datasources.data_vault import DataVault
+from anton.core.idle_scratchpad import (
+    IDLE_ROUNDS_BEFORE_WITHHOLD,
+    IDLE_SCRATCHPAD_NOTICE,
+    round_is_idle,
+    without_scratchpad,
+)
 from anton.core.llm import jev as _jev
 from anton.core.llm.effort import (
     TRUNCATION_RETRY_NOTE,
@@ -95,6 +104,7 @@ from anton.core.llm.provider import (
     usage_log_enabled,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
+from anton.core.llm.ui_locale import ui_locale_line, validated_ui_locale
 from anton.core.llm.tracing import (
     JEV_CALL_ROLE,
     VALID_SURFACES,
@@ -150,7 +160,7 @@ from anton.core.utils.scratchpad import (
     scratchpad_action,
 )
 from anton.core.utils.write_check import parse_http_write_rules
-from anton.core.utils.write_hold import parse_relay_hosts
+from anton.core.utils.write_hold import parse_relay_hosts, unchecked_mode
 # Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
 # handle_scratchpad's own exec branch (tool_handlers.py) rather than duplicated
 # here, since this inline streaming exec bypasses that handler entirely.
@@ -165,7 +175,7 @@ from anton.core.tools.tool_handlers import (
     page_check_lines,
     preliminary_cell,
     resolve_artifact_store,
-    snapshot_existing_artifacts,
+    snapshot_cell_artifacts,
     unanswered_question_line,
 )
 from anton.core.artifacts.page_copies import TurnPages
@@ -329,6 +339,25 @@ _NOT_RUN_AFTER_UNANSWERED_QUESTION = (
 )
 
 
+_NOT_RUN_PAST_TIME_LIMIT = (
+    "Not run: this task reached its time limit before this step started"
+)
+
+
+def _not_run_past_time_limit(tc: ToolCall) -> dict:
+    """The `tool_result` for a call the time limit kept from starting.
+
+    The round's next check asks the user; a "Keep going" lets the model send
+    the call again.
+    """
+    return {
+        "type": "tool_result",
+        "tool_use_id": tc.id,
+        "content": f"{_NOT_RUN_PAST_TIME_LIMIT}.",
+        "is_error": True,
+    }
+
+
 def _not_run_after_unanswered_question(tc: ToolCall) -> dict:
     """The `tool_result` for a call that came after an unanswered question.
 
@@ -396,6 +425,7 @@ if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.chat_ui import EscapeWatcher
+    from anton.core.browser.config import BrowserConfig
     from anton.core.artifacts.live_app_slots import LiveAppHost
     from anton.core.llm.client import LLMClient
     from anton.core.mcp.client import McpSession
@@ -556,7 +586,10 @@ class _VerifierVerdict(BaseModel):
             # A bare "came back empty" claimed the shape COMPLETE carves out as
             # a genuine none-found answer, and STUCK is the later bullet.
             "(blocked, no access, came back empty because the source failed "
-            "rather than because nothing matched, cannot be installed), or that "
+            "rather than because nothing matched, cannot be installed; looking in "
+            "several tables, fields, documents or endpoints and finding the value "
+            "in none of them, including guessed names rejected as unknown, is a "
+            "search that matched nothing, not failed approaches), or that "
             "the required tool is absent from this environment, and the assistant "
             "told the user plainly what it could not get instead of guessing — "
             "judged on the failed attempts in the transcript, not on the "
@@ -569,7 +602,14 @@ class _VerifierVerdict(BaseModel):
             # both, and the hand-back would re-ask what the assistant just did.
             "If the assistant instead asked the "
             "user to supply what it could not get, that is WAITING (above), not "
-            "STUCK."
+            "STUCK, even when the reply also calls the value unavailable; 'if you "
+            "have X, share it and I can check' is such an ask. "
+            # Correct "not in the data" answers matched the clause above by their
+            # lookups and rejected table-name guesses and ended as hand-backs.
+            "A source that returned its contents (it did not refuse, error, time "
+            "out, or say it has no access) but does not record what was asked has "
+            "not failed: when the assistant said so without substituting a related "
+            "figure, that is COMPLETE (above), not STUCK."
         )
     )
     reason: str = Field(description="One brief sentence explaining the verdict.")
@@ -765,10 +805,11 @@ _TRANSIENT_VERDICT_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 # Verdict-call failures that are DETERMINISTIC DENIALS: the provider will give
-# the identical answer on every retry while the latch lives — a wallet that can't pay
-# for the verifier's model (TokenLimitExceeded, raised as one of its subclasses
+# the identical answer on every retry while the latch lives — a billing stop on the
+# verifier's model, from an empty wallet, allowance or spent budget (TokenLimitExceeded, raised as one of its subclasses
 # for the gate's 402 ``wallet_empty`` / 429 ``included_allowance_exhausted`` /
-# 429 ``free_air_daily_spend_fuse_exceeded``, all matched on the exact code;
+# 429 ``free_air_daily_spend_fuse_exceeded`` / 402 ``budget_exceeded``, all
+# matched on the exact code;
 # velocity 429s map to TransientProviderError and never land here) or a model
 # id that doesn't resolve for this key (ModelUnavailableError: 404
 # model-not-found / 403 model-access-denied / 403 model-restricted, the last
@@ -961,17 +1002,29 @@ _SPEND_CEILING_RESERVE = 200_000
 # put the turn back up near the ceiling. See `_grant_spend_ceiling_grace`.
 _SPEND_CEILING_GRACE_FLOOR = 100_000
 
-# One-time round-cap extension (ENG-1893), granted the first time a turn
-# breaches max_tool_rounds. Sized to the "2-3 more tool calls" this exists
-# for — add a closing step, save, verify — not a way to talk past the cap
-# repeatedly: see the grant sites for the one-shot guard.
-_ROUND_CAP_GRACE_ROUNDS = 3
-
 # What one "Keep going" at a turn limit buys: the limit rises by this many times
 # its configured size. Replayed against 30 days of limit stops, 4x let 116 of
 # 120 interrupted-then-finished runs complete after one question; one more
 # equal window removed none of the repeat stops.
 _LIMIT_CONTINUE_MULTIPLIER = 4
+
+# The time limit grows by one window per "Keep going", not four: four more
+# hours on one answer would hold a hosted pod, its model key and the user's
+# allowance far longer than anyone agreed to by clicking once.
+_TIME_LIMIT_CONTINUE_MULTIPLIER = 1
+
+# How many times the time limit asks before it hands back without asking:
+# the limit plus three more windows. The hosting side's hard ceiling and the
+# turn key's lifetime sit just above that, so the turn ends with a summary
+# rather than being cut off.
+_TIME_LIMIT_MAX_CONTINUES = 3
+
+def _duration_text(seconds: int, *, more: bool = False) -> str:
+    """A time limit as the user reads it: whole minutes, or seconds under one.
+    With `more`, "3 more minutes"."""
+    count, unit = (seconds, "second") if seconds < 60 else (seconds // 60, "minute")
+    return f"{count} {'more ' if more else ''}{unit}{'' if count == 1 else 's'}"
+
 
 # Closes every hand-back notice. The notices reach the model as user-role
 # messages, so without this it reads the pause as the user's request and tells
@@ -1064,8 +1117,38 @@ _VERIFIER_JUDGMENT_RUBRIC = (
     "attempt. Conversely, an assistant that implied success "
     "while the data its answer relies on errored or came back empty is INCOMPLETE, "
     "not COMPLETE — and supplying such values with a disclaimer that they are "
-    "indicative or unverified is still implying success, not honesty."
+    "indicative or unverified is still implying success, not honesty. A source "
+    "that returned its contents but does not record what was asked has not "
+    "failed, and neither has a guessed table or field name rejected as unknown: "
+    "a reply that says the value is not recorded, without substituting a "
+    "related figure, is COMPLETE, not STUCK."
 )
+
+# Opens the block that shows the model text the user added mid-turn (ENG-4194).
+_USER_INPUT_PREFIX = (
+    "The user added this while you were working. Take it into account from here on:"
+)
+# Each added message is wrapped in this tag with a marker drawn per turn, so a
+# tool result that imitates an addition can't reproduce it (ENG-4194).
+_USER_INPUT_TAG = "user_addition"
+# Any user_addition tag inside the user's own text is stripped before wrapping.
+_USER_INPUT_TAG_RE = re.compile(r"<\s*/?\s*user_addition\b[^>]*>", re.IGNORECASE)
+# Appended only when the added text arrives after the model's final answer: the
+# reply that follows replaces that answer in what the user sees. An anton note,
+# so the completion check's transcript leaves it out.
+_USER_INPUT_REPLY_CLAUSE = (
+    f"{ANTON_NOTE} Your next reply replaces your previous answer in what the user "
+    "sees, so it must stand on its own."
+)
+# Extra rounds a turn may take for added text that arrived after its final answer.
+_MAX_USER_INPUT_ROUNDS = 2
+# Limits on what one turn takes; past them `add_user_input` refuses and the
+# host keeps the message as the next task.
+_MAX_USER_INPUTS_PER_TURN = 20
+_MAX_USER_INPUT_CHARS = 4000
+_MAX_USER_INPUT_TURN_BYTES = 64 * 1024
+# Most added text one injected block carries; the rest waits for the next step.
+_MAX_USER_INPUT_BLOCK_CHARS = 16000
 
 # Opens the verifier's continuation and stuck notes. A "SYSTEM:" note that says "do not
 # mention this" reads as an injection: Azure's prompt filter blocks variants of it, and
@@ -1078,7 +1161,9 @@ _NOTE_PREFIXES = ("SYSTEM:", _CHECK_NOTE, ANTON_NOTE)
 _NO_GUESS_AT_LIMIT = (
     "Report only what your tool results actually showed. If you have not found the "
     "answer, say plainly that you could not find it; do not estimate, extrapolate or "
-    "state a figure you did not retrieve."
+    "state a figure you did not retrieve. A result your tools did compute is not a "
+    "guess: if you have one, give it with the assumptions it rests on, rather than "
+    "withholding it because something is still unexplained."
 )
 
 
@@ -1549,7 +1634,7 @@ def _render_verify_transcript(
                 btype = block.get("type")
                 if btype == "text":
                     text = (block.get("text") or "").strip()
-                    if not text:
+                    if not text or (role == "user" and text.startswith(_NOTE_PREFIXES)):
                         continue
                     if preamble:
                         # A tool_use rides with this text, so it is never the
@@ -1622,18 +1707,6 @@ def _role_tokens(tc: TurnCost, role: str) -> str:
 def _role_calls(tc: TurnCost, role: str) -> str:
     slice_ = tc.by_role.get(role)
     return str(slice_.calls if slice_ else 0)
-
-
-def _record_grace(turn_cost: TurnCost | None, tag: str) -> None:
-    """Add `tag` ("round" or "ceiling") to `turn_cost.grace_granted`,
-    comma-joined, deduplicated, and sorted — alphabetical rather than
-    firing order, so the two-grace value is one fixed string either way."""
-    if turn_cost is None:
-        return
-    tags = turn_cost.grace_granted.split(",") if turn_cost.grace_granted else []
-    if tag not in tags:
-        tags.append(tag)
-        turn_cost.grace_granted = ",".join(sorted(tags))
 
 
 @functools.cache
@@ -1825,6 +1898,14 @@ class ChatSessionConfig:
     # in every surface breakdown, and a wrong surface is worse than an absent
     # one.
     surface: str | None = None
+    # The language the user's app is set to, as a tag from
+    # `anton.core.llm.ui_locale.UI_LOCALE_NAMES` (en, es, pt-BR, de, fr, it, ja,
+    # ko, zh-CN), or None
+    # when the host did not say (ENG-4149). Adds one line to the system prompt:
+    # reply in the language the user writes in, and in this one when that is
+    # unclear. Untrusted like `surface`: an unsupported value is dropped with a
+    # warning, and None leaves the prompt exactly as it was.
+    ui_locale: str | None = None
     # Trusted deployment facts supplied by the host. Omitted by desktop, hosted
     # web and CLI callers, whose identity and memory prompts stay unchanged.
     deployment_identity: DeploymentIdentity | None = None
@@ -1910,6 +1991,18 @@ class ChatSessionConfig:
     # `ChatSession.close()` can tear them down at turn end, the same way it
     # already closes the LLM client's transports.
     mcp_sessions: list["McpSession"] = field(default_factory=list)
+    # The browser the `browser` tool drives; the tool is registered only with
+    # one. Hosts pass it: cowork-server for the Cowork desktop app's own
+    # browser, and the cloud pod for the MindsHub browser router. None means no
+    # browser tool, and nothing falls back to settings or the environment.
+    browser: "BrowserConfig | None" = None
+    # Asks the user's open preview of an artifact whether it runs (ENG-4207):
+    # `await preview_checker(artifact_slug, timeout_s)` returns the host's
+    # answer, `{"status": "passed" | "failed" | "unavailable", "errors": [...],
+    # "ms": int}`, or None when no preview answered. `edit_artifact` asks it
+    # after its own checks; None or "unavailable" counts as unverified, never
+    # as passed. None (the default) asks no preview.
+    preview_checker: "Callable[[str, float], Awaitable[dict | None]] | None" = None
 
 
 class ChatSession:
@@ -1944,6 +2037,7 @@ class ChatSession:
         # ``external_search_provider`` / ``exa_api_key`` via getattr so the
         # session stays decoupled from the host's settings shape.
         self._settings = config.settings
+        self._preview_checker = config.preview_checker
         self._max_tool_rounds = s.max_tool_rounds
         self._max_continuations = s.max_continuations
         self._verify_min_tool_rounds = s.verify_min_tool_rounds
@@ -1964,11 +2058,30 @@ class ChatSession:
         # this is __init__ so a long CLI session gets it too.
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
-        self._round_cap_grace_used = False
         # Headroom the user granted this turn by answering "Keep going" at a
         # limit. Reset per turn in turn_stream.
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        # Tool rounds this turn has run. The step limit is per task, so the
+        # count spans verifier continuations and provider-error retries alike.
+        # Reset per turn in turn_stream.
+        self._turn_tool_rounds = 0
+        # Verifier-forced continuations this turn has run, against
+        # `max_continuations`. Per turn for the same reason: a retry must
+        # not hand out a fresh set. Reset per turn in turn_stream.
+        self._turn_continuations = 0
+        # Wall-clock limit per turn (0 = none) and the seconds "Keep going" has
+        # added to it. The clock starts when turn_stream starts the turn, and
+        # counts time spent waiting on the user: the turn holds its pod and key
+        # for all of it.
+        self._max_turn_seconds = getattr(s, "max_turn_seconds", 0) or 0
+        self._time_limit_continued_s = 0
+        self._turn_started_monotonic: float | None = None
+        # Set when a "Keep going" past the time limit resumed work after the
+        # answer the user read. Like a verifier continuation, a later hand-back
+        # must then announce itself so the host restores that answer. Reset per
+        # turn in turn_stream.
+        self._time_limit_resumed = False
         # The tool calls this turn ran, for the report `_stream_handback_diagnosis`
         # writes when the content filter stops every hand-back. Reset per turn in
         # turn_stream.
@@ -2060,6 +2173,9 @@ class ChatSession:
         # skill is recalled. Populated in `_build_tools`.
         self._deferred_bundles: dict[str, list["ToolDef"]] = {}
         self._workspace = config.workspace
+        self._browser_config = config.browser
+        self._browser_state = None
+        self._tidy_browser = False
         self._data_vault = config.data_vault
         self._connector_usage_notes = config.connector_usage_notes
         # Kept so an artifact backend can be given the same project .env the
@@ -2123,6 +2239,7 @@ class ChatSession:
         self._session_id = config.session_id
         self._harness = config.harness
         self._surface = _validated_surface(config.surface)
+        self._ui_locale = validated_ui_locale(config.ui_locale)
         self._deployment_identity = (
             DeploymentIdentity.model_validate(config.deployment_identity)
             if config.deployment_identity is not None else None
@@ -2165,6 +2282,32 @@ class ChatSession:
         # Out-of-band event path, attached for the duration of a
         # `turn_stream` turn only; None outside one.
         self.emitter = None
+        # Text the user added while a turn runs (ENG-4194). The host calls
+        # `add_user_input` from any thread; the tool loop shows unread entries
+        # to the model at its next step boundary. Only unread entries are kept.
+        self._user_input_lock = threading.Lock()
+        self._user_inputs: list[dict] = []
+        self._user_input_turn_running = False
+        # Shown to the model by a call that has not completed yet. They count
+        # as unread until it does: a failed or cancelled call returns them.
+        # Each entry also holds the history block that carried it.
+        self._user_inputs_in_flight: list[dict] = []
+        # What this turn has taken so far, against the per-turn limits.
+        self._user_input_count = 0
+        self._user_input_bytes = 0
+        # Texts the model has read this turn, for the completion check.
+        self._user_inputs_seen: list[str] = []
+        # Per-turn marker on the user_addition tags.
+        self._user_input_marker = secrets.token_hex(8)
+        # Extra model rounds this turn took because the model finished with
+        # added text still unread. Capped by `_MAX_USER_INPUT_ROUNDS`.
+        self._user_input_rounds = 0
+        # Called with the ids just shown to the model, so the host can mark
+        # them read. Runs on the event loop; must not block.
+        self.on_user_input_read: Callable[[list[str]], None] | None = None
+        # Called once at turn start, before any model call, when the turn
+        # starts taking added text. Runs on the event loop; must not block.
+        self.on_user_input_ready: Callable[[], None] | None = None
         self.question_count = 0
         # Seconds spent waiting on humans during the current tool dispatch,
         # subtracted from the tool's reported elapsed time.
@@ -2184,9 +2327,15 @@ class ChatSession:
             # The relayed hosts count only with a relay to hold their writes,
             # so a stray hosts setting never drops a card.
             relayed = getattr(s, "write_relay_hosts", "") if self._write_relay_url else ""
+            http_rules = parse_http_write_rules(listed if isinstance(listed, str) else "")
+            relayed_hosts = parse_relay_hosts(relayed if isinstance(relayed, str) else "")
             self._write_gate = WriteGate(
-                http_rules=parse_http_write_rules(listed if isinstance(listed, str) else ""),
-                relayed_hosts=parse_relay_hosts(relayed if isinstance(relayed, str) else ""),
+                http_rules=http_rules,
+                relayed_hosts=relayed_hosts,
+                unchecked=unchecked_mode(
+                    getattr(s, "write_approval_unchecked", "all"), relay_url=self._write_relay_url,
+                    relayed_hosts=relayed_hosts, http_rules=http_rules,
+                ),
             )
 
         coding_provider = config.llm_client.coding_provider
@@ -2241,6 +2390,11 @@ class ChatSession:
         # project-wide) directory can never be mistaken for this turn's work.
         # Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
+        # False once a snapshot around one of this turn's cells could not
+        # read the artifacts folder or an entry in it, so an edit there may
+        # be missing from `_artifacts_touched`
+        # (`tool_handlers.snapshot_cell_artifacts`). Reset every turn.
+        self._artifacts_touched_complete = True
         # (artifact slug, page) -> how that page last fared in a browser this
         # turn (`passed`, `failed` or `unverified`), from generate_artifact
         # and the checks after each cell. On a sandboxed deployment the turn
@@ -2434,6 +2588,15 @@ class ChatSession:
         surface, and must not be able to mutate the session's own record.
         """
         return set(self._artifacts_touched)
+
+    @property
+    def artifacts_touched_complete(self) -> bool:
+        """Whether `artifacts_touched` names every artifact this turn's cells
+        edited. False once a snapshot around a cell could not read the
+        artifacts folder or an entry in it, since an edit there goes unseen;
+        a host should then diff the whole artifacts folder instead.
+        """
+        return self._artifacts_touched_complete
 
     def _unverified_page_lines(self) -> list[str]:
         """The lines that end the turn's final message on a sandboxed
@@ -3188,6 +3351,8 @@ class ChatSession:
             datasource_context=ds_ctx,
             skill_store=self._skill_store,
             workspace_context=workspace_ctx,
+            # ENG-4149. Fixed for the session, so it sits with the stable lines.
+            ui_locale_context=ui_locale_line(getattr(self, "_ui_locale", None)),
         )
 
         return prompt
@@ -3472,12 +3637,31 @@ class ChatSession:
             )
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
+            # The artifact editor (ENG-4207): changes to an existing artifact go
+            # to edit_artifact, and generate_artifact keeps rebuilds.
+            from anton.core.tools.edit_artifact import (
+                EDIT_ARTIFACT_TOOL,
+                editor_enabled,
+                route_edits_to_editor,
+            )
+
+            if editor_enabled(self._settings):
+                generate = route_edits_to_editor(generate)
+                self.tool_registry.register_tool(EDIT_ARTIFACT_TOOL)
             self.tool_registry.register_tool(generate)
             # Pictures, saved as image artifacts — so also only with a
             # workspace, and only once `_settle_image_offer` found an images
             # API to send them to.
             if getattr(self, "_image_offer", None):
                 self.tool_registry.register_tool(self._image_tool())
+
+        # The shared browser: only when the host gave one. The credential is
+        # resolved per call, so a session without one still registers it and
+        # the tool reports the missing login itself.
+        if self._browser_config is not None:
+            from anton.core.browser.tool import build_browser_tool
+
+            self.tool_registry.register_tool(build_browser_tool())
 
     def _image_tool(self) -> ToolDef:
         """`generate_image`, offering the pad's helper only where it can work:
@@ -3564,6 +3748,14 @@ class ChatSession:
                 # Provider clients own an HTTP pool. This runs even if the
                 # steps above raise, or the pool outlives the process.
                 try:
+                    if self._browser_state is not None:
+                        # Jev may close a browser the task is done with; its tabs are noted.
+                        # A turn tidies once: after the cloud turn's own tidy
+                        # before `turn_completed`, this finds nothing to do.
+                        from anton.core.browser.tool import tidy_after_turn
+
+                        await tidy_after_turn(self)
+                        await self._browser_state.aclose()
                     if self._jev_http is not None:
                         await self._jev_http.aclose()
                 finally:
@@ -4906,10 +5098,10 @@ class ChatSession:
         message for a task that never started.
 
         `TurnCost.rounds` is turn-wide (it accumulates across verifier-forced
-        continuations rather than resetting with the loop-local counter), so
-        `> 1` means at least one round has completed its dispatch — including
-        rounds from an earlier continuation, which is why a continuation cannot
-        hand out a fresh free round.
+        continuations, as does `self._turn_tool_rounds`), so `> 1` means at
+        least one round has completed its dispatch — including rounds from an
+        earlier continuation, which is why a continuation cannot hand out a
+        fresh free round.
 
         Belt and braces with the reserve cap in `_spend_ceiling_gate`: that cap
         keeps the gate proportional to the ceiling, this keeps the guarantee true
@@ -4939,8 +5131,7 @@ class ChatSession:
         first check, before any tool had been dispatched, and the turn still
         paid for two calls. Measured at a 100k ceiling with 190k contexts: zero
         tools run, 400k spent, 300% over the number the user asked for. The cap
-        binds only below ~2x the reserve; at the 1.25M default it changes
-        nothing.
+        binds only below ~2x the reserve; at the default it changes nothing.
 
         The bound this produces is close, not exact: the reserve is derived from
         `peak_context_tokens` (input + cache_read + cache_creation) but compared
@@ -4994,7 +5185,7 @@ class ChatSession:
         self._spend_ceiling_grace_used = True
         if self._turn_cost is not None:
             self._turn_cost.grace_tokens = self._spend_ceiling_grace_tokens
-        _record_grace(self._turn_cost, "ceiling")
+            self._turn_cost.grace_granted = "ceiling"
 
     def _limit_reached(self, limit: str) -> str:
         """Names the limit that stopped the turn.
@@ -5014,13 +5205,31 @@ class ChatSession:
         if limit == "spend_ceiling":
             ceiling = self._max_turn_tokens + self._spend_ceiling_continued_tokens
             return f"This task reached its limit of {ceiling:,} tokens per request"
+        if limit == "time_limit":
+            allowed = _duration_text(self._max_turn_seconds + self._time_limit_continued_s)
+            return f"This task reached its time limit of {allowed} per request"
         cap = self._max_tool_rounds + self._round_cap_continued_rounds
         return f"This task reached its limit of {cap} steps per request"
 
     def _grant_limit(self, limit: str) -> None:
-        """Raise `limit` by `_LIMIT_CONTINUE_MULTIPLIER` times its configured
-        size for the rest of the turn."""
-        if limit == "spend_ceiling":
+        """Raise `limit` for the rest of the turn: by `_LIMIT_CONTINUE_MULTIPLIER`
+        times its configured size, or by `_TIME_LIMIT_CONTINUE_MULTIPLIER` for
+        the time limit."""
+        if limit == "time_limit":
+            # One window from the answer, not from the old limit, so a long last
+            # cell and the wait for the answer don't eat it; never past
+            # `_TIME_LIMIT_MAX_CONTINUES` windows in all, which the host's
+            # backstop and the turn key's lifetime are sized for.
+            window = _TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds
+            elapsed = (
+                int(time.monotonic() - self._turn_started_monotonic)
+                if self._turn_started_monotonic is not None else 0
+            )
+            self._time_limit_continued_s = min(
+                max(self._time_limit_continued_s + window, elapsed - self._max_turn_seconds + window),
+                _TIME_LIMIT_MAX_CONTINUES * window,
+            )
+        elif limit == "spend_ceiling":
             self._spend_ceiling_continued_tokens += (
                 _LIMIT_CONTINUE_MULTIPLIER * self._max_turn_tokens
             )
@@ -5032,19 +5241,38 @@ class ChatSession:
     async def _ask_to_continue_past_limit(self, limit: str, user_message: str = ""):
         """Decide whether the turn keeps going past a limit.
 
-        `limit` is "spend_ceiling" or "round_cap". Yields ``("event", ev)``,
-        then ``("result", granted)``. Granted raises that limit by
-        `_LIMIT_CONTINUE_MULTIPLIER` times its configured size for the rest of
-        the turn. Two ways to grant, in order:
+        `limit` is "spend_ceiling", "round_cap" or "time_limit". Yields
+        ``("event", ev)``, then ``("result", granted)``. Granted raises that
+        limit for the rest of the turn (`_grant_limit`). Only a turn that can
+        ask a person grants anything. With no one to ask (no elicitor that
+        takes a choice, or no emitter, as in `turn()`), even a message saying
+        "don't stop" grants nothing: it returns False and the caller hands back
+        at the configured limit. "Can ask" is read from the elicitor the host
+        injects, so this holds for `turn()` and cloud turns, which inject none
+        when no one is there; a host that injects a choice elicitor on an
+        unattended turn still lets that turn's message grant.
+        Otherwise, two ways to grant, in order:
 
         1. The message that started this turn already says to keep going or
            finish. Honored once per limit per turn, with a progress line
            naming the limit, so the user is not asked what they just said.
         2. A "Keep going / Stop here" question naming the limit. "Stop
-           here", Skip, a timeout, or a host that cannot ask returns False
-           and the caller hands back as before.
+           here", Skip or a timeout returns False and the caller hands back
+           as before.
         """
-        if limit not in self._limits_passed_by_message and await self._user_authorized_finishing(
+        if not self._can_ask_a_choice():
+            yield "result", False
+            return
+        if limit == "time_limit" and self._max_turn_seconds > 0 and (
+            self._time_limit_continued_s
+            >= _TIME_LIMIT_MAX_CONTINUES * _TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds
+        ):
+            yield "result", False
+            return
+        # The time limit always asks: "don't stop" in the message can't speak
+        # for the extra hour, and the host extends the turn's credentials only
+        # when the question is answered.
+        if limit != "time_limit" and limit not in self._limits_passed_by_message and await self._user_authorized_finishing(
             user_message
         ):
             # Named before the grant, which would report the raised limit.
@@ -5056,11 +5284,6 @@ class ChatSession:
             yield "event", StreamTaskProgress(phase="analyzing", message=note)
             yield "result", True
             return
-        if self.emitter is None:
-            # `turn()` runs without an emitter, so there is no one to ask and
-            # nothing to drain; the caller hands back as it always did.
-            yield "result", False
-            return
         inner = self._run_draining(self._continue_question(limit))
         try:
             async for kind, item in inner:
@@ -5071,6 +5294,17 @@ class ChatSession:
                 yield kind, item
         finally:
             await inner.aclose()
+
+    def _can_ask_a_choice(self) -> bool:
+        """Whether a "choice" question can reach a person this turn: the same
+        test `elicit` applies before publishing one. Inferred from what the
+        host injects, so a host whose turn has no one to answer must not
+        inject an elicitor."""
+        return (
+            self.emitter is not None
+            and self.elicitor is not None
+            and "choice" in self.elicitor.supported_kinds
+        )
 
     async def _user_authorized_finishing(self, user_message: str) -> bool:
         """Whether this turn's own message tells the agent to keep going.
@@ -5112,6 +5346,9 @@ class ChatSession:
         if limit == "spend_ceiling":
             more = f"Allow up to {_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_tokens:,} more tokens"
             cost = " Continuing uses more tokens."
+        elif limit == "time_limit":
+            more = f"Allow up to {_duration_text(_TIME_LIMIT_CONTINUE_MULTIPLIER * self._max_turn_seconds, more=True)}"
+            cost = ""
         else:
             more = f"Allow up to {_LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds} more steps"
             cost = ""
@@ -5127,13 +5364,51 @@ class ChatSession:
             allow_custom=False,
             timeout_s=getattr(self.elicitor, "timeout_s", None),
         )
-        answer = await elicit(self, f"limit:{uuid.uuid4().hex}", request)
+        # The time limit asks outside the model's question budget: a turn that
+        # spent its questions would otherwise end at the limit without asking.
+        # Its id says which limit asked: the web host extends the turn's model
+        # key on Keep going to this question, and only this one.
+        prefix = "limit:time:" if limit == "time_limit" else "limit:"
+        answer = await elicit(
+            self, f"{prefix}{uuid.uuid4().hex}", request, counted=limit != "time_limit",
+        )
         return answer.status == "answered" and answer.values == ("continue",)
+
+    @property
+    def _continuation_pending(self) -> bool:
+        """Whether this turn has resumed past an answer the user already read:
+        a verifier continuation, a "Keep going" past the time limit, or a
+        round taken for added user text (ENG-4194). A hand-back after any of
+        them must announce itself (`cancels_continuation`)."""
+        return (
+            self._turn_continuations > 0
+            or self._time_limit_resumed
+            or self._user_input_rounds > 0
+        )
+
+    def _time_limit_reached(self) -> bool:
+        """Whether this turn has run past its time limit. Never on a host that
+        sets no limit, or outside a turn."""
+        if self._max_turn_seconds <= 0 or self._turn_started_monotonic is None:
+            return False
+        allowed = self._max_turn_seconds + self._time_limit_continued_s
+        return time.monotonic() - self._turn_started_monotonic >= allowed
+
+    def _time_limit_notice(self) -> str:
+        """The notice for a time-limit stop, worded like the other limits'."""
+        return (
+            f"{ANTON_NOTE} This task has run for as long as one request may. "
+            "Pause here. Summarize what you have accomplished so far and what remains. "
+            f"{_NO_GUESS_AT_LIMIT} "
+            "Do NOT retry automatically — wait for the user's response. "
+            + _limit_handback_clause(self._limit_reached("time_limit"))
+            + _HANDBACK_NOT_USER_CLAUSE
+        )
 
     def _spend_ceiling_notice(self) -> str:
         """The SYSTEM injection for a ceiling stop.
 
-        Mirrors the 25-round cap's pause-and-ask wording deliberately: the user
+        Mirrors the round cap's pause-and-ask wording deliberately: the user
         already meets that shape when a long turn stops, and two different
         "I stopped, shall I go on?" behaviours would read as two different
         products. `Do NOT retry automatically` is what keeps this a question
@@ -5193,7 +5468,7 @@ class ChatSession:
         if self._jev_http is None:
             # Same TLS setting as the provider, e.g. behind an intercepting proxy.
             self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)
-        return await _jev.classify(
+        result = await _jev.classify(
             base_url=base_url,
             api_key=api_key,
             headers=headers,
@@ -5206,6 +5481,18 @@ class ChatSession:
             timeout_s=self._jev_timeout_s,
             client=self._jev_http,
         )
+        if result.error == "http_403":
+            # MindsHub refuses Jev to this organization, for zero data retention
+            # or an admin's model rule, and will refuse every later check too:
+            # this session's later checks use the LLM verifier alone. A desktop
+            # session spans the conversation; a hosted turn builds its own
+            # session, so there it lasts the turn.
+            self._jev_enabled = False
+            logger.info("Jev refused (HTTP 403); verifying with the LLM for the rest of this session")
+            client, self._jev_http = self._jev_http, None
+            if client is not None:
+                await client.aclose()
+        return result
 
     def _jev_decides(self, result: "_jev.JevVerdict | None") -> bool:
         """Jev settles only a confident COMPLETE or WAITING; the rest needs the LLM's reason."""
@@ -5250,7 +5537,7 @@ class ChatSession:
         label: str,
         answered: bool,
         cancels_continuation: bool = False,
-        limit: Literal["round_cap", "spend_ceiling"] | None = None,
+        limit: Literal["round_cap", "spend_ceiling", "time_limit"] | None = None,
     ):
         """Stream a hand-back diagnosis and persist exactly what the user read.
 
@@ -5417,6 +5704,7 @@ class ChatSession:
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
                 self._book_content_filter(event)
+                self._confirm_user_inputs_read(event)
                 yield event
             return
         except ContextOverflowError:
@@ -5432,6 +5720,7 @@ class ChatSession:
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
                 self._book_content_filter(event)
+                self._confirm_user_inputs_read(event)
                 yield event
             return
         except ContextOverflowError:
@@ -5443,6 +5732,7 @@ class ChatSession:
         )
         async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
             self._book_content_filter(event)
+            self._confirm_user_inputs_read(event)
             yield event
 
     def _book_content_filter(self, event: StreamEvent) -> None:
@@ -5711,6 +6001,142 @@ class ChatSession:
             )
         return ""
 
+    def add_user_input(self, addon_id: str, text: str) -> bool:
+        """Queue *text* for the running turn. False when no turn is running or
+        the text is past this turn's limits (`_MAX_USER_INPUTS_PER_TURN`,
+        `_MAX_USER_INPUT_CHARS`, `_MAX_USER_INPUT_TURN_BYTES`), so the caller
+        keeps it as the next task instead. Thread-safe."""
+        size = len(text.encode("utf-8", "replace"))
+        with self._user_input_lock:
+            if not self._user_input_turn_running:
+                return False
+            if (
+                len(text) > _MAX_USER_INPUT_CHARS
+                or self._user_input_count >= _MAX_USER_INPUTS_PER_TURN
+                or self._user_input_bytes + size > _MAX_USER_INPUT_TURN_BYTES
+            ):
+                logger.info("added user input refused: past this turn's limits")
+                return False
+            self._user_input_count += 1
+            self._user_input_bytes += size
+            self._user_inputs.append({"id": addon_id, "text": text})
+            return True
+
+    def withdraw_user_input(self, addon_id: str) -> bool:
+        """Remove an added text the model has not been shown. False when it
+        was already shown (even by a call still running) or is unknown."""
+        with self._user_input_lock:
+            for i, entry in enumerate(self._user_inputs):
+                if entry["id"] == addon_id:
+                    del self._user_inputs[i]
+                    return True
+            return False
+
+    def take_unread_user_inputs(self) -> list[dict]:
+        """Return and clear what the model never read, as ``{"id", "text"}``
+        dicts. The host runs them as the next task once the turn ends.
+
+        Includes text shown to a model call that never completed (it failed,
+        or the turn was cancelled first); its block is taken back out of the
+        history so the next task does not carry it twice."""
+        with self._user_input_lock:
+            in_flight, self._user_inputs_in_flight = self._user_inputs_in_flight, []
+            unread, self._user_inputs = self._user_inputs, []
+        self._drop_user_input_blocks([e["block"] for e in in_flight])
+        return [{"id": e["id"], "text": e["text"]} for e in in_flight + unread]
+
+    def _reset_user_inputs(self) -> None:
+        """A new turn: nothing left over from the last one, fresh limits and marker."""
+        with self._user_input_lock:
+            self._user_inputs = []
+            self._user_inputs_in_flight = []
+            self._user_input_count = 0
+            self._user_input_bytes = 0
+            self._user_inputs_seen = []
+            self._user_input_marker = secrets.token_hex(8)
+
+    def _take_user_input_block(self) -> dict | None:
+        """Move unread added text into one text block for the model, at most
+        `_MAX_USER_INPUT_BLOCK_CHARS` of it (the rest waits for the next step).
+        Each message is wrapped in a ``user_addition`` tag carrying this
+        turn's marker; tags inside the text are stripped. The entries stay
+        in flight until a model call that saw the block completes
+        (`_confirm_user_inputs_read`). None when nothing is unread."""
+        marker = self._user_input_marker
+        taken: list[dict] = []
+        parts: list[str] = []
+        used = 0
+        with self._user_input_lock:
+            while self._user_inputs:
+                entry = self._user_inputs[0]
+                text = _USER_INPUT_TAG_RE.sub("", scrub_credentials(entry["text"])).strip()
+                part = f'<{_USER_INPUT_TAG} id="{marker}">\n{text}\n</{_USER_INPUT_TAG}>'
+                if taken and used + len(part) > _MAX_USER_INPUT_BLOCK_CHARS:
+                    break
+                self._user_inputs.pop(0)
+                taken.append(entry)
+                parts.append(part)
+                used += len(part)
+            if not taken:
+                return None
+            block = {"type": "text", "text": f"{_USER_INPUT_PREFIX}\n" + "\n".join(parts)}
+            self._user_inputs_in_flight.extend(
+                {"id": e["id"], "text": e["text"], "block": block} for e in taken
+            )
+        return block
+
+    def _confirm_user_inputs_read(self, event: StreamEvent) -> None:
+        """On a completed model call, the in-flight added text has been read:
+        tell the host (`on_user_input_read`). A failing callback must not end
+        the turn."""
+        if not isinstance(event, StreamComplete):
+            return
+        with self._user_input_lock:
+            read, self._user_inputs_in_flight = self._user_inputs_in_flight, []
+            self._user_inputs_seen.extend(e["text"] for e in read)
+        callback = self.on_user_input_read
+        if callback is None or not read:
+            return
+        try:
+            callback([e["id"] for e in read])
+        except Exception:
+            logger.warning("on_user_input_read callback failed", exc_info=True)
+
+    def _drop_user_input_blocks(self, blocks: list[dict]) -> None:
+        """Take unread added-text blocks back out of the history. A message
+        left holding only anton's note goes too; it was the last one, so the
+        history still alternates."""
+        if not blocks:
+            return
+        for msg in reversed(self._history[-6:]):
+            content = msg.get("content")
+            if msg.get("role") != "user" or not isinstance(content, list):
+                continue
+            kept = [b for b in content if not any(b is blk for blk in blocks)]
+            if len(kept) == len(content):
+                continue
+            msg["content"] = kept
+            leftover = [b for b in kept if not (
+                b.get("type") == "text" and (b.get("text") or "").startswith(_NOTE_PREFIXES)
+            )]
+            if not leftover and msg is self._history[-1]:
+                self._history.pop()
+
+    def _verify_request_text(self, user_message: str | None) -> str | None:
+        """The request the completion check judges: the turn's message plus
+        whatever the user added that the model read, so a later "stop, don't
+        send it" counts."""
+        if not self._user_inputs_seen:
+            return user_message
+        added = "\n".join(
+            f"- {_USER_INPUT_TAG_RE.sub('', scrub_credentials(t)).strip()}"
+            for t in self._user_inputs_seen
+        )
+        return (
+            f"{(user_message or '').strip()}\n\nThe user then added, while the work "
+            f"ran (where these conflict with the request, the later message wins):\n{added}"
+        )
+
     async def _dispatch_draining(self, tc):
         """Run one tool through `_run_draining`. The final item is
         ``("result", outcome)``, the ``ToolOutcome`` ``dispatch_tool`` returns,
@@ -5853,6 +6279,7 @@ class ChatSession:
         # session per turn get the same result either way.
         self._artifacts_touched = set()
         self._images_this_turn = 0
+        self._artifacts_touched_complete = True
         self._page_checks = {}
         self._geography_requirements = {}
         self._artifact_geography_request = ""
@@ -5868,6 +6295,15 @@ class ChatSession:
         # Before the inner turn appends the user input, so `turn_messages`
         # starts where a slice of the seeded history would.
         self._start_turn_segments()
+        self._user_input_rounds = 0
+        self._reset_user_inputs()
+        with self._user_input_lock:
+            self._user_input_turn_running = True
+        if self.on_user_input_ready is not None:
+            try:
+                self.on_user_input_ready()
+            except Exception:
+                logger.warning("on_user_input_ready callback failed", exc_info=True)
         # Bind the inner generator so we can close it explicitly. A bare
         # `async for` would leave it suspended at its own `yield` when a host
         # abandons this wrapper: GeneratorExit lands on OUR yield, the loop is
@@ -5888,6 +6324,10 @@ class ChatSession:
             async for event in inner:
                 yield event
         finally:
+            # First, so text added during cleanup is refused and queued by the
+            # host rather than accepted into a turn that will never read it.
+            with self._user_input_lock:
+                self._user_input_turn_running = False
             # Nested so the turn still closes when the inner turn's own
             # cleanup raises; a turn left open would record the next
             # between-turn swap as its own.
@@ -5956,13 +6396,18 @@ class ChatSession:
         _screenshot_drop_unconfirmed = False
         _tool_images_dropped = False
         _tool_image_drop_unconfirmed = False
-        # One-time cap grace, reset once per turn_stream() call rather than in
-        # `_stream_and_handle_tools`, which retries re-enter and would re-arm.
+        # Per-turn limit state, reset once per turn_stream() call rather than
+        # in `_stream_and_handle_tools`, which retries re-enter: the grace
+        # would re-arm and the step and auto-continue counts would restart.
         self._spend_ceiling_grace_used = False
         self._spend_ceiling_grace_tokens = 0
-        self._round_cap_grace_used = False
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
+        self._turn_tool_rounds = 0
+        self._turn_continuations = 0
+        self._time_limit_continued_s = 0
+        self._time_limit_resumed = False
+        self._turn_started_monotonic = time.monotonic()
         self._turn_steps = []
         self._finish_authorized = None
         self._limits_passed_by_message = set()
@@ -6592,6 +7037,16 @@ class ChatSession:
             # guard passes the books this turn opened so a late finalizer
             # can't close a newer turn's.
             self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
+            # The browser is tidied (by the cloud turn, else close()) only after
+            # a turn that completed and used it; a cancelled, failed, paused or
+            # limit-stopped one leaves it as it is.
+            browser = self._browser_state
+            self._tidy_browser = bool(
+                browser is not None and browser.used and not _turn_raised
+                and _turn_cost_books.ended_by == "completed"
+            )
+            if browser is not None:
+                browser.used = False
             if _turn_raised and usage_log_enabled():
                 # A turn that raised starts no end-of-turn work, so it is done now.
                 log_background_done(_turn_trace)
@@ -6870,7 +7325,6 @@ class ChatSession:
         # Tool-call loop with circuit breaker, wrapped in a completion
         # verification outer loop that can restart the tool loop if the
         # task isn't actually done yet.
-        continuation = 0
         _max_rounds_hit = False
         # Set when the per-turn spend ceiling stopped the turn (ENG-1286). Like
         # `_max_rounds_hit` it also suppresses verification: the turn is already
@@ -6878,10 +7332,18 @@ class ChatSession:
         # would both cost more of the budget we just declared spent and risk
         # forcing a continuation past it.
         _spend_ceiling_hit = False
+        # Set when the turn's time limit stopped it. Suppresses verification for
+        # the same reason as the two above.
+        _time_limit_hit = False
+        # Set when a tool call was not run because the time limit had passed.
+        _time_limit_refused_calls = False
         # Set per verification-loop iteration (see below): tells the post-loop
         # fallback the current reply is already in history, so it must not append
         # it a second time (ENG-1155 double-append).
         _reply_persisted = False
+        # Rounds carried into the next verification-loop pass by a round taken
+        # for added user text, so the verifier gate still sees them.
+        _carried_rounds = 0
 
         while True:  # Completion verification loop
             # Per-iteration, NOT per-turn: the flag means "the reply currently in
@@ -6889,64 +7351,45 @@ class ChatSession:
             # `llm_response`, so a stale True would make the post-loop fallback
             # skip a reply that was never persisted — dropping the answer the
             # user just read on any INCOMPLETE turn whose continuation needs no
-            # tools (tool_round stays 0, so the loop breaks at the gate below
-            # before the append).
+            # tools (attempt_rounds stays 0, so the loop breaks at the gate
+            # below before the append).
             _reply_persisted = False
-            tool_round = 0
+            # This attempt's rounds alone, for the verifier gate below. A round
+            # taken for added user text continues the same attempt.
+            attempt_rounds = _carried_rounds
+            _carried_rounds = 0
             error_streak: dict[str, int] = {}
             resilience_nudged: set[str] = set()
-            # Per-continuation, unlike `_round_cap_grace_used`: only the
-            # continuation that actually earns the grant (the first ever
-            # breach this turn) gets the wider cap. Without this,
-            # `_round_cap_grace_used` staying True for the rest of the turn
-            # let EVERY later continuation start pre-extended to M+3, turning
-            # a one-shot +3 into +3 per continuation.
-            _round_cap_grace_active = False
+            idle_scratchpad_rounds = 0
 
             while llm_response.tool_calls:
-                tool_round += 1
-                # One-time extension (ENG-1893), unconditional like the
-                # mid-loop spend-ceiling grace — no verdict exists yet at
-                # this point, so the grant is a single small window rather
-                # than a self-report. Decided before the accounting below so
-                # the granted round is counted like any other. `> 0` excludes
-                # a configured 0 (or negative) cap — "no tool rounds", not
-                # "one round of free grace".
-                if (
-                    tool_round > self._max_tool_rounds
-                    and not self._round_cap_grace_used
-                    and self._max_tool_rounds > 0
-                ):
-                    self._round_cap_grace_used = True
-                    _round_cap_grace_active = True
-                    _record_grace(self._turn_cost, "round")
-                effective_round_cap = (
-                    self._max_tool_rounds
-                    + (_ROUND_CAP_GRACE_ROUNDS if _round_cap_grace_active else 0)
-                    + self._round_cap_continued_rounds
-                )
-                if tool_round > effective_round_cap and self._max_tool_rounds > 0:
+                # Only the last round's refusals count: an earlier one was asked
+                # about by the per-round check, or the turn ran on past it.
+                _time_limit_refused_calls = False
+                self._turn_tool_rounds += 1
+                attempt_rounds += 1
+                # The configured cap plus whatever "Keep going" answers have
+                # added this turn. There is no silent extension: the user's
+                # step limit is the step limit.
+                effective_round_cap = self._max_tool_rounds + self._round_cap_continued_rounds
+                if self._turn_tool_rounds > effective_round_cap and self._max_tool_rounds > 0:
                     agen = self._ask_to_continue_past_limit("round_cap", user_message)
                     try:
                         async for _kind, _payload in agen:
                             if _kind == "event":
                                 yield _payload
-                            elif _payload:
-                                effective_round_cap += (
-                                    _LIMIT_CONTINUE_MULTIPLIER * self._max_tool_rounds
-                                )
                     finally:
                         await agen.aclose()
-                # Accumulate, don't assign: `tool_round` is loop-local and
-                # resets to 0 on every verifier-forced continuation, so
-                # assigning reported only the last continuation's rounds —
-                # breaking the metric for exactly the expensive shape it
-                # exists to classify. Counted before the cap check so a
-                # capped turn reports the (possibly grace-extended) cap, not
-                # cap+1 (#309 review).
-                if self._turn_cost is not None and tool_round <= effective_round_cap:
+                    # A grant raised `_round_cap_continued_rounds`; re-read it
+                    # rather than repeating `_grant_limit`'s arithmetic here.
+                    effective_round_cap = (
+                        self._max_tool_rounds + self._round_cap_continued_rounds
+                    )
+                # Counted before the cap check so a capped turn reports the
+                # cap, not cap+1.
+                if self._turn_cost is not None and self._turn_tool_rounds <= effective_round_cap:
                     self._turn_cost.rounds += 1
-                if tool_round > effective_round_cap:
+                if self._turn_tool_rounds > effective_round_cap:
                     _max_rounds_hit = True
                     if self._turn_cost is not None:
                         self._turn_cost.ended_by = "round_cap"
@@ -6954,7 +7397,7 @@ class ChatSession:
                         "cap_exhausted",
                         {"cap": effective_round_cap, "configured_cap": self._max_tool_rounds},
                         severity=9,
-                        round_idx=tool_round,
+                        round_idx=self._turn_tool_rounds,
                     )
                     self._append_history(
                         {"role": "assistant", "content": llm_response.content or ""}
@@ -6983,7 +7426,7 @@ class ChatSession:
                     _reply_persisted = True
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="max-tool-rounds", answered=False,
-                        cancels_continuation=continuation > 0, limit="round_cap",
+                        cancels_continuation=self._continuation_pending, limit="round_cap",
                     ):
                         yield event
                     break
@@ -7022,7 +7465,7 @@ class ChatSession:
                             "tool_round=%d continuation=%d — pausing to ask the user",
                             self._turn_cost.total_tokens if self._turn_cost else 0,
                             self._max_turn_tokens, self._spend_ceiling_gate(),
-                            tool_round, continuation,
+                            self._turn_tool_rounds, self._turn_continuations,
                         )
                         self._append_history(
                             {"role": "assistant", "content": llm_response.content or ""}
@@ -7041,7 +7484,41 @@ class ChatSession:
                         )
                         async for event in self._stream_handback_diagnosis(
                             system=system, label="spend-ceiling", answered=False,
-                            cancels_continuation=continuation > 0, limit="spend_ceiling",
+                            cancels_continuation=self._continuation_pending, limit="spend_ceiling",
+                        ):
+                            yield event
+                        break
+
+                # Time limit, checked per round like the spend ceiling and after
+                # it, so a turn that breaches both still reports the ceiling. A
+                # round's own tools and model call run to the end first, so a
+                # turn can overrun by one round.
+                if self._time_limit_reached():
+                    agen = self._ask_to_continue_past_limit("time_limit", user_message)
+                    try:
+                        async for _kind, _payload in agen:
+                            if _kind == "event":
+                                yield _payload
+                    finally:
+                        await agen.aclose()
+                    if self._time_limit_reached():
+                        _time_limit_hit = True
+                        if self._turn_cost is not None:
+                            self._turn_cost.ended_by = "time_limit"
+                        self._append_history(
+                            {"role": "assistant", "content": llm_response.content or ""}
+                        )
+                        self._append_history(
+                            {"role": "user", "content": self._time_limit_notice()}
+                        )
+                        _reply_persisted = True
+                        yield StreamTaskProgress(
+                            phase="analyzing",
+                            message="Reached this task's time limit — checking in with you...",
+                        )
+                        async for event in self._stream_handback_diagnosis(
+                            system=system, label="time-limit", answered=False,
+                            cancels_continuation=self._continuation_pending, limit="time_limit",
                         ):
                             yield event
                         break
@@ -7083,6 +7560,17 @@ class ChatSession:
                         ):
                             yield event
                         continue
+                    # The limit is checked per round, but a round runs its calls
+                    # one after another: without this, every cell in the round
+                    # would overrun it, past what the turn's key was sized for.
+                    if self._time_limit_reached():
+                        _time_limit_refused_calls = True
+                        tool_results.append(_not_run_past_time_limit(tc))
+                        for event in _discarded_tool_call_events(
+                            tc, _NOT_RUN_PAST_TIME_LIMIT
+                        ):
+                            yield event
+                        continue
 
                     # ACC: tool_call emit. Args_summary is intentionally
                     # truncated — the ACC vocabulary documents it as a
@@ -7093,7 +7581,7 @@ class ChatSession:
                         "tool_call",
                         {"name": tc.name, "args_summary": str(tc.input)[:120]},
                         severity=1,
-                        round_idx=tool_round,
+                        round_idx=self._turn_tool_rounds,
                     )
                     if self._episodic is not None:
                         self._episodic.log_turn(
@@ -7217,7 +7705,7 @@ class ChatSession:
                                 if artifact_store is not None:
                                     await capture_turn_pages(self, artifact_store)
                                 before_artifacts = (
-                                    snapshot_existing_artifacts(artifact_store)
+                                    await snapshot_cell_artifacts(session=self, store=artifact_store)
                                     if artifact_store is not None
                                     else {}
                                 )
@@ -7582,7 +8070,7 @@ class ChatSession:
                             "tool_result",
                             {"name": tc.name, "success": tool_ok is not False, "error": ""},
                             severity=5 if tool_ok is False else 1,
-                            round_idx=tool_round,
+                            round_idx=self._turn_tool_rounds,
                         )
                         tool_results.append(
                             {
@@ -7628,7 +8116,7 @@ class ChatSession:
                             "error": result_text[:300] if _failed else "",
                         },
                         severity=5 if _failed else 1,
-                        round_idx=tool_round,
+                        round_idx=self._turn_tool_rounds,
                     )
                     tool_results.append(
                         {
@@ -7644,6 +8132,34 @@ class ChatSession:
                 # so the LLM sees the alarm before its next decision.
                 self._acc_maybe_nudge(tool_results)
 
+                # Only on turns with MCP tools: without them the scratchpad is
+                # the only way to the data, and the notice points at tools the
+                # turn does not have.
+                idle_scratchpad_rounds = (
+                    idle_scratchpad_rounds + 1
+                    if self._mcp_sessions and round_is_idle(llm_response.tool_calls)
+                    else 0
+                )
+                withhold_scratchpad = idle_scratchpad_rounds >= IDLE_ROUNDS_BEFORE_WITHHOLD
+                if withhold_scratchpad:
+                    logger.info(
+                        "idle scratchpad loop: %d rounds — withholding scratchpad for the next round",
+                        idle_scratchpad_rounds,
+                    )
+                    tool_results.append({"type": "text", "text": IDLE_SCRATCHPAD_NOTICE})
+                # Text the user added while this round ran (ENG-4194), in the
+                # same message so turns still alternate. Not after a question
+                # nobody answered: the turn ends below with no model call.
+                # A separate text block, never inside a tool_result: only this
+                # form is the user's (see the system prompt). Read once the
+                # next model call completes (`_confirm_user_inputs_read`).
+                _added = (
+                    self._take_user_input_block()
+                    if self._unanswered_question is None else None
+                )
+                if _added is not None:
+                    tool_results.append(_added)
+
                 self._append_history({"role": "user", "content": tool_results})
                 # Every model call resends the whole history: one render
                 # screenshot in it, the newest, is enough.
@@ -7653,7 +8169,7 @@ class ChatSession:
                 # one would get to answer the question itself. The answer, when
                 # it comes, starts the next turn.
                 if self._unanswered_question is not None:
-                    for event in self._unanswered_question_events(cancels_continuation=continuation > 0):
+                    for event in self._unanswered_question_events(cancels_continuation=self._continuation_pending):
                         yield event
                     _reply_persisted = True
                     break
@@ -7661,6 +8177,8 @@ class ChatSession:
                 # Rebuild: a tool this round (e.g. recall_skill) may have
                 # registered new tools the follow-up must see.
                 tools = self._build_tools()
+                if withhold_scratchpad:
+                    tools = without_scratchpad(tools)
 
                 # Signal that tools are done and LLM is now reasoning
                 _reasoning_t0 = _time.monotonic()
@@ -7728,14 +8246,131 @@ class ChatSession:
                     else:
                         self._compaction_failed_this_turn = True
 
+            # A cell that crosses the limit mid-round leaves the round's other
+            # calls not run, and the model may answer that in text, which ends
+            # the tool loop before its per-round check comes round again. The
+            # limit cut that answer short, so it is asked about here too.
+            if _time_limit_refused_calls and not _time_limit_hit and self._time_limit_reached():
+                _time_limit_refused_calls = False
+                agen = self._ask_to_continue_past_limit("time_limit", user_message)
+                try:
+                    async for _kind, _payload in agen:
+                        if _kind == "event":
+                            yield _payload
+                finally:
+                    await agen.aclose()
+                reply = llm_response.content or ""
+                self._append_history({"role": "assistant", "content": reply})
+                _reply_persisted = True
+                if self._time_limit_reached():
+                    _time_limit_hit = True
+                    if self._turn_cost is not None:
+                        self._turn_cost.ended_by = "time_limit"
+                    self._append_history(
+                        {"role": "user", "content": self._time_limit_notice()}
+                    )
+                    yield StreamTaskProgress(
+                        phase="analyzing",
+                        message="Reached this task's time limit — checking in with you...",
+                    )
+                    async for event in self._stream_handback_diagnosis(
+                        system=system, label="time-limit", answered=bool(reply.strip()),
+                        cancels_continuation=self._continuation_pending, limit="time_limit",
+                    ):
+                        yield event
+                    break
+                # Keep going: the answer above stopped at the limit, so the
+                # work resumes, the steps that were not run included.
+                self._append_history(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{_CHECK_NOTE} The user chose to keep going past this task's "
+                            "time limit. Continue the user's original request where you "
+                            "left off, including the steps that were not run; do not redo "
+                            "tool work already done. Your next reply replaces the previous "
+                            "one in what the user sees, so it must stand on its own."
+                        ),
+                    }
+                )
+                self._time_limit_resumed = True
+                yield StreamTaskProgress(
+                    phase="continuation",
+                    message="Continuing past the time limit...",
+                )
+                response = None
+                async for event in self.plan_stream_with_recovery(
+                    system=system, tools=tools
+                ):
+                    yield event
+                    if isinstance(event, StreamComplete):
+                        response = event
+                if response is None:
+                    return
+                llm_response = response.response
+                continue
+
+            # The model finished with added user text still unread (ENG-4194):
+            # show it and take another round instead of ending on an answer
+            # that ignores it. Capped so a stream of additions can't hold the
+            # turn open; later ones stay unread for `take_unread_user_inputs`.
+            if (
+                not _max_rounds_hit
+                and not _spend_ceiling_hit
+                and not _time_limit_hit
+                and not self._spend_ceiling_stops_the_tool_loop()
+                and not self._time_limit_reached()
+                and self._unanswered_question is None
+                and self._user_input_rounds < _MAX_USER_INPUT_ROUNDS
+            ):
+                _added = self._take_user_input_block()
+                if _added is not None:
+                    self._user_input_rounds += 1
+                    _extra = [_added, {"type": "text", "text": _USER_INPUT_REPLY_CLAUSE}]
+                    _last = self._history[-1] if self._history else None
+                    if (llm_response.content or "").strip():
+                        self._append_history(
+                            {"role": "assistant", "content": llm_response.content}
+                        )
+                        self._append_history({"role": "user", "content": _extra})
+                    elif _last is not None and _last.get("role") == "user":
+                        # A blank answer is not kept: an empty assistant message
+                        # is no answer to replace, and some providers reject it.
+                        # The added text joins the user message it follows, so
+                        # the history still alternates.
+                        if isinstance(_last.get("content"), str):
+                            _last["content"] = [{"type": "text", "text": _last["content"]}]
+                        _last["content"] = list(_last["content"]) + _extra
+                    else:
+                        self._append_history({"role": "user", "content": _extra})
+                    # Same boundary as a verifier continuation: the next reply
+                    # supersedes the one the user just read.
+                    yield StreamTaskProgress(
+                        phase="continuation",
+                        message="Taking your added message into account...",
+                    )
+                    response = None
+                    async for event in self.plan_stream_with_recovery(
+                        system=system, tools=tools
+                    ):
+                        yield event
+                        if isinstance(event, StreamComplete):
+                            response = event
+                    if response is None:
+                        return
+                    llm_response = response.response
+                    _carried_rounds = attempt_rounds
+                    continue
+
             # --- Completion verification ---
             # Skip when too few tool rounds were used (pure Q&A and, at the
             # default of 2, single-round turns), when we hit the max-rounds
             # hard stop, or after an unanswered question.
             if (
-                tool_round < self._verify_min_tool_rounds
+                attempt_rounds < self._verify_min_tool_rounds
                 or _max_rounds_hit
                 or _spend_ceiling_hit
+                or _time_limit_hit
                 or self._unanswered_question is not None
             ):
                 break
@@ -7748,7 +8383,7 @@ class ChatSession:
             self._append_history({"role": "assistant", "content": reply})
             _reply_persisted = True
 
-            if continuation >= self._max_continuations:
+            if self._turn_continuations >= self._max_continuations:
                 # Budget exhausted — ask LLM to diagnose and present to user
                 self._append_history(
                     {
@@ -7773,7 +8408,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="budget-exhausted", answered=bool(reply.strip()),
-                    cancels_continuation=continuation > 0,
+                    cancels_continuation=self._continuation_pending,
                 ):
                     yield event
                 # Consolidation still runs after diagnosis
@@ -7817,8 +8452,8 @@ class ChatSession:
                         f"{self._verifier_latch.no_verdict_failures} verdict "
                         "call(s) with no successful verdict since",
                         self._verifier_latch.skips,
-                        reprobe_turns, continuation,
-                        self._max_continuations, tool_round,
+                        reprobe_turns, self._turn_continuations,
+                        self._max_continuations, self._turn_tool_rounds,
                     )
                     # Stamp the books: this turn books ended_by="completed"
                     # but was NOT verified — without the flag it is
@@ -7860,11 +8495,13 @@ class ChatSession:
             # Ask the cheap coding model to self-assess completion over a compact,
             # text-rendered view of the recent conversation (ENG-716). The
             # assistant's latest reply is already in history (appended above).
+            # With what the user added mid-turn, so a retraction counts (ENG-4194).
+            _verify_request = self._verify_request_text(user_message)
             verifier_system, verify_messages = _build_verify_request(
-                self._history, user_message
+                self._history, _verify_request
             )
             # Still latched here means this is the LLM re-probe: only an LLM verdict can clear it.
-            jev_result = None if self._verifier_latch.latched else await self._jev_verdict(user_message)
+            jev_result = None if self._verifier_latch.latched else await self._jev_verdict(_verify_request)
             jev_decided = self._jev_decides(jev_result)
             verdict = (
                 _VerifierVerdict(status=jev_result.status, reason=f"Decided by Jev (p={jev_result.p_status:.2f}).")
@@ -8029,14 +8666,15 @@ class ChatSession:
                     # than auto-upgrading to the planning model: a missing
                     # check beats a surprise bill. The periodic re-probe still
                     # runs; a re-probe denied again lands back here and stays
-                    # latched, so adding credits self-heals within
+                    # latched, so lifting the stop (adding credits, or raising
+                    # a spent budget) self-heals within
                     # _VERIFIER_LATCH_REPROBE_TURNS turns.
                     #
                     # Scope note: the latch lives as long as its owner. A
                     # session-owned latch in a host that rebuilds the session
-                    # per message spans one message, so a top-up recovers on
-                    # the next one. A latch the host shares spans messages, so
-                    # a top-up recovers at the re-probe. Either way this branch
+                    # per message spans one message, so lifting the stop recovers
+                    # on the next one. A latch the host shares spans messages, so
+                    # it recovers at the re-probe. Either way this branch
                     # is the guarantee the user is never told the turn failed.
                     self._verifier_latch.latched = True
                     # Through the same accumulator as every other class, but
@@ -8124,7 +8762,7 @@ class ChatSession:
                 logger.warning(
                     "completion-verifier verdict=ERROR continuation=%d/%d tool_rounds=%d "
                     "model=%s — failing toward an honest diagnosis, not a silent COMPLETE",
-                    continuation, self._max_continuations, tool_round,
+                    self._turn_continuations, self._max_continuations, self._turn_tool_rounds,
                     self._llm.coding_model,
                 )
                 self._append_history(
@@ -8156,7 +8794,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="verifier-failure", answered=bool(reply.strip()),
-                    cancels_continuation=continuation > 0,
+                    cancels_continuation=self._continuation_pending,
                 ):
                     yield event
                 break
@@ -8166,7 +8804,7 @@ class ChatSession:
                 # from the user's conversation, and this is an ordinary app log.
                 # It stays in the Langfuse trace, where that content belongs.
                 "completion-verifier verdict=%s continuation=%d/%d tool_rounds=%d",
-                status, continuation, self._max_continuations, tool_round,
+                status, self._turn_continuations, self._max_continuations, self._turn_tool_rounds,
             )
 
             if status in ("COMPLETE", "WAITING"):
@@ -8196,7 +8834,7 @@ class ChatSession:
                     self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
                     system=system, label="stuck", answered=bool(reply.strip()),
-                    cancels_continuation=continuation > 0,
+                    cancels_continuation=self._continuation_pending,
                 ):
                     yield event
                 break
@@ -8240,7 +8878,7 @@ class ChatSession:
                         "spend ceiling reached at the continuation gate: tokens=%d "
                         "ceiling=%d continuation=%d — pausing to ask the user",
                         self._turn_cost.total_tokens if self._turn_cost else 0,
-                        self._max_turn_tokens, continuation,
+                        self._max_turn_tokens, self._turn_continuations,
                     )
                     self._append_history(
                         {"role": "user", "content": self._spend_ceiling_notice()}
@@ -8255,20 +8893,48 @@ class ChatSession:
                     )
                     async for event in self._stream_handback_diagnosis(
                         system=system, label="spend-ceiling", answered=bool(reply.strip()),
-                        cancels_continuation=continuation > 0, limit="spend_ceiling",
+                        cancels_continuation=self._continuation_pending, limit="spend_ceiling",
                     ):
                         yield event
                     break
 
-            continuation += 1
+            # The time limit at the same gate, for the same reason: a
+            # continuation that answers in text never reaches the per-round check.
+            if self._time_limit_reached():
+                agen = self._ask_to_continue_past_limit("time_limit", user_message)
+                try:
+                    async for _kind, _payload in agen:
+                        if _kind == "event":
+                            yield _payload
+                finally:
+                    await agen.aclose()
+                if self._time_limit_reached():
+                    _time_limit_hit = True
+                    if self._turn_cost is not None:
+                        self._turn_cost.ended_by = "time_limit"
+                    self._append_history(
+                        {"role": "user", "content": self._time_limit_notice()}
+                    )
+                    yield StreamTaskProgress(
+                        phase="analyzing",
+                        message="Reached this task's time limit — checking in with you...",
+                    )
+                    async for event in self._stream_handback_diagnosis(
+                        system=system, label="time-limit", answered=bool(reply.strip()),
+                        cancels_continuation=self._continuation_pending, limit="time_limit",
+                    ):
+                        yield event
+                    break
+
+            self._turn_continuations += 1
             if self._turn_cost is not None:
-                self._turn_cost.continuations = continuation
+                self._turn_cost.continuations = self._turn_continuations
             self._append_history(
                 {
                     "role": "user",
                     "content": (
                         f"{_CHECK_NOTE} The check judged the answer above unfinished "
-                        f"(attempt {continuation}/{self._max_continuations}): {reason}\n\n"
+                        f"(attempt {self._turn_continuations}/{self._max_continuations}): {reason}\n\n"
                         "Continue the user's original request where you left off; do not "
                         "redo tool work already done. If the data truly does not hold what "
                         "was asked, saying so plainly is a complete answer. Your next reply "
@@ -8285,10 +8951,12 @@ class ChatSession:
             # otherwise. `analyzing` is emitted from several unrelated sites.
             yield StreamTaskProgress(
                 phase="continuation",
-                message=f"Task incomplete — continuing ({continuation}/{self._max_continuations})...",
+                message=f"Task incomplete — continuing ({self._turn_continuations}/{self._max_continuations})...",
             )
 
-            # Re-enter tool loop: get next LLM response with tools available
+            # Re-enter tool loop: get next LLM response with tools available.
+            # Rebuilt so a scratchpad withheld for the last round is back.
+            tools = self._build_tools()
             response = None
             async for event in self.plan_stream_with_recovery(
                 system=system, tools=tools

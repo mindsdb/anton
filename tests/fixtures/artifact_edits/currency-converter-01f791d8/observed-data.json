@@ -1,0 +1,36 @@
+{
+  "dataset": "synthetic_exchange_rates_against_USD",
+  "units": "currency units per 1 USD",
+  "scope": "fixed table supplied in the user request; no time filter",
+  "records": [
+    {
+      "currency": "USD",
+      "rate": 1.0
+    },
+    {
+      "currency": "EUR",
+      "rate": 0.92
+    },
+    {
+      "currency": "GBP",
+      "rate": 0.79
+    },
+    {
+      "currency": "JPY",
+      "rate": 151.2
+    },
+    {
+      "currency": "CAD",
+      "rate": 1.36
+    },
+    {
+      "currency": "AUD",
+      "rate": 1.52
+    },
+    {
+      "currency": "CHF",
+      "rate": 0.88
+    }
+  ],
+  "calculation": "amount_from / rate_from * rate_to; rates are units per USD"
+}

@@ -108,6 +108,7 @@ def test_the_names_hosts_read_stay_put():
     from anton.core.llm.provider import ModelCallTimeoutError
 
     assert MODEL_WAIT_PHASE == "model_wait"
+    assert liveness.MODEL_WAIT_TICK_S == 20.0
     assert {"message", "open_for_s"} <= set(ModelCallSnapshot.model_fields)
     assert ModelCallTimeoutError.__name__ == "ModelCallTimeoutError"
     assert ModelCallTimeoutError.code == "model_timeout"
@@ -278,8 +279,3 @@ def test_the_snapshot_is_a_frozen_model():
     snap = ModelCallSnapshot(role="planning", open_for_s=1.0, quiet_for_s=1.0, message="m")
     with pytest.raises(ValidationError):
         snap.message = "changed"
-
-
-def test_the_phase_string_is_the_cross_repo_contract():
-    assert MODEL_WAIT_PHASE == "model_wait"
-    assert liveness.MODEL_WAIT_TICK_S == 20.0

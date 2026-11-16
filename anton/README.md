@@ -957,7 +957,7 @@ The memory + skills + cerebellum + ACC systems are wired into `ChatSession` (def
 | `tool_call` | At top of per-tc loop in `_stream_and_handle_tools` | `core/session.py` |
 | `tool_result` | After result_text is finalized, before `tool_results.append` | `core/session.py` |
 | `history_repair` | After `_seal_dangling_tool_uses` actually inserts synthetic blocks | `core/session.py` |
-| `cap_exhausted` | When `tool_round > self._max_tool_rounds` | `core/session.py` |
+| `cap_exhausted` | When the turn's step count passes `max_tool_rounds` plus any "Keep going" grants (counted across the whole turn, not per attempt) | `core/session.py` |
 
 ### End-of-turn drain
 

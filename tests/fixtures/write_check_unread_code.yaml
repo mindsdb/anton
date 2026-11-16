@@ -16283,6 +16283,7 @@ cases:
           print(sqrt(16), floor(2.5))
     card: none
 
+  # itertools is built into every CPython; math is a separate file on some builds, so its import may fail.
   - name: a star import under a try that catches ImportError, and a call after it, after an unread exec
     earlier:
       - |-
@@ -16292,10 +16293,10 @@ cases:
         x = 1
     code: |-
       try:
-          from math import *
+          from itertools import *
       except ImportError:
           pass
-      print(sqrt(16))
+      print(list(repeat(1, 2)))
     card: none
 
   # A program path built from the interpreter's, read as the program it names

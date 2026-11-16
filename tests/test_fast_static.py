@@ -88,7 +88,7 @@ async def test_direct_writer_respects_the_existing_spend_guard(tmp_path):
 
 async def test_only_the_canonical_handoff_is_embedded(tmp_path, monkeypatch):
     import json
-    from anton.core.tools.generate_artifact import observed_data
+    from anton.core.tools.generate_artifact import component_page, observed_data
 
     canonical = {"records": [{"region": "west", "amount": 42}]}
     old = [{"amount": 999}]
@@ -98,7 +98,8 @@ async def test_only_the_canonical_handoff_is_embedded(tmp_path, monkeypatch):
 
     async def stream(**kwargs):
         calls.append(kwargs)
-        yield StreamComplete(LLMResponse(content=html))
+        # The component writer declines, so the ordinary HTML writer builds the page.
+        yield StreamComplete(LLMResponse(content=component_page.FALLBACK if len(calls) == 1 else html))
 
     session = SimpleNamespace(_llm=SimpleNamespace(code_stream=stream), history=[
         {"content": [{"type": "tool_use", "id": "source", "name": "scratchpad"}]},
@@ -118,7 +119,6 @@ async def test_without_a_handoff_nothing_from_the_conversation_is_embedded(tmp_p
     import json
     from anton.core.tools.generate_artifact import observed_data
 
-    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
     html = '<html lang="en"><head><meta name="viewport" content="width=device-width"></head><body>ok</body></html>'
     systems = []
 
@@ -197,7 +197,6 @@ def test_a_page_too_large_to_rewrite_in_one_reply_keeps_the_normal_pipeline(tmp_
 
 async def test_coherent_gather_changes_only_its_copied_control_tool(tmp_path, monkeypatch):
     from anton.core.tools.generate_artifact.discovery import engine, prompts
-    monkeypatch.setenv("ANTON_STATIC_FAST_PATH", "direct")
     state = GenState(session=SimpleNamespace(history=[]), artifact_type="html-app", artifact_path=tmp_path,
                      slug="report", act_first=True)
     original = state.pipeline_tools
@@ -249,13 +248,14 @@ async def test_a_handoff_with_credentials_is_deleted_not_embedded(tmp_path, monk
 
 async def test_a_repair_resends_the_reply_without_the_embedded_data(tmp_path, monkeypatch):
     import json
+    from anton.core.tools.generate_artifact import component_page
     from anton.core.tools.generate_artifact.verifiers import VerifyResult
     html = '<html lang="en"><head><meta name="viewport" content="width=device-width"></head><body>ok</body></html>'
     calls = []
 
     async def stream(**kwargs):
         calls.append(kwargs)
-        yield StreamComplete(LLMResponse(content=html))
+        yield StreamComplete(LLMResponse(content=component_page.FALLBACK if len(calls) == 1 else html))
 
     (tmp_path / "observed-data.json").write_text(json.dumps({"rows": ["large-dataset-marker"]}))
     results = iter([BrowserCheck(status="failed", verdict=VerifyResult(errors=["blank"])), BrowserCheck(status="passed")])
@@ -263,7 +263,7 @@ async def test_a_repair_resends_the_reply_without_the_embedded_data(tmp_path, mo
     state = GenState(session=SimpleNamespace(_llm=SimpleNamespace(code_stream=stream), history=[]),
                      artifact_type="html-app", artifact_path=tmp_path, slug="r", act_first=True)
     assert (await fast_static.run(state))["status"] == "generated"
-    assert calls[1]["messages"][1] == {"role": "assistant", "content": html}
+    assert calls[2]["messages"][1] == {"role": "assistant", "content": html}
 
 
 async def test_a_reply_that_runs_out_of_room_hands_back_to_the_normal_pipeline(tmp_path):
@@ -293,9 +293,8 @@ async def test_a_fallback_starts_discovery_over(tmp_path, monkeypatch):
     assert not state.gathering_complete and state.final_artifact_type == ""
 
 
-def test_a_runtime_page_is_sized_by_its_program(tmp_path, monkeypatch):
+def test_a_runtime_page_is_sized_by_its_program(tmp_path):
     from anton.core.tools.generate_artifact import component_page
-    monkeypatch.setenv("ANTON_STATIC_COMPONENT_WRITER", "on")
     (tmp_path / "index.html").write_text(component_page.document("await CoworkPage({title:'T',sections:[]});"))
     state = GenState(session=SimpleNamespace(), artifact_type="html-app", artifact_path=tmp_path, slug="r", act_first=True)
     assert len((tmp_path / "index.html").read_text()) > fast_static.MAX_EXISTING_CHARS

@@ -458,10 +458,15 @@ class TestReset:
         cortex.encode.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_pre_execute_increments_counter(self):
-        cb = Cerebellum(cortex=_make_cortex(), llm=_make_llm_returning())
-        await cb.on_pre_execute(_cell(code="x = 1", description="set x"))
-        await cb.on_pre_execute(_cell(code="y = 2", description="set y"))
-        # Internal counter — we don't expose it as a property but reset clears it
-        cb.reset()
-        # No exception means reset worked
+    async def test_pre_execute_cells_are_never_diffed(self):
+        """Preliminary cells seen before execution are not buffered for the diff pass."""
+        cortex = _make_cortex()
+        llm = _make_llm_returning(("x", "scratchpad"))
+        cb = Cerebellum(cortex=cortex, llm=llm)
+        await cb.on_pre_execute(_cell(code="x = 1", description="set x", error="boom"))
+        await cb.on_pre_execute(_cell(code="y = 2", description="set y", error="boom"))
+        assert cb.buffered_count == 0
+
+        assert await cb.flush() == []
+        llm.generate_object_code.assert_not_called()
+        cortex.encode.assert_not_called()

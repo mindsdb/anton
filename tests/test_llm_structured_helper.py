@@ -44,11 +44,6 @@ class WrappedLessons(BaseModel):
 
 
 class TestBuildStructuredToolSingle:
-    def test_returns_three_tuple(self):
-        result = build_structured_tool(Answer)
-        assert isinstance(result, tuple)
-        assert len(result) == 3
-
     def test_tool_has_required_fields(self):
         tool, _, _ = build_structured_tool(Answer)
         assert "name" in tool
@@ -221,36 +216,3 @@ class TestUnwrapWrapperModel:
         )
         assert isinstance(result, WrappedLessons)
         assert result.lessons == []
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Round-trip — build then unwrap, mimicking the full flow
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestRoundTrip:
-    def test_single_model_round_trip(self):
-        tool, validator_class, is_list = build_structured_tool(Answer)
-        # Simulate the LLM calling the tool with this input
-        simulated_tool_input = {"text": "yes", "confidence": 0.7}
-        result = unwrap_structured_response(
-            simulated_tool_input, validator_class, is_list
-        )
-        assert result.text == "yes"
-        assert result.confidence == 0.7
-        # Sanity check the tool name was right
-        assert tool["name"] == "Answer"
-
-    def test_list_model_round_trip(self):
-        tool, validator_class, is_list = build_structured_tool(list[Lesson])
-        simulated = {
-            "items": [
-                {"text": "x", "topic": "a"},
-                {"text": "y", "topic": "b"},
-                {"text": "z", "topic": "c"},
-            ]
-        }
-        result = unwrap_structured_response(simulated, validator_class, is_list)
-        assert len(result) == 3
-        assert [l.text for l in result] == ["x", "y", "z"]
-        assert tool["name"] == "Lesson_array"

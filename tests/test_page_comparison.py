@@ -8,7 +8,6 @@ agent hears, what anton puts back, and what closes the turn.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import threading
@@ -21,6 +20,8 @@ import anton.core.tools.generate_artifact as gen_pkg
 from anton.core.artifacts import ArtifactStore
 from anton.core.artifacts.page_copies import TurnPages
 from anton.core.artifacts.render_check import Comparison
+from anton.core.backends.base import Cell
+from anton.core.llm.provider import StreamComplete
 from anton.core.session import ChatSession
 from anton.core.tools.generate_artifact import engine, orchestrator, verifiers
 from anton.core.tools.generate_artifact.state import BrowserCheckFailed
@@ -113,12 +114,65 @@ async def test_with_less_than_a_whole_check_left_the_page_goes_without_its_copy(
     assert "previous_html" not in service.requests[0]["body"]
 
 
-def test_both_exec_paths_keep_the_turns_copies_before_their_snapshot():
-    """`handle_scratchpad` and the session's inline streaming exec each keep
-    the copies before the snapshot a cell's check diffs against."""
-    for source in (inspect.getsource(tool_handlers.handle_scratchpad), inspect.getsource(ChatSession)):
-        capture = source.index("capture_turn_pages(")
-        assert capture < source.index("snapshot_existing_artifacts(", capture)
+class _EditingPad:
+    """A pad whose cell rewrites the page, with the mtime set back as in `_cell`."""
+
+    def __init__(self, page: Path) -> None:
+        self.page = page
+
+    def _edit(self, code: str) -> Cell:
+        os.utime(self.page, ns=(1_000_000_000, 1_000_000_000))
+        self.page.write_text(_PAGE.replace("hi", "edited"))
+        return Cell(code=code, stdout="saved", stderr="", error=None)
+
+    async def execute(self, code, **kwargs):
+        return self._edit(code)
+
+    async def execute_streaming(self, code, **kwargs):
+        yield self._edit(code)
+
+
+async def test_both_exec_paths_keep_the_turns_copies_before_their_snapshot(service, tmp_path, monkeypatch):
+    """`handle_scratchpad` and the session's inline streaming exec each send
+    the page as the turn found it, not the page their cell wrote."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from anton.core.session import ChatSessionConfig
+    from tests.conftest import make_mock_llm
+    from tests.test_streaming_exec_artifact_lint import _FakeAsyncIter, _scratchpad_exec_response, _text_response
+
+    store, slug = _artifact(tmp_path)
+    pad = _EditingPad(store.root / slug / "index.html")
+    session = _session(
+        _workspace=SimpleNamespace(artifacts_dir=store.root),
+        _record_cell_explainability=lambda **kw: None,
+    )
+
+    async def prepared(session, tc_input):
+        return pad, tc_input["code"], "edit", "", 5
+
+    monkeypatch.setattr(tool_handlers, "prepare_scratchpad_exec", prepared)
+    await tool_handlers.handle_scratchpad(session, {"action": "exec", "name": "main", "code": "edit()"})
+
+    assert [request["body"].get("previous_html") for request in service.requests] == [_BEFORE]
+
+    service.requests.clear()
+    store, slug = _artifact(tmp_path / "streamed")
+    pad = _EditingPad(store.root / slug / "index.html")
+    workspace = MagicMock(base=tmp_path)
+    workspace.artifacts_dir = store.root
+    llm = make_mock_llm()
+    responses = iter([_scratchpad_exec_response("Edit"), _text_response("Done")])
+    llm.plan_stream = lambda **kw: _FakeAsyncIter([StreamComplete(response=next(responses, _text_response("Done")))])
+    chat = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace))
+    chat._scratchpads.get_or_create = AsyncMock(return_value=pad)
+    try:
+        async for _ in chat.turn_stream("Edit the page"):
+            pass
+    finally:
+        await chat.close()
+
+    assert service.requests and service.requests[0]["body"].get("previous_html") == _BEFORE
 
 
 # ── What the agent hears ─────────────────────────────────────────────────────

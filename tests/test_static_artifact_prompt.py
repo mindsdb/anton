@@ -14,12 +14,7 @@ def build(*, has_name=True, proactive=False, act_first=True):
     )
 
 
-def enable(monkeypatch):
-    monkeypatch.setenv("ANTON_STATIC_SINGLE_CALL", "on")
-
-
-def test_delegated_artifacts_have_no_competing_registration_or_data_fetch_instruction(monkeypatch):
-    enable(monkeypatch)
+def test_delegated_artifacts_have_no_competing_registration_or_data_fetch_instruction():
     prompt = build()
     assert "This one\noperation registers the folder" in prompt
     assert "REGISTER FIRST, always" not in prompt
@@ -28,18 +23,15 @@ def test_delegated_artifacts_have_no_competing_registration_or_data_fetch_instru
     assert "For inline analysis without an artifact" in prompt
     assert "dataset for CSV/JSON/parquet" in prompt
     assert "Never create a duplicate artifact" in prompt
+    assert "tell the user it is missing" in " ".join(prompt.split())
 
 
-def test_old_tool_schema_and_default_configuration_keep_the_existing_workflow(monkeypatch):
-    monkeypatch.delenv("ANTON_STATIC_SINGLE_CALL", raising=False)
-    baseline = build(has_name=False)
-    assert "REGISTER FIRST, always" in build()
-    enable(monkeypatch)
-    assert build(has_name=False) == baseline
+def test_a_generate_tool_without_name_keeps_the_register_first_workflow():
+    assert "REGISTER FIRST, always" in build(has_name=False)
+    assert "REGISTER FIRST, always" not in build()
 
 
-def test_proactive_preference_and_ask_first_are_preserved(monkeypatch):
-    enable(monkeypatch)
+def test_proactive_preference_and_ask_first_are_preserved():
     assert "Do not proactively create HTML" in build(proactive=False)
     assert "benefits from a saved visual" in build(proactive=True)
     prompt = build(act_first=False)

@@ -311,10 +311,9 @@ def test_the_pads_context_comes_from_where_the_guard_looks():
     assert engine._scratchpads_context(N(_agent_scratchpad_names=set(), _scratchpads=None)) == ""
 
 
-def test_gathering_in_act_first_asks_only_what_blocks_the_build():
+def test_gathering_in_act_first_fetches_the_data_and_asks_nothing_extra():
     message = step_message(sub_tools.STEP_GATHERING, _state(act_first=True))
-    assert "no reasonable assumption" in message
-    assert "Leave `open_points` empty" in message
+    assert "observed-data.json" in message
     assert "Ask only when the answer changes the artifact type" not in message
 
 

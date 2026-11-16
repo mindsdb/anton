@@ -192,6 +192,22 @@ def test_scratchpad_package_installed_goes_to_posthog_not_the_collector(monkeypa
     assert body["properties"]["package"] == "numpy"
 
 
+def test_the_browser_events_go_to_posthog_with_every_property(monkeypatch):
+    """The collector keeps five property names, so the browser's events would
+    arrive there with none of their own."""
+    _clear_ci(monkeypatch)
+    captured = _capture_posthog(monkeypatch)
+
+    analytics.send_event(_PosthogSettings(), "browser_jev_step", jev_action="click", p_action="0.91", ms="12")
+    analytics.send_event(_PosthogSettings(), "browser_human_check", kind="Cloudflare")
+    analytics.send_event(_PosthogSettings(), "browser_hand_over_waits", state="checked")
+
+    assert [body["event"] for _, body in captured] == ["browser_jev_step", "browser_human_check", "browser_hand_over_waits"]
+    assert {"jev_action": "click", "p_action": "0.91", "ms": "12"}.items() <= captured[0][1]["properties"].items()
+    assert captured[1][1]["properties"]["kind"] == "Cloudflare"
+    assert captured[2][1]["properties"]["state"] == "checked"
+
+
 @pytest.mark.parametrize("event", sorted(analytics._POSTHOG_EVENTS))
 def test_every_posthog_event_names_the_deployment_that_sent_it(monkeypatch, event):
     """A staging or eval turn must be separable from a user's without reading

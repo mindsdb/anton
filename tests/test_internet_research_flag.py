@@ -13,12 +13,12 @@ from types import SimpleNamespace
 import pytest
 
 from anton.core.llm.prompts import (
-    NO_INTERNET_CHAT_SYSTEM_PROMPT,
     NO_INTERNET_RESILIENCE_NUDGE,
     NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE,
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
 )
+from anton.core.llm.static_artifact_prompt import ARTIFACTS
 from anton.core.memory import skills as skills_mod
 from anton.core.session import ChatSession, ChatSessionConfig
 from anton.core.tools.generate_artifact.orchestrator import _public_data_sources_skill
@@ -69,6 +69,9 @@ async def test_without_internet_research_a_turn_has_no_web_tools_or_internet_gui
     assert "web_search" not in system
     assert "public-data-sources" not in system
     assert "Internet research is turned off for this session" in system
+    # The public-dataset follow-ups go with the internet section; the data sources note replaces it.
+    assert "PROACTIVE FOLLOW-UP SUGGESTIONS" not in system
+    assert "DATA SOURCES:" in system
 
 
 async def test_web_tools_off_with_internet_research_on_keeps_the_guidance_and_helper(tmp_path, builtin_skills):
@@ -90,13 +93,22 @@ async def test_by_default_the_web_tools_stay_native(tmp_path):
     assert kwargs["native_web_tools"] == {"web_search", "web_fetch"}
 
 
-def test_the_prompt_variant_differs_only_where_it_cuts():
-    assert NO_INTERNET_CHAT_SYSTEM_PROMPT.startswith("{identity_lead}")
-    for field in ("{artifacts_section}", "{conversation_discipline}", "{runtime_identity_section}"):
-        assert field in NO_INTERNET_CHAT_SYSTEM_PROMPT
-    assert "GENERAL RULES:" in NO_INTERNET_CHAT_SYSTEM_PROMPT
-    assert "web_search" not in NO_INTERNET_RESILIENCE_NUDGE + NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE
-    assert "archive.org" not in NO_INTERNET_RESILIENCE_NUDGE
+async def test_the_prompt_variant_differs_only_where_it_cuts(tmp_path):
+    """The offline prompt keeps every section the cuts do not touch, and its nudges carry no web advice."""
+    system = (await _first_request(tmp_path, internet_research_enabled=False))["system"]
+
+    assert system.startswith("You are Anton")
+    for section in (
+        ARTIFACTS.splitlines()[0],
+        "CONVERSATION DISCIPLINE (critical):",
+        "RUNTIME IDENTITY:",
+        "GENERAL RULES:",
+    ):
+        assert section in system, section
+    generic = _nudges(internet_research=False, tool_name="web_fetch", error="Fetch returned HTTP 403")
+    install = _nudges(internet_research=False, tool_name="scratchpad", error="ModuleNotFoundError: No module named 'x'")
+    assert "web_search" not in generic + install
+    assert "archive.org" not in generic
 
 
 def _nudges(*, internet_research: bool | None, tool_name: str, error: str) -> str:
@@ -127,11 +139,6 @@ def test_nudges_drop_internet_advice_only_without_internet_research(tool_name, e
     assert _nudges(internet_research=True, tool_name=tool_name, error=error).endswith(online)
     # A session object that predates the flag keeps today's nudge.
     assert _nudges(internet_research=None, tool_name=tool_name, error=error).endswith(online)
-
-
-def test_the_prompt_variant_drops_the_public_dataset_follow_ups():
-    assert "PROACTIVE FOLLOW-UP SUGGESTIONS" not in NO_INTERNET_CHAT_SYSTEM_PROMPT
-    assert "DATA SOURCES:" in NO_INTERNET_CHAT_SYSTEM_PROMPT
 
 
 # --- generate_artifact's own gathering loop ---------------------------------

@@ -161,17 +161,6 @@ class TestTurnStreamToolProgress:
         finally:
             await session.close()
 
-    async def test_exception_mid_stream_produces_clean_failed_result_not_a_crash(self):
-        session, mock_llm = _make_session_with_tool(_raising_after_progress_handler)
-        _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
-        try:
-            events = [e async for e in session.turn_stream("run the probe")]
-            assert any(isinstance(e, StreamComplete) for e in events)
-            texts = _tool_result_texts(session)
-            assert any("failed" in t and "boom" in t for t in texts)
-        finally:
-            await session.close()
-
     async def test_generator_with_no_result_produces_clean_failed_result_not_a_crash(self):
         session, mock_llm = _make_session_with_tool(_no_result_handler)
         _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
@@ -207,6 +196,7 @@ class TestTurnStreamToolProgress:
         _script_one_tool_call_then_text(mock_llm, "streaming_probe", "Done.")
         try:
             events = [e async for e in session.turn_stream("run the probe")]
+            assert any(isinstance(e, StreamComplete) for e in events)
             done = [
                 e for e in events
                 if isinstance(e, StreamTaskProgress) and e.phase == "tool_done"

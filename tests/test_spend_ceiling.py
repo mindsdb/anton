@@ -12,6 +12,7 @@ reaching the gate.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -86,12 +87,19 @@ def _text(text: str = "done") -> LLMResponse:
                        stop_reason="end_turn")
 
 
+def _small(response: LLMResponse) -> LLMResponse:
+    """The response with a usage well under the output budget, so the
+    truncation retry stays out of the way."""
+    return replace(response, usage=_usage(1_000))
+
+
 def _session(workspace, *, ceiling: int = CEILING, responses=None,
              per_call: int = PER_CALL) -> ChatSession:
     """Session whose LLM emits `responses` in order and reports usage per call.
 
     Falls back to a text reply once the script runs out, so a test that fails to
-    trip the gate terminates instead of looping.
+    trip the gate terminates instead of looping. An exception in `responses` is
+    raised by that call, to model a provider error the turn retries.
     """
     mock_llm = make_mock_llm()
     script = list(responses or [])
@@ -99,6 +107,8 @@ def _session(workspace, *, ceiling: int = CEILING, responses=None,
     def _plan_stream(**kwargs):
         async def _gen():
             resp = script.pop(0) if script else _text()
+            if isinstance(resp, Exception):
+                raise resp
             # Exactly what LLMClient does on every completion (ENG-1288).
             if mock_llm.usage_listener is not None:
                 mock_llm.usage_listener("planning", "test-model", _usage(per_call))
@@ -216,6 +226,8 @@ async def test_handback_asks_the_user_and_is_persisted_as_streamed(workspace):
     assert "ask if they'd like you to continue" in text
     # A stop mid-search must not fill the gap with a guess.
     assert "do not estimate, extrapolate or state a figure you did not retrieve" in text
+    # ...but a result the tools did compute is kept, not withdrawn at the limit.
+    assert "A result your tools did compute is not a guess" in text
     # The streamed diagnosis, not the pre-stop reply, is the tail of history.
     assert session._history[-1]["role"] == "assistant"
 
@@ -382,9 +394,9 @@ async def test_gate_stays_proportional_to_the_ceiling(workspace):
     session._turn_cost.peak_context_tokens = 5_000_000  # absurd, on purpose
     assert session._spend_ceiling_gate() >= 300_000 // 2
     # …and the cap does not disturb the shipped default.
-    session._max_turn_tokens = 1_250_000
+    session._max_turn_tokens = 25_000_000
     session._turn_cost.peak_context_tokens = 190_000
-    assert session._spend_ceiling_gate() == 1_250_000 - 380_000
+    assert session._spend_ceiling_gate() == 25_000_000 - 380_000
 
 
 async def test_the_setting_actually_reaches_the_session(workspace):
@@ -399,7 +411,7 @@ async def test_the_setting_actually_reaches_the_session(workspace):
 
     session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm(),
                                             workspace=workspace))
-    assert session._max_turn_tokens == CoreSettings().max_turn_tokens == 1_250_000
+    assert session._max_turn_tokens == CoreSettings().max_turn_tokens == 25_000_000
 
 
 async def test_ceiling_trips_at_the_continuation_gate(workspace):
@@ -659,3 +671,12 @@ async def test_filtered_handback_at_the_continuation_gate_sends_anton_s_own_repo
     assert len(handbacks) == 2
     assert ended_by == "content_filter"
     assert events[-1] == StreamTurnEnded(ended_by="content_filter")
+
+
+def test_the_built_in_limits_are_the_safety_limits():
+    """A host that sets nothing gets these; they are sized from production, so
+    a change here is a product decision, not a refactor."""
+    from anton.core.settings import CoreSettings
+
+    s = CoreSettings(_env_file=None)
+    assert (s.max_tool_rounds, s.max_continuations, s.max_turn_tokens) == (250, 10, 25_000_000)
