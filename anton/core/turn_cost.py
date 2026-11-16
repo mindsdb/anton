@@ -27,8 +27,9 @@ full-weight against the gateway TPM limiter).
 Stated gaps (by design, documented on ENG-1288):
 - usage on errored/aborted calls may be absent from the provider — the turn
   undercounts rather than crashes;
-- LLM and image use inside scratchpad user code (``get_llm``,
-  ``generate_image``) happens in a separate process and is never seen here;
+- LLM use inside scratchpad user code (``get_llm``) happens in a separate
+  process and is never seen here; its ``generate_image()`` calls are booked
+  through the session's `TurnImageBudget`;
 - post-turn background work (cerebellum flush, identity extraction) runs
   after the turn's books close and is not attributed to any turn;
 - retried calls count every attempt — retries cost real money.

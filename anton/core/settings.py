@@ -148,12 +148,9 @@ class CoreSettings(BaseSettings):
     # sets it from the request, since a web turn otherwise meets the hosting
     # side's hard cut-off with no summary.
     max_turn_seconds: int = 0
-    # Calls the `generate_image` TOOL may make in one turn
-    # (ANTON_MAX_IMAGES_PER_TURN); a call past it is refused before any request
-    # is sent. It does not bound the scratchpad's `generate_image()`, which has
-    # its own per-cell cap (`scratchpad_max_images`), so a turn's pictures are
-    # bounded by this plus that cap per cell, and the pad's image spend is not
-    # in the turn cost (see `turn_cost`'s stated gaps).
+    # Images one turn may make (ANTON_MAX_IMAGES_PER_TURN), the `generate_image`
+    # tool and the scratchpad's `generate_image()` together; a call past it is
+    # refused before any request is sent.
     max_images_per_turn: int = 8
     context_pressure_threshold: float = 0.7
     max_consecutive_errors: int = 5
@@ -172,9 +169,5 @@ class CoreSettings(BaseSettings):
     # while capping how long an agent-supplied estimate can extend a hang.
     cell_total_max: int = 3600
     cell_install_timeout: int = 120  # pip/uv install timeout (s)
-    # Images the scratchpad's `generate_image()` may make in one cell
-    # (ANTON_SCRATCHPAD_MAX_IMAGES). A call past it raises before any request.
-    # Per cell, not per turn: each cell a turn runs gets this many again.
-    scratchpad_max_images: int = 8
     cell_keep_recent: int = 5  # Recent cells preserved during compaction
 

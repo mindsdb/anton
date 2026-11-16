@@ -24,6 +24,8 @@ import re
 import struct
 import threading
 import time
+from collections.abc import Callable
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -50,8 +52,8 @@ DEFAULT_IMAGE_MODEL = "gpt-image-2.6-flare"
 #: The role image calls are counted and traced under (`TurnCost`, Langfuse).
 IMAGE_ROLE = "image"
 
-#: How many images one agent turn (the tool) or one scratchpad cell (the
-#: helper) may make, unless configured otherwise.
+#: How many images one agent turn may make (the tool and the pad's helper
+#: together), unless configured otherwise.
 DEFAULT_MAX_IMAGES = 8
 
 QUALITIES = ("auto", "low", "medium", "high")
@@ -119,6 +121,43 @@ class ImageGenerationError(Exception):
         self.code = code
         self.status_code = status_code
         self.usage = usage
+
+
+# ── The turn's allowance, for the scratchpad ─────────────────────────
+
+
+@dataclass(frozen=True)
+class TurnImageBudget:
+    """What the running turn lets the pad's ``generate_image()`` do.
+
+    The session arms one per turn (`arm_turn_images`); the scratchpad runtime
+    reads it around each cell, so the pad and the tool share one per-turn cap
+    and the pad's image calls land in the turn's cost.
+    """
+
+    #: Images the pad may still make this turn; None when the helper is not offered.
+    allowance: Callable[[], "int | None"]
+    #: Count one image request the pad sent.
+    take: Callable[[], None]
+    #: Book one pad image call's usage (model, usage) in the turn's cost.
+    record_usage: Callable[[str, Usage], None]
+
+
+_turn_images: ContextVar[TurnImageBudget | None] = ContextVar("anton_turn_images", default=None)
+
+
+def arm_turn_images(budget: TurnImageBudget | None) -> Token:
+    """Install the turn's image budget; pair with `disarm_turn_images`."""
+    return _turn_images.set(budget)
+
+
+def disarm_turn_images(token: Token) -> None:
+    _turn_images.reset(token)
+
+
+def current_turn_images() -> TurnImageBudget | None:
+    """The budget armed for the running task, or None outside a turn."""
+    return _turn_images.get()
 
 
 # ── Arguments ────────────────────────────────────────────────────────

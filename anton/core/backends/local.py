@@ -28,14 +28,15 @@ from anton.core.backends.sandbox import (
 )
 from anton.core.backends.wire import (
     CELL_DELIM,
+    CELL_IMAGES_MARKER,
     CELL_TRACE_MARKER,
     ARTIFACTS_ROOT_ENV,
     HEARTBEAT_MARKER,
+    IMAGE_MARKER,
     IMAGE_MODEL_ENV,
     INSTALL_END_MARKER,
     INSTALL_START_MARKER,
     INTERNET_RESEARCH_ENV,
-    MAX_IMAGES_ENV,
     MAX_OUTPUT,
     truncation_note,
     NOTHING_KEPT,
@@ -47,8 +48,10 @@ from anton.core.backends.wire import (
     USAGE_MARKER,
     USAGE_MARKER_ENV,
 )
+from anton.core.llm.images import current_turn_images
 from anton.core.llm.provider import (
     USAGE_LOG_ENV,
+    Usage,
     log_usage_record,
     scratchpad_usage_record,
     usage_log_enabled,
@@ -96,6 +99,44 @@ def _add_salvage_chunk(chunks: list[str], chunk: str) -> bool:
         total -= len(chunks.pop(0))
         dropped = True
     return dropped
+
+
+def _record_pad_image(raw: str) -> None:
+    """Count one pad image line against the running turn's budget and books.
+
+    Only counts reach the host: the line comes from a process running cell code.
+    """
+    budget = current_turn_images()
+    if budget is None:
+        return
+    try:
+        sent = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(sent, dict):
+        return
+
+    def count(key: str) -> int:
+        value = sent.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    try:
+        if sent.get("event") == "sent":
+            budget.take()
+        elif sent.get("event") == "usage":
+            model = sent.get("model")
+            budget.record_usage(
+                model if isinstance(model, str) else "",
+                Usage(
+                    input_tokens=count("input"),
+                    output_tokens=count("output"),
+                    image_input_tokens=count("image_input"),
+                    image_output_tokens=count("image_output"),
+                ),
+            )
+    except Exception:
+        # The books must never fail the cell they count.
+        logger.warning("could not book a scratchpad image call", exc_info=True)
 
 
 def _salvage_tail(chunks: list[str], dropped: bool) -> str:
@@ -1201,10 +1242,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # scratchpad_boot no longer auto-installs on ModuleNotFoundError, so
         # this var (and _read_result's install-span handling below) is dead;
         # left wired rather than reworking the kill-window logic in one pass.
-        _core_settings = CoreSettings()
-        env["ANTON_CELL_INSTALL_TIMEOUT"] = str(_core_settings.cell_install_timeout)
-        # Set, not inherited, so the pad reads a validated number.
-        env[MAX_IMAGES_ENV] = str(_core_settings.scratchpad_max_images)
+        env["ANTON_CELL_INSTALL_TIMEOUT"] = str(CoreSettings().cell_install_timeout)
 
         # Namespace snapshot path (ENG-1124). The boot script reads
         # ANTON_SCRATCHPAD_SESSION_PATH and nothing ever set it, so it fell back to a
@@ -1572,6 +1610,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         trace = get_trace_context()
         if trace is not None:
             payload = f"{CELL_TRACE_MARKER} {trace_context_to_json(trace)}\n" + payload
+        # The turn's remaining image allowance; without it the pad withholds generate_image().
+        images = current_turn_images()
+        allowed = images.allowance() if images is not None else None
+        if allowed is not None:
+            payload = f"{CELL_IMAGES_MARKER} {json.dumps({'allowed': allowed})}\n" + payload
         try:
             self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
             self._running_code = code
@@ -1920,6 +1963,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     last_output = elapsed
                     if _add_salvage_chunk(self._salvage, chunk):
                         self._salvage_dropped = True
+                continue
+
+            if line.startswith(IMAGE_MARKER):
+                _record_pad_image(line[len(IMAGE_MARKER):])
                 continue
 
             if line.startswith(USAGE_MARKER) and usage_log_enabled():

@@ -27,8 +27,12 @@ INTERNET_RESEARCH_ENV = "ANTON_SCRATCHPAD_INTERNET_RESEARCH"
 # The image model the pad's generate_image() asks for (ENG-4024). Unset: the
 # pad resolves it itself, from ANTON_IMAGE_MODEL or the MindsHub catalogue.
 IMAGE_MODEL_ENV = "ANTON_SCRATCHPAD_IMAGE_MODEL"
-# How many images generate_image() may make in one cell.
-MAX_IMAGES_ENV = "ANTON_SCRATCHPAD_MAX_IMAGES"
+# Optional cell line, host to pad: {"allowed": n}, the images generate_image()
+# may still make this turn. Absent, the helper is not offered for the cell.
+CELL_IMAGES_MARKER = "__ANTON_CELL_IMAGES__"
+# Pad to host, one line per image call: {"event": "sent"} as its request goes
+# out, then {"event": "usage", "model", ...counts} once it is billed.
+IMAGE_MARKER = "__ANTON_IMAGE__"
 # The project's artifacts folder when it is not <workspace>/.anton/artifacts
 # (a cloud pod's mount), where generate_image() saves an image by default.
 ARTIFACTS_ROOT_ENV = "ANTON_SCRATCHPAD_ARTIFACTS_ROOT"

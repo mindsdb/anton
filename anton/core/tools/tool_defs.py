@@ -857,7 +857,7 @@ _IMAGES_PROMPT_PAD_HELPER = (
     "path=None)` in the scratchpad instead — a global there, do not import it. It saves "
     "each image to `path` (relative to the project, or absolute, such as a file in the "
     "folder `create_artifact` returned), else as an image artifact of its own, returns "
-    "the saved file's absolute path, and refuses past its per-cell limit.\n"
+    "the saved file's absolute path, and counts against the turn's image limit.\n"
 )
 _IMAGES_PROMPT_TAIL = (
     "- Each image costs the user money: make the images asked for, not unrequested "

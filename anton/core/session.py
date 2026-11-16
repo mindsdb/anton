@@ -44,7 +44,13 @@ from anton.core.llm.effort import (
 )
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import DeploymentIdentity, product_lines, serving_model_lines
-from anton.core.llm.images import DEFAULT_MAX_IMAGES
+from anton.core.llm.images import (
+    DEFAULT_MAX_IMAGES,
+    IMAGE_ROLE,
+    TurnImageBudget,
+    arm_turn_images,
+    disarm_turn_images,
+)
 from anton.core.llm.liveness import (
     MODEL_WAIT_PHASE,
     ModelCallTracker,
@@ -2152,9 +2158,10 @@ class ChatSession:
             else DEFAULT_MAX_IMAGES
         )
         self._images_this_turn = 0
-        # Whether `generate_image` is offered: None until `_settle_image_offer`
-        # decides, at the first turn.
+        # Whether `generate_image` is offered, and the pad's helper with it:
+        # None until `_settle_image_offer` decides, at each turn's start.
         self._image_offer: bool | None = None
+        self._pad_image_offer = False
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -3664,55 +3671,63 @@ class ChatSession:
             self.tool_registry.register_tool(build_browser_tool())
 
     def _image_tool(self) -> ToolDef:
-        """`generate_image`, offering the pad's helper only where it can work:
-        the pad's helper goes out on the coding provider, and only an
-        OpenAI-API one has an images API."""
-        coding = self._llm.coding_provider.export_connection_info().provider
+        """`generate_image`, advertising the pad's helper only where the pad
+        can use it (`_settle_image_offer`)."""
         return (
-            GENERATE_IMAGE_TOOL if coding in ("openai", "openai-compatible")
+            GENERATE_IMAGE_TOOL if getattr(self, "_pad_image_offer", False)
             else GENERATE_IMAGE_TOOL_NO_PAD_HELPER
         )
 
     async def _settle_image_offer(self) -> None:
-        """Decide, once per session, whether `generate_image` is offered (ENG-4024).
+        """Decide, once per turn, whether `generate_image` is offered (ENG-4024).
 
         It needs a role on an OpenAI-API endpoint to send the call to
-        (`LLMClient.image_provider`), and then:
+        (`LLMClient.image_provider`) that serves images
+        (`_provider_offers_images`). The pad's helper goes out on the coding
+        provider, so it is offered only when that one passes the same test.
 
-        - an image model configured (settings, ANTON_IMAGE_MODEL, a cloud
-          turn's `llm["image_model"]`) turns it on;
-        - direct OpenAI serves the images API;
-        - on MindsHub, its catalogue must list an image model this key may
-          use: the image aliases are published after the clients that use them
-          ship, and until then every call would fail. A catalogue that cannot
-          be read offers nothing. Read off the event loop, and cached for the
-          process (`images.catalog_offers_images`);
-        - another OpenAI-compatible server is assumed to have none.
-
-        Runs before the turn's first tool build. A registry built earlier
-        (a host that builds tools before the turn) gets the tool added here.
+        Re-checked at each turn's start (the catalogue read is cached), and the
+        registry follows: the tool is added, swapped or withdrawn.
         """
         if getattr(self, "_image_offer", None) is not None:
             return
-        offered = False
+        offered = pad_offered = False
         try:
-            offered = await self._image_generation_available()
+            offered = await self._provider_offers_images(getattr(self._llm, "image_provider", None))
+            if offered:
+                coding = getattr(self._llm, "coding_provider", None)
+                pad_offered = await self._provider_offers_images(coding)
         except Exception:
             logger.warning("could not decide whether to offer generate_image", exc_info=True)
         self._image_offer = offered
-        if (
-            offered
-            and self._workspace is not None
-            and self.tool_registry
-            and not any(t.name == GENERATE_IMAGE_TOOL.name for t in self.tool_registry.get_tool_defs())
-        ):
-            self.tool_registry.register_tool(self._image_tool())
+        self._pad_image_offer = pad_offered
+        if not self.tool_registry:
+            return  # `_build_core_tools` registers it on the first build
+        current = next(
+            (t for t in self.tool_registry.get_tool_defs() if t.name == GENERATE_IMAGE_TOOL.name), None,
+        )
+        if current is not None and current not in (GENERATE_IMAGE_TOOL, GENERATE_IMAGE_TOOL_NO_PAD_HELPER):
+            return  # a host's own tool of that name is left alone
+        wanted = self._image_tool() if offered and self._workspace is not None else None
+        if current is not None and current is not wanted:
+            self.tool_registry.unregister_tool(GENERATE_IMAGE_TOOL.name)
+        if wanted is not None and current is not wanted:
+            self.tool_registry.register_tool(wanted)
 
-    async def _image_generation_available(self) -> bool:
+    async def _provider_offers_images(self, provider: object) -> bool:
+        """Whether image calls on ``provider`` can work.
+
+        - only an `OpenAIProvider` has the images API;
+        - an image model configured (settings, ANTON_IMAGE_MODEL, a cloud
+          turn's `llm["image_model"]`) turns it on;
+        - direct OpenAI serves the images API;
+        - on MindsHub, its catalogue must list an image model this key may use
+          (read off the event loop, cached by `images.catalog_offers_images`);
+        - another OpenAI-compatible server is assumed to have none.
+        """
         from anton.core.llm.images import catalog_offers_images, is_mindshub_endpoint
         from anton.core.llm.openai import OpenAIProvider
 
-        provider = getattr(self._llm, "image_provider", None)
         if not isinstance(provider, OpenAIProvider):
             return False
         if _named_model(getattr(self._llm, "image_model", None)) is not None:
@@ -3726,6 +3741,17 @@ class ChatSession:
                 catalog_offers_images, conn.base_url, api_key, verify=conn.ssl_verify,
             )
         return conn.flavor == OpenAIProvider.FLAVOR_OPENAI
+
+    def _pad_image_allowance(self) -> int | None:
+        """Images the pad may still make this turn, or None when its helper is not offered."""
+        if not (getattr(self, "_image_offer", None) and getattr(self, "_pad_image_offer", False)):
+            return None
+        if self.spend_ceiling_reached():
+            return 0
+        return max(0, self._max_images_per_turn - self._images_this_turn)
+
+    def _take_pad_image(self) -> None:
+        self._images_this_turn += 1
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -6279,6 +6305,8 @@ class ChatSession:
         # session per turn get the same result either way.
         self._artifacts_touched = set()
         self._images_this_turn = 0
+        # Re-decided at this turn's start (`_settle_image_offer`).
+        self._image_offer = None
         self._artifacts_touched_complete = True
         self._page_checks = {}
         self._geography_requirements = {}
@@ -6474,6 +6502,13 @@ class ChatSession:
         _turn_calls = ModelCallTracker()
         self.model_calls = _turn_calls
         _calls_token = arm_turn_tracker(_turn_calls)
+        # The pad's generate_image() shares the turn's image cap and books its
+        # calls in these books (`LocalScratchpadRuntime` reads it per cell).
+        _images_token = arm_turn_images(TurnImageBudget(
+            allowance=self._pad_image_allowance,
+            take=self._take_pad_image,
+            record_usage=functools.partial(_turn_cost_books.add, IMAGE_ROLE),
+        ))
 
         _turn_exc: BaseException | None = None
         _turn_raised = False
@@ -7026,6 +7061,8 @@ class ChatSession:
                 # Cross-context finalizer of an abandoned turn: the ContextVar
                 # copy dies with that task, and the newer turn keeps its own.
                 pass
+            with contextlib.suppress(ValueError):
+                disarm_turn_images(_images_token)
             if self._active_explainability is not None:
                 self._active_explainability.finalize(
                     "".join(assistant_text_parts)[:2000]

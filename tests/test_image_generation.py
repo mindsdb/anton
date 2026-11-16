@@ -122,13 +122,12 @@ def test_from_settings_carries_the_image_model():
     assert LLMClient.from_settings(settings).image_model == "gpt-image-2.6-sunburst"
 
 
-def test_image_caps_default_to_eight_and_read_their_env_vars(monkeypatch):
+def test_the_turn_image_cap_defaults_to_eight_and_reads_its_env_var(monkeypatch):
     assert CoreSettings().max_images_per_turn == 8
-    assert CoreSettings().scratchpad_max_images == 8
     monkeypatch.setenv("ANTON_MAX_IMAGES_PER_TURN", "3")
-    monkeypatch.setenv("ANTON_SCRATCHPAD_MAX_IMAGES", "2")
     assert CoreSettings().max_images_per_turn == 3
-    assert CoreSettings().scratchpad_max_images == 2
+    # One cap for the tool and the pad together: no per-cell setting.
+    assert not hasattr(CoreSettings(), "scratchpad_max_images")
 
 
 # ── Which model ──────────────────────────────────────────────────────
@@ -867,19 +866,99 @@ def test_catalog_offers_images_only_for_a_usable_image_row():
         assert images.catalog_offers_images(MINDSHUB, "k") is False
 
 
-async def test_the_pad_helper_is_offered_only_where_the_coding_connection_has_images(tmp_path):
-    from anton.core.llm.provider import ProviderConnectionInfo
-
+@pytest.mark.parametrize("flavor, base_url, offered", [
+    (OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH, MINDSHUB, True),
+    (OpenAIProvider.FLAVOR_OPENAI, "https://api.openai.com/v1", True),
+    # Reports "openai" like every OpenAIProvider, but has no images API.
+    (OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC, "http://localhost:11434/v1", False),
+], ids=["mindshub", "openai", "generic"])
+async def test_the_pad_helper_is_offered_only_where_the_coding_connection_has_images(
+    tmp_path, flavor, base_url, offered,
+):
     llm = make_mock_llm()
     llm.image_provider = OpenAIProvider(api_key="k", base_url=MINDSHUB)
     llm.image_model = None
-    llm.coding_provider.export_connection_info = MagicMock(
-        return_value=ProviderConnectionInfo(provider="openai", api_key="k", base_url=MINDSHUB)
-    )
+    coding = OpenAIProvider(api_key="k", base_url=base_url, flavor=flavor)
+    assert coding.export_connection_info().provider == "openai"
+    llm.coding_provider = MagicMock(wraps=coding)
+    llm.coding_provider.__class__ = OpenAIProvider
+    llm.coding_provider.export_connection_info = MagicMock(return_value=coding.export_connection_info())
+    llm.coding_provider.current_api_key = AsyncMock(return_value="k")
     with _catalog():
-        system, _ = await _first_request(tmp_path, llm)
-    assert GENERATE_IMAGE_TOOL.prompt in system
-    assert "in the scratchpad instead" in system
+        system, tools = await _first_request(tmp_path, llm)
+    assert "generate_image" in tools
+    assert ("in the scratchpad instead" in system) is offered
+
+
+async def test_the_offer_is_rechecked_at_each_turn(tmp_path):
+    """A catalogue that gains (or loses) its image models changes the next
+    turn's tools, without a new session."""
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    llm = make_mock_llm()
+    llm.image_provider = OpenAIProvider(api_key="k", base_url=MINDSHUB)
+    llm.image_model = None
+    session = ChatSession(ChatSessionConfig(llm_client=llm, workspace=workspace))
+
+    def tools(call: int) -> set[str]:
+        return {t["name"] for t in llm.plan.call_args_list[call].kwargs["tools"]}
+
+    try:
+        with _catalog(_CATALOG_NO_IMAGES):
+            await run_turn(session, "Draw me a cat.")
+        images._catalog_cache.clear()
+        with _catalog():
+            await run_turn(session, "Draw me a cat.")
+        images._catalog_cache.clear()
+        with _catalog(_CATALOG_NO_IMAGES):
+            await run_turn(session, "Draw me a cat.")
+        assert ["generate_image" in tools(i) for i in range(3)] == [False, True, False]
+    finally:
+        await session.close()
+
+
+async def test_the_pad_allowance_is_what_the_turn_has_left(tmp_path):
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm(), workspace=workspace))
+    try:
+        session._max_images_per_turn = 3
+        session._image_offer, session._pad_image_offer = True, False
+        assert session._pad_image_allowance() is None  # helper not offered
+        session._pad_image_offer = True
+        session._images_this_turn = 1  # one from the tool
+        assert session._pad_image_allowance() == 2
+        session._take_pad_image()
+        assert session._images_this_turn == 2 and session._pad_image_allowance() == 1
+        session.spend_ceiling_reached = lambda: True
+        assert session._pad_image_allowance() == 0
+    finally:
+        await session.close()
+
+
+def test_the_runtime_books_pad_image_lines_in_the_turn_budget():
+    from anton.core.backends.local import _record_pad_image
+
+    taken: list = []
+    booked: list = []
+    budget = images.TurnImageBudget(
+        allowance=lambda: 8, take=lambda: taken.append(1),
+        record_usage=lambda model, usage: booked.append((model, usage)),
+    )
+    _record_pad_image(' {"event": "sent"}')  # no turn armed: ignored
+    token = images.arm_turn_images(budget)
+    try:
+        _record_pad_image(' {"event": "sent"}')
+        _record_pad_image(' {"event": "usage", "model": "m", "input": 16, "image_output": 824, "output": -3}')
+        _record_pad_image(" not json")
+    finally:
+        images.disarm_turn_images(token)
+    assert taken == [1]
+    [(model, usage)] = booked
+    assert (model, usage.input_tokens, usage.output_tokens, usage.image_output_tokens) == ("m", 16, 0, 824)
+    tc = TurnCost()
+    tc.add("image", model, usage)
+    assert tc.total_tokens == 840
 
 
 async def test_an_anthropic_only_session_has_no_image_tool(tmp_path):

@@ -472,8 +472,9 @@ The boot script also provides `agentic_loop(...)` (a sync tool-call loop),
 from the OpenAI images API on the coding provider's endpoint and key, saved to
 `path` or else as an `image` artifact of its own, returning the saved file's
 absolute path; its model is `ANTON_SCRATCHPAD_IMAGE_MODEL`, which the host sets
-from the session's image model or `ANTON_IMAGE_MODEL`, and at most
-`ANTON_SCRATCHPAD_MAX_IMAGES` per cell),
+from the session's image model or `ANTON_IMAGE_MODEL`; bound only while the
+turn offers it, and held to the turn's remaining `ANTON_MAX_IMAGES_PER_TURN`,
+which the host sends with each cell),
 `progress(message)` (inactivity-timer reset), and `sample(var)` (type-aware
 variable inspection).
 
