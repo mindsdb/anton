@@ -201,18 +201,49 @@ def check_runtime_uv() -> list[str]:
     return []
 
 
-def check_venv_writable() -> list[str]:
-    """That same install writes into the venv as uid 1000.
+#: Code the agent process loads. Cell code runs as the same uid, so any of it
+#: that uid can write is code a cell can change under the agent.
+AGENT_CODE_ROOTS = ("/app/anton", "/usr/local/lib/python3.12")
+#: Listing more than this many writable paths adds nothing to the verdict.
+MAX_WRITABLE_REPORTED = 10
 
-    The Dockerfile chowns the venv for exactly this. A chown that stops covering
-    it leaves an image that serves turns normally right up until a cell imports
-    something that is not installed.
+
+def writable_paths(roots) -> list[str]:
+    """Every file and folder under *roots* this process can write, links skipped."""
+    found: list[str] = []
+    for root in roots:
+        if os.access(root, os.W_OK):
+            found.append(root)
+        for folder, dirs, files in os.walk(root):
+            for name in dirs + files:
+                path = os.path.join(folder, name)
+                if not os.path.islink(path) and os.access(path, os.W_OK):
+                    found.append(path)
+    return found
+
+
+def check_agent_code_read_only() -> list[str]:
+    """The runtime user can write nothing the agent process loads.
+
+    That covers the venv, anton's own source and the standard library. Pads
+    install into venvs of their own under the workspace, so nothing at turn
+    time needs to write here.
     """
     venv = os.environ.get("VIRTUAL_ENV", "")
     if not venv:
         return ["venv: VIRTUAL_ENV is not set in the image"]
-    if not os.access(venv, os.W_OK):
-        return [f"venv: {venv} is not writable by uid {os.getuid()}"]
+    found = writable_paths((venv, *AGENT_CODE_ROOTS))
+    if not found:
+        return []
+    shown = "\n  ".join(found[:MAX_WRITABLE_REPORTED])
+    more = f"\n  ... and {len(found) - MAX_WRITABLE_REPORTED} more" if len(found) > MAX_WRITABLE_REPORTED else ""
+    return [f"agent code: {len(found)} path(s) writable by uid {os.getuid()}:\n  {shown}{more}"]
+
+
+def check_user_site_disabled() -> list[str]:
+    """Python loads no startup files from the runtime user's home, which cells can write."""
+    if not sys.flags.no_user_site:
+        return ["user site: Python would load packages from the runtime user's home (set PYTHONNOUSERSITE)"]
     return []
 
 
@@ -247,7 +278,8 @@ CHECKS = (
     check_launcher_through_resident,
     check_scratchpad_boot,
     check_runtime_uv,
-    check_venv_writable,
+    check_agent_code_read_only,
+    check_user_site_disabled,
     check_bytecode,
 )
 

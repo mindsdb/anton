@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -180,3 +182,74 @@ def test_bytecode_passes_when_every_module_has_a_pyc(smoke, monkeypatch):
 def test_bytecode_names_the_modules_without_a_pyc(smoke, monkeypatch):
     monkeypatch.setattr(smoke.os.path, "exists", lambda path: "openai" not in path)
     assert smoke.check_bytecode() == ["bytecode: no compiled .pyc for openai"]
+
+
+def _agent_code_tree(tmp_path, monkeypatch, smoke):
+    venv = tmp_path / "venv"
+    (venv / "lib" / "site-packages").mkdir(parents=True)
+    (venv / "lib" / "site-packages" / "mod.py").write_text("x = 1\n")
+    monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+    monkeypatch.setattr(smoke, "AGENT_CODE_ROOTS", ())
+    return venv
+
+
+def _read_only(root):
+    for folder, dirs, files in os.walk(root, topdown=False):
+        for name in files:
+            os.chmod(os.path.join(folder, name), 0o444)
+        os.chmod(folder, 0o555)
+
+
+def _writable_again(root):
+    for folder, dirs, files in os.walk(root):
+        os.chmod(folder, 0o755)
+        for name in files:
+            os.chmod(os.path.join(folder, name), 0o644)
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root can write a read-only file")
+def test_agent_code_passes_when_the_runtime_user_can_write_none_of_it(smoke, monkeypatch, tmp_path):
+    venv = _agent_code_tree(tmp_path, monkeypatch, smoke)
+    _read_only(venv)
+    try:
+        assert smoke.check_agent_code_read_only() == []
+    finally:
+        _writable_again(venv)
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="root can write a read-only file")
+def test_agent_code_names_a_file_the_runtime_user_can_write(smoke, monkeypatch, tmp_path):
+    """One writable module is enough for a cell to change what the agent runs."""
+    venv = _agent_code_tree(tmp_path, monkeypatch, smoke)
+    _read_only(venv)
+    module = venv / "lib" / "site-packages" / "mod.py"
+    os.chmod(module, 0o644)
+    try:
+        (failure,) = smoke.check_agent_code_read_only()
+    finally:
+        _writable_again(venv)
+    assert "1 path(s) writable" in failure
+    assert str(module) in failure
+
+
+def test_agent_code_fails_on_the_image_layout_this_change_removed(smoke, monkeypatch, tmp_path):
+    """The venv the runtime user owned and could write must fail the build."""
+    _agent_code_tree(tmp_path, monkeypatch, smoke)
+    (failure,) = smoke.check_agent_code_read_only()
+    assert "writable by uid" in failure
+
+
+def test_agent_code_fails_without_a_venv(smoke, monkeypatch):
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    assert smoke.check_agent_code_read_only() == ["venv: VIRTUAL_ENV is not set in the image"]
+
+
+def test_user_site_fails_when_python_would_load_it(smoke, monkeypatch):
+    monkeypatch.setattr(smoke, "sys", SimpleNamespace(flags=SimpleNamespace(no_user_site=0)))
+    (failure,) = smoke.check_user_site_disabled()
+    assert "PYTHONNOUSERSITE" in failure
+
+
+def test_user_site_passes_when_python_skips_it(smoke, monkeypatch):
+    monkeypatch.setattr(smoke, "sys", SimpleNamespace(flags=SimpleNamespace(no_user_site=1)))
+    assert smoke.check_user_site_disabled() == []

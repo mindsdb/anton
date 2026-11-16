@@ -40,6 +40,7 @@ from anton.cloud_turn.elicitor import (
     ask_user_event,
 )
 from anton.cloud_turn.history_rows import split_turn_into_rows
+from anton.cloud_turn.launcher import forbid_same_user_access
 from anton.cloud_turn.session import (
     build_cloud_chat_session,
     build_turn_content,
@@ -570,6 +571,15 @@ async def _stream_turn(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before the request is read: it carries the turn's credentials, and cell
+    # code runs as this process's user. A turn the launcher hands to the
+    # resident already has this; one exec'd directly has not, since exec resets it.
+    if sys.platform == "linux":
+        try:
+            forbid_same_user_access()
+        except OSError as exc:
+            # The launcher makes the same choice: losing it is not worth losing the turn.
+            print(f"cloud turn: could not close /proc access: {exc}", file=sys.stderr, flush=True)
     with _isolated_protocol_stdout() as emit:
         # A private reader over a dup of fd 0, never `sys.stdin` (why: see the
         # cloud_turn/stdin.py docstring).
