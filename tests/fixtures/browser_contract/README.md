@@ -24,7 +24,7 @@ Each file is one JSON object:
 | `sessions.json` | Opening a conversation's session, and the one answer shape both hosts give |
 | `page.json` | The page snapshot: elements, `value_hidden` on secret fields, `challenges` for visible check frames |
 | `action.json` | Step requests and the action answer |
-| `control.json` | The control record (`holder`, `reason`, `since`, `seq`, `by`), the hand-over request, and the refused take-back |
+| `control.json` | The control record (`holder`, `reason`, `since`, `seq`, `by`), the hand-over request and its answer's `watching`, and the refused take-back |
 | `tabs.json` | Tab list, open, activate and close |
 | `sites.json` | Signed-in sites the browser records |
 | `saved_tabs.json` | A project's saved tabs, and the most a project keeps |
