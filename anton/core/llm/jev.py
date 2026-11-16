@@ -196,17 +196,22 @@ def policy_unavailable(response) -> bool:
 
 async def decide(
     *,
-    base_url: str,
+    base_url: str = "",
     api_key: str,
     model: str,
     state: dict,
     questions: dict,
     timeout_s: float,
     client=None,
+    url: str = "",
     headers: dict[str, str] | None = None,
     retry_policy_unavailable: bool = False,
 ) -> JevDecision:
     """POST one decision request with any questions. Never raises.
+
+    The request goes to ``{base_url}/decisions`` (a MindsHub inference base
+    URL, incl. /v1), or to ``url`` as given when there is one: a decision
+    endpoint's full URL, which hosts serve at paths of their own.
 
     ``retry_policy_unavailable``: send the request once more after MindsHub's
     503 "policy temporarily unavailable", inside the same ``timeout_s``.
@@ -225,7 +230,7 @@ async def decide(
         async with asyncio.timeout(timeout_s):
             for attempt in range(2):
                 response = await client.post(
-                    f"{base_url.rstrip('/')}/decisions",
+                    url or f"{base_url.rstrip('/')}/decisions",
                     headers={**(headers or {}), "Authorization": f"Bearer {api_key}"},
                     json={"model": model, "state": state, "questions": questions},
                 )
