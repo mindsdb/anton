@@ -6,6 +6,7 @@ remain data: script delimiters are escaped before insertion into the document.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import re
@@ -21,6 +22,9 @@ PLACES_ID = "cowork-places-json"
 CHECKS_ID = "cowork-figure-checks"
 MARKER = "data-cowork-observed"
 MAX_DOUBLE_COUNTS = 200
+DIFFERENCES_KEY = "scenario_differences"
+MAX_DIFFERENCES_CHARS = 5000
+MAX_COMPARED_ROWS = 100_000
 def _invalid_constant(value):
     raise ValueError(f"Non-JSON constant: {value}")
 
@@ -209,6 +213,133 @@ def double_counts(data):
     return [item for value, item in found.items() if value not in legitimate][:MAX_DOUBLE_COUNTS]
 
 
+def _tables(value, path=(), depth=0):
+    if depth > 6:
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _tables(item, path + (str(key),), depth + 1)
+    elif isinstance(value, list) and len(value) >= 2 and all(isinstance(v, dict) for v in value):
+        yield path, value
+
+
+def _same_shaped_pairs(tables):
+    """Tables with the same fields whose paths differ in one name, such as one per scenario."""
+    work = 0
+    for i, (path_a, a, fields_a) in enumerate(tables):
+        for path_b, b, fields_b in tables[i + 1:]:
+            if (fields_a == fields_b and len(path_a) == len(path_b)
+                    and sum(x != y for x, y in zip(path_a, path_b)) == 1):
+                # Many same-shaped tables would make this quadratic; the page is built without them.
+                work += len(a) + len(b)
+                if work > MAX_COMPARED_ROWS:
+                    return
+                yield path_a, a, path_b, b
+
+
+def _matching_fields(a, b, fields):
+    """The fewest fields, up to three, that name each row once in both tables, such as an id and line."""
+    def unique(rows, combo):
+        keys = [tuple(r.get(f) for f in combo) for r in rows]
+        return all(None not in k for k in keys) and len(set(keys)) == len(keys)
+    for size in (1, 2, 3):
+        for combo in itertools.combinations(fields, size):
+            if unique(a, combo) and unique(b, combo):
+                return combo
+    return None
+
+
+# Rates, shares, averages and unit prices do not add up across rows.
+_NOT_ADDITIVE = {"pct", "percent", "percentage", "rate", "ratio", "share", "average", "avg", "mean", "price"}
+
+
+def _additive(name):
+    words = re.findall(r"[a-z0-9]+", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower())
+    return bool(words) and not (words[0] in _NOT_ADDITIVE or words[-1] in _NOT_ADDITIVE and words[0] != "total")
+
+
+def _summary(rows, measures, groups):
+    # Subtotal rows beside their parts would count those parts twice.
+    totals = [(m["field"], m["value"]) for m in total_rows(rows)]
+    rows = [r for r in rows if not any(r.get(f) == v for f, v in totals)]
+
+    def sums(subset):
+        totals = {m: round(sum(r.get(m) or 0 for r in subset), 2) for m in measures}
+        # Huge values can add up to infinity, which JSON cannot hold.
+        return {"rows": len(subset), **{m: v for m, v in totals.items() if math.isfinite(v)}}
+    result = sums(rows)
+    for field, values in groups.items():
+        result["by " + field] = {str(v): sums([r for r in rows if type(r.get(field)) is type(v) and r.get(field) == v])
+                                 for v in values}
+    return result
+
+
+def _minus(after, before):
+    if isinstance(after, dict):
+        return {k: _minus(after[k], before[k]) for k in after if k in before}
+    return round(after - before, 2)
+
+
+def scenario_comparisons(value):
+    """Counts and sums of the same records saved once per scenario, with their differences,
+    so a page can show a gain or a risk between scenarios instead of deriving it."""
+    found = {}
+    tables = [(path, rows, frozenset(k for r in rows for k in r)) for path, rows in _tables(value)]
+    for path_a, a, path_b, b in _same_shaped_pairs(tables):
+        keys = list(dict.fromkeys(k for r in a + b for k in r))
+        # Text ids first, so a unique number such as an amount is not taken for the record's name.
+        candidates = sorted((k for k in keys if all(isinstance(r.get(k), (str, int)) for r in a + b)),
+                            key=lambda k: not all(isinstance(r.get(k), str) for r in a + b))
+        fields = _matching_fields(a, b, candidates)
+        if not fields:
+            continue
+        rows_a = {tuple(r.get(f) for f in fields): r for r in a}
+        rows_b = {tuple(r.get(f) for f in fields): r for r in b}
+        shared = rows_a.keys() & rows_b.keys()
+        # Mostly different records, such as two periods, are not one set of records under two scenarios.
+        if len(shared) < 0.5 * min(len(a), len(b)):
+            continue
+        changed = [k for k in keys if k not in fields and any(rows_a[s].get(k) != rows_b[s].get(k) for s in shared)]
+        # Without a changed value, a smaller table is a filtered subset, such as one site's rows.
+        if not changed:
+            continue
+        at = next(n for n, (x, y) in enumerate(zip(path_a, path_b)) if x != y)
+        entry = found.setdefault((path_a[:at], path_a[at + 1:], frozenset(keys)),
+                                 {"keys": keys, "fields": fields, "changed": {}, "scenarios": {}, "pairs": []})
+        entry["changed"].update(dict.fromkeys(changed))
+        entry["scenarios"].setdefault(path_a[at], a)
+        entry["scenarios"].setdefault(path_b[at], b)
+        entry["pairs"].append((path_a[at], path_b[at]))
+    result, size = {}, 0
+    for (before, after, _), entry in found.items():
+        table = " / ".join(before + ("<scenario>",) + after)
+        table += f" ({len(result) + 1})" if table in result else ""
+        rows = [r for t in entry["scenarios"].values() for r in t]
+        # A field equal on every row, such as line 1, sums to a row count.
+        measures = [k for k in entry["keys"] if k not in entry["fields"] and k != "rows" and _additive(k)
+                    and all(_number(r.get(k)) or r.get(k) is None for r in rows)
+                    and len({r.get(k) for r in rows}) > 1]
+        groups, smallest = {}, min(len(t) for t in entry["scenarios"].values())
+        for field in entry["changed"]:
+            if field in measures or not all(isinstance(r.get(field), (str, int, bool, type(None))) for r in rows):
+                continue
+            values = list({(type(r.get(field)), r.get(field)): r.get(field) for r in rows}.values())
+            # Grouping by a field with a value per few rows, such as a date, is a listing, not a comparison.
+            if len(values) <= min(12, smallest / 3) and len({str(v) for v in values}) == len(values):
+                groups[field] = values
+        summaries = {label: _summary(t, measures, groups) for label, t in entry["scenarios"].items()}
+        compared = {"matched on": ", ".join(entry["fields"]), "changed fields": ", ".join(entry["changed"]),
+                    "per scenario": summaries,
+                    "differences": {f"{later} minus {first}": _minus(summaries[later], summaries[first])
+                                    for first, later in entry["pairs"]}}
+        cost = len(json.dumps({table: compared}, ensure_ascii=False))
+        # The writer reads these as one exact object, so they share a size budget.
+        if size + cost <= MAX_DIFFERENCES_CHARS:
+            result[table] = compared
+            size += cost
+    return result
+
+
 def runtime_contract(value, path, depth=0, *, compact=False):
     """Describe actual access expressions without making arrays look like wrapper objects."""
     if depth > 6:
@@ -270,9 +401,20 @@ def previous_data(html):
 def collect(handoff, existing=""):
     """Bind a fresh handoff; an edit without one keeps only the page's previous data."""
     data = {identity(handoff): handoff} if handoff is not None else previous_data(existing)
+    if handoff is not None and (compared := scenario_comparisons(handoff)):
+        differences = {DIFFERENCES_KEY: compared}
+        data[identity(differences)] = differences
     schemas = []
     for key, value in data.items():
-        schemas.extend(runtime_contract(value, "window.ARTIFACT_DATA[" + json.dumps(key) + "]", compact=True))
+        path = "window.ARTIFACT_DATA[" + json.dumps(key) + "]"
+        schemas.extend(runtime_contract(value, path, compact=True))
+        if isinstance(value, dict) and list(value) == [DIFFERENCES_KEY]:
+            schemas.append(
+                f"SCENARIO DIFFERENCES: {path}[{json.dumps(DIFFERENCES_KEY)}] holds row counts and sums the host "
+                "computed from the same records saved once per scenario, or per other group such as a site "
+                "(matched on the listed fields), overall and by each changed field, with the differences between "
+                "them. When they are scenarios, show a gain, saving or risk between them from these figures "
+                "instead of calling it unavailable.")
     return data, "Embedded JSON contracts (actual runtime access paths):\n" + "\n".join(schemas)
 
 
