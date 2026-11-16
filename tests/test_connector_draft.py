@@ -176,10 +176,10 @@ def test_a_boolean_must_be_a_boolean():
         parse_connector_draft(_draft(fields=[{"name": "k", "label": "K", "required": "false"}]))
 
 
-def test_an_optional_field_that_is_not_secret_is_refused():
+def test_an_optional_field_is_refused_since_auth_sends_every_field():
     fields = [{"name": "api_key", "label": "Key"}, {"name": "region", "label": "Region", "secret": False, "required": False}]
 
-    with pytest.raises(ConnectorDraftError, match=r"^fields\[1\]\.required may be false only on a secret field"):
+    with pytest.raises(ConnectorDraftError, match=r"^fields\[1\]\.required must be true"):
         parse_connector_draft(_draft(fields=fields))
 
 
@@ -768,7 +768,7 @@ def test_the_tool_describes_the_check():
 
     check = tool.input_schema["properties"]["check"]
     assert check["required"] == ["path"]
-    assert set(check["properties"]) == {"path", "public_path"}
+    assert set(check["properties"]) == {"path"}
     assert check["additionalProperties"] is False
     assert "check" in tool.description
     assert "call it directly from code" in tool.description
@@ -830,7 +830,7 @@ def test_the_tool_describes_auth_as_one_flat_object():
     assert "type 'query'" in tool.description
     assert auth["properties"]["params"]["maxProperties"] == 5
     field = schema["properties"]["fields"]["items"]["properties"]["required"]
-    assert "enum" not in field and field["type"] == "boolean"
+    assert field["enum"] == [True]
     assert auth["additionalProperties"] is False
     assert _union_keywords(schema) == set()
     assert "call_minds_api" in schema["properties"]["usage_notes"]["description"]
@@ -846,96 +846,3 @@ def test_the_examples_the_tool_gives_parse():
     )
     for data in (header, basic, notion):
         parse_connector_draft(data)
-
-
-_OPTIONAL_FIELDS = [{"name": "api_key", "label": "Key", "required": False}]
-_OPTIONAL_CHECK = {"path": "/api/3/action/user_show", "public_path": "/api/3/action/package_list"}
-
-
-def _optional_draft(**overrides):
-    """A one-key template whose key a member may leave out, with both check paths."""
-    return _draft(**{"fields": _OPTIONAL_FIELDS, "auth": _one_field_auth(), "check": _OPTIONAL_CHECK, **overrides})
-
-
-def test_an_optional_key_with_a_public_path_parses_and_round_trips():
-    draft = parse_connector_draft(_optional_draft())
-
-    assert draft.fields[0].required is False
-    assert draft.check.public_path == "/api/3/action/package_list"
-    assert draft.to_dict()["check"] == _OPTIONAL_CHECK
-    assert draft.to_dict()["fields"][0]["required"] is False
-    assert parse_connector_draft(draft.to_dict()) == draft
-
-
-def test_a_check_without_an_optional_key_keeps_its_old_shape():
-    assert parse_connector_draft(_draft(check=_CHECK)).check.public_path is None
-    assert parse_connector_draft(_draft(check=_CHECK)).to_dict()["check"] == _CHECK
-
-
-def test_a_public_path_is_required_when_every_secret_field_is_optional():
-    with pytest.raises(ConnectorDraftError, match=r"^check\.public_path is required"):
-        parse_connector_draft(_optional_draft(check={"path": "/api/3/action/user_show"}))
-
-
-@pytest.mark.parametrize("fields,auth", [
-    (_BASIC_FIELDS, {"type": "basic", "username": "{email}/token", "password": "{api_token}"}),
-    (
-        [{"name": "api_key", "label": "Key"}, {"name": "extra", "label": "Extra", "required": False}],
-        {"type": "header", "headers": {"Authorization": "Bearer {api_key}", "X-Extra": "{extra}"}},
-    ),
-], ids=["no optional field", "a required secret beside the optional one"])
-def test_a_public_path_is_refused_when_no_connection_could_be_keyless(fields, auth):
-    check = {"path": "/v2/me", "public_path": "/v2/status"}
-
-    with pytest.raises(ConnectorDraftError, match=r"^check\.public_path is only for"):
-        parse_connector_draft(_draft(fields=fields, auth=auth, check=check))
-
-
-def test_a_public_path_may_not_equal_the_path():
-    check = {"path": "/v2/me", "public_path": "/v2/me"}
-
-    with pytest.raises(ConnectorDraftError, match=r"^check\.public_path must differ"):
-        parse_connector_draft(_optional_draft(check=check))
-
-
-@pytest.mark.parametrize("path", ["v2/status", "//evil.example/x", "/v2/../x", "/v2/{api_key}"])
-def test_a_public_path_follows_the_path_rules(path):
-    with pytest.raises(ConnectorDraftError, match=r"^check\.public_path\b"):
-        parse_connector_draft(_optional_draft(check={"path": "/v2/me", "public_path": path}))
-
-
-def test_a_public_path_carrying_the_placed_parameter_is_refused():
-    fields = [{"name": "api_key", "label": "Key", "required": False}]
-    check = {"path": "/v1/me", "public_path": "/v1/eod?access_key=demo"}
-
-    with pytest.raises(ConnectorDraftError, match=r"^check\.public_path may carry only plain parameter names"):
-        parse_connector_draft(_draft(fields=fields, auth=_QUERY_AUTH, check=check))
-
-
-def test_an_optional_key_may_not_share_a_header_with_another_field():
-    fields = [{"name": "api_key", "label": "Key", "required": False}, {"name": "account", "label": "Account", "secret": False}]
-    auth = {"type": "header", "headers": {"Authorization": "Bearer {api_key}.{account}"}}
-
-    with pytest.raises(ConnectorDraftError, match=r"^auth\.headers\[0\] places an optional field with another"):
-        parse_connector_draft(_draft(fields=fields, auth=auth, check=_OPTIONAL_CHECK))
-
-
-def test_the_tool_stages_an_optional_key_and_names_it_in_its_text():
-    box = ConnectorDraftBox()
-    tool = connector_draft_tool(box)
-
-    outcome = asyncio.run(tool.handler(None, _optional_draft()))
-
-    assert outcome.ok and box.drain()[0]["check"] == _OPTIONAL_CHECK
-    assert "required: false" in tool.description and "public_path" in tool.description
-    assert "no key or token at all" in tool.description
-    assert "none" not in tool.input_schema["properties"]["auth"]["properties"]["type"]["enum"]
-
-
-def test_the_tool_texts_say_public_path_goes_only_with_every_key_optional():
-    tool = connector_draft_tool(ConnectorDraftBox())
-    required = tool.input_schema["properties"]["fields"]["items"]["properties"]["required"]["description"]
-
-    assert "every key is optional" in tool.description and "every key is optional" in required
-    assert "public_path" in tool.input_schema["properties"]["check"]["properties"]
-    assert "every key is required: false" in tool.input_schema["properties"]["check"]["properties"]["public_path"]["description"]

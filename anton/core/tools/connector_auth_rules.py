@@ -24,9 +24,6 @@ AUTH_KEYS = {
     "basic": frozenset({"type", "username", "password"}),
     "query": frozenset({"type", "params"}),
 }
-#: The type of a connection's own section when it holds no key to place. Never
-#: part of a template, so it stays out of ``AUTH_KEYS`` and the tool schema.
-AUTH_NONE = "none"
 
 HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,40}")
 #: No ``.``: it would split the token-run rule, and some frameworks read it as ``_``.
@@ -215,18 +212,8 @@ def _check_keys(data: dict, allowed: frozenset[str], where: str) -> None:
         raise AuthRuleError(f"{where} has a key that is not allowed. Allowed keys: {', '.join(sorted(allowed))}.")
 
 
-def _check_optional_placement(names: set[str], optional: frozenset[str], where: str) -> None:
-    """Refuse a template that places an optional field together with another field.
-
-    Dropping the optional field must drop the whole header or parameter, so
-    nothing else may ride in it.
-    """
-    if names & optional and len(names) > 1:
-        raise AuthRuleError(f"{where} places an optional field with another field; give it a place of its own.")
-
-
 def _parse_headers(
-    value: Any, declared: frozenset[str], looks_secret: LooksSecret | None, optional: frozenset[str]
+    value: Any, declared: frozenset[str], looks_secret: LooksSecret | None
 ) -> tuple[dict[str, str], set[str]]:
     """Return the ``header`` type's headers and the fields they place."""
     if not isinstance(value, dict) or not 1 <= len(value) <= MAX_AUTH_HEADERS:
@@ -241,7 +228,6 @@ def _parse_headers(
             raise AuthRuleError("auth.headers has a header name that is not allowed.")
         seen.add(name.lower())
         text, names = check_template(template, f"auth.headers[{index}]", declared, looks_secret=looks_secret)
-        _check_optional_placement(names, optional, f"auth.headers[{index}]")
         # Basic needs base64 of user:password, which a header template cannot build.
         if text.lower().startswith("basic"):
             raise AuthRuleError("auth.headers must not hold a Basic value; use auth type 'basic'.")
@@ -251,7 +237,7 @@ def _parse_headers(
 
 
 def _parse_params(
-    value: Any, declared: frozenset[str], looks_secret: LooksSecret | None, optional: frozenset[str]
+    value: Any, declared: frozenset[str], looks_secret: LooksSecret | None
 ) -> tuple[dict[str, str], set[str]]:
     """Return the ``query`` type's parameters and the fields they place."""
     if not isinstance(value, dict) or not 1 <= len(value) <= MAX_AUTH_PARAMS:
@@ -266,7 +252,6 @@ def _parse_params(
         seen.add(name.lower())
         where = f"auth.params[{index}]"
         text, names = check_template(template, where, declared, looks_secret=looks_secret)
-        _check_optional_placement(names, optional, where)
         if QUERY_LITERAL_REFUSED & set(PLACEHOLDER.sub("", text)):
             raise AuthRuleError(f"{where} may not hold &, #, +, = or a space outside {{field_name}}.")
         params[name] = text
@@ -299,7 +284,7 @@ def render(auth: Mapping[str, Any], values: Mapping[str, str]) -> tuple[dict[str
     HTTP client.
 
     Args:
-        auth: An auth section as ``parse_auth`` returned it; ``none`` places nothing.
+        auth: An auth section as ``parse_auth`` returned it.
         values: Each placed field's value.
 
     Returns:
@@ -309,8 +294,6 @@ def render(auth: Mapping[str, Any], values: Mapping[str, str]) -> tuple[dict[str
         AuthRuleError: when the type is not one this file knows, or a placed
             field has no value or holds a control character.
     """
-    if auth["type"] == AUTH_NONE:
-        return {}, []
     if auth["type"] == "basic":
         pair = f"{_fill(auth['username'], values)}:{_fill(auth['password'], values)}"
         return {"Authorization": "Basic " + base64.b64encode(pair.encode()).decode("ascii")}, []
@@ -342,33 +325,17 @@ def query_collides(auth: Mapping[str, Any], names: Iterable[str]) -> bool:
 
 
 def parse_auth(
-    data: Any,
-    fields: Sequence[tuple[str, bool]],
-    looks_secret: LooksSecret | None = None,
-    *,
-    optional: frozenset[str] = frozenset(),
-    stored: bool = False,
+    data: Any, fields: Sequence[tuple[str, bool]], looks_secret: LooksSecret | None = None
 ) -> dict[str, Any]:
     """Check an auth section against the template's fields and return it canonical.
 
-    A template's section must place at least one secret field and every
-    field: a field it never uses would ask the member for a value that goes
-    nowhere. A header or parameter that places an optional field places only
-    that field. In Basic only the password may be optional, as the whole
-    password template, and only beside a username that places a required
-    secret field, so a skipped password never leaves a bare identity.
-
-    A stored section is a connection's own: the template's section with the
-    placements of skipped optional fields taken out. It may be ``none``, may
-    place no secret field and may be literal only, but must still place every
-    field the connection holds.
+    It must place at least one secret field and every field: a field it never
+    uses would ask the member for a value that goes nowhere.
 
     Args:
         data: The auth section as the template gives it.
         fields: Each field's name and whether it is secret, in template order.
         looks_secret: The host's detector for a value it holds or a known key shape.
-        optional: The names of the fields a member may leave out; each must be secret.
-        stored: Whether ``data`` is a connection's section, not a template's.
 
     Returns:
         The section rebuilt from what was checked, holding only its type's keys.
@@ -381,24 +348,15 @@ def parse_auth(
     if not isinstance(data, dict):
         raise AuthRuleError("auth must be an object.")
     kind = data.get("type")
-    stored_none = stored and kind == AUTH_NONE
-    if not stored_none and (not isinstance(kind, str) or kind not in AUTH_KEYS):
-        types = sorted({*AUTH_KEYS, AUTH_NONE} if stored else AUTH_KEYS)
-        raise AuthRuleError(f"auth.type must be one of: {', '.join(types)}.")
-    _check_keys(data, frozenset({"type"}) if stored_none else AUTH_KEYS[kind], "auth")
+    if not isinstance(kind, str) or kind not in AUTH_KEYS:
+        raise AuthRuleError(f"auth.type must be one of: {', '.join(sorted(AUTH_KEYS))}.")
+    _check_keys(data, AUTH_KEYS[kind], "auth")
     declared = frozenset(name for name, _ in fields)
-    secrets = {name for name, secret in fields if secret}
-    optional = frozenset(optional)
-    if not optional <= secrets:
-        raise AuthRuleError("An optional field must be a secret field the template declares.")
-    if stored_none:
-        placed: set[str] = set()
-        canonical: dict[str, Any] = {"type": kind}
-    elif kind == "header":
-        headers, placed = _parse_headers(data.get("headers"), declared, looks_secret, optional)
-        canonical = {"type": kind, "headers": headers}
+    if kind == "header":
+        headers, placed = _parse_headers(data.get("headers"), declared, looks_secret)
+        canonical: dict[str, Any] = {"type": kind, "headers": headers}
     elif kind == "query":
-        params, placed = _parse_params(data.get("params"), declared, looks_secret, optional)
+        params, placed = _parse_params(data.get("params"), declared, looks_secret)
         canonical = {"type": kind, "params": params}
     else:
         username, placed = check_template(data.get("username"), "auth.username", declared, looks_secret=looks_secret)
@@ -409,91 +367,12 @@ def parse_auth(
         password, in_password = check_template(
             data["password"], "auth.password", declared, may_be_empty=True, looks_secret=looks_secret
         )
-        _check_basic_optional(placed, password, in_password, optional, secrets)
         placed |= in_password
         canonical = {"type": kind, "username": username, "password": password}
-    # Basic is kept to a secret even stored, so no request carries an identity with an empty password.
-    if (not stored or kind == "basic") and not placed & secrets:
+    secrets = {name for name, secret in fields if secret}
+    if not placed & secrets:
         raise AuthRuleError("auth must place a secret field, such as {api_key}.")
     unused = [i for i, (name, _) in enumerate(fields) if name not in placed]
     if unused:
         raise AuthRuleError(f"auth must place every field; fields[{unused[0]}] is never used.")
     return canonical
-
-
-def _check_basic_optional(
-    in_username: set[str], password: str, in_password: set[str], optional: frozenset[str], secrets: set[str]
-) -> None:
-    """Refuse a Basic section whose optional fields sit anywhere but the whole password.
-
-    The username must place a required secret field whenever the password may
-    be skipped, so a keyless request never carries an identity with no password.
-    """
-    if in_username & optional:
-        raise AuthRuleError("auth.username may not place an optional field; only the password may be optional.")
-    if not in_password & optional:
-        return
-    if len(in_password) > 1 or password != "{" + next(iter(in_password)) + "}":
-        raise AuthRuleError("auth.password must be only the optional field, with nothing around it.")
-    if not (in_username & secrets) - optional:
-        raise AuthRuleError("An optional auth.password needs a username that places a required secret field.")
-
-
-def _check_drops_only_missing(placed: set[str], missing: set[str]) -> None:
-    """Refuse dropping a placement that also places a field the connection holds."""
-    if placed & missing and placed - missing:
-        raise AuthRuleError("A placement of a missing field also places a field the connection holds.")
-
-
-def without_missing(auth: Mapping[str, Any], held: Iterable[str], optional: Iterable[str]) -> dict[str, Any]:
-    """Take out of a template's auth section the placements of fields a connection does not hold.
-
-    A header or parameter that places a missing field is dropped, and so
-    must place nothing else the connection holds. A missing
-    Basic password becomes empty, and a section left with no header or
-    parameter becomes ``none``. The result is the section ``parse_auth`` takes
-    with ``stored=True``. Computed once from the stored template, never from
-    a request.
-
-    Args:
-        auth: The template's section as ``parse_auth`` returned it.
-        held: The names of the fields the connection holds.
-        optional: The names of the fields the template lets a member leave out.
-
-    Returns:
-        A new section; ``auth`` is not changed.
-
-    Raises:
-        AuthRuleError: when a missing field is not optional, a placement of a
-            missing field also places a held one, or the type is not one these
-            rules can apply.
-    """
-    held = set(held)
-    optional = set(optional)
-    kind = auth["type"]
-    if kind == "basic":
-        names = set(PLACEHOLDER.findall(auth["username"])) | set(PLACEHOLDER.findall(auth["password"]))
-    elif kind in ("header", "query"):
-        key = "headers" if kind == "header" else "params"
-        names = {n for template in auth[key].values() for n in PLACEHOLDER.findall(template)}
-    elif kind == AUTH_NONE:
-        return {"type": AUTH_NONE}
-    else:
-        raise AuthRuleError("auth.type is not one these rules can apply.")
-    if names - held - optional:
-        raise AuthRuleError("A field that is not optional has no value.")
-    missing = names - held
-    if kind == "basic":
-        if set(PLACEHOLDER.findall(auth["username"])) & missing:
-            raise AuthRuleError("A field that is not optional has no value.")
-        in_password = set(PLACEHOLDER.findall(auth["password"]))
-        _check_drops_only_missing(in_password, missing)
-        password = "" if in_password & missing else auth["password"]
-        return {"type": kind, "username": auth["username"], "password": password}
-    kept = {}
-    for name, template in auth[key].items():
-        placed = set(PLACEHOLDER.findall(template))
-        _check_drops_only_missing(placed, missing)
-        if not placed & missing:
-            kept[name] = template
-    return {"type": kind, key: kept} if kept else {"type": AUTH_NONE}
