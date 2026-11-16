@@ -535,6 +535,171 @@ def test_cells_that_run_code_the_check_cant_read(case: "_UnreadCase", tmp_path, 
         assert kind not in writes.kinds()
 
 
+def _unchecked_card(code: str, earlier: Sequence[str] = ()) -> str:
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(),
+                              http_rules=parse_http_write_rules(_UNREAD_CODE_RULE))
+    assert writes.unchecked
+    return _card_prompt(writes)
+
+
+def test_the_card_names_what_a_step_uses_and_the_earlier_line_that_made_it():
+    card = _unchecked_card("print(orders.mean())", earlier=(
+        "SCRIPT = open('job.txt').read()", "exec(SCRIPT)", "orders = load_orders()",
+    ))
+    assert ("It uses `orders`, which code an earlier step ran may have set. The check couldn't read that code:"
+            "\n\n```\nexec(SCRIPT)\n```") in card
+
+
+def test_the_card_quotes_the_line_that_runs_code_the_check_cant_read():
+    card = _unchecked_card("import runpy\nrunpy.run_path('job.py')")
+    assert "It runs code the check can't read:\n\n```\nrunpy.run_path('job.py')\n```" in card
+    # Inside literal code a step hands exec(), the step's own line is quoted.
+    card = _unchecked_card('exec("import runpy\\nrunpy.run_path(\'job.py\')")')
+    assert "```\nexec(\"import runpy\\nrunpy.run_path('job.py')\")\n```" in card
+
+
+def test_a_step_too_deep_to_parse_says_so():
+    writes = find_cell_writes(code="-" * 200_000 + "1", earlier=(), snapshots=())
+    assert writes.unchecked and [c.kind for c in writes.causes] == ["limit"]
+
+
+def test_a_call_chain_past_the_depth_limit_says_so_instead_of_quoting_a_def():
+    defs = "\n".join(f"def f{i}():\n    return f{i + 1}()" for i in range(10))
+    defs += "\ndef f10():\n    import os\n    os.remove('a.csv')"
+    writes = find_cell_writes(code="f0()", earlier=_earlier([defs]), snapshots=())
+    assert writes.unchecked and [c.kind for c in writes.causes] == ["limit"]
+
+
+def _chain(body: str) -> str:
+    """An earlier cell whose f0() calls on to f4(), five calls deep from the
+    cell that calls f0(), so the read stops at f4, which runs `body`."""
+    return "\n".join(f"def f{i}():\n    return f{i + 1}()" for i in range(4)) + f"\ndef f4():\n{body}"
+
+
+def test_a_call_chain_past_the_depth_limit_quotes_where_the_read_stopped():
+    earlier = _chain("    import requests\n    requests.post('https://erp.example.com/orders', json={'qty': 5})")
+    writes = find_cell_writes(code="f0()", earlier=_earlier([earlier]), snapshots=(),
+                              http_rules=parse_http_write_rules("POST https://erp.example.com/**"))
+    assert writes.stopped and not writes.unread_here
+    card = _card_prompt(writes, "f0()")
+    assert ("Its code goes too deep for the check to follow all of it.\n\nThe check stopped at:\n\n"
+            "```\ndef f4():\n    import requests\n    requests.post(") in card
+
+
+def test_where_the_read_stopped_is_quoted_scrubbed_and_cut():
+    body = ("    token = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789'\n"
+            + "".join(f"    step_{i} = {'x' * 80!r}\n" for i in range(8))
+            + "    import requests\n    requests.delete('https://erp.example.com/orders/1')")
+    writes = find_cell_writes(code="f0()", earlier=_earlier([_chain(body)]), snapshots=())
+    quoted = writes.causes[0].code
+    assert writes.causes[0].kind == "limit" and quoted.startswith("def f4():\n    token = ")
+    assert "sk-ant-api03" not in quoted
+    assert len(quoted.split("\n")) <= 6 and len(quoted) <= 400 and quoted.endswith("...")
+
+
+def test_where_the_read_stopped_is_cut_to_400_characters_in_a_short_function():
+    body = "    import requests\n    requests.delete('https://erp.example.com/orders/' + '" + "x" * 600 + "')"
+    writes = find_cell_writes(code="f0()", earlier=_earlier([_chain(body)]), snapshots=())
+    quoted = writes.causes[0].code
+    assert writes.causes[0].kind == "limit" and quoted.startswith("def f4():")
+    assert len(quoted.split("\n")) == 3 and len(quoted) == 400 and quoted.endswith("...")
+
+
+def test_an_error_building_the_reasons_keeps_that_the_read_stopped(monkeypatch):
+    from anton.core.utils import write_check
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("reasons")
+
+    monkeypatch.setattr(write_check, "_stopped_at", boom)
+    delete = "    import requests\n    requests.delete('https://erp.example.com/orders/1')"
+    writes = find_cell_writes(code="f0()", earlier=_earlier([_chain(delete)]), snapshots=())
+    assert writes.unchecked and writes.stopped and writes.causes == ()
+
+
+def test_a_cell_too_deep_to_parse_is_a_stopped_read():
+    writes = find_cell_writes(code="-" * 200_000 + "1", earlier=(), snapshots=())
+    assert writes.unchecked and writes.stopped
+
+
+def test_a_client_bound_through_more_names_than_the_read_follows_is_a_stopped_read():
+    code = ("import requests\ns0 = requests.Session()\n" + "".join(f"s{i + 1} = s{i}\n" for i in range(6))
+            + "s6.delete('https://erp.example.com/api/orders/1')")
+    writes = find_cell_writes(code=code, earlier=(), snapshots=())
+    assert writes.unchecked and writes.stopped and not writes.unread_here
+
+
+def test_a_delete_past_the_depth_limit_in_the_reread_for_an_errored_cell_is_a_stopped_read(snap):
+    """Read again with the errored cell as maybe stopped anywhere, the
+    delete five calls deep may name stock.csv."""
+    defs = "import os\n" + "".join(f"def f{i}():\n    f{i + 1}()\n" for i in range(1, 5)) + "def f5():\n    os.remove(P)"
+    writes = find_cell_writes(code="f1()", earlier=_earlier(["P = 'stock.csv'", "x = 1 / 0\nP = 'tmp.csv'", defs],
+                                                            errored=(False, True, False)), snapshots=(snap,))
+    assert writes.unchecked and writes.stopped and not writes.unread_here
+
+
+def test_unread_here_is_code_the_cell_runs_not_a_hold_carried_from_an_earlier_cell():
+    script = ["SCRIPT = open('job.txt').read()"]
+    runs = find_cell_writes(code="exec(SCRIPT)", earlier=_earlier(script), snapshots=())
+    assert runs.unchecked and runs.unread_here and not runs.stopped
+    uses = find_cell_writes(code="print(orders.mean())", earlier=_earlier([*script, "exec(SCRIPT)"]), snapshots=())
+    assert uses.unchecked and not uses.unread_here and not uses.stopped
+    assert [c.kind for c in uses.causes] == ["uses"]
+
+
+@pytest.mark.parametrize(("code", "hook"), [
+    ("import site\nopen(site.getsitepackages()[0] + '/x.pth', 'w').write('import boot')", True),
+    ("import site, subprocess\nsubprocess.run(['cp', 'h.txt', site.getsitepackages()[0] + '/x.pth'])", True),
+    ("exec(input())", False),
+], ids=["pth-open", "pth-cp", "exec"])
+def test_writes_startup_hook_is_a_hook_write_among_the_code_the_cell_runs(code, hook):
+    writes = find_cell_writes(code=code, earlier=(), snapshots=())
+    assert writes.unchecked and writes.unread_here and writes.writes_startup_hook is hook
+
+
+def test_an_error_building_the_reasons_keeps_what_the_check_found(monkeypatch):
+    from anton.core.utils import write_check
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("reasons")
+
+    monkeypatch.setattr(write_check, "_quoted", boom)
+    code = "import requests\nrequests.put('https://erp.example.com/x')\nexec(SCRIPT)"
+    writes = find_cell_writes(code=code, earlier=_earlier(["SCRIPT = open('job.txt').read()"]), snapshots=())
+    assert writes.unchecked and writes.http and writes.causes == ()
+
+
+def test_an_error_scrubbing_the_code_leaves_it_off_the_card(monkeypatch):
+    from anton.core.utils import scratchpad as scratchpad_mod
+
+    def boom(text):
+        raise RuntimeError("scrub")
+
+    monkeypatch.setattr(scratchpad_mod, "scrub_output", boom)
+    writes = find_cell_writes(code="exec(SCRIPT)", earlier=_earlier(["SCRIPT = open('job.txt').read()"]),
+                              snapshots=())
+    card = _card_prompt(writes, "exec(SCRIPT)")
+    assert writes.unchecked and card.count("exec(SCRIPT)") == 1, "only the reason quotes it; the code block is left off"
+
+
+def test_the_card_gives_at_most_three_reasons_once_each():
+    card = _unchecked_card("\n".join(["import runpy", *(f"runpy.run_path('job{i}.py')" for i in range(5)),
+                                      "runpy.run_path('job0.py')"]))
+    assert card.count("It runs code the check can't read:") == 3
+
+
+def test_the_card_scrubs_a_credential_in_the_steps_code():
+    code = 'exec(fetch("https://x", token="sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"))'
+    writes = find_cell_writes(code=code, earlier=(), snapshots=())
+    card = _card_prompt(writes, code)
+    assert "sk-ant-api03" not in card and "[REDACTED_API_KEY]" in card
+
+
+def test_the_card_scrubs_a_credential_in_a_line_it_quotes():
+    card = _unchecked_card('exec(fetch("https://x", token="sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"))')
+    assert "sk-ant-api03" not in card and "[REDACTED_API_KEY]" in card
+
+
 class _EverydayContext(BaseModel):
     """What ran before an everyday cell (`write_check_everyday_cells.yaml`)."""
 
@@ -2052,7 +2217,7 @@ async def test_the_gate_passes_each_earlier_cells_error_to_the_check(office, mon
     """Compacting a failed cell cannot turn its unexecuted write into ownership."""
     asked: list[CellWrites] = []
 
-    async def cancel(_session, writes):
+    async def cancel(_session, writes, _code):
         asked.append(writes)
         return "cancelled"
 
@@ -2085,7 +2250,7 @@ async def test_the_gate_holds_the_first_cell_after_the_pad_starts_a_new_process_
     nothing new."""
     asked: list[CellWrites] = []
 
-    async def cancel(_session, writes):
+    async def cancel(_session, writes, _code):
         asked.append(writes)
         return "cancelled"
 
@@ -2099,6 +2264,7 @@ async def test_the_gate_holds_the_first_cell_after_the_pad_starts_a_new_process_
     pad = SimpleNamespace(compacted_cells=(), cells=[hook, died])
     assert await scratchpad.hold_unapproved_write(session, pad=pad, code="print(1)") is not None
     assert asked[0].unchecked
+    assert [c.kind for c in asked[0].causes] == ["restart"]
     compacted = SimpleNamespace(compacted_cells=(
         CompactedCell(code=hook.code, errored=False),
         CompactedCell(code=died.code, errored=True, stopped_at=1, ended_process=True),
@@ -2108,6 +2274,33 @@ async def test_the_gate_holds_the_first_cell_after_the_pad_starts_a_new_process_
     kept = SimpleNamespace(compacted_cells=(), cells=[hook, raised])
     assert await scratchpad.hold_unapproved_write(session, pad=kept, code="print(1)") is None
     assert len(asked) == 2
+
+
+@pytest.mark.parametrize("unchecked", ["own", "off"])
+async def test_own_and_off_let_the_first_cell_after_a_restart_run_and_show_a_held_one_whole(
+    office, monkeypatch, unchecked,
+):
+    """The restart hold is no code the cell itself runs, so `own` drops it,
+    as `off` does. A cell that holds for a write it makes shows the whole
+    card, the restart's reason with it."""
+    asked: list[str] = []
+
+    async def cancel(_session, writes, code):
+        asked.append(scratchpad._card_prompt(writes, code))
+        return "cancelled"
+
+    monkeypatch.setattr(scratchpad, "_ask_approval", cancel)
+    session = SimpleNamespace(_write_gate=scratchpad.WriteGate(snapshots=(office,), unchecked=unchecked))
+    hook = Cell(code="import site\nopen(site.getsitepackages()[0] + '/hook.pth', 'w').write('import job')",
+                stdout="", stderr="", error=None)
+    died = Cell(code="import os\nos._exit(1)", stdout="", stderr="", error="Process exited unexpectedly.",
+                stopped_at=1, ended_process=True)
+    pad = SimpleNamespace(compacted_cells=(), cells=[hook, died])
+    assert await scratchpad.hold_unapproved_write(session, pad=pad, code="print(1)") is None
+    assert asked == []
+    assert await scratchpad.hold_unapproved_write(session, pad=pad, code="import os\nos.remove('log.txt')") is not None
+    assert "This step would delete:" in asked[0]
+    assert "The scratchpad starts again before this step" in asked[0]
 
 
 @pytest.mark.parametrize("earlier", [
