@@ -273,8 +273,15 @@ async def test_reference_images_make_a_multipart_edit():
      {}, "moderation_blocked", "safety system refused"),
     (400, {"error": {"code": "unsupported_model_kind", "message": "not an image model"}},
      {}, "unsupported_model_kind", "is not an image model"),
+    # MindsHub's own refusal of a chat model on the images route.
+    (400, {"error": {"code": "invalid_param", "param": "model", "message": "not an image model"}},
+     {}, "unsupported_model_kind", "pick one in Settings"),
+    (400, {"error": {"code": "invalid_param", "param": "size", "message": "bad size"}},
+     {}, "invalid_param", "HTTP 400"),
     (402, {"error": {"code": "wallet_empty", "message": "Wallet is empty"}},
      {}, "wallet_empty", "No image was made"),
+    (402, {"error": {"code": "budget_exceeded", "message": "Budget exceeded"}},
+     {}, "budget_exceeded", "No image was made"),
     (429, {"error": {"code": "rate_limited", "message": "slow down"}},
      {"retry-after": "20"}, "rate_limited", "wait 20 s"),
     (503, {"error": {"message": "upstream unavailable"}}, {}, "provider_error", "HTTP 503"),
@@ -609,6 +616,28 @@ def test_every_image_failure_reason_has_a_tier():
     from anton.core.root_cause import _SENTINEL_REASONS
 
     assert set(th._IMAGE_FAILURE_REASONS.values()) | {"image_failed", "image_limit"} <= set(_SENTINEL_REASONS)
+    # Every MindsHub billing stop is a stop, not a failure to retry.
+    for code in ("wallet_empty", "budget_exceeded", "included_allowance_exhausted"):
+        assert th._IMAGE_FAILURE_REASONS[code] == "image_unavailable"
+
+
+def test_a_reference_image_over_20_mib_is_refused_unread(tmp_path, monkeypatch):
+    big = tmp_path / "big.png"
+    with big.open("wb") as handle:
+        handle.truncate(20 * 1024 * 1024 + 1)
+    monkeypatch.setattr(Path, "read_bytes", lambda self: pytest.fail("read"))
+    with pytest.raises(ValueError, match="larger than 20 MiB"):
+        images.load_reference_image(big)
+
+
+async def test_a_too_large_reference_uses_no_turn_image(tmp_path):
+    gateway = Gateway()
+    session = _session(tmp_path, gateway)
+    with (tmp_path / "big.png").open("wb") as handle:
+        handle.truncate(images.MAX_REFERENCE_BYTES + 1)
+    _, outcome = await _run(session, {"prompt": "x", "reference_images": ["big.png"]})
+    assert outcome.ok is False and "20 MiB" in outcome.content
+    assert gateway.requests == [] and session._images_this_turn == 0
 
 
 async def test_the_registry_dispatches_the_streaming_handler(tmp_path):

@@ -58,9 +58,9 @@ QUALITIES = ("auto", "low", "medium", "high")
 SIZES = ("auto", "1024x1024", "1536x1024", "1024x1536")
 _SIZE_RE = re.compile(r"^[1-9]\d{1,4}x[1-9]\d{1,4}$")
 
-# OpenAI's limits for an edit: at most 16 reference images, each under 50 MB.
+# Limits for an edit: OpenAI's 16 reference images, each at most MindsHub's 20 MiB.
 MAX_REFERENCE_IMAGES = 16
-MAX_REFERENCE_BYTES = 50 * 1024 * 1024
+MAX_REFERENCE_BYTES = 20 * 1024 * 1024
 
 # What the images API returns, by the extension a file of it gets.
 _FORMATS = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
@@ -205,7 +205,7 @@ def load_reference_image(path: Path) -> ReferenceImage:
     if not path.is_file():
         raise ValueError(f"{path} is not a file")
     if size > MAX_REFERENCE_BYTES:
-        raise ValueError(f"{path.name} is larger than {MAX_REFERENCE_BYTES // (1024 * 1024)} MB")
+        raise ValueError(f"{path.name} is larger than {MAX_REFERENCE_BYTES // (1024 * 1024)} MiB")
     try:
         data = path.read_bytes()
     except OSError as exc:
@@ -472,7 +472,9 @@ def image_call_error(exc: "openai.APIStatusError", model: str) -> Exception:
             "for without the flagged content, you may offer one; do not retry the same prompt.",
             code="moderation_blocked", status_code=status,
         )
-    if code == "unsupported_model_kind":
+    # MindsHub refuses a non-image model on the images route as a 400 invalid_param on `model`.
+    param = parsed.top.param or parsed.envelope.param
+    if code == "unsupported_model_kind" or (status == 400 and code == "invalid_param" and param == "model"):
         return ImageGenerationError(
             f"'{model}' is not an image model, so the images API refused it "
             f"(unsupported_model_kind). The image model setting must name an image model such as "

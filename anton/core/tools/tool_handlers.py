@@ -3091,6 +3091,7 @@ _IMAGE_FAILURE_REASONS = {
     "wallet_empty": "image_unavailable",
     "included_allowance_exhausted": "image_unavailable",
     "free_air_daily_spend_fuse_exceeded": "image_unavailable",
+    "budget_exceeded": "image_unavailable",
     "payment_required": "image_unavailable",
     "auth": "image_unavailable",
 }
