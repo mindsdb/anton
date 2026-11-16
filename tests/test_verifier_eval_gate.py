@@ -486,8 +486,9 @@ def test_an_alias_echo_is_recorded_as_not_disclosed_and_never_a_repoint(monkeypa
     with pytest.raises(ev.AliasRepointed):
         ev._check_served_model("haiku", "claude-sonnet-5")
     # And the pinned id itself is still accepted and recorded verbatim.
-    ev._check_served_model("haiku", "claude-haiku-4-5-20251001")
-    assert ev._SERVED["haiku"] == "claude-haiku-4-5-20251001"
+    pinned = ev._EXPECTED_SERVED["haiku"]
+    ev._check_served_model("haiku", pinned)
+    assert ev._SERVED["haiku"] == pinned
     # A confirmed match wins over the echo test: when the alias IS the pinned
     # real id (a one-off `VERIFIER_EVAL_*_MODEL=<real id>` run), the gateway
     # did disclose and the report must not claim blindness (#490 self-review,

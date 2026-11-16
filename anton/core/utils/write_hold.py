@@ -17,8 +17,14 @@ removed or scrubbed.
 
 A cell's own check (`scratchpad.hold_unapproved_write`) leaves out a request
 the relay holds (`held_by_relay`), so one request raises one card. The
-exception is a cell the check can't read: it keeps the cell's "can't be
-checked" card, and its request then raises the relay's card as well.
+exception is a cell the check can't read that keeps its "can't be checked"
+card (under `write_approval_unchecked` `all` always; under `own` and `off`
+see `scratchpad._unchecked_hold_dropped`): its request then raises the
+relay's card as well. Under `own` and `off`, a write inside code the check
+can't read may get no card of its own: the relay holds it only when it sends
+a method other than GET or HEAD to a host the relay holds, and nothing holds
+any other. So `own` and `off` apply only while the relay holds every listed
+write, and anton uses `all` otherwise (`unchecked_mode`).
 """
 
 from __future__ import annotations
@@ -27,18 +33,21 @@ import asyncio
 import logging
 import re
 import time
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple, get_args
 
 import httpx2 as httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from anton.core.interaction.elicit import AskOption
+from anton.core.settings import UncheckedMode
 from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.scratchpad import RefusalCause, ask_approval_choice, refusal_why
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from anton.core.session import ChatSession
-    from anton.core.utils.write_check import HttpWrite
+    from anton.core.utils.write_check import HttpWrite, HttpWriteRule
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +72,9 @@ PENDING_ID = re.compile(r"[0-9a-f]{32}")
 _AUTHORITY = r"([a-z0-9.-]+)(?::([0-9]{1,5}))?"
 _RELAY_ENTRY = re.compile(_AUTHORITY, re.IGNORECASE)
 _HTTP_URL = re.compile(r"http://" + _AUTHORITY + r"(?=[/?#]|\Z)", re.IGNORECASE)
+# A rule's `http://` address up to its path. In a rule's glob `?` and `*`
+# are wildcards, not a query, so a host or port with one is no match.
+_RULE_AUTHORITY = re.compile(r"http://" + _AUTHORITY + r"(?:/|\Z)", re.IGNORECASE)
 
 HeldState = Literal["pending", "sending", "sent", "failed", "unknown", "cancelled", "expired"]
 # The states after which the relay never sends the request.
@@ -102,6 +114,10 @@ def relayed_host(url: str) -> str | None:
     return _host_key(match[1], match[2]) if match else None
 
 
+# The methods the relay forwards without holding them.
+_FORWARDED = frozenset({"GET", "HEAD"})
+
+
 def held_by_relay(write: HttpWrite, hosts: frozenset[str]) -> bool:
     """Whether the write relay holds `write`: it writes out a method other
     than GET or HEAD, which the relay forwards, and an `http://` URL to one
@@ -109,10 +125,43 @@ def held_by_relay(write: HttpWrite, hosts: frozenset[str]) -> bool:
     any, so the cell's check keeps it."""
     return (
         write.method_code is None
-        and write.method not in {"GET", "HEAD"}
+        and write.method not in _FORWARDED
         and write.url_code is None
         and relayed_host(write.url) in hosts
     )
+
+
+def unchecked_mode(
+    value: UncheckedMode, *, relay_url: str | None, relayed_hosts: frozenset[str],
+    http_rules: Sequence[HttpWriteRule],
+) -> UncheckedMode:
+    """The `write_approval_unchecked` value a session applies. Under `own`
+    and `off` a write inside code the check can't read may get no card of
+    its own, so they apply only while the write relay holds every write the
+    operator lists: `relay_url` is set, the relay holds a host, and each of
+    `http_rules` names one method other than GET or HEAD (not `*`, since
+    the relay forwards a GET or HEAD) and an `http://` address, with no
+    wildcard in its host or port, whose `host:port` is among
+    `relayed_hosts` (`relayed_host`). Otherwise it is
+    `all`, with one WARNING that names what is missing. Any value but `own`
+    or `off` is `all`."""
+    if value == "all" or value not in get_args(UncheckedMode):
+        return "all"
+    if relay_url is None:
+        logger.warning("write approval: ANTON_WRITE_APPROVAL_UNCHECKED falls back to all: own and off need "
+                       "the write relay, and ANTON_WRITE_RELAY_URL is unset")
+    elif not relayed_hosts:
+        logger.warning("write approval: ANTON_WRITE_APPROVAL_UNCHECKED falls back to all: own and off need "
+                       "the write relay to hold the listed writes, and ANTON_WRITE_RELAY_HOSTS names no host")
+    elif any(rule.method == "*" or rule.method in _FORWARDED or not _RULE_AUTHORITY.match(rule.url_glob)
+             or relayed_host(rule.url_glob) not in relayed_hosts for rule in http_rules):
+        logger.warning("write approval: ANTON_WRITE_APPROVAL_UNCHECKED falls back to all: own and off need "
+                       "the write relay to hold the listed writes, and an ANTON_WRITE_APPROVAL_HTTP rule names "
+                       "GET, HEAD or * as its method, or an address that is not an http:// address of a host in "
+                       "ANTON_WRITE_RELAY_HOSTS")
+    else:
+        return value
+    return "all"
 
 
 class _Wire(BaseModel):

@@ -199,6 +199,15 @@
         "error": "browser_starting",
         "message": "Your browser is taking too long to start. Try again in a moment."
       }
+    },
+    "tab_limit": {
+      "where": "POST /sessions/{id}/tabs",
+      "kind": "response",
+      "status": 409,
+      "body": {
+        "error": "tab_limit",
+        "message": "This task keeps at most 2 tabs open. Close one you're done with first (note what you still need from it): you can always go back to a page by its address."
+      }
     }
   }
 }

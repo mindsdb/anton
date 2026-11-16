@@ -156,7 +156,7 @@ from anton.core.utils.scratchpad import (
     scratchpad_action,
 )
 from anton.core.utils.write_check import parse_http_write_rules
-from anton.core.utils.write_hold import parse_relay_hosts
+from anton.core.utils.write_hold import parse_relay_hosts, unchecked_mode
 # Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
 # handle_scratchpad's own exec branch (tool_handlers.py) rather than duplicated
 # here, since this inline streaming exec bypasses that handler entirely.
@@ -2149,6 +2149,7 @@ class ChatSession:
         self._workspace = config.workspace
         self._browser_config = config.browser
         self._browser_state = None
+        self._tidy_browser = False
         self._data_vault = config.data_vault
         self._connector_usage_notes = config.connector_usage_notes
         # Kept so an artifact backend can be given the same project .env the
@@ -2300,9 +2301,15 @@ class ChatSession:
             # The relayed hosts count only with a relay to hold their writes,
             # so a stray hosts setting never drops a card.
             relayed = getattr(s, "write_relay_hosts", "") if self._write_relay_url else ""
+            http_rules = parse_http_write_rules(listed if isinstance(listed, str) else "")
+            relayed_hosts = parse_relay_hosts(relayed if isinstance(relayed, str) else "")
             self._write_gate = WriteGate(
-                http_rules=parse_http_write_rules(listed if isinstance(listed, str) else ""),
-                relayed_hosts=parse_relay_hosts(relayed if isinstance(relayed, str) else ""),
+                http_rules=http_rules,
+                relayed_hosts=relayed_hosts,
+                unchecked=unchecked_mode(
+                    getattr(s, "write_approval_unchecked", "all"), relay_url=self._write_relay_url,
+                    relayed_hosts=relayed_hosts, http_rules=http_rules,
+                ),
             )
 
         coding_provider = config.llm_client.coding_provider
@@ -3642,6 +3649,12 @@ class ChatSession:
                 # steps above raise, or the pool outlives the process.
                 try:
                     if self._browser_state is not None:
+                        # Jev may close a browser the task is done with; its tabs are noted.
+                        # A turn tidies once: after the cloud turn's own tidy
+                        # before `turn_completed`, this finds nothing to do.
+                        from anton.core.browser.tool import tidy_after_turn
+
+                        await tidy_after_turn(self)
                         await self._browser_state.aclose()
                     if self._jev_http is not None:
                         await self._jev_http.aclose()
@@ -6903,6 +6916,16 @@ class ChatSession:
             # guard passes the books this turn opened so a late finalizer
             # can't close a newer turn's.
             self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
+            # The browser is tidied (by the cloud turn, else close()) only after
+            # a turn that completed and used it; a cancelled, failed, paused or
+            # limit-stopped one leaves it as it is.
+            browser = self._browser_state
+            self._tidy_browser = bool(
+                browser is not None and browser.used and not _turn_raised
+                and _turn_cost_books.ended_by == "completed"
+            )
+            if browser is not None:
+                browser.used = False
             if _turn_raised and usage_log_enabled():
                 # A turn that raised starts no end-of-turn work, so it is done now.
                 log_background_done(_turn_trace)
