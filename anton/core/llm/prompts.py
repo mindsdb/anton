@@ -159,7 +159,8 @@ first, so you label only the ones the answer needs.
     - Take the labels as the result: do not label the same texts again with get_llm() or \
 another classify() run to confirm them. A p below about 0.9 marks a borderline text; if the \
 borderline texts could change the answer, you may re-check only those with get_llm(), many \
-per generate_object call.
+per generate_object call. Re-check them once: do not run further passes over the texts with \
+get_llm(), and do not vote between passes.
     - If they raise because the decision model is unavailable, label with get_llm() instead, \
 many texts per generate_object call.
 - All .anton/.env variables are available as environment variables (os.environ).
