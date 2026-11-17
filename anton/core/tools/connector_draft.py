@@ -357,8 +357,9 @@ def _parse_check(data: Any, auth: ConnectorDraftAuth, fields: tuple[ConnectorDra
         raise ConnectorDraftError("check must be an object.")
     _check_keys(data, _CHECK_KEYS, "check")
     raw_path = data.get("path")
-    if isinstance(raw_path, str) and any(f"{{{f.name}}}" in raw_path for f in fields):
-        raise ConnectorCheckError("check.path must not name a field; the template places the key.")
+    field_names = {f.name for f in fields}
+    if isinstance(raw_path, str) and field_names & set(rules.PLACEHOLDER.findall(raw_path)):
+        raise ConnectorCheckError("check.path must not name a field; the template places field values.")
     path = _check_path(raw_path)
     try:
         _check_no_collision(path, auth, "check.path")

@@ -897,6 +897,20 @@ def test_a_refused_public_path_gets_no_no_connector_hint(public_path):
     assert "call it directly from code" not in error
 
 
+def test_a_public_path_carrying_an_auth_parameter_gets_no_no_connector_hint():
+    draft = _optional_draft(
+        auth={"type": "query", "params": {"access_key": "{api_key}"}},
+        check={**_OPTIONAL_CHECK, "public_path": "/api/3/action/package_list?access_key=x"},
+    )
+
+    outcome = asyncio.run(connector_draft_tool(ConnectorDraftBox()).handler(None, draft))
+
+    assert outcome.ok is False
+    error = json.loads(outcome.content)["error"]
+    assert "check.public_path" in error and "auth places" in error
+    assert "call it directly from code" not in error
+
+
 def test_an_optional_key_with_a_public_path_parses_and_round_trips():
     draft = parse_connector_draft(_optional_draft())
 
