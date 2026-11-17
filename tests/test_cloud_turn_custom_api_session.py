@@ -173,7 +173,9 @@ def test_the_childs_key_is_the_llm_api_key_and_the_block_carries_none(tmp_path, 
 
     config = _captured_config(tmp_path, monkeypatch, _request(llm=llm))
 
-    assert "turn_key" not in _PRODUCED
+    block = _request(llm=llm).custom_api
+    assert not hasattr(block, "turn_key")
+    assert "turn_key" not in vars(block)
     assert config.settings.openai_api_key == key
 
 

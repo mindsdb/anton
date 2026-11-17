@@ -229,8 +229,8 @@ def _cloud_turn_workspace_env(request: TurnRequestV1, settings: AntonSettings) -
     datasource or custom API connections by id and version only, with the
     correlation id. Raises ``ValueError`` when a datasource or custom API turn's
     child would not send this turn's own key to this turn's inference host, or
-    when the correlation id
-    is missing (or, for custom API calls, not a UUID). No side effects.
+    when the correlation id is missing (or, for custom API calls, not a UUID).
+    No side effects.
     """
     overlay = {_CLOUD_TURN_ENV: "1"}
     if request.datasource is not None:

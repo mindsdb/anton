@@ -367,7 +367,11 @@ def _parse_custom_api_block(value: object, conversation_id: str) -> CustomApiBlo
         return None
     refs = _custom_api_refs(value)
     if isinstance(refs, str):
-        logger.warning("custom_api block dropped: %s (conversation %s)", refs, conversation_id)
+        logger.warning(
+            "custom_api block dropped: %s",
+            refs,
+            extra={"event": "custom_api_dropped", "reason": refs, "conversation_id": conversation_id},
+        )
         return None
     return CustomApiBlockV1(CUSTOM_API_PROTOCOL_VERSION, refs)
 

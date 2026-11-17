@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -100,8 +102,14 @@ async def test_the_connections_are_listed_with_how_to_call_them(
         assert part in block, part
     assert _TURN_KEY not in block
     path_rule = _bullet_with(block, "host")
-    for word in ("`path`", "version", "`query`", "?", "key parameter"):
-        assert word in path_rule, word
+    assert "no query string" in path_rule
+    assert "Never add a key parameter" in path_rule
+    example = re.search(r"call_minds_api\(12,[^)]*\)", path_rule.replace('\\"', '"'))
+    assert example, path_rule
+    call = ast.parse(example.group(0), mode="eval").body
+    assert isinstance(call, ast.Call)
+    assert isinstance(call.args[1], ast.Constant) and "?" not in call.args[1].value
+    assert [kw.arg for kw in call.keywords] == ["query"]
 
 
 async def test_the_error_result_is_described_truly_for_codes_after_the_call_was_sent(
@@ -113,7 +121,7 @@ async def test_the_error_result_is_described_truly_for_codes_after_the_call_was_
     one_line = " ".join(block.split())
 
     error_rule = _bullet_with(block, "'error_code'")
-    for word in ("refused", "before it was sent", "sent and then", "timed out", "failed", "does not pass on"):
+    for word in ("refused", "before it was sent", "may have been", "sent and then", "timed out", "failed", "does not pass on"):
         assert word in error_rule, word
     assert "the call was not made" not in one_line
 
