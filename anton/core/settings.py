@@ -129,7 +129,8 @@ class CoreSettings(BaseSettings):
     # (`write_hold.held_by_relay`). A bad entry is skipped with a WARNING.
     write_relay_hosts: str = ""
     # Per-turn spend ceiling in RAW tokens — input + output + cache_read +
-    # cache_creation, i.e. `TurnCost.total_tokens` (ENG-1286). 0 disables it.
+    # cache_creation, plus an image call's image tokens, i.e.
+    # `TurnCost.total_tokens` (ENG-1286). 0 disables it.
     #
     # RAW is deliberate, and the instinct to discount cache reads here is wrong:
     # they bill at ~a tenth, but they draw the user's included-token allowance at
@@ -147,6 +148,10 @@ class CoreSettings(BaseSettings):
     # sets it from the request, since a web turn otherwise meets the hosting
     # side's hard cut-off with no summary.
     max_turn_seconds: int = 0
+    # Images one turn may make (ANTON_MAX_IMAGES_PER_TURN), the `generate_image`
+    # tool and the scratchpad's `generate_image()` together; a call past it is
+    # refused before any request is sent.
+    max_images_per_turn: int = 8
     context_pressure_threshold: float = 0.7
     max_consecutive_errors: int = 5
     resilience_nudge_at: int = 2
