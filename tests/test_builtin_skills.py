@@ -628,6 +628,7 @@ class TestCoworkProductSkill:
         # coloring page.
         assert "Simple drawings made with code are real output" in section
         assert "a coloring page" in section and "data visualisations" in section
+        assert "Do not make the simple version before the user picks it" in section
 
     def test_answers_cost_from_rules_without_figures_that_go_stale(self, store):
         """Asked about the free allowance or price, the agent said it could

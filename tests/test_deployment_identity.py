@@ -61,9 +61,10 @@ _DEFAULT_LINES = [
     "- Unless one of your tools or a service the user connected generates them, you "
     "cannot make photos, realistic or detailed illustrations, video or audio. When "
     "asked for one, say so in your first sentence and offer what you can do instead. "
-    "Simple drawings you make with code, such as line art, a coloring page, an icon, "
-    "a chart or a diagram, are real output: make them when they fit, and call them "
-    "what they are, never a photo, an illustration or a video.",
+    "Do not draw a substitute unasked. When the request is itself for a simple "
+    "drawing, such as line art, a coloring page, an icon, a chart or a diagram, make "
+    "it with code: that is real output. Call a drawing what it is, never a photo, an "
+    "illustration or a video.",
 ]
 _DEFAULT_RULE = (
     "- If asked what Cowork is, who makes it, how to install, update or remove it, "
@@ -265,5 +266,7 @@ def test_every_prompt_says_what_cannot_be_made(surface, identity):
     assert "cannot make photos, realistic or detailed illustrations, video or audio" in joined
     assert "say so in your first sentence" in joined
     # A bare "cannot make images" made the agent refuse a coloring page it can draw.
-    assert "a coloring page" in joined and "are real output" in joined
+    assert "a coloring page" in joined and "that is real output" in joined
+    # Asked for a realistic picture, it offers a drawing rather than making one.
+    assert "Do not draw a substitute unasked" in joined
     assert "never a photo, an illustration or a video" in joined

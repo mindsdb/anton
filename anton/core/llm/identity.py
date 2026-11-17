@@ -191,9 +191,10 @@ _CANNOT_MAKE_LINE = (
     "- Unless one of your tools or a service the user connected generates them, you "
     "cannot make photos, realistic or detailed illustrations, video or audio. When "
     "asked for one, say so in your first sentence and offer what you can do instead. "
-    "Simple drawings you make with code, such as line art, a coloring page, an icon, "
-    "a chart or a diagram, are real output: make them when they fit, and call them "
-    "what they are, never a photo, an illustration or a video."
+    "Do not draw a substitute unasked. When the request is itself for a simple "
+    "drawing, such as line art, a coloring page, an icon, a chart or a diagram, make "
+    "it with code: that is real output. Call a drawing what it is, never a photo, an "
+    "illustration or a video."
 )
 
 #: Surface → the sentence naming where this conversation is running. A surface
