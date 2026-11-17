@@ -263,6 +263,9 @@ _SENTINEL_REASONS = {
     # reconnect, same shape as a 401 (`_STATUS_WALLS["401"] = "auth_missing"`)
     # — the agent cannot fix this by retrying, so it's a genuine wall.
     "mcp_permanent_error": (TIER_WALL, "auth_missing"),
+    # A custom MCP server whose address is not public: only the user can fix
+    # it, by changing the server URL, so retrying never helps.
+    "mcp_egress_blocked": (TIER_WALL, "service_unavailable"),
     # A rate limit or transport hiccup — already retried once inside
     # McpSession.call_tool before this reason ever reaches a ToolOutcome, so
     # reaching here means the provider is still down, not a one-off blip.
