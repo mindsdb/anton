@@ -7,6 +7,7 @@ from mcp.server.mcpserver import MCPServer
 
 from anton.core.mcp.access import TOOL_ACCESS
 from anton.core.mcp.client import McpSession
+from anton.core.mcp.errors import McpEgressBlocked, McpPermanentError
 from anton.core.mcp.names import (
     ToolNameParts,
     namespaced_tool_name,
@@ -309,7 +310,9 @@ async def test_allowed_tools_still_register_nothing_when_the_connection_is_off(s
     assert defs == []
 
 
-async def test_an_allowed_custom_tool_gets_its_arguments_unchanged():
+async def test_an_allowed_custom_tool_gets_its_arguments_unchanged(monkeypatch):
+    """Holds even when the access table marks a tool of that name read."""
+    monkeypatch.setitem(TOOL_ACCESS, "custom_mcp", {"list_pages": "read"})
     server = MCPServer(name="custom-stub")
 
     @server.tool()
@@ -325,8 +328,6 @@ async def test_an_allowed_custom_tool_gets_its_arguments_unchanged():
 
 
 async def test_a_refused_address_has_its_own_message_naming_the_server(stub_mcp_server, monkeypatch):
-    from anton.core.mcp.errors import McpEgressBlocked
-
     async with McpSession(server=stub_mcp_server) as session:
         defs = await discover_tool_defs(
             session,
@@ -348,8 +349,6 @@ async def test_a_refused_address_has_its_own_message_naming_the_server(stub_mcp_
 
 
 async def test_a_rejected_token_message_names_the_server_by_its_label(stub_mcp_server, monkeypatch):
-    from anton.core.mcp.errors import McpPermanentError
-
     async with McpSession(server=stub_mcp_server) as session:
         defs = await discover_tool_defs(
             session,

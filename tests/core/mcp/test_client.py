@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import mcp
 import mcp_types
@@ -188,6 +189,15 @@ async def test_a_guarded_session_retry_logs_no_part_of_its_url_path(caplog):
     assert "reconnect failed" in caplog.text
     assert secret not in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_a_guarded_session_round_trip_log_names_only_the_host(caplog):
+    session = McpSession(url="https://mcp.example.com/SECRET-PATH-7f3a/mcp", guarded=True)
+    caplog.set_level("DEBUG")
+    session._log_round_trip("tools/list()", time.monotonic() - 1)
+    assert "host=mcp.example.com" in caplog.text
+    assert "SECRET-PATH-7f3a" not in caplog.text
+    assert caplog.records[-1].levelname == "WARNING"
 
 
 def _paged_server(page_count: int, *, endless: bool = False):
