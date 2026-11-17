@@ -52,7 +52,8 @@ def test_public_addresses_pass(address):
 
 
 def test_a_plain_https_url_passes_and_returns_its_host():
-    assert check_server_url("https://mcp.example.com/mcp") == "mcp.example.com"
+    assert check_server_url("https://mcp.example.com/mcp") == ("mcp.example.com", 443)
+    assert check_server_url("https://mcp.example.com:8443/mcp") == ("mcp.example.com", 8443)
 
 
 @pytest.mark.parametrize(
@@ -67,6 +68,11 @@ def test_a_plain_https_url_passes_and_returns_its_host():
         "https:///mcp",
         "mcp.example.com/mcp",
         "https://[::1/mcp",
+        " https://mcp.example.com/mcp",
+        "https://mcp.example.com/mcp ",
+        "https://mcp.example.com/m cp",
+        "https://mcp.example.com:99999/mcp",
+        "https://mcp.example.com:0/mcp",
     ],
 )
 def test_unusable_urls_are_refused(url):

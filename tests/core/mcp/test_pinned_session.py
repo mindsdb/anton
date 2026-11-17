@@ -290,10 +290,18 @@ async def test_an_environment_proxy_is_ignored(tls_server, monkeypatch):
         assert [tool.name for tool in await session.list_tools()] == ["echo"]
 
 
-async def test_a_request_for_another_host_is_answered_locally_and_recorded():
-    guard = EgressGuard(resolver=Answers(LOOPBACK), address_rule=_loopback_only)
-    transport = guard.transport(HOST)
-    response = await transport.handle_async_request(httpx2.Request("GET", "https://elsewhere.test/mcp"))
+@pytest.mark.parametrize(
+    "url",
+    ["https://elsewhere.test/mcp", f"http://{HOST}/mcp", f"https://{HOST}:8443/mcp"],
+    ids=["other host", "plain http", "other port"],
+)
+async def test_a_request_outside_the_pinned_origin_is_answered_locally_and_recorded(url):
+    resolver = Answers(LOOPBACK)
+    guard = EgressGuard(resolver=resolver, address_rule=_loopback_only)
+    transport = guard.transport(HOST, 443)
+    response = await transport.handle_async_request(
+        httpx2.Request("GET", url, headers={"Authorization": "Bearer test-token"})
+    )
     await transport.aclose()
     assert response.status_code == 421
     assert isinstance(guard.refused, McpEgressBlocked)

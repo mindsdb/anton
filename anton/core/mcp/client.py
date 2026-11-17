@@ -121,11 +121,11 @@ class McpSession:
             event_hooks = {"response": [self._record_status]}
             if self._egress is not None:
                 self._raise_if_refused()
-                host = check_server_url(self._url)
+                host, port = check_server_url(self._url)
                 self._http_client = httpx2.AsyncClient(
                     headers=headers,
                     event_hooks=event_hooks,
-                    transport=self._egress.transport(host),
+                    transport=self._egress.transport(host, port),
                     trust_env=False,
                 )
             else:

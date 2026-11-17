@@ -66,16 +66,20 @@ def is_public_destination(address: Address) -> bool:
     )
 
 
-def check_server_url(url: str) -> str:
-    """Return the hostname of `url`, or raise `McpEgressBlocked`.
+def check_server_url(url: str) -> tuple[str, int]:
+    """Return the hostname and port of `url`, or raise `McpEgressBlocked`.
 
-    Accepts https only, with a hostname, and no user, password, query or
-    fragment. A query or user part is where a fixed credential would ride,
-    and fixed credentials are out of scope for custom servers.
+    Accepts https only, with a hostname, a port from 1 to 65535 (443 when
+    absent), and no whitespace, user, password, query or fragment. A query
+    or user part is where a fixed credential would ride, and fixed
+    credentials are out of scope for custom servers.
     """
+    if any(character.isspace() for character in url):
+        raise McpEgressBlocked("MCP server URL must not contain whitespace")
     try:
         parts = urlsplit(url)
         host = parts.hostname
+        port = parts.port or 443
     except ValueError as exc:
         raise McpEgressBlocked("MCP server URL could not be parsed") from exc
     if parts.scheme != "https":
@@ -86,7 +90,9 @@ def check_server_url(url: str) -> str:
         raise McpEgressBlocked("MCP server URL must not carry a query or fragment")
     if not host:
         raise McpEgressBlocked("MCP server URL has no host")
-    return host
+    if parts.port == 0:
+        raise McpEgressBlocked("MCP server URL has no usable port")
+    return host, port
 
 
 async def _loop_getaddrinfo(host: str, port: int) -> list[tuple[Any, ...]]:
@@ -185,35 +191,36 @@ class EgressGuard:
         if self.refused is None:
             self.refused = error
 
-    def transport(self, host: str) -> PinnedHostTransport:
-        """A transport that sends requests only to checked addresses of `host`."""
-        return PinnedHostTransport(host, self)
+    def transport(self, host: str, port: int) -> PinnedHostTransport:
+        """A transport that sends requests only over https to checked addresses of `host`:`port`."""
+        return PinnedHostTransport(host, port, self)
 
 
 class PinnedHostTransport(httpx2.AsyncBaseTransport):
-    """Send requests for one host to an address checked at that moment.
+    """Send requests for one https origin to an address checked at that moment.
 
     The original hostname stays in the Host header and is the TLS name the
-    certificate is checked against. A request for any other host, or a host
-    that fails the check, is never sent: it is answered locally with 421 and
-    the refusal is recorded on the guard.
+    certificate is checked against. A request for any other scheme, host or
+    port, or a host that fails the check, is never sent: it is answered
+    locally with 421 and the refusal is recorded on the guard.
     """
 
-    def __init__(self, host: str, guard: EgressGuard) -> None:
-        """Pin `host`; `guard` supplies the checks and records refusals."""
+    def __init__(self, host: str, port: int, guard: EgressGuard) -> None:
+        """Pin `host` and `port`; `guard` supplies the checks and records refusals."""
         self._host = host.casefold()
+        self._port = port
         self._guard = guard
         self._inner = httpx2.AsyncHTTPTransport(verify=guard.verify)
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-        """Dial a checked address of the pinned host, or answer 421 without a socket."""
+        """Dial a checked address of the pinned origin, or answer without a socket."""
         host = (request.url.host or "").casefold()
-        if host != self._host:
-            return self._refuse(McpEgressBlocked(f"MCP request to {host!r} is not to the server's own host"), request)
+        if request.url.scheme != "https" or host != self._host or (request.url.port or 443) != self._port:
+            return self._refuse(McpEgressBlocked("MCP request is not to the server's own https origin"), request)
         try:
             addresses = await resolve_public(
                 host,
-                request.url.port or 443,
+                self._port,
                 resolver=self._guard.resolver,
                 address_rule=self._guard.address_rule,
             )
@@ -238,6 +245,7 @@ class PinnedHostTransport(httpx2.AsyncBaseTransport):
         await self._inner.aclose()
 
     def _refuse(self, error: McpEgressBlocked, request: httpx2.Request) -> httpx2.Response:
+        """Record `error` on the guard and answer `request` locally with 421."""
         self._guard.refuse(error)
         return httpx2.Response(_REFUSED_STATUS, request=request)
 
