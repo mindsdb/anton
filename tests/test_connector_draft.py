@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -175,10 +176,10 @@ def test_a_boolean_must_be_a_boolean():
         parse_connector_draft(_draft(fields=[{"name": "k", "label": "K", "required": "false"}]))
 
 
-def test_an_optional_field_is_refused_since_auth_sends_every_field():
+def test_an_optional_field_that_is_not_secret_is_refused():
     fields = [{"name": "api_key", "label": "Key"}, {"name": "region", "label": "Region", "secret": False, "required": False}]
 
-    with pytest.raises(ConnectorDraftError, match=r"^fields\[1\]\.required must be true"):
+    with pytest.raises(ConnectorDraftError, match=r"^fields\[1\]\.required may be false only on a secret field"):
         parse_connector_draft(_draft(fields=fields))
 
 
@@ -365,21 +366,29 @@ def test_a_token_run_is_caught_where_the_scrubber_is_not():
         parse_connector_draft(_draft(label=value))
 
 
+_TOOL_CHECK = {"path": "/v1/me"}
+
+
+def _tool_draft(**overrides):
+    """A draft as the tool takes it, which requires a check."""
+    return _draft(**{"check": _TOOL_CHECK, **overrides})
+
+
 def test_the_tool_keeps_drafts_and_the_box_drains_once():
     box = ConnectorDraftBox()
     tool = connector_draft_tool(box)
-    outcome = asyncio.run(tool.handler(None, _draft()))
+    outcome = asyncio.run(tool.handler(None, _tool_draft()))
     assert outcome.ok is True
     assert json.loads(outcome.content)["status"] == "staged"
-    assert box.drain() == [parse_connector_draft(_draft()).to_dict()]
+    assert box.drain() == [parse_connector_draft(_tool_draft()).to_dict()]
     assert box.drain() == []
 
 
-def test_the_same_id_replaces_the_earlier_draft():
+def test_the_same_id_replaces_the_earlier_tool_draft():
     box = ConnectorDraftBox()
     tool = connector_draft_tool(box)
-    asyncio.run(tool.handler(None, _draft(label="First")))
-    asyncio.run(tool.handler(None, _draft(label="Second")))
+    asyncio.run(tool.handler(None, _tool_draft(label="First")))
+    asyncio.run(tool.handler(None, _tool_draft(label="Second")))
     assert [d["label"] for d in box.drain()] == ["Second"]
 
 
@@ -387,12 +396,77 @@ def test_a_turn_holds_at_most_three_drafts():
     box = ConnectorDraftBox()
     tool = connector_draft_tool(box)
     for i in range(MAX_DRAFTS_PER_TURN):
-        assert asyncio.run(tool.handler(None, _draft(connector_id=f"acme_{i}"))).ok
-    refused = asyncio.run(tool.handler(None, _draft(connector_id="acme_extra")))
+        assert asyncio.run(tool.handler(None, _tool_draft(connector_id=f"acme_{i}"))).ok
+    refused = asyncio.run(tool.handler(None, _tool_draft(connector_id="acme_extra")))
     assert refused.ok is False and refused.reason == "draft_limit"
     # Replacing one already held still works at the cap.
-    assert asyncio.run(tool.handler(None, _draft(connector_id="acme_0", label="New"))).ok
+    assert asyncio.run(tool.handler(None, _tool_draft(connector_id="acme_0", label="New"))).ok
     assert [d["connector_id"] for d in box.drain()] == ["acme_0", "acme_1", "acme_2"]
+
+
+@pytest.mark.parametrize("check", ["missing", None], ids=["missing", "null"])
+def test_the_tool_refuses_a_template_without_a_check_and_says_what_to_do(check):
+    box = ConnectorDraftBox()
+    draft = _draft() if check == "missing" else _draft(check=None)
+
+    outcome = asyncio.run(connector_draft_tool(box).handler(None, draft))
+
+    assert outcome.ok is False and outcome.reason == "invalid_draft"
+    error = json.loads(outcome.content)["error"]
+    assert "needs a check" in error and "path of one GET" in error
+    assert box.drain() == []
+
+
+@pytest.mark.parametrize("overrides", [
+    {"check": {"path": "/v1/me?key={api_key}"}},
+    {"check": {"path": "/v1/{region}/me"}},
+    {
+        "fields": [{"name": "api_key", "label": "Access key"}],
+        "auth": {"type": "query", "params": {"access_key": "{api_key}"}},
+        "check": {"path": "/v1/me?access_key=x"},
+    },
+], ids=["key-placeholder", "other-field-placeholder", "auth-parameter-in-query"])
+def test_the_tool_says_what_to_do_when_a_check_path_tries_to_carry_the_key(overrides):
+    """A check path that tries to carry the key also says when to skip the connector."""
+    box = ConnectorDraftBox()
+
+    outcome = asyncio.run(connector_draft_tool(box).handler(None, _tool_draft(**overrides)))
+
+    assert outcome.ok is False and outcome.reason == "invalid_draft"
+    error = json.loads(outcome.content)["error"]
+    assert "call it directly from code" in error and "cannot be a custom connector yet" in error
+    assert box.drain() == []
+
+
+@pytest.mark.parametrize("check", [
+    {"path": "v1/me"},
+    {"path": "/v1/../me"},
+    {"path": "/v1//me"},
+    {"path": "/v1/users/{id}"},
+    {"path": "/v1/search?q=a%20b"},
+    {},
+], ids=["no-leading-slash", "dot-dot-segment", "double-slash", "non-field-brace", "percent", "missing-path"])
+def test_a_malformed_check_path_is_refused_without_the_no_connector_hint(check):
+    box = ConnectorDraftBox()
+
+    outcome = asyncio.run(connector_draft_tool(box).handler(None, _tool_draft(check=check)))
+
+    assert outcome.ok is False and outcome.reason == "invalid_draft"
+    error = json.loads(outcome.content)["error"]
+    assert "check.path" in error
+    assert "call it directly from code" not in error
+    assert box.drain() == []
+
+
+def test_the_tool_refuses_a_draft_outside_the_check_without_the_check_guidance():
+    outcome = asyncio.run(connector_draft_tool(ConnectorDraftBox()).handler(None, _tool_draft(label="")))
+
+    assert outcome.ok is False
+    assert "call it directly from code" not in json.loads(outcome.content)["error"]
+
+
+def test_the_tool_schema_requires_the_check():
+    assert "check" in connector_draft_tool(ConnectorDraftBox()).input_schema["required"]
 
 
 def test_the_tool_refuses_a_bad_draft_without_the_value():
@@ -719,9 +793,10 @@ def test_the_tool_describes_the_check():
 
     check = tool.input_schema["properties"]["check"]
     assert check["required"] == ["path"]
-    assert set(check["properties"]) == {"path"}
+    assert set(check["properties"]) == {"path", "public_path"}
     assert check["additionalProperties"] is False
     assert "check" in tool.description
+    assert "call it directly from code" in tool.description
     assert "base URL" not in tool.input_schema["properties"]["usage_notes"]["description"]
 
 
@@ -735,10 +810,22 @@ def test_the_tool_says_every_path_starts_at_the_host_with_its_version():
 
     for where, text in texts.items():
         assert "only" in text and "host" in text, where
-        assert "/v2/" in text, where
+        assert re.search(r"/v\d/", text), where
         assert "includ" in text and "version" in text, where
     assert "(/v2/exchanges, not /exchanges)" in texts["description"]
-    assert "/v2/eod?symbols=AAPL" in texts["usage_notes"]
+    assert "path /v1/orders with query {'status': 'open'}" in texts["usage_notes"]
+
+
+def test_no_example_path_for_a_call_carries_its_query():
+    """call_minds_api takes parameters apart from the path; a check path may still carry a query."""
+    tool = connector_draft_tool(ConnectorDraftBox())
+    texts = {
+        "description": tool.description,
+        "usage_notes": tool.input_schema["properties"]["usage_notes"]["description"],
+    }
+
+    for where, text in texts.items():
+        assert re.findall(r"/[A-Za-z0-9_./-]*\?", text) == [], where
 
 
 def test_a_check_path_with_a_host_is_refused_with_a_versioned_example():
@@ -768,7 +855,7 @@ def test_the_tool_describes_auth_as_one_flat_object():
     assert "type 'query'" in tool.description
     assert auth["properties"]["params"]["maxProperties"] == 5
     field = schema["properties"]["fields"]["items"]["properties"]["required"]
-    assert field["enum"] == [True]
+    assert "enum" not in field and field["type"] == "boolean"
     assert auth["additionalProperties"] is False
     assert _union_keywords(schema) == set()
     assert "call_minds_api" in schema["properties"]["usage_notes"]["description"]
@@ -784,3 +871,125 @@ def test_the_examples_the_tool_gives_parse():
     )
     for data in (header, basic, notion):
         parse_connector_draft(data)
+
+
+_OPTIONAL_FIELDS = [{"name": "api_key", "label": "Key", "required": False}]
+_OPTIONAL_CHECK = {"path": "/api/3/action/user_show", "public_path": "/api/3/action/package_list"}
+
+
+def _optional_draft(**overrides):
+    """A one-key template whose key a member may leave out, with both check paths."""
+    return _draft(**{"fields": _OPTIONAL_FIELDS, "auth": _one_field_auth(), "check": _OPTIONAL_CHECK, **overrides})
+
+
+@pytest.mark.parametrize("public_path", [
+    "/api/3/action/package_list?key={api_key}",
+    "/api/3/action/../package_list",
+], ids=["key-placeholder", "dot-dot-segment"])
+def test_a_refused_public_path_gets_no_no_connector_hint(public_path):
+    check = {**_OPTIONAL_CHECK, "public_path": public_path}
+
+    outcome = asyncio.run(connector_draft_tool(ConnectorDraftBox()).handler(None, _optional_draft(check=check)))
+
+    assert outcome.ok is False
+    error = json.loads(outcome.content)["error"]
+    assert "check.public_path" in error
+    assert "call it directly from code" not in error
+
+
+def test_a_public_path_carrying_an_auth_parameter_gets_no_no_connector_hint():
+    draft = _optional_draft(
+        auth={"type": "query", "params": {"access_key": "{api_key}"}},
+        check={**_OPTIONAL_CHECK, "public_path": "/api/3/action/package_list?access_key=x"},
+    )
+
+    outcome = asyncio.run(connector_draft_tool(ConnectorDraftBox()).handler(None, draft))
+
+    assert outcome.ok is False
+    error = json.loads(outcome.content)["error"]
+    assert "check.public_path" in error and "auth places" in error
+    assert "call it directly from code" not in error
+
+
+def test_an_optional_key_with_a_public_path_parses_and_round_trips():
+    draft = parse_connector_draft(_optional_draft())
+
+    assert draft.fields[0].required is False
+    assert draft.check.public_path == "/api/3/action/package_list"
+    assert draft.to_dict()["check"] == _OPTIONAL_CHECK
+    assert draft.to_dict()["fields"][0]["required"] is False
+    assert parse_connector_draft(draft.to_dict()) == draft
+
+
+def test_a_check_without_an_optional_key_keeps_its_old_shape():
+    assert parse_connector_draft(_draft(check=_CHECK)).check.public_path is None
+    assert parse_connector_draft(_draft(check=_CHECK)).to_dict()["check"] == _CHECK
+
+
+def test_a_public_path_is_required_when_every_secret_field_is_optional():
+    with pytest.raises(ConnectorDraftError, match=r"^check\.public_path is required"):
+        parse_connector_draft(_optional_draft(check={"path": "/api/3/action/user_show"}))
+
+
+@pytest.mark.parametrize("fields,auth", [
+    (_BASIC_FIELDS, {"type": "basic", "username": "{email}/token", "password": "{api_token}"}),
+    (
+        [{"name": "api_key", "label": "Key"}, {"name": "extra", "label": "Extra", "required": False}],
+        {"type": "header", "headers": {"Authorization": "Bearer {api_key}", "X-Extra": "{extra}"}},
+    ),
+], ids=["no optional field", "a required secret beside the optional one"])
+def test_a_public_path_is_refused_when_no_connection_could_be_keyless(fields, auth):
+    check = {"path": "/v2/me", "public_path": "/v2/status"}
+
+    with pytest.raises(ConnectorDraftError, match=r"^check\.public_path is only for"):
+        parse_connector_draft(_draft(fields=fields, auth=auth, check=check))
+
+
+def test_a_public_path_may_not_equal_the_path():
+    check = {"path": "/v2/me", "public_path": "/v2/me"}
+
+    with pytest.raises(ConnectorDraftError, match=r"^check\.public_path must differ"):
+        parse_connector_draft(_optional_draft(check=check))
+
+
+@pytest.mark.parametrize("path", ["v2/status", "//evil.example/x", "/v2/../x", "/v2/{api_key}"])
+def test_a_public_path_follows_the_path_rules(path):
+    with pytest.raises(ConnectorDraftError, match=r"^check\.public_path\b"):
+        parse_connector_draft(_optional_draft(check={"path": "/v2/me", "public_path": path}))
+
+
+def test_a_public_path_carrying_the_placed_parameter_is_refused():
+    fields = [{"name": "api_key", "label": "Key", "required": False}]
+    check = {"path": "/v1/me", "public_path": "/v1/eod?access_key=demo"}
+
+    with pytest.raises(ConnectorDraftError, match=r"^check\.public_path may carry only plain parameter names"):
+        parse_connector_draft(_draft(fields=fields, auth=_QUERY_AUTH, check=check))
+
+
+def test_an_optional_key_may_not_share_a_header_with_another_field():
+    fields = [{"name": "api_key", "label": "Key", "required": False}, {"name": "account", "label": "Account", "secret": False}]
+    auth = {"type": "header", "headers": {"Authorization": "Bearer {api_key}.{account}"}}
+
+    with pytest.raises(ConnectorDraftError, match=r"^auth\.headers\[0\] places an optional field with another"):
+        parse_connector_draft(_draft(fields=fields, auth=auth, check=_OPTIONAL_CHECK))
+
+
+def test_the_tool_stages_an_optional_key_and_names_it_in_its_text():
+    box = ConnectorDraftBox()
+    tool = connector_draft_tool(box)
+
+    outcome = asyncio.run(tool.handler(None, _optional_draft()))
+
+    assert outcome.ok and box.drain()[0]["check"] == _OPTIONAL_CHECK
+    assert "required: false" in tool.description and "public_path" in tool.description
+    assert "no key or token at all" in tool.description
+    assert "none" not in tool.input_schema["properties"]["auth"]["properties"]["type"]["enum"]
+
+
+def test_the_tool_texts_say_public_path_goes_only_with_every_key_optional():
+    tool = connector_draft_tool(ConnectorDraftBox())
+    required = tool.input_schema["properties"]["fields"]["items"]["properties"]["required"]["description"]
+
+    assert "every key is optional" in tool.description and "every key is optional" in required
+    assert "public_path" in tool.input_schema["properties"]["check"]["properties"]
+    assert "every key is required: false" in tool.input_schema["properties"]["check"]["properties"]["public_path"]["description"]

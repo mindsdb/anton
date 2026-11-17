@@ -197,7 +197,15 @@ logger = logging.getLogger(__name__)
 
 TURN_PROTOCOL_VERSION = 1
 DATASOURCE_PROTOCOL_VERSION = 1
+CUSTOM_API_PROTOCOL_VERSION = 1
 MAX_DATASOURCE_CONNECTIONS = 100
+#: The most custom API connections one turn carries; cowork-server holds the
+#: same cap.
+MAX_CUSTOM_API_CONNECTIONS = 25
+#: The connector id rule anton's draft parser applies, and auth's longest
+#: connection name: a block outside them did not come from those writers.
+_CUSTOM_CONNECTOR_ID = re.compile(r"[a-z][a-z0-9_]{1,40}")
+_CUSTOM_NAME_MAX = 128
 _REQUIRED_REF_KEYS = frozenset({"connection_id", "credential_version"})
 # Names only, for the prompt. cowork-server's queue check allows the same two.
 _OPTIONAL_REF_KEYS = frozenset({"label", "engine"})
@@ -284,6 +292,88 @@ def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
             )
         )
     return DatasourceBlockV1(DATASOURCE_PROTOCOL_VERSION, tuple(refs))
+
+
+@dataclass(frozen=True)
+class CustomApiConnectionRefV1:
+    """One custom API connection the turn may call: auth's id and the member's own names, never a value."""
+
+    connection_id: int
+    connector_id: str
+    name: str
+    credential_version: int
+
+
+@dataclass(frozen=True)
+class CustomApiBlockV1:
+    """The member's custom API connections for this turn, by auth id and with their own names."""
+
+    protocol_version: int
+    connections: tuple[CustomApiConnectionRefV1, ...]
+
+
+def _positive_int(value: object) -> bool:
+    """Whether ``value`` is an int of 1 or more, booleans excluded."""
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 1
+
+
+def _custom_api_connection(connection: object) -> CustomApiConnectionRefV1 | None:
+    """One connection reference, or None when it is not exactly the producer's shape."""
+    if not isinstance(connection, dict) or set(connection) != {
+        "connection_id", "connector_id", "name", "credential_version",
+    }:
+        return None
+    if (
+        not _positive_int(connection["connection_id"])
+        or not _positive_int(connection["credential_version"])
+        or not isinstance(connection["connector_id"], str)
+        or not _CUSTOM_CONNECTOR_ID.fullmatch(connection["connector_id"])
+        or not isinstance(connection["name"], str)
+        or not connection["name"]
+        or len(connection["name"]) > _CUSTOM_NAME_MAX
+    ):
+        return None
+    return CustomApiConnectionRefV1(
+        connection["connection_id"], connection["connector_id"], connection["name"], connection["credential_version"],
+    )
+
+
+def _custom_api_refs(value: object) -> tuple[CustomApiConnectionRefV1, ...] | str:
+    """The block's connection refs, or a fixed phrase that names why ``value`` is not a version 1 block."""
+    if not isinstance(value, dict):
+        return "not an object"
+    if set(value) != {"protocol_version", "connections"}:
+        return "missing or unsupported top-level keys"
+    if not _is_version(value["protocol_version"], CUSTOM_API_PROTOCOL_VERSION):
+        return "unsupported protocol version"
+    connections = value["connections"]
+    if not isinstance(connections, list) or not connections or len(connections) > MAX_CUSTOM_API_CONNECTIONS:
+        return "invalid connection list"
+    refs = [_custom_api_connection(connection) for connection in connections]
+    if None in refs or len({ref.connection_id for ref in refs}) != len(refs):
+        return "invalid connection reference"
+    return tuple(refs)
+
+
+def _parse_custom_api_block(value: object, conversation_id: str) -> CustomApiBlockV1 | None:
+    """Parse the optional ``custom_api`` block, or drop it.
+
+    Input: the raw block and the request's conversation id. Output: the parsed block,
+    or None when it is absent or unusable. A rejected block logs one line naming the
+    reason and the conversation id, never a value, and the turn goes on exactly as if
+    the block were absent. No other side effects.
+    """
+    if value is None:
+        return None
+    refs = _custom_api_refs(value)
+    if isinstance(refs, str):
+        logger.warning(
+            "custom_api block dropped: %s",
+            refs,
+            extra={"event": "custom_api_dropped", "reason": refs, "conversation_id": conversation_id},
+        )
+        return None
+    return CustomApiBlockV1(CUSTOM_API_PROTOCOL_VERSION, refs)
 
 
 def _usable_label(value: object) -> str | None:
@@ -446,7 +536,7 @@ class TurnRequestV1:
     #: Optional per-turn LLM credential set by cowork ({"provider","api_key","base_url"},
     #: optionally "coding_model" and "image_model" — the user's image model, ENG-4024).
     #: MVP: always MindsHub (provider="minds-cloud"). None falls back to env settings.
-    llm: dict | None = None
+    llm: dict | None = field(default=None, repr=False)
     #: Optional memory cowork resolved for this tenant: {"global": {slot: text},
     #: "project": {...}}, slot in profile|rules|lessons. Read-only in the pod.
     memory: dict | None = None
@@ -481,12 +571,15 @@ class TurnRequestV1:
     #: {"turn_key": str, "connections": [{"engine", "name"}, ...]}. Absent or
     #: empty means no connectors for this turn — see cloud_turn/session.py's
     #: build_cloud_chat_session, which is the only place this is read.
-    oauth: dict | None = None
+    oauth: dict | None = field(default=None, repr=False)
     #: Optional verified datasource references: IDs and immutable versions, each with
     #: an optional ``label`` (the user's name for it) and ``engine`` (auth's connector
     #: id), which only the prompt reads. No capability or password crosses; the
     #: gateway is on the `llm` base URL's host.
     datasource: DatasourceBlockV1 | None = None
+    #: Optional custom API connections of the member, by auth id: ``{"protocol_version": 1,
+    #: "connections": [...]}``. No value. An unusable block reads as absent.
+    custom_api: CustomApiBlockV1 | None = None
     #: Optional ISO 8601 creation time of the conversation, as cowork-server
     #: resolved it. The pod is new every turn and cannot derive this: history
     #: rows carry no timestamps. Without it the session dates the conversation
@@ -523,7 +616,8 @@ class TurnRequestV1:
     preview_checks: bool = False
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
-    #: vault connects. Absent when no connected engine has notes.
+    #: vault connects and, apart and as data, for the connector ids of the
+    #: ``custom_api`` block. Absent when no connected engine has notes.
     connectors: dict | None = None
     #: Whether this turn may build connector templates with
     #: `create_connector_draft`, sent back on the `connector` event. Anything
@@ -575,6 +669,7 @@ class TurnRequestV1:
             # Same defensive isinstance check as trace, for the same reason.
             oauth=d.get("oauth") if isinstance(d.get("oauth"), dict) else None,
             datasource=_parse_datasource_block(d.get("datasource")),
+            custom_api=_parse_custom_api_block(d.get("custom_api"), str(d["conversation_id"])),
             # The controller always sends the key and sends None when
             # cowork-server could not resolve it, so the guard does real work.
             started_at=(
