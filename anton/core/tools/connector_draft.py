@@ -58,7 +58,7 @@ _LONG_TEXTS = frozenset({"usage_notes", "help"})
 
 _TOP_KEYS = frozenset({"connector_id", "help_url", "fields", "check", "auth", *_TOP_TEXT_CAPS})
 _FIELD_KEYS = frozenset({"name", "secret", "required", *_FIELD_TEXT_CAPS})
-_CHECK_KEYS = frozenset({"path"})
+_CHECK_KEYS = frozenset({"path", "public_path"})
 
 _CHECK_PATH_MAX = 300
 
@@ -68,9 +68,15 @@ class ConnectorDraftError(ValueError):
     never quotes its value, since the value may be a credential."""
 
 
+class ConnectorCheckError(ConnectorDraftError):
+    """``check.path`` tried to carry a field's value, so the refusal also says when no connector fits."""
+
+
 @dataclass(frozen=True)
 class ConnectorDraftField:
-    """One credential field the member fills in; it describes, never holds, a value."""
+    """One credential field the member fills in; it describes, never holds, a value.
+
+    ``required`` is false only for a secret field the member may leave out."""
 
     name: str
     label: str
@@ -83,13 +89,20 @@ class ConnectorDraftField:
 @dataclass(frozen=True)
 class ConnectorDraftCheck:
     """How to test the credentials: one GET of ``path`` on the address the
-    member types, carrying the template's ``auth``."""
+    member types, carrying the template's ``auth``.
+
+    ``public_path`` is for a member who skipped every optional key: one GET
+    that the API answers without credentials. Set only when no secret field
+    is required."""
 
     path: str
+    public_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """The check as JSON-ready data."""
-        return {"path": self.path}
+        """The check as JSON-ready data, with ``public_path`` only when set."""
+        if self.public_path is None:
+            return {"path": self.path}
+        return {"path": self.path, "public_path": self.public_path}
 
 
 @dataclass(frozen=True)
@@ -279,27 +292,27 @@ def _check_help_url(value: Any) -> str | None:
     return text
 
 
-def _check_path(value: Any) -> str:
-    """Return the check's path: an absolute path with an optional query, never a host.
+def _check_path(value: Any, where: str = "check.path") -> str:
+    """Return a check's path: an absolute path with an optional query, never a host.
 
     A path the request URL could read as naming another host (``//``, ``\\``,
     a ``.`` or ``..`` segment) is refused, and so is anything a placeholder
     could reach: a value never goes into the URL. ``%`` is refused too, so an
     encoded value cannot pass the token rule.
     """
-    text = _check_text(value, "check.path", _CHECK_PATH_MAX, long_text=False)
+    text = _check_text(value, where, _CHECK_PATH_MAX, long_text=False)
     if text is None:
-        raise ConnectorDraftError("check.path is required.")
+        raise ConnectorDraftError(f"{where} is required.")
     if (
         not text.startswith("/")
         or "//" in text
         or not is_printable_ascii(text, space=False)
         or any(c in text for c in "\\#{}%")
     ):
-        raise ConnectorDraftError("check.path must be a path from the host, with any version, such as /v2/me, and no host.")
+        raise ConnectorDraftError(f"{where} must be a path from the host, with any version, such as /v2/me, and no host.")
     segments = text.split("?", 1)[0].split("/")
     if any(segment in (".", "..") for segment in segments):
-        raise ConnectorDraftError("check.path must not have . or .. segments.")
+        raise ConnectorDraftError(f"{where} must not have . or .. segments.")
     return text
 
 
@@ -311,7 +324,12 @@ def _parse_auth(data: Any, fields: tuple[ConnectorDraftField, ...]) -> Connector
             it, with the scrubber as its secret detector.
     """
     try:
-        canonical = rules.parse_auth(data, [(f.name, f.secret) for f in fields], _scrubbed)
+        canonical = rules.parse_auth(
+            data,
+            [(f.name, f.secret) for f in fields],
+            _scrubbed,
+            optional=frozenset(f.name for f in fields if not f.required),
+        )
     except rules.AuthRuleError as e:
         raise ConnectorDraftError(str(e)) from e
     return ConnectorDraftAuth(
@@ -323,21 +341,53 @@ def _parse_auth(data: Any, fields: tuple[ConnectorDraftField, ...]) -> Connector
     )
 
 
-def _parse_check(data: Any, auth: ConnectorDraftAuth) -> ConnectorDraftCheck | None:
+def _parse_check(data: Any, auth: ConnectorDraftAuth, fields: tuple[ConnectorDraftField, ...]) -> ConnectorDraftCheck | None:
     """Parse the optional ``check``, or return None when absent.
 
-    For a ``query`` template the path may not carry a parameter the template
-    places, or the check would send the key under two values.
+    For a ``query`` template a path may not carry a parameter the template
+    places, or the check would send the key under two values. A member can
+    connect without any key only when every secret field is optional, so
+    only then is ``public_path`` required, and otherwise it is refused.
+    A ``path`` naming a field's placeholder, or a parameter the auth places,
+    raises ``ConnectorCheckError``.
     """
     if data is None:
         return None
     if not isinstance(data, dict):
         raise ConnectorDraftError("check must be an object.")
     _check_keys(data, _CHECK_KEYS, "check")
-    path = _check_path(data.get("path"))
+    raw_path = data.get("path")
+    field_names = {f.name for f in fields}
+    if isinstance(raw_path, str) and field_names & set(rules.PLACEHOLDER.findall(raw_path)):
+        raise ConnectorCheckError("check.path must not name a field; the template places field values.")
+    path = _check_path(raw_path)
+    try:
+        _check_no_collision(path, auth, "check.path")
+    except ConnectorDraftError as e:
+        raise ConnectorCheckError(str(e)) from e
+    keyless_possible = any(not f.required for f in fields) and all(not f.required for f in fields if f.secret)
+    public_path = data.get("public_path")
+    if not keyless_possible:
+        if public_path is not None:
+            raise ConnectorDraftError(
+                "check.public_path is only for a template whose every secret field is optional."
+            )
+        return ConnectorDraftCheck(path=path)
+    if public_path is None:
+        raise ConnectorDraftError(
+            "check.public_path is required: the template has optional keys, so give a path that answers without one."
+        )
+    public_path = _check_path(public_path, "check.public_path")
+    if public_path == path:
+        raise ConnectorDraftError("check.public_path must differ from check.path.")
+    _check_no_collision(public_path, auth, "check.public_path")
+    return ConnectorDraftCheck(path=path, public_path=public_path)
+
+
+def _check_no_collision(path: str, auth: ConnectorDraftAuth, where: str) -> None:
+    """Refuse a path whose query carries a parameter name the template's auth places."""
     if rules.query_collides(auth.to_dict(), rules.query_names(urlsplit(path).query)):
-        raise ConnectorDraftError("check.path may carry only plain parameter names, none of them one auth places.")
-    return ConnectorDraftCheck(path=path)
+        raise ConnectorDraftError(f"{where} may carry only plain parameter names, none of them one auth places.")
 
 
 def _parse_field(data: Any, index: int) -> ConnectorDraftField:
@@ -361,14 +411,16 @@ def _parse_field(data: Any, index: int) -> ConnectorDraftField:
     }
     if texts["label"] is None:
         raise ConnectorDraftError(f"{where}.label is required.")
-    # auth places every field on every request, so a field left blank would send an empty value.
-    if not _check_bool(data.get("required"), f"{where}.required", True):
-        raise ConnectorDraftError(f"{where}.required must be true: every field goes on a request.")
+    secret = _check_bool(data.get("secret"), f"{where}.secret", True)
+    required = _check_bool(data.get("required"), f"{where}.required", True)
+    # A skipped field is dropped from the request, which only a key can be.
+    if not required and not secret:
+        raise ConnectorDraftError(f"{where}.required may be false only on a secret field.")
     return ConnectorDraftField(
         name=name,
         label=texts["label"],
-        secret=_check_bool(data.get("secret"), f"{where}.secret", True),
-        required=True,
+        secret=secret,
+        required=required,
         placeholder=texts["placeholder"],
         help=texts["help"],
     )
@@ -416,7 +468,7 @@ def parse_connector_draft(data: Any) -> ConnectorDraft:
         category=texts["category"],
         help_url=_check_help_url(data.get("help_url")),
         usage_notes=texts["usage_notes"],
-        check=_parse_check(data.get("check"), auth),
+        check=_parse_check(data.get("check"), auth, fields),
     )
 
 
@@ -444,6 +496,12 @@ class ConnectorDraftBox:
         return drained
 
 
+_NO_CONNECTOR_CASES = (
+    "If an API takes no key or token at all, do not build a connector: call it directly "
+    "from code. If it has no GET that answers only with valid credentials, it "
+    "cannot be a custom connector yet: tell the user so."
+)
+
 _DESCRIPTION = (
     "Build the template for a connector to an API the user needs and has no "
     "connector for. Pass the connector's id, a label, the credential fields "
@@ -455,6 +513,10 @@ _DESCRIPTION = (
     "password such as {email}/token and {api_token}, or type 'query' with "
     "the URL parameters that carry the key, such as access_key: {api_key}; "
     "{field_name} places a field's value and every field must be placed. "
+    "Mark a key required: false only when the provider documents public "
+    "access without it. When every key is optional, also give "
+    "check.public_path, a GET that answers without a key; path still "
+    "answers only with one. With any key required, leave public_path out. "
     "The user types only the API's host when connecting (such as "
     "api.example.com), so leave it out, and start every path at the host: "
     "include any version the provider's docs put after the host "
@@ -464,7 +526,7 @@ _DESCRIPTION = (
     "template is staged, not saved: the user sees it as a card in the chat "
     "and saves it, then enters their credentials in Connect Apps and Data. "
     "Only API connectors that take keys or tokens are supported; not "
-    "database drivers and not sign-in flows that redirect to the provider."
+    "database drivers and not sign-in flows that redirect to the provider. " + _NO_CONNECTOR_CASES
 )
 
 _TEXT = {"type": "string"}
@@ -487,7 +549,7 @@ _INPUT_SCHEMA = {
                 "the credentials, including any key parameter auth places in the URL, so leave out "
                 "auth headers, key parameters, keys and the API's address. No values. The user types "
                 "only the host, so every path starts at the host and includes any version, "
-                "e.g. /v2/eod?symbols=AAPL."
+                "with its parameters apart, e.g. path /v1/orders with query {'status': 'open'}."
             ),
         },
         "fields": {
@@ -502,8 +564,10 @@ _INPUT_SCHEMA = {
                     "secret": {"type": "boolean", "description": "Mask the input. Defaults to true."},
                     "required": {
                         "type": "boolean",
-                        "enum": [True],
-                        "description": "Must be true or left out: auth sends every field on a request.",
+                        "description": (
+                            "Defaults to true. Set false only on a secret key the provider documents "
+                            "public access without. Give check.public_path only when every key is optional."
+                        ),
                     },
                     "placeholder": _TEXT,
                     "help": {"type": "string", "description": "Where the user finds this value."},
@@ -513,7 +577,7 @@ _INPUT_SCHEMA = {
             },
         },
     },
-    "required": ["connector_id", "label", "fields", "auth"],
+    "required": ["connector_id", "label", "fields", "auth", "check"],
     "additionalProperties": False,
 }
 # One flat object with a type, not a oneOf: providers refuse union schemas in tool inputs.
@@ -563,6 +627,18 @@ _INPUT_SCHEMA["properties"]["check"] = {
     "required": ["path"],
     "additionalProperties": False,
 }
+_INPUT_SCHEMA["properties"]["check"]["properties"]["public_path"] = {
+    "type": "string",
+    "description": (
+        "Only when every key is required: false. A GET path, from the host as above, that the API "
+        "answers with 200 without any key, used when the user skips the key. It must differ from path."
+    ),
+}
+
+
+_CHECK_REQUIRED = (
+    "A connector needs a check: the path of one GET that answers only with valid credentials."
+)
 
 
 def connector_draft_tool(box: ConnectorDraftBox) -> ToolDef:
@@ -572,8 +648,15 @@ def connector_draft_tool(box: ConnectorDraftBox) -> ToolDef:
         """Parse one draft and keep it in ``box``; refusals name the field only."""
         try:
             draft = parse_connector_draft(tc_input)
+        except ConnectorCheckError as e:
+            # A check path that tried to carry the key: say when no connector fits at all.
+            return ToolOutcome(content=json.dumps({"error": f"{e} {_NO_CONNECTOR_CASES}"}), ok=False, reason="invalid_draft")
         except ConnectorDraftError as e:
             return ToolOutcome(content=json.dumps({"error": str(e)}), ok=False, reason="invalid_draft")
+        # The parser keeps the check optional for templates stored before it
+        # existed; a new one without it could never be connected.
+        if draft.check is None:
+            return ToolOutcome(content=json.dumps({"error": _CHECK_REQUIRED}), ok=False, reason="invalid_draft")
         if not box.put(draft):
             return ToolOutcome(
                 content=json.dumps({

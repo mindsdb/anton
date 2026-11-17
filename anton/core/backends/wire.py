@@ -80,7 +80,7 @@ MISSING_MODULE_HINT = (
 INJECTED_HELPER_NAMES = frozenset(
     {
         "get_llm", "agentic_loop", "classify", "classify_yes_no", "web_search",
-        "generate_image", "query_minds_data", "progress", "sample",
+        "generate_image", "query_minds_data", "call_minds_api", "progress", "sample",
     }
 )
 # The list the boot binds in the cell namespace for the data helpers to

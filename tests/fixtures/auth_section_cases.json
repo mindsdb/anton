@@ -892,6 +892,519 @@
           true
         ]
       ]
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      },
+      "fields": [
+        [
+          "api_key",
+          true
+        ]
+      ],
+      "optional": [
+        "api_key"
+      ],
+      "result": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      }
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "params": {
+          "access_key": "{api_key}"
+        },
+        "type": "query"
+      },
+      "fields": [
+        [
+          "api_key",
+          true
+        ]
+      ],
+      "optional": [
+        "api_key"
+      ],
+      "result": {
+        "params": {
+          "access_key": "{api_key}"
+        },
+        "type": "query"
+      }
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}",
+          "X-Account": "{account}"
+        },
+        "type": "header"
+      },
+      "fields": [
+        [
+          "api_key",
+          true
+        ],
+        [
+          "account",
+          false
+        ]
+      ],
+      "optional": [
+        "api_key"
+      ],
+      "result": {
+        "headers": {
+          "Authorization": "Bearer {api_key}",
+          "X-Account": "{account}"
+        },
+        "type": "header"
+      }
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}.{account}"
+        },
+        "type": "header"
+      },
+      "error": "auth.headers[0] places an optional field with another field; give it a place of its own.",
+      "fields": [
+        [
+          "api_key",
+          true
+        ],
+        [
+          "account",
+          false
+        ]
+      ],
+      "optional": [
+        "api_key"
+      ]
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "params": {
+          "k": "{api_key}{token}"
+        },
+        "type": "query"
+      },
+      "error": "auth.params[0] places an optional field with another field; give it a place of its own.",
+      "fields": [
+        [
+          "api_key",
+          true
+        ],
+        [
+          "token",
+          true
+        ]
+      ],
+      "optional": [
+        "api_key"
+      ]
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      },
+      "error": "An optional field must be a secret field the template declares.",
+      "fields": [
+        [
+          "api_key",
+          true
+        ],
+        [
+          "account",
+          false
+        ]
+      ],
+      "optional": [
+        "account"
+      ]
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      },
+      "error": "An optional field must be a secret field the template declares.",
+      "fields": [
+        [
+          "api_key",
+          true
+        ]
+      ],
+      "optional": [
+        "missing"
+      ]
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "password": "{password}",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "fields": [
+        [
+          "email",
+          true
+        ],
+        [
+          "password",
+          true
+        ]
+      ],
+      "optional": [
+        "password"
+      ],
+      "result": {
+        "password": "{password}",
+        "type": "basic",
+        "username": "{email}"
+      }
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "password": "{password}",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "error": "auth.username may not place an optional field; only the password may be optional.",
+      "fields": [
+        [
+          "email",
+          true
+        ],
+        [
+          "password",
+          true
+        ]
+      ],
+      "optional": [
+        "email"
+      ]
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "password": "{password}",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "error": "An optional auth.password needs a username that places a required secret field.",
+      "fields": [
+        [
+          "email",
+          false
+        ],
+        [
+          "password",
+          true
+        ]
+      ],
+      "optional": [
+        "password"
+      ]
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "password": "{password}{tail}",
+        "type": "basic",
+        "username": "{user}"
+      },
+      "error": "auth.password must be only the optional field, with nothing around it.",
+      "fields": [
+        [
+          "user",
+          true
+        ],
+        [
+          "password",
+          true
+        ],
+        [
+          "tail",
+          true
+        ]
+      ],
+      "optional": [
+        "password"
+      ]
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "type": "none"
+      },
+      "error": "auth.type must be one of: basic, header, query.",
+      "fields": [
+        [
+          "api_key",
+          true
+        ]
+      ]
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "type": "none"
+      },
+      "fields": [],
+      "result": {
+        "type": "none"
+      },
+      "stored": true
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "type": "none"
+      },
+      "error": "auth must place every field; fields[0] is never used.",
+      "fields": [
+        [
+          "api_key",
+          true
+        ]
+      ],
+      "stored": true
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "headers": {},
+        "type": "none"
+      },
+      "error": "auth has a key that is not allowed. Allowed keys: type.",
+      "fields": [
+        [
+          "base",
+          false
+        ]
+      ],
+      "stored": true
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "Notion-Version": "2022-06-28"
+        },
+        "type": "header"
+      },
+      "fields": [],
+      "result": {
+        "headers": {
+          "Notion-Version": "2022-06-28"
+        },
+        "type": "header"
+      },
+      "stored": true
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "params": {
+          "format": "json"
+        },
+        "type": "query"
+      },
+      "fields": [],
+      "result": {
+        "params": {
+          "format": "json"
+        },
+        "type": "query"
+      },
+      "stored": true
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "headers": {
+          "Notion-Version": "2022-06-28"
+        },
+        "type": "header"
+      },
+      "error": "auth must place every field; fields[0] is never used.",
+      "fields": [
+        [
+          "api_key",
+          true
+        ]
+      ],
+      "stored": true
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "X-Account": "{account}"
+        },
+        "type": "header"
+      },
+      "fields": [
+        [
+          "account",
+          false
+        ]
+      ],
+      "result": {
+        "headers": {
+          "X-Account": "{account}"
+        },
+        "type": "header"
+      },
+      "stored": true
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "password": "",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "error": "auth.username names a field the draft does not declare.",
+      "fields": [],
+      "stored": true
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "password": "",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "error": "auth must place a secret field, such as {api_key}.",
+      "fields": [
+        [
+          "email",
+          false
+        ]
+      ],
+      "stored": true
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "type": "oauth"
+      },
+      "error": "auth.type must be one of: basic, header, none, query.",
+      "fields": [],
+      "stored": true
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "headers": {
+          "Notion-Version": "2022-06-28"
+        },
+        "type": "header"
+      },
+      "error": "auth must place a secret field, such as {api_key}.",
+      "fields": [
+        [
+          "api_key",
+          true
+        ]
+      ]
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      },
+      "fields": [
+        [
+          "api_key",
+          true
+        ]
+      ],
+      "result": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      },
+      "stored": true
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "password": "",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "fields": [
+        [
+          "email",
+          true
+        ]
+      ],
+      "result": {
+        "password": "",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "stored": true
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}",
+          "X-Account": "{account}"
+        },
+        "type": "header"
+      },
+      "fields": [
+        [
+          "api_key",
+          true
+        ],
+        [
+          "account",
+          false
+        ]
+      ],
+      "optional": [
+        "api_key"
+      ],
+      "result": {
+        "headers": {
+          "Authorization": "Bearer {api_key}",
+          "X-Account": "{account}"
+        },
+        "type": "header"
+      },
+      "stored": true
     }
   ],
   "query_collides": [
@@ -1369,6 +1882,318 @@
       },
       "error": "auth.type is not one these rules can apply.",
       "values": {}
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "type": "none"
+      },
+      "result": [
+        {},
+        []
+      ],
+      "values": {}
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "type": "none"
+      },
+      "result": [
+        {},
+        []
+      ],
+      "values": {
+        "api_key": "k0"
+      }
+    }
+  ],
+  "without_missing": [
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      },
+      "held": [
+        "api_key"
+      ],
+      "optional": [
+        "api_key"
+      ],
+      "result": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      }
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      },
+      "held": [],
+      "optional": [
+        "api_key"
+      ],
+      "result": {
+        "type": "none"
+      }
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      },
+      "error": "A field that is not optional has no value.",
+      "held": [],
+      "optional": []
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "params": {
+          "access_key": "{api_key}"
+        },
+        "type": "query"
+      },
+      "held": [],
+      "optional": [
+        "api_key"
+      ],
+      "result": {
+        "type": "none"
+      }
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}",
+          "Notion-Version": "2022-06-28"
+        },
+        "type": "header"
+      },
+      "held": [],
+      "optional": [
+        "api_key"
+      ],
+      "result": {
+        "headers": {
+          "Notion-Version": "2022-06-28"
+        },
+        "type": "header"
+      }
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "params": {
+          "access_key": "{api_key}",
+          "format": "json"
+        },
+        "type": "query"
+      },
+      "held": [],
+      "optional": [
+        "api_key"
+      ],
+      "result": {
+        "params": {
+          "format": "json"
+        },
+        "type": "query"
+      }
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}",
+          "X-Account": "{account}"
+        },
+        "type": "header"
+      },
+      "held": [
+        "account"
+      ],
+      "optional": [
+        "api_key"
+      ],
+      "result": {
+        "headers": {
+          "X-Account": "{account}"
+        },
+        "type": "header"
+      }
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}",
+          "X-Account": "{account}"
+        },
+        "type": "header"
+      },
+      "error": "A field that is not optional has no value.",
+      "held": [
+        "api_key"
+      ],
+      "optional": [
+        "api_key"
+      ]
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "headers": {
+          "Authorization": "Bearer {api_key}",
+          "X-Account": "{account}"
+        },
+        "type": "header"
+      },
+      "held": [
+        "api_key"
+      ],
+      "optional": [
+        "api_key",
+        "account"
+      ],
+      "result": {
+        "headers": {
+          "Authorization": "Bearer {api_key}"
+        },
+        "type": "header"
+      }
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "password": "{password}",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "held": [
+        "email"
+      ],
+      "optional": [
+        "password"
+      ],
+      "result": {
+        "password": "",
+        "type": "basic",
+        "username": "{email}"
+      }
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "password": "{password}",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "held": [
+        "email",
+        "password"
+      ],
+      "optional": [
+        "password"
+      ],
+      "result": {
+        "password": "{password}",
+        "type": "basic",
+        "username": "{email}"
+      }
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "password": "{password}",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "error": "A field that is not optional has no value.",
+      "held": [
+        "password"
+      ],
+      "optional": [
+        "password"
+      ]
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "password": "{password}",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "error": "A field that is not optional has no value.",
+      "held": [
+        "email"
+      ],
+      "optional": []
+    },
+    {
+      "accepted": true,
+      "auth": {
+        "type": "none"
+      },
+      "held": [],
+      "optional": [],
+      "result": {
+        "type": "none"
+      }
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "type": "oauth"
+      },
+      "error": "auth.type is not one these rules can apply.",
+      "held": [],
+      "optional": []
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "password": "{password}",
+        "type": "basic",
+        "username": "{email}"
+      },
+      "error": "A field that is not optional has no value.",
+      "held": [
+        "password"
+      ],
+      "optional": [
+        "email",
+        "password"
+      ]
+    },
+    {
+      "accepted": false,
+      "auth": {
+        "headers": {
+          "A": "{acct}-{api_key}"
+        },
+        "type": "header"
+      },
+      "error": "A placement of a missing field also places a field the connection holds.",
+      "held": [
+        "acct"
+      ],
+      "optional": [
+        "api_key"
+      ]
     }
   ]
 }
