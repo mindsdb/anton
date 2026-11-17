@@ -34,3 +34,21 @@ fails automatically when that code changes, so re-check these when touching:
   400 names `tool_choice` (`refuses_forced_tool_choice`); a server whose refusal
   says something else still fails the verifier, so the bullet stays until
   every refusal gets the fallback
+- what Cowork cannot make — anton's tool set (`anton/core/tools/tool_defs.py`
+  has no video or audio generator, and an image tool only once ENG-4024's
+  `generate_image` ships). The section is worded in terms of tools so it stays
+  true when one lands; revisit it when a video or audio tool does
+- free Air allowance, refill and balance fallback — cowork's own copy:
+  `usageBar.freeLow*` / `freeUsed*` and `connectProviderBody` in
+  `src/shared/i18n/locales/en/chat.json`; other models needing credits —
+  `needsCreditsTitle` / `needsCreditsBody` there. Sizes, prices and refill
+  times are deliberately not stated: they are server-side settings that change
+- billing page — `MINDS_BILLING_URL` in `src/renderer/lib/mindsUrls.ts`
+- chat subscriptions not usable, API keys on desktop only — the `Provider` enum
+  in cowork-server `cowork/common/settings/user_settings.py` (API keys and
+  OpenAI-compatible servers only, no account sign-in) and the `!orgMode` gate on
+  `LLM Providers` above
+- the existing-folder route — `canChooseFolder = host.isElectron && !orgMode`
+  and the `newProjectModal.useExistingFolder` / `locationLabel` /
+  `locationHelpChosen` strings in cowork's `NewProjectModal.jsx` and
+  `src/shared/i18n/locales/en/projects.json`

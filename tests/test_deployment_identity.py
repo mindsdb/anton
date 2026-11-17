@@ -58,12 +58,18 @@ _DEFAULT_LINES = [
     "- Cowork runs as a desktop app on macOS, Windows and Linux, and in the browser. "
     "Some features exist on only one of those, so never assume a feature you know "
     "about is reachable from where this user is.",
+    "- Unless one of your tools or a service the user connected generates them, you "
+    "cannot make images, video or audio. When asked for one, say so in your first "
+    "sentence and offer what you can do instead. Never describe a drawing made with "
+    "code as the image, photo or video that was asked for. Charts and diagrams are "
+    "not affected.",
 ]
 _DEFAULT_RULE = (
     "- If asked what Cowork is, who makes it, how to install, update or remove it, "
     "which platforms or editions exist, where a setting or feature lives, which models "
-    "it can use (including local models such as Ollama or LM Studio), or what it "
-    "costs, call `recall_skill(\"cowork-product\")` and answer from it. Do not answer "
+    "it can use (including local models such as Ollama or LM Studio), what it costs "
+    "or how much is free, what it can make, or which files and computers it can reach, "
+    "call `recall_skill(\"cowork-product\")` and answer from it. Do not answer "
     "those from general knowledge, and do not guess or web-search for them. If it "
     "does not cover the question, say so plainly and point the user at "
     "https://docs.mindshub.ai — never fill the gap with a guess."
@@ -83,10 +89,10 @@ def test_default_product_lines_are_byte_identical(surface, line):
 
 
 @pytest.mark.parametrize(("surface", "digest"), [
-    (None, "31c1394749cf4048ed941d96280621e6fe7ec6e3a2d9c77e55c3f07087190633"),
-    ("desktop", "c23b2270b3c72681f135c9b6a3f9e517aef89ff2a28ec4fc6b1289e511fc8a3b"),
-    ("web", "90cc7fe6174c01d287a544875880e5e7ff91ab1353e2ab207bb53d84e1bead5e"),
-    ("cli", "947cff2aff00222982a78874e16de9be94c8e94be6687ab414023057349962df"),
+    (None, "13e112b1fb769510de2e61cc158654366b7e8f661d577c489ab8132bb996c12f"),
+    ("desktop", "a0b01cd1fa4b29f88cfb2434b384476c1bcba46fc94a8b53d785b51e7bbe5e88"),
+    ("web", "04bb3080287007f35b31f79b027fc8da6efbb3a84d632f6d20ab985d0c7d1559"),
+    ("cli", "36025db98d8c068a7e27e975e5de34956d9790980779146f7c28f0c3feb39c7b"),
 ])
 def test_complete_default_builder_output_is_byte_identical(surface, digest):
     # Snapshot the current complete default prompt for each surface, including
@@ -246,3 +252,15 @@ async def test_identity_remains_authoritative_in_model_call_after_recall(tmp_pat
         assert any(DEPLOYMENT_PRODUCT_SKILL_PREFACE in content for content in results)
     finally:
         await session.close()
+
+
+# A request for an image or a video is not a question about the product, so the
+# skill is never recalled for it: the rule has to ride in the always-on lines,
+# on every surface and in a self-hosted deployment too.
+@pytest.mark.parametrize("identity", [None, deployment()])
+@pytest.mark.parametrize("surface", ["desktop", "web", "cli", None])
+def test_every_prompt_says_what_cannot_be_made(surface, identity):
+    joined = "\n".join(product_lines(surface, identity))
+    assert "cannot make images, video or audio" in joined
+    assert "say so in your first sentence" in joined
+    assert "Never describe a drawing made with code" in joined
