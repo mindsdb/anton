@@ -70,10 +70,16 @@ def _scanned_pdf(path: Path, pages: int) -> None:
 
 
 class _FakeLLM:
-    """Stands in for get_llm(): records each image it was sent and answers per page."""
+    """Stands in for get_llm(): records each image it was sent and answers per page.
 
-    def __init__(self):
+    Pages in `fail` raise, pages in `empty` get a blank reply, as a gateway
+    error or a model that returns nothing would.
+    """
+
+    def __init__(self, fail=(), empty=()):
         self.images: list[Image.Image] = []
+        self.asked: list[str] = []
+        self.fail, self.empty = set(fail), set(empty)
 
     async def complete_async(self, *, system, messages, max_tokens):
         text_part, image_part = messages[0]["content"]
@@ -81,6 +87,11 @@ class _FakeLLM:
         assert image_part["source"]["media_type"] == "image/jpeg"
         raw = base64.b64decode(image_part["source"]["data"])
         self.images.append(Image.open(io.BytesIO(raw)))
+        self.asked.append(text_part["text"])
+        if text_part["text"] in self.fail:
+            raise RuntimeError("400 image rejected")
+        if text_part["text"] in self.empty:
+            return SimpleNamespace(content="  ")
         return SimpleNamespace(content=f"text of {text_part['text']}")
 
 
@@ -99,29 +110,59 @@ def test_pdf_snippet_extracts_text_and_flags_scanned_pages(tmp_path):
     assert ns["scanned"] == [0, 1]
 
 
-def test_scan_snippet_reads_every_page_through_the_model_and_resumes(tmp_path, monkeypatch):
+def _run_scan_snippet(tmp_path, monkeypatch, pages, llm):
     scanned_pdf = tmp_path / "scan.pdf"
-    _scanned_pdf(scanned_pdf, 3)
+    _scanned_pdf(scanned_pdf, pages)
     monkeypatch.chdir(tmp_path)
-    llm, progress = _FakeLLM(), []
-    ns = {"get_llm": lambda: llm, "progress": progress.append, "path": str(scanned_pdf)}
-
+    progress, printed = [], []
+    ns = {"get_llm": lambda: llm, "progress": progress.append, "path": str(scanned_pdf),
+          "print": lambda *a: printed.append(" ".join(map(str, a)))}
     # Runs the snippet as written, including the call it tells the agent to make.
     exec(_block("read_pages"), ns)
+    return ns, scanned_pdf, tmp_path / ".anton" / "output" / "extracted_text" / "scan", progress, printed
 
-    out_dir = tmp_path / "extracted_text" / "scan"
+
+def test_scan_snippet_reads_every_page_through_the_model_and_resumes(tmp_path, monkeypatch):
+    llm = _FakeLLM()
+    ns, scanned_pdf, out_dir, progress, printed = _run_scan_snippet(tmp_path, monkeypatch, 3, llm)
+
     assert sorted(p.name for p in out_dir.iterdir()) == ["page_0001.txt", "page_0002.txt", "page_0003.txt"]
     assert (out_dir / "page_0002.txt").read_text() == "text of Page 2."
     assert len(llm.images) == 3
     assert all(max(img.size) <= 1600 for img in llm.images)
     assert progress == ["Read 3 of 3 pages"]
+    assert printed == ["pages not read: none"]
 
     # A cut-off job is resumed by the same call: saved pages are not sent again.
     (out_dir / "page_0003.txt").unlink()
-    asyncio.run(ns["read_pages"](str(scanned_pdf), [0, 1, 2], out_dir, batch=2))
+    assert asyncio.run(ns["read_pages"](str(scanned_pdf), [0, 1, 2], out_dir, batch=2)) == {}
     assert len(llm.images) == 4
     assert (out_dir / "page_0003.txt").exists()
     assert progress[-1] == "Read 1 of 1 pages"
+
+
+def test_a_page_that_always_fails_does_not_stop_the_rest(tmp_path, monkeypatch):
+    llm = _FakeLLM(fail={"Page 3."})
+    ns, scanned_pdf, out_dir, progress, printed = _run_scan_snippet(tmp_path, monkeypatch, 20, llm)
+
+    # One pass reads every other page and names the one it could not read.
+    assert len(list(out_dir.iterdir())) == 19
+    assert not (out_dir / "page_0003.txt").exists()
+    assert printed == ["pages not read: {3: 'RuntimeError: 400 image rejected'}"]
+    assert len(llm.asked) == 20
+
+    # Running it again retries only that page.
+    failed = asyncio.run(ns["read_pages"](str(scanned_pdf), range(20), out_dir))
+    assert failed == {3: "RuntimeError: 400 image rejected"}
+    assert llm.asked[20:] == ["Page 3."]
+
+
+def test_an_empty_reply_is_a_failed_page_not_a_saved_one(tmp_path, monkeypatch):
+    llm = _FakeLLM(empty={"Page 2."})
+    ns, scanned_pdf, out_dir, progress, printed = _run_scan_snippet(tmp_path, monkeypatch, 3, llm)
+
+    assert sorted(p.name for p in out_dir.iterdir()) == ["page_0001.txt", "page_0003.txt"]
+    assert printed == ["pages not read: {2: 'ValueError: the model returned no text'}"]
 
 
 def test_word_snippet_reads_paragraphs_and_tables(tmp_path):

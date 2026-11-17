@@ -10,9 +10,11 @@ metadata:
 ---
 READING WEB PAGES, DOCUMENTS AND SCANS
 
-Libraries: `requests`, `beautifulsoup4` with `lxml`, `pypdf`, `pdfplumber` (with `pypdfium2`), `python-docx` and `pillow`. If an import reports a package as not installed, run the cell again with it in the `packages` array; an import alone never installs anything. There are no command-line tools for this: no pdftotext, pdftoppm, qpdf, tesseract or LibreOffice. Do not try them.
+Libraries: `requests`, `beautifulsoup4` with `lxml`, `pypdf`, `pdfplumber` (with `pypdfium2`), `python-docx` and `pillow`. Cowork on the web has all of them; on a person's own computer some may be missing. Check the installed packages listed in the scratchpad tool's description: put any of these libraries that is not listed there in the `packages` array of the first cell that needs it. Do not list one that is already installed; that installs a second copy. An import alone never installs anything.
 
-Keep text out of the conversation. Write extracted text to a file in the output folder and print only a short excerpt and its length; printed output stops at 10,000 characters. Search or read the file for what you need.
+Use these Python libraries, not command-line tools such as pdftotext, pdftoppm, qpdf, tesseract or LibreOffice. The web sandbox has none of them and a person's computer usually doesn't either, so trying them costs a step.
+
+Keep text out of the conversation. Write extracted text to a file under `.anton/output` and print only a short excerpt and its length; printed output stops at 10,000 characters. Search or read the file for what you need.
 
 WEB PAGE
 ```python
@@ -72,26 +74,41 @@ def to_block(img):
 async def read_page(i, img, out_dir):
     r = await llm.complete_async(system=SYSTEM, messages=[{"role": "user", "content": [
         {"type": "text", "text": f"Page {i + 1}."}, to_block(img)]}], max_tokens=4000)
-    (out_dir / f"page_{i + 1:04d}.txt").write_text(r.content)
+    text = (r.content or "").strip()
+    if not text:
+        raise ValueError("the model returned no text")
+    (out_dir / f"page_{i + 1:04d}.txt").write_text(text)
 
 async def read_pages(pdf_path, pages, out_dir, batch=8):
+    """Read the pages not saved yet. Returns {page number: error} for pages that failed."""
     out_dir.mkdir(parents=True, exist_ok=True)
     todo = [i for i in pages if not (out_dir / f"page_{i + 1:04d}.txt").exists()]
+    failed = {}
     for start in range(0, len(todo), batch):
         chunk = todo[start:start + batch]
-        await asyncio.gather(*(read_page(i, img, out_dir) for i, img in page_images(pdf_path, chunk)))
+        results = await asyncio.gather(
+            *(read_page(i, img, out_dir) for i, img in page_images(pdf_path, chunk)),
+            return_exceptions=True)
+        for i, result in zip(chunk, results):
+            if isinstance(result, Exception):
+                failed[i + 1] = f"{type(result).__name__}: {result}"[:200]
         progress(f"Read {start + len(chunk)} of {len(todo)} pages")
+    return failed
 
 # Call it with asyncio.run: a cell has no running event loop, so a bare `await` is a SyntaxError.
-out_dir = pathlib.Path("extracted_text") / pathlib.Path(path).stem
-asyncio.run(read_pages(path, range(len(pdfium.PdfDocument(path))), out_dir))
+out_dir = pathlib.Path(".anton/output/extracted_text") / pathlib.Path(path).stem
+failed = asyncio.run(read_pages(path, range(len(pdfium.PdfDocument(path))), out_dir))
+print("pages not read:", failed or "none")
 ```
 For a photo or image file, open it with `Image.open(path)` and send it the same way.
 
 Large jobs:
-- Count the pages across all files first, and say the number in your progress message. Each page is one model call, so a large job takes time and uses the person's allowance; do not stop to ask, but do not hide it either.
-- Each page is saved as it finishes and skipped if it already exists. If the step is cut off, run the same call again and it continues where it stopped.
+- Count the pages you will read with the model across all files first: scanned pages, photos and images. Text you extract with the libraries above does not count.
+- Up to 20 pages: go ahead, and say the number in your progress message.
+- More than 20 pages: before reading any, tell the person how many pages there are, that each page is one model call that counts against their usage, and offer to read all of them or start with the first 20. Wait for their answer. Do not ask again if they already approved a job this size in this conversation.
+- Set the step's estimated time from the page count: about 2 seconds a page, plus 30. The step is stopped when its time budget runs out.
+- Each page is saved as it finishes and skipped if it already exists. A page that fails is reported in `failed` and the rest carry on. If the step is cut off, run the same call again: it continues where it stopped and retries the failed pages once.
 - Work from the saved files: search them, then read only the pages you need.
 - If the work cannot finish, deliver what the saved pages already show and say which pages are missing. Never end with nothing when some pages were read.
 
-If the model cannot read a page, or your model cannot take images, tell the person which pages and why. Never fill in text you did not read.
+If pages still fail after one retry, or your model cannot take images, deliver what was read and tell the person which pages are missing and why. Never fill in text you did not read.
