@@ -3354,6 +3354,7 @@ class ChatSession:
             fullstack_offered=getattr(self, "_fullstack_offered", True),
             internet_research=getattr(self, "_internet_research_enabled", True),
             classify=getattr(self, "_classify_enabled", True),
+            reading_files_offered=self._reading_files_offered(),
             direct_reports=self._direct_reports_enabled(),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
@@ -3425,6 +3426,18 @@ class ChatSession:
         "paramiko",
         "boto3",
     }
+
+    # Every library the `reading-files` skill's code imports. Offered only where all are
+    # installed (the Web sandbox image): elsewhere the agent imports them without
+    # declaring them first, and each one costs a failed cell.
+    _READING_FILES_PACKAGES: frozenset[str] = frozenset({
+        "requests", "beautifulsoup4", "lxml", "pypdf", "pdfplumber", "pypdfium2", "python-docx", "pillow",
+    })
+
+    def _reading_files_offered(self) -> bool:
+        scratchpads = getattr(self, "_scratchpads", None)
+        installed = {p.lower() for p in (getattr(scratchpads, "available_packages", None) or [])}
+        return self._READING_FILES_PACKAGES <= installed
 
     def _build_tools(self) -> list[dict]:
         if not self.tool_registry:
