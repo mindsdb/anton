@@ -623,6 +623,10 @@ class TestCoworkProductSkill:
         # Image generation exists where the tool is offered; the skill must say
         # to use it there, not that Cowork cannot make images at all.
         assert "Cowork generates images when a `generate_image` tool" in section
+        # The fast responder (cowork-server direct_answer) inlines this skill
+        # but has no tools, so without this it told users whose agent can make
+        # images that Cowork cannot.
+        assert "If you are replying without tools, do not say it cannot" in section
         assert "first sentence" in section
         assert "Never describe a drawing made with code as the photo" in section
         # Simple drawings are real output, not a substitute; the rule must not
