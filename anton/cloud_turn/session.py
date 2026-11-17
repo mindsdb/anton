@@ -1119,7 +1119,10 @@ def build_cloud_chat_session(
         # line is derived by the session from the provider's response.
         system_prompt_context=SystemPromptContext(
             runtime_context=build_runtime_context(
-                settings, cloud_datasource=request.datasource, cloud_custom_api=request.custom_api
+                settings,
+                cloud_datasource=request.datasource,
+                cloud_custom_api=request.custom_api,
+                custom_api_notes_shown=bool(custom_api_notes),
             ),
             # The delivery half and the credential half of the prompt context;
             # the desktop harness injects its own via `_turn_style_context`.

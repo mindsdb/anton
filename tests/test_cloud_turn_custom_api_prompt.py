@@ -181,6 +181,27 @@ async def test_a_turn_without_custom_connections_has_neither_part(
     assert "call_minds_api(connection_id" not in prompt
 
 
+async def test_the_connections_block_points_to_the_notes_section_when_it_is_rendered(
+    tmp_path, monkeypatch, skills_tmp
+):
+    prompt = await _system_prompt(tmp_path, monkeypatch, _request())
+
+    block = prompt[prompt.index("CUSTOM API CONNECTIONS") : prompt.index("CUSTOM API USAGE NOTES\n")]
+    assert "CUSTOM API USAGE NOTES" in block
+
+
+@pytest.mark.parametrize(
+    "connectors", [None, {"acme_crm": {"usage_notes": "  "}}], ids=["absent", "blank"]
+)
+async def test_without_notes_nothing_points_to_a_notes_section(
+    tmp_path, monkeypatch, skills_tmp, connectors
+):
+    prompt = await _system_prompt(tmp_path, monkeypatch, _request(connectors=connectors))
+
+    assert "CUSTOM API CONNECTIONS" in prompt
+    assert "CUSTOM API USAGE NOTES" not in prompt
+
+
 async def test_no_ds_variable_is_named_for_a_custom_connection(
     tmp_path, monkeypatch, skills_tmp
 ):

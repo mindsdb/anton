@@ -417,19 +417,42 @@ def test_the_tool_refuses_a_template_without_a_check_and_says_what_to_do(check):
     assert box.drain() == []
 
 
+@pytest.mark.parametrize("overrides", [
+    {"check": {"path": "/v1/me?key={api_key}"}},
+    {"check": {"path": "/v1/me?key=%41"}},
+    {
+        "fields": [{"name": "api_key", "label": "Access key"}],
+        "auth": {"type": "query", "params": {"access_key": "{api_key}"}},
+        "check": {"path": "/v1/me?access_key=x"},
+    },
+], ids=["placeholder-in-path", "encoded-value", "auth-parameter-in-query"])
+def test_the_tool_says_what_to_do_when_a_check_path_tries_to_carry_the_key(overrides):
+    """A check path that tries to carry the key also says when to skip the connector."""
+    box = ConnectorDraftBox()
+
+    outcome = asyncio.run(connector_draft_tool(box).handler(None, _tool_draft(**overrides)))
+
+    assert outcome.ok is False and outcome.reason == "invalid_draft"
+    error = json.loads(outcome.content)["error"]
+    assert "call it directly from code" in error and "cannot be a custom connector yet" in error
+    assert box.drain() == []
+
+
 @pytest.mark.parametrize("check", [
-    {"path": "/v1/me?key={api_key}"},
     {"path": "v1/me"},
-], ids=["placeholder-in-path", "no-leading-slash"])
-def test_the_tool_says_what_to_do_when_a_check_path_is_refused(check):
-    """A refused check path also says when to skip the connector."""
+    {"path": "/v1/../me"},
+    {"path": "/v1//me"},
+    {},
+], ids=["no-leading-slash", "dot-dot-segment", "double-slash", "missing-path"])
+def test_a_malformed_check_path_is_refused_without_the_no_connector_hint(check):
     box = ConnectorDraftBox()
 
     outcome = asyncio.run(connector_draft_tool(box).handler(None, _tool_draft(check=check)))
 
     assert outcome.ok is False and outcome.reason == "invalid_draft"
     error = json.loads(outcome.content)["error"]
-    assert "call it directly from code" in error and "cannot be a custom connector yet" in error
+    assert "check.path" in error
+    assert "call it directly from code" not in error
     assert box.drain() == []
 
 
