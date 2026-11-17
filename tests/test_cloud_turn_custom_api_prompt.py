@@ -80,6 +80,13 @@ def _configured_block(prompt: str) -> str:
     return prompt[start:end]
 
 
+def _bullet_with(block: str, marker: str) -> str:
+    """The one bullet of the block that holds ``marker``, joined onto one line."""
+    bullets = [" ".join(b.split()) for b in block.split("\n- ") if marker in b]
+    assert len(bullets) == 1, marker
+    return bullets[0]
+
+
 async def test_the_connections_are_listed_with_how_to_call_them(
     tmp_path, monkeypatch, skills_tmp
 ):
@@ -92,6 +99,9 @@ async def test_the_connections_are_listed_with_how_to_call_them(
     for part in ("'path'", "'query'", "'headers'", "'turn_key'"):
         assert part in block, part
     assert _TURN_KEY not in block
+    path_rule = _bullet_with(block, "host")
+    for word in ("`path`", "version", "`query`", "?", "key parameter"):
+        assert word in path_rule, word
 
 
 async def test_the_error_result_is_described_truly_for_codes_after_the_call_was_sent(
@@ -102,7 +112,9 @@ async def test_the_error_result_is_described_truly_for_codes_after_the_call_was_
     block = _configured_block(await _system_prompt(tmp_path, monkeypatch, _request()))
     one_line = " ".join(block.split())
 
-    assert "error_code" in one_line
+    error_rule = _bullet_with(block, "'error_code'")
+    for word in ("refused", "before it was sent", "sent and then", "timed out", "failed", "does not pass on"):
+        assert word in error_rule, word
     assert "the call was not made" not in one_line
 
 

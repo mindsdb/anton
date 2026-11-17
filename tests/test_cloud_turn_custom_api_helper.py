@@ -229,10 +229,10 @@ def test_the_request_is_the_contracts_example(tmp_path):
 def test_a_dict_query_and_numbers_are_sent_as_string_pairs(tmp_path):
     scenarios = [
         {
-            "args": [_ID, "/v2/eod"],
+            "args": [_ID, "/v1/orders"],
             "kwargs": {"query": {"symbols": "AAPL", "limit": 10, "ratio": 0.5}},
         },
-        {"args": [_ID, "/v2/eod"]},
+        {"args": [_ID, "/v1/orders"]},
     ]
     for scenario in scenarios:
         scenario["answers"] = [[200, {"json": _CONTRACT["response"]}]]
@@ -246,7 +246,7 @@ def test_a_dict_query_and_numbers_are_sent_as_string_pairs(tmp_path):
     ]
     assert bare["sent"][0]["body"]["request"] == {
         "method": "GET",
-        "path": "/v2/eod",
+        "path": "/v1/orders",
         "query": [],
         "headers": {},
     }
@@ -254,7 +254,7 @@ def test_a_dict_query_and_numbers_are_sent_as_string_pairs(tmp_path):
 
 def test_an_int_too_long_to_write_is_refused_before_sending(tmp_path):
     cell = _HARNESS.format(scenarios="[]") + (
-        "\nr = call_minds_api(ID, '/v2/eod', query={'a': 10**5000})\n"
+        "\nr = call_minds_api(ID, '/v1/orders', query={'a': 10**5000})\n"
         "print(json.dumps({'result': r, 'sent': len(sent)}))\n"
     )
     record = _run_cell(f"ID = {_ID}\n" + cell, tmp_path, _env())
@@ -269,7 +269,7 @@ def test_an_int_too_long_to_write_is_refused_before_sending(tmp_path):
 def test_nan_and_large_floats_are_sent_as_python_writes_them(tmp_path):
     cell = _HARNESS.format(scenarios="[]") + (
         "\nanswers[:] = [(200, {'json': SAMPLE})]\n"
-        "r = call_minds_api(ID, '/v2/eod', query=[['x', float('nan')], ['y', 1e20]])\n"
+        "r = call_minds_api(ID, '/v1/orders', query=[['x', float('nan')], ['y', 1e20]])\n"
         "print(json.dumps({'result': r, 'query': sent[0]['body']['request']['query']}))\n"
     )
     cell = f"SAMPLE = {_CONTRACT['response']!r}\nID = {_ID}\n" + cell
@@ -286,7 +286,7 @@ def test_nan_and_large_floats_are_sent_as_python_writes_them(tmp_path):
 )
 def test_each_answer_example_comes_back_as_the_result(tmp_path, name):
     example = _CONTRACT[name]
-    outcome = _call(tmp_path, [_ID, "/v2/quote"], answers=[[200, {"json": example}]])
+    outcome = _call(tmp_path, [_ID, "/v1/orders"], answers=[[200, {"json": example}]])
 
     assert outcome["result"] == {
         "type": "response",
@@ -300,7 +300,7 @@ def test_each_answer_example_comes_back_as_the_result(tmp_path, name):
 @pytest.mark.parametrize("status", [100, 999])
 def test_any_status_the_gateway_can_pass_through_is_accepted(tmp_path, status):
     answer = {**_CONTRACT["response"], "status": status}
-    outcome = _call(tmp_path, [_ID, "/v2/quote"], answers=[[200, {"json": answer}]])
+    outcome = _call(tmp_path, [_ID, "/v1/orders"], answers=[[200, {"json": answer}]])
 
     assert outcome["result"]["status"] == status
 
@@ -350,7 +350,7 @@ def test_any_status_the_gateway_can_pass_through_is_accepted(tmp_path, status):
 )
 def test_an_answer_outside_the_contract_is_refused(tmp_path, change):
     answer = {**_CONTRACT["response"], **change}
-    outcome = _call(tmp_path, [_ID, "/v2/quote"], answers=[[200, {"json": answer}]])
+    outcome = _call(tmp_path, [_ID, "/v1/orders"], answers=[[200, {"json": answer}]])
 
     assert outcome["result"] == {
         "type": "error",
@@ -364,7 +364,7 @@ def test_an_answer_outside_the_contract_is_refused(tmp_path, change):
     ids=["not-json", "not-an-object", "nested-past-the-recursion-limit"],
 )
 def test_an_unreadable_answer_is_refused(tmp_path, body):
-    outcome = _call(tmp_path, [_ID, "/v2/quote"], answers=[[200, body]])
+    outcome = _call(tmp_path, [_ID, "/v1/orders"], answers=[[200, body]])
 
     assert outcome["result"] == {
         "type": "error",
@@ -374,7 +374,7 @@ def test_an_unreadable_answer_is_refused(tmp_path, body):
 
 def test_an_answer_past_the_read_cap_is_too_large(tmp_path):
     outcome = _call(
-        tmp_path, [_ID, "/v2/quote"], answers=[[200, {"repeat": ["a", 8_388_609]}]]
+        tmp_path, [_ID, "/v1/orders"], answers=[[200, {"repeat": ["a", 8_388_609]}]]
     )
 
     assert outcome["result"] == {"type": "error", "error_code": "response_too_large"}
@@ -392,7 +392,7 @@ def test_each_gateway_code_is_relayed_as_it_leaves_the_gateway(tmp_path, error):
     }
     if status != error["status"]:
         body["upstream_status"] = error["status"]
-    outcome = _call(tmp_path, [_ID, "/v2/quote"], answers=[[status, {"json": body}]])
+    outcome = _call(tmp_path, [_ID, "/v1/orders"], answers=[[status, {"json": body}]])
 
     assert outcome["result"] == {"type": "error", "error_code": error["code"]}
 
@@ -400,7 +400,7 @@ def test_each_gateway_code_is_relayed_as_it_leaves_the_gateway(tmp_path, error):
 @pytest.mark.parametrize("part", sorted(_DETAILS))
 def test_a_refused_part_is_named_from_the_gateways_own_detail(tmp_path, part):
     body = {"code": "invalid_request", "detail": _DETAILS[part], "request_id": "r1"}
-    outcome = _call(tmp_path, [_ID, "/v2/quote"], answers=[[422, {"json": body}]])
+    outcome = _call(tmp_path, [_ID, "/v1/orders"], answers=[[422, {"json": body}]])
 
     assert outcome["result"] == {
         "type": "error",
@@ -420,7 +420,7 @@ def test_a_detail_that_is_not_one_of_the_four_names_no_part(tmp_path, detail):
         "request_id": "r1",
         **({"detail": detail} if detail is not None else {}),
     }
-    outcome = _call(tmp_path, [_ID, "/v2/quote"], answers=[[422, {"json": body}]])
+    outcome = _call(tmp_path, [_ID, "/v1/orders"], answers=[[422, {"json": body}]])
 
     assert outcome["result"] == {"type": "error", "error_code": "invalid_request"}
 
@@ -431,7 +431,7 @@ def test_a_part_comes_only_with_invalid_request(tmp_path):
         "detail": _DETAILS["query"],
         "request_id": "r1",
     }
-    outcome = _call(tmp_path, [_ID, "/v2/quote"], answers=[[404, {"json": body}]])
+    outcome = _call(tmp_path, [_ID, "/v1/orders"], answers=[[404, {"json": body}]])
 
     assert outcome["result"] == {"type": "error", "error_code": "invalid_connection"}
 
@@ -445,7 +445,7 @@ def _refusal_of_size(size: int) -> dict:
 def test_a_refusal_at_the_64_kib_parse_limit_is_still_read(tmp_path):
     refusal = _refusal_of_size(65_536)
     assert len(json.dumps(refusal)) == 65_536
-    outcome = _call(tmp_path, [_ID, "/v2/quote"], answers=[[503, {"json": refusal}]])
+    outcome = _call(tmp_path, [_ID, "/v1/orders"], answers=[[503, {"json": refusal}]])
 
     assert outcome["result"] == {"type": "error", "error_code": "timed_out"}
 
@@ -478,7 +478,7 @@ def test_a_refusal_at_the_64_kib_parse_limit_is_still_read(tmp_path):
     ],
 )
 def test_anything_else_is_the_custom_api_being_unavailable(tmp_path, answer):
-    outcome = _call(tmp_path, [_ID, "/v2/quote"], answers=[answer])
+    outcome = _call(tmp_path, [_ID, "/v1/orders"], answers=[answer])
 
     assert outcome["result"] == {
         "type": "error",
@@ -489,21 +489,21 @@ def test_anything_else_is_the_custom_api_being_unavailable(tmp_path, answer):
 @pytest.mark.parametrize(
     ("args", "kwargs"),
     [
-        ([_ID + 1, "/v2/quote"], {}),
-        ([True, "/v2/quote"], {}),
-        ([str(_ID), "/v2/quote"], {}),
+        ([_ID + 1, "/v1/orders"], {}),
+        ([True, "/v1/orders"], {}),
+        ([str(_ID), "/v1/orders"], {}),
         ([_ID, ""], {}),
-        ([_ID, "v2/quote"], {}),
+        ([_ID, "v1/orders"], {}),
         ([_ID, None], {}),
-        ([_ID, "/v2/quote"], {"query": "symbols=AAPL"}),
-        ([_ID, "/v2/quote"], {"query": [["symbols"]]}),
-        ([_ID, "/v2/quote"], {"query": [["symbols", "AAPL", "x"]]}),
-        ([_ID, "/v2/quote"], {"query": {"symbols": True}}),
-        ([_ID, "/v2/quote"], {"query": {"symbols": None}}),
-        ([_ID, "/v2/quote"], {"query": {"symbols": ["AAPL"]}}),
-        ([_ID, "/v2/quote"], {"query": [[1, "AAPL"]]}),
-        ([_ID, "/v2/quote"], {"headers": [["Accept", "text/csv"]]}),
-        ([_ID, "/v2/quote"], {"headers": {"Accept": 1}}),
+        ([_ID, "/v1/orders"], {"query": "symbols=AAPL"}),
+        ([_ID, "/v1/orders"], {"query": [["symbols"]]}),
+        ([_ID, "/v1/orders"], {"query": [["symbols", "AAPL", "x"]]}),
+        ([_ID, "/v1/orders"], {"query": {"symbols": True}}),
+        ([_ID, "/v1/orders"], {"query": {"symbols": None}}),
+        ([_ID, "/v1/orders"], {"query": {"symbols": ["AAPL"]}}),
+        ([_ID, "/v1/orders"], {"query": [[1, "AAPL"]]}),
+        ([_ID, "/v1/orders"], {"headers": [["Accept", "text/csv"]]}),
+        ([_ID, "/v1/orders"], {"headers": {"Accept": 1}}),
     ],
     ids=[
         "unknown-connection",
@@ -548,7 +548,7 @@ def test_an_argument_the_helper_refuses_sends_nothing(tmp_path, args, kwargs):
 def test_a_base_the_bearer_cannot_go_to_sends_nothing(tmp_path, base_url):
     scenarios = [
         {
-            "args": [_ID, "/v2/quote"],
+            "args": [_ID, "/v1/orders"],
             "answers": [[200, {"json": _CONTRACT["response"]}]],
         }
     ]
@@ -563,8 +563,8 @@ def test_a_base_the_bearer_cannot_go_to_sends_nothing(tmp_path, base_url):
 
 def test_no_result_or_stderr_line_carries_the_turn_key(tmp_path):
     scenarios = [
-        {"args": [_ID, "/v2/quote"], "answers": [[None, None]]},
-        {"args": [_ID, "/v2/quote"], "answers": [[503, {"text": _TURN_KEY}]]},
+        {"args": [_ID, "/v1/orders"], "answers": [[None, None]]},
+        {"args": [_ID, "/v1/orders"], "answers": [[503, {"text": _TURN_KEY}]]},
         {
             "args": [_ID, f"/{_TURN_KEY}"],
             "answers": [
@@ -579,7 +579,7 @@ def test_no_result_or_stderr_line_carries_the_turn_key(tmp_path):
                 ]
             ],
         },
-        {"args": [_ID + 1, "/v2/quote"]},
+        {"args": [_ID + 1, "/v1/orders"]},
     ]
     record = _run_cell(
         _HARNESS.format(scenarios=json.dumps(scenarios)), tmp_path, _env()
@@ -612,11 +612,11 @@ def test_every_error_the_helper_returns_is_one_of_sixteen_codes(tmp_path):
     ]
     scenarios = [
         *(
-            {"args": [_ID, "/v2/quote"], "answers": [answer]}
+            {"args": [_ID, "/v1/orders"], "answers": [answer]}
             for answer in refusals + oddities
         ),
-        {"args": [_ID + 1, "/v2/quote"]},
-        {"args": [_ID, "/v2/quote"], "kwargs": {"query": {"a": True}}},
+        {"args": [_ID + 1, "/v1/orders"]},
+        {"args": [_ID, "/v1/orders"], "kwargs": {"query": {"a": True}}},
     ]
     # In chunks: one cell's printed output is capped, and each outcome carries its request.
     outcomes = [
@@ -625,7 +625,7 @@ def test_every_error_the_helper_returns_is_one_of_sixteen_codes(tmp_path):
         for outcome in _calls(tmp_path, scenarios[start : start + 5])
     ]
     (unsent,) = _calls(
-        tmp_path, [{"args": [_ID, "/v2/quote"]}], OPENAI_BASE_URL="http://x/v1"
+        tmp_path, [{"args": [_ID, "/v1/orders"]}], OPENAI_BASE_URL="http://x/v1"
     )
 
     codes = {outcome["result"]["error_code"] for outcome in [*outcomes, unsent]}

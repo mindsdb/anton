@@ -18,7 +18,6 @@ from anton.cloud_turn.session import _WORKSPACE_PATH_ENV, build_cloud_chat_sessi
 from anton.core.backends import local
 from anton.core.backends.sandbox import CellSandbox, overlay_key_allowed
 from anton.core.backends.wire import CELL_DELIM, RESULT_END, RESULT_START
-from tests.test_cloud_turn_custom_api_helper import _CONTRACT, _EXAMPLE, _calls
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _FIXTURE = Path(__file__).parent / "fixtures" / "turn_custom_api_block.json"
@@ -167,20 +166,15 @@ def test_a_custom_api_turn_fails_when_its_base_is_not_this_turns(
         _captured_config(tmp_path, monkeypatch, _request(llm=llm))
 
 
-def test_the_helper_sends_the_llm_settings_key(tmp_path, monkeypatch):
-    """The block carries no key; the child's OPENAI_API_KEY is the turn's llm api_key."""
+def test_the_childs_key_is_the_llm_api_key_and_the_block_carries_none(tmp_path, monkeypatch):
+    """The helper sends the child's OPENAI_API_KEY, which the session derives from llm.api_key."""
     key = "mdb_llm_only.key"
     llm = {"provider": "minds-cloud", "api_key": key, "base_url": _BASE_URL}
 
     config = _captured_config(tmp_path, monkeypatch, _request(llm=llm))
 
+    assert "turn_key" not in _PRODUCED
     assert config.settings.openai_api_key == key
-    sent = _calls(
-        tmp_path,
-        [{"args": [_EXAMPLE["connection_id"], "/v1/orders"], "answers": [[200, {"json": _CONTRACT["response"]}]]}],
-        OPENAI_API_KEY=config.settings.openai_api_key,
-    )[0]["sent"]
-    assert [call["bearer_is_turn_key"] for call in sent] == [True]
 
 
 @pytest.mark.parametrize(

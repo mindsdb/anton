@@ -228,8 +228,8 @@ def _cloud_turn_workspace_env(request: TurnRequestV1, settings: AntonSettings) -
     every scratchpad child, which marks a cloud turn and, per block, carries the
     datasource or custom API connections by id and version only, with the
     correlation id. Raises ``ValueError`` when a datasource or custom API turn's
-    child would not send this turn's own key to this turn's inference host,
-    when the custom API block's key is not that key, or when the correlation id
+    child would not send this turn's own key to this turn's inference host, or
+    when the correlation id
     is missing (or, for custom API calls, not a UUID). No side effects.
     """
     overlay = {_CLOUD_TURN_ENV: "1"}

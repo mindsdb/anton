@@ -91,4 +91,5 @@ def test_an_unusable_block_is_dropped_with_one_warning_and_the_turn_goes_on(cust
     warnings = [r for r in caplog.records if r.name == "anton.cloud_turn.contract"]
     assert len(warnings) == 1
     assert warnings[0].getMessage().startswith("custom_api block dropped: ")
+    assert warnings[0].getMessage().endswith("(conversation c)")
     assert "planted-secret" not in caplog.text

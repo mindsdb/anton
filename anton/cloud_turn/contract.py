@@ -338,8 +338,8 @@ def _custom_api_connection(connection: object) -> CustomApiConnectionRefV1 | Non
     )
 
 
-def _custom_api_problem(value: object) -> str | None:
-    """Why ``value`` is not a version 1 block, as a fixed phrase that quotes nothing, or None."""
+def _custom_api_refs(value: object) -> tuple[CustomApiConnectionRefV1, ...] | str:
+    """The block's connection refs, or a fixed phrase that names why ``value`` is not a version 1 block."""
     if not isinstance(value, dict):
         return "not an object"
     if set(value) != {"protocol_version", "connections"}:
@@ -352,23 +352,23 @@ def _custom_api_problem(value: object) -> str | None:
     refs = [_custom_api_connection(connection) for connection in connections]
     if None in refs or len({ref.connection_id for ref in refs}) != len(refs):
         return "invalid connection reference"
-    return None
+    return tuple(refs)
 
 
-def _parse_custom_api_block(value: object) -> CustomApiBlockV1 | None:
+def _parse_custom_api_block(value: object, conversation_id: str) -> CustomApiBlockV1 | None:
     """Parse the optional ``custom_api`` block, or drop it.
 
-    Input: the raw block. Output: the parsed block, or None when it is absent or
-    unusable. A rejected block logs one line naming the reason, never a value, and
-    the turn goes on exactly as if the block were absent. No other side effects.
+    Input: the raw block and the request's conversation id. Output: the parsed block,
+    or None when it is absent or unusable. A rejected block logs one line naming the
+    reason and the conversation id, never a value, and the turn goes on exactly as if
+    the block were absent. No other side effects.
     """
     if value is None:
         return None
-    problem = _custom_api_problem(value)
-    if problem is not None:
-        logger.warning("custom_api block dropped: %s", problem)
+    refs = _custom_api_refs(value)
+    if isinstance(refs, str):
+        logger.warning("custom_api block dropped: %s (conversation %s)", refs, conversation_id)
         return None
-    refs = tuple(_custom_api_connection(connection) for connection in value["connections"])
     return CustomApiBlockV1(CUSTOM_API_PROTOCOL_VERSION, refs)
 
 
@@ -665,7 +665,7 @@ class TurnRequestV1:
             # Same defensive isinstance check as trace, for the same reason.
             oauth=d.get("oauth") if isinstance(d.get("oauth"), dict) else None,
             datasource=_parse_datasource_block(d.get("datasource")),
-            custom_api=_parse_custom_api_block(d.get("custom_api")),
+            custom_api=_parse_custom_api_block(d.get("custom_api"), str(d["conversation_id"])),
             # The controller always sends the key and sends None when
             # cowork-server could not resolve it, so the guard does real work.
             started_at=(
