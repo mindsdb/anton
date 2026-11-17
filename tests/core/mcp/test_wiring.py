@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import socket
 
 import pytest
 from mcp.server.mcpserver import MCPServer
@@ -8,7 +9,7 @@ from mcp_types import ToolAnnotations
 
 from anton.core.mcp import wiring
 from anton.core.mcp.client import McpSession
-from anton.core.mcp.errors import McpEgressBlocked
+from anton.core.mcp.errors import McpEgressBlocked, McpHostUnresolved
 from anton.core.mcp.names import parse_namespaced_tool_name
 
 
@@ -304,6 +305,7 @@ async def test_listing_a_custom_servers_tools_reports_the_read_only_label(monkey
         return McpSession(server=server)
 
     monkeypatch.setattr(wiring, "McpSession", factory)
+    _answer_lookups_with(monkeypatch, "93.184.215.14")
     tools = await wiring.list_custom_server_tools(
         "https://mcp.example.com/mcp", "tok", connection_name="acme-tracker"
     )
@@ -316,10 +318,38 @@ async def test_listing_a_custom_servers_tools_reports_the_read_only_label(monkey
     }
 
 
+def _answer_lookups_with(monkeypatch, *addresses: str) -> None:
+    """Make wiring's host lookup answer with `addresses`, or fail when none are given."""
+
+    async def resolver(host: str, port: int):
+        if not addresses:
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port)) for address in addresses]
+
+    real_resolve_public = wiring.resolve_public
+    monkeypatch.setattr(
+        wiring, "resolve_public", lambda host, port: real_resolve_public(host, port, resolver=resolver)
+    )
+
+
 @pytest.mark.parametrize("url", ["https://10.0.0.5/mcp", "https://169.254.169.254/mcp", "http://mcp.example.com/mcp"])
 async def test_listing_tools_at_a_refused_address_raises_before_connecting(url):
     with pytest.raises(McpEgressBlocked):
         await wiring.list_custom_server_tools(url, "tok", connection_name="acme-tracker")
+
+
+async def test_listing_tools_at_a_name_that_does_not_resolve_says_so_before_connecting(recorded_sessions, monkeypatch):
+    _answer_lookups_with(monkeypatch)
+    with pytest.raises(McpHostUnresolved):
+        await wiring.list_custom_server_tools("https://nowhere.example.com/mcp", "tok", connection_name="x")
+    assert recorded_sessions == []
+
+
+async def test_listing_tools_at_a_name_resolving_privately_is_refused_before_connecting(recorded_sessions, monkeypatch):
+    _answer_lookups_with(monkeypatch, "10.0.0.5")
+    with pytest.raises(McpEgressBlocked):
+        await wiring.list_custom_server_tools("https://inside.example.com/mcp", "tok", connection_name="x")
+    assert recorded_sessions == []
 
 
 SECRET_PATH = "SECRET-PATH-7f3a"

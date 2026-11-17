@@ -57,6 +57,21 @@ def test_a_plain_https_url_passes_and_returns_its_host():
 
 
 @pytest.mark.parametrize(
+    ("url", "host"),
+    [
+        ("https://straße.example/mcp", "xn--strae-oqa.example"),
+        ("https://faςe.example/mcp", "xn--fae-nzc.example"),
+        ("https://mcp。example。com/mcp", "mcp.example.com"),
+        ("https://MCP.Example.com/mcp", "mcp.example.com"),
+    ],
+)
+def test_the_host_returned_is_the_ascii_name_requests_carry(url, host):
+    """The older IDNA rules the system resolver and `ssl` use would turn
+    `straße` into `strasse`, a different registered domain."""
+    assert check_server_url(url) == (host, 443)
+
+
+@pytest.mark.parametrize(
     "url",
     [
         "http://mcp.example.com/mcp",
@@ -73,6 +88,10 @@ def test_a_plain_https_url_passes_and_returns_its_host():
         "https://mcp.example.com/m cp",
         "https://mcp.example.com:99999/mcp",
         "https://mcp.example.com:0/mcp",
+        "https://mcp.ex​ample.com/mcp",
+        "https://mcp.ex­ample.com/mcp",
+        "https://" + "a" * 64 + ".example.com/mcp",
+        "https://" + ".".join(["a" * 60] * 5) + "/mcp",
     ],
 )
 def test_unusable_urls_are_refused(url):
@@ -118,6 +137,15 @@ async def test_an_answer_with_no_parsable_address_is_reported_as_unresolved():
 
     with pytest.raises(McpHostUnresolved):
         await resolve_public("mcp.example.com", 443, resolver=garbage)
+
+
+async def test_a_name_the_resolver_cannot_encode_is_a_refusal_not_an_unresolved_host():
+    async def cannot_encode(host, port):
+        raise UnicodeError("label too long")
+
+    with pytest.raises(McpEgressBlocked) as caught:
+        await resolve_public("mcp.example.com", 443, resolver=cannot_encode)
+    assert not isinstance(caught.value, McpHostUnresolved)
 
 
 async def test_a_private_answer_is_a_refusal_not_an_unresolved_host():

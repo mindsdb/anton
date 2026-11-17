@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 from anton.core.mcp.access import AccessMode
 from anton.core.mcp.client import McpSession, log_session_failure
-from anton.core.mcp.egress import check_server_url
+from anton.core.mcp.egress import check_server_url, resolve_public
 from anton.core.mcp.errors import McpEgressBlocked
 from anton.core.mcp.names import registrable_tool_name
 from anton.core.mcp.registry import discover_tool_defs
@@ -282,12 +282,16 @@ class ServerTool:
 async def list_custom_server_tools(url: str, access_token: str | None, *, connection_name: str) -> list[ServerTool]:
     """The tools the custom server at `url` offers, for the user to switch on.
 
-    Opens a guarded session, so `McpEgressBlocked` is raised for a URL or
-    address anton will not connect to, and `McpTokenRejected` for a refused
-    token. `read_only` is true only when the server marks the tool read only.
-    Tools discovery would leave out under `connection_name` are left out
-    here too, so the user never switches on a tool that cannot register.
+    Checks the URL and looks the host up before opening a guarded session,
+    so `McpHostUnresolved` is raised for a name that does not resolve,
+    `McpEgressBlocked` for a URL or address anton will not connect to, and
+    `McpTokenRejected` for a refused token. `read_only` is true only when the
+    server marks the tool read only. Tools discovery would leave out under
+    `connection_name` are left out here too, so the user never switches on a
+    tool that cannot register.
     """
+    host, port = check_server_url(url)
+    await resolve_public(host, port)
     async with McpSession(url=url, access_token=access_token, guarded=True) as mcp_session:
         tools = await mcp_session.list_tools()
     return [

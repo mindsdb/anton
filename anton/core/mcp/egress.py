@@ -23,7 +23,6 @@ import socket
 import ssl
 from collections.abc import Awaitable, Callable
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx2
 
@@ -67,32 +66,53 @@ def is_public_destination(address: Address) -> bool:
 
 
 def check_server_url(url: str) -> tuple[str, int]:
-    """Return the hostname and port of `url`, or raise `McpEgressBlocked`.
+    """Return the ASCII hostname and port of `url`, or raise `McpEgressBlocked`.
 
-    Accepts https only, with a hostname, a port from 1 to 65535 (443 when
-    absent), and no whitespace, user, password, query or fragment. A query
-    or user part is where a fixed credential would ride, and fixed
-    credentials are out of scope for custom servers.
+    Parsed with httpx2's own URL parser, so the host checked here is the one
+    every request names. Accepts https only, with a hostname of valid DNS
+    labels, a port from 1 to 65535 (443 when absent), and no whitespace,
+    user, password, query or fragment. A query or user part is where a fixed
+    credential would ride, and fixed credentials are out of scope.
     """
     if any(character.isspace() for character in url):
         raise McpEgressBlocked("MCP server URL must not contain whitespace")
     try:
-        parts = urlsplit(url)
-        host = parts.hostname
-        port = parts.port or 443
-    except ValueError as exc:
+        parsed = httpx2.URL(url)
+    except (httpx2.InvalidURL, ValueError) as exc:
         raise McpEgressBlocked("MCP server URL could not be parsed") from exc
-    if parts.scheme != "https":
+    if parsed.scheme != "https":
         raise McpEgressBlocked("MCP server URL must use https")
-    if parts.username is not None or parts.password is not None:
+    if parsed.userinfo:
         raise McpEgressBlocked("MCP server URL must not carry a user or password")
-    if parts.query or parts.fragment:
+    if parsed.query or parsed.fragment:
         raise McpEgressBlocked("MCP server URL must not carry a query or fragment")
+    host = ascii_host(parsed)
     if not host:
         raise McpEgressBlocked("MCP server URL has no host")
-    if parts.port == 0:
+    if not _is_dns_name(host):
+        raise McpEgressBlocked("MCP server URL host is not a valid name")
+    port = 443 if parsed.port is None else parsed.port
+    if not 1 <= port <= 65535:
         raise McpEgressBlocked("MCP server URL has no usable port")
     return host, port
+
+
+def ascii_host(url: httpx2.URL) -> str:
+    """The host as the request names it on the wire: the ASCII (IDNA 2008)
+    form for an international name, so its lookup, TLS name and Host header
+    all name one domain."""
+    return url.raw_host.decode("ascii").casefold()
+
+
+def _is_dns_name(host: str) -> bool:
+    """Whether `host` is an address literal or a name of 1 to 63 character labels, 253 at most."""
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return True
+    except ValueError:
+        pass
+    labels = host.rstrip(".").split(".")
+    return len(host) <= 253 and all(1 <= len(label) <= 63 for label in labels)
 
 
 async def _loop_getaddrinfo(host: str, port: int) -> list[tuple[Any, ...]]:
@@ -125,7 +145,9 @@ async def resolve_public(
     else:
         try:
             records = await (resolver or _loop_getaddrinfo)(host, port)
-        except (OSError, UnicodeError) as exc:
+        except UnicodeError as exc:
+            raise McpEgressBlocked(f"MCP server host {host!r} is not a valid name") from exc
+        except OSError as exc:
             raise McpHostUnresolved(f"MCP server host {host!r} does not resolve") from exc
         addresses = []
         for record in records:
@@ -206,7 +228,8 @@ class PinnedHostTransport(httpx2.AsyncBaseTransport):
     """
 
     def __init__(self, host: str, port: int, guard: EgressGuard) -> None:
-        """Pin `host` and `port`; `guard` supplies the checks and records refusals."""
+        """Pin `host` (the ASCII form `check_server_url` returns) and `port`;
+        `guard` supplies the checks and records refusals."""
         self._host = host.casefold()
         self._port = port
         self._guard = guard
@@ -214,7 +237,9 @@ class PinnedHostTransport(httpx2.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         """Dial a checked address of the pinned origin, or answer without a socket."""
-        host = (request.url.host or "").casefold()
+        # The wire form, not `url.host`: the system resolver and `ssl` encode a
+        # Unicode name by older IDNA rules, which can name a different domain.
+        host = ascii_host(request.url)
         if request.url.scheme != "https" or host != self._host or (request.url.port or 443) != self._port:
             return self._refuse(McpEgressBlocked("MCP request is not to the server's own https origin"), request)
         try:

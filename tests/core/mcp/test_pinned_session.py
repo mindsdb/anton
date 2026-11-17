@@ -290,6 +290,30 @@ async def test_an_environment_proxy_is_ignored(tls_server, monkeypatch):
         assert [tool.name for tool in await session.list_tools()] == ["echo"]
 
 
+class RecordingAnswers(Answers):
+    """A resolver that records the names it is asked for."""
+
+    def __init__(self, *addresses: str) -> None:
+        super().__init__(*addresses)
+        self.hosts: list[str] = []
+
+    async def __call__(self, host: str, port: int):
+        self.hosts.append(host)
+        return await super().__call__(host, port)
+
+
+async def test_an_international_host_is_looked_up_by_the_name_the_request_carries():
+    """Looking up the Unicode name would use older IDNA rules and could
+    resolve, and check the certificate of, a different domain."""
+    resolver = RecordingAnswers("10.0.0.5")
+    guard = EgressGuard(resolver=resolver, address_rule=_loopback_only)
+    transport = guard.transport("xn--strae-oqa.example", 443)
+    response = await transport.handle_async_request(httpx2.Request("GET", "https://straße.example/mcp"))
+    await transport.aclose()
+    assert response.status_code == 421
+    assert resolver.hosts == ["xn--strae-oqa.example"]
+
+
 @pytest.mark.parametrize(
     "url",
     ["https://elsewhere.test/mcp", f"http://{HOST}/mcp", f"https://{HOST}:8443/mcp"],
