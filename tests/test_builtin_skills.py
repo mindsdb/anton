@@ -622,9 +622,12 @@ class TestCoworkProductSkill:
         assert "does not generate video or audio" in section
         assert "`generate_image`" in section
         assert "first sentence" in section
-        assert "Never describe a drawing made with code as the image" in section
-        # Charts are real output, not a substitute; the rule must not stop them.
-        assert "Charts, diagrams and data visualisations are not affected" in section
+        assert "Never describe a drawing made with code as the photo" in section
+        # Simple drawings are real output, not a substitute; the rule must not
+        # stop them. A bare "cannot make an image" made the agent refuse a
+        # coloring page.
+        assert "Simple drawings made with code are real output" in section
+        assert "a coloring page" in section and "data visualisations" in section
 
     def test_answers_cost_from_rules_without_figures_that_go_stale(self, store):
         """Asked about the free allowance or price, the agent said it could

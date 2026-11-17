@@ -185,13 +185,15 @@ _PRODUCT_LINES = [
 #: about the product, so nothing would prompt a recall, and the agent instead
 #: draws a substitute with code and reports it as the thing asked for. Stated
 #: in terms of tools so it stays true once an image tool or a connected
-#: provider exists.
+#: provider exists. Simple drawings are named as allowed on purpose: a bare
+#: "cannot make images" made the agent refuse a coloring page it can draw.
 _CANNOT_MAKE_LINE = (
     "- Unless one of your tools or a service the user connected generates them, you "
-    "cannot make images, video or audio. When asked for one, say so in your first "
-    "sentence and offer what you can do instead. Never describe a drawing made with "
-    "code as the image, photo or video that was asked for. Charts and diagrams are "
-    "not affected."
+    "cannot make photos, realistic or detailed illustrations, video or audio. When "
+    "asked for one, say so in your first sentence and offer what you can do instead. "
+    "Simple drawings you make with code, such as line art, a coloring page, an icon, "
+    "a chart or a diagram, are real output: make them when they fit, and call them "
+    "what they are, never a photo, an illustration or a video."
 )
 
 #: Surface → the sentence naming where this conversation is running. A surface

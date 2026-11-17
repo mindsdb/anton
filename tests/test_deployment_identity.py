@@ -59,10 +59,11 @@ _DEFAULT_LINES = [
     "Some features exist on only one of those, so never assume a feature you know "
     "about is reachable from where this user is.",
     "- Unless one of your tools or a service the user connected generates them, you "
-    "cannot make images, video or audio. When asked for one, say so in your first "
-    "sentence and offer what you can do instead. Never describe a drawing made with "
-    "code as the image, photo or video that was asked for. Charts and diagrams are "
-    "not affected.",
+    "cannot make photos, realistic or detailed illustrations, video or audio. When "
+    "asked for one, say so in your first sentence and offer what you can do instead. "
+    "Simple drawings you make with code, such as line art, a coloring page, an icon, "
+    "a chart or a diagram, are real output: make them when they fit, and call them "
+    "what they are, never a photo, an illustration or a video.",
 ]
 _DEFAULT_RULE = (
     "- If asked what Cowork is, who makes it, how to install, update or remove it, "
@@ -89,10 +90,10 @@ def test_default_product_lines_are_byte_identical(surface, line):
 
 
 @pytest.mark.parametrize(("surface", "digest"), [
-    (None, "13e112b1fb769510de2e61cc158654366b7e8f661d577c489ab8132bb996c12f"),
-    ("desktop", "a0b01cd1fa4b29f88cfb2434b384476c1bcba46fc94a8b53d785b51e7bbe5e88"),
-    ("web", "04bb3080287007f35b31f79b027fc8da6efbb3a84d632f6d20ab985d0c7d1559"),
-    ("cli", "36025db98d8c068a7e27e975e5de34956d9790980779146f7c28f0c3feb39c7b"),
+    (None, "f970b9c621edd2822709f2140e1571e683dd909dfb9ef503caee859aa31aa10b"),
+    ("desktop", "6890799181d928a72c013f566f68725e87e6072981788bf7b565f2d9e5e7ddb8"),
+    ("web", "fb19cc0bacc2e8f6a8c34fcb5d01d9fc982f13d69f8b2f3a63c25d981059e82a"),
+    ("cli", "7b9fd5af8f1968e224775d8015d3669185741c414022ff76f94632d4b30b64d2"),
 ])
 def test_complete_default_builder_output_is_byte_identical(surface, digest):
     # Snapshot the current complete default prompt for each surface, including
@@ -261,6 +262,8 @@ async def test_identity_remains_authoritative_in_model_call_after_recall(tmp_pat
 @pytest.mark.parametrize("surface", ["desktop", "web", "cli", None])
 def test_every_prompt_says_what_cannot_be_made(surface, identity):
     joined = "\n".join(product_lines(surface, identity))
-    assert "cannot make images, video or audio" in joined
+    assert "cannot make photos, realistic or detailed illustrations, video or audio" in joined
     assert "say so in your first sentence" in joined
-    assert "Never describe a drawing made with code" in joined
+    # A bare "cannot make images" made the agent refuse a coloring page it can draw.
+    assert "a coloring page" in joined and "are real output" in joined
+    assert "never a photo, an illustration or a video" in joined
