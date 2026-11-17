@@ -79,9 +79,11 @@ scratchpad = [
     "boto3==1.43.117",
 ]
 dev = [
+    "cryptography>=46",
     "pytest>=9.0.0",
     "pytest-asyncio>=0.24",
     "pytest-xdist>=3.6",
+    "uvicorn>=0.40",
 ]
 
 [project.urls]

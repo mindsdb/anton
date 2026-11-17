@@ -22,11 +22,13 @@ import asyncio
 import logging
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx2
 import mcp
 from mcp_types import Tool as McpTool
 
+from anton.core.mcp.egress import EgressGuard, check_server_url
 from anton.core.mcp.errors import McpPermanentError, McpTokenRejected, classify_mcp_error
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,11 @@ class McpSession:
     Exactly one of `url` or `server` must be given. `server` is for tests —
     an in-process `MCPServer`/`Server` instance connects directly, with no
     network involved at all.
+
+    `guarded=True` is for a server URL a user chose: the URL must pass
+    `check_server_url`, every request goes only to a public address checked
+    at that moment, environment proxies are ignored, and a refusal raises
+    `McpEgressBlocked`. `egress_guard` replaces the default guard in tests.
     """
 
     def __init__(
@@ -61,13 +68,18 @@ class McpSession:
         access_token: str | None = None,
         server: Any | None = None,
         read_timeout_seconds: float = 30.0,
+        guarded: bool = False,
+        egress_guard: EgressGuard | None = None,
     ) -> None:
         if (url is None) == (server is None):
             raise ValueError("McpSession needs exactly one of `url` or `server`")
+        if (guarded or egress_guard is not None) and url is None:
+            raise ValueError("A guarded McpSession needs a `url`")
         self._url = url
         self._access_token = access_token
         self._server = server
         self._read_timeout_seconds = read_timeout_seconds
+        self._egress = egress_guard or (EgressGuard() if guarded else None)
         self._http_client: httpx2.AsyncClient | None = None
         self._client: mcp.Client | None = None
         # The SDK turns any HTTP 4xx into a JSON-RPC error with no status on
@@ -83,6 +95,11 @@ class McpSession:
         if self._rejected_status is not None:
             raise McpTokenRejected(self._rejected_status) from exc
 
+    def _raise_if_refused(self, exc: BaseException | None = None) -> None:
+        """Raise the guard's recorded refusal, if any, ahead of any other error."""
+        if self._egress is not None and self._egress.refused is not None:
+            raise self._egress.refused from exc
+
     async def __aenter__(self) -> "McpSession":
         await self._connect()
         return self
@@ -92,7 +109,18 @@ class McpSession:
             target: Any = self._server
         else:
             headers = {"Authorization": f"Bearer {self._access_token}"} if self._access_token else {}
-            self._http_client = httpx2.AsyncClient(headers=headers, event_hooks={"response": [self._record_status]})
+            event_hooks = {"response": [self._record_status]}
+            if self._egress is not None:
+                self._raise_if_refused()
+                host = check_server_url(self._url)
+                self._http_client = httpx2.AsyncClient(
+                    headers=headers,
+                    event_hooks=event_hooks,
+                    transport=self._egress.transport(host),
+                    trust_env=False,
+                )
+            else:
+                self._http_client = httpx2.AsyncClient(headers=headers, event_hooks=event_hooks)
             from mcp.client.streamable_http import streamable_http_client
 
             target = streamable_http_client(self._url, http_client=self._http_client)
@@ -107,6 +135,7 @@ class McpSession:
         except Exception as exc:
             if self._http_client is not None:
                 await self._http_client.aclose()
+            self._raise_if_refused(exc)
             self._raise_if_rejected(exc)
             raise
         self._log_round_trip("initialize()", started)
@@ -158,11 +187,13 @@ class McpSession:
     async def list_tools(self) -> list[McpTool]:
         """List every tool this server advertises, unfiltered."""
         client = self._require_client()
+        self._raise_if_refused()
         started = time.monotonic()
         self._rejected_status = None
         try:
             result = await client.list_tools()
         except Exception as exc:
+            self._raise_if_refused(exc)
             self._raise_if_rejected(exc)
             raise
         self._log_round_trip("tools/list()", started)
@@ -212,9 +243,14 @@ class McpSession:
         task, 0 for a leaked child-task `CancelledError`, >=1 for a real
         one — verified empirically both ways before relying on it. A real
         cancellation is re-raised immediately, no retry attempted.
+
+        A guarded session's recorded refusal is raised as `McpEgressBlocked`
+        ahead of any classification and is never retried; only a real
+        cancellation takes precedence over it.
         """
         last_error: BaseException | None = None
         for attempt in (1, 2):
+            self._raise_if_refused()
             self._rejected_status = None
             try:
                 result = await self._require_client().call_tool(name, arguments)
@@ -223,6 +259,7 @@ class McpSession:
                 raise
             except BaseException as exc:  # noqa: BLE001 - reclassified/reraised below
                 if isinstance(exc, Exception):
+                    self._raise_if_refused(exc)
                     self._raise_if_rejected(exc)
                     classified = classify_mcp_error(exc)
                     if isinstance(classified, McpPermanentError):
@@ -232,6 +269,7 @@ class McpSession:
                     current_task = asyncio.current_task()
                     if current_task is not None and current_task.cancelling() > 0:
                         raise
+                    self._raise_if_refused(exc)
                     last_error = exc
                 if attempt == 2:
                     break
@@ -252,7 +290,12 @@ class McpSession:
     def _log_round_trip(self, label: str, started: float) -> None:
         elapsed_ms = (time.monotonic() - started) * 1000
         log = logger.warning if elapsed_ms > _SLOW_ROUND_TRIP_MS else logger.info
-        log("MCP %s took %.0fms (url=%s)", label, elapsed_ms, self._url or "<in-process>")
+        # A user-chosen URL may carry a secret in its path, so only its host is logged.
+        if self._egress is not None:
+            target = f"host={urlsplit(self._url or '').hostname}"
+        else:
+            target = f"url={self._url or '<in-process>'}"
+        log("MCP %s took %.0fms (%s)", label, elapsed_ms, target)
 
 
 def _flatten_content(blocks: list[Any]) -> str | list[dict]:

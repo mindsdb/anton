@@ -78,9 +78,11 @@ clipboard = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "cryptography" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-xdist" },
+    { name = "uvicorn" },
 ]
 scratchpad = [
     { name = "boto3" },
@@ -112,9 +114,11 @@ provides-extras = ["clipboard"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "cryptography", specifier = ">=46" },
     { name = "pytest", specifier = ">=9.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "pytest-xdist", specifier = ">=3.6" },
+    { name = "uvicorn", specifier = ">=0.40" },
 ]
 scratchpad = [{ name = "boto3", specifier = "==1.43.117" }]
 
