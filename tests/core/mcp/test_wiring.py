@@ -270,6 +270,68 @@ async def test_call_mcp_tool_does_not_serve_custom_servers():
         await wiring.call_mcp_tool("custom_mcp", "tok", "add")
 
 
+SECRET_PATH = "SECRET-PATH-7f3a"
+SECRET_ERROR = f"Client error '404 Not Found' for url 'https://mcp.example.com/{SECRET_PATH}/mcp'"
+
+
+class _FailsToOpen(McpSession):
+    async def _connect(self) -> None:
+        raise RuntimeError(SECRET_ERROR)
+
+
+class _FailsToList(McpSession):
+    async def _connect(self) -> None:
+        return None
+
+    async def list_tools(self):
+        raise RuntimeError(SECRET_ERROR)
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _FailsToClose(McpSession):
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        raise RuntimeError(SECRET_ERROR)
+
+
+@pytest.mark.parametrize("session_class", [_FailsToOpen, _FailsToList])
+async def test_a_custom_server_failure_logs_no_part_of_its_url_path(monkeypatch, caplog, session_class):
+    monkeypatch.setattr(
+        wiring,
+        "McpSession",
+        lambda *, url=None, access_token=None, guarded=False, **kw: session_class(
+            url=url, access_token=access_token, guarded=guarded
+        ),
+    )
+    vault = FakeDataVault(
+        {("custom_mcp", "acme-tracker"): _custom_record(_server_url=f"https://mcp.example.com/{SECRET_PATH}/mcp")}
+    )
+    caplog.set_level("DEBUG")
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "custom_mcp", "name": "acme-tracker"}]
+    )
+    assert (tool_defs, sessions) == ([], [])
+    assert "RuntimeError" in caplog.text
+    assert SECRET_PATH not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+async def test_a_built_in_server_failure_still_logs_the_full_error(monkeypatch, caplog):
+    monkeypatch.setattr(wiring, "McpSession", lambda *, url=None, access_token=None, **kw: _FailsToOpen(url=url))
+    vault = FakeDataVault({("hubspot", "acme"): {"_method": "mcp", "access_token": "tok"}})
+    caplog.set_level("DEBUG")
+    await wiring.discover_mcp_tools_async(vault, [{"engine": "hubspot", "name": "acme"}])
+    assert SECRET_PATH in caplog.text
+
+
+async def test_closing_a_custom_session_logs_no_part_of_its_url_path(caplog):
+    caplog.set_level("DEBUG")
+    await wiring.close_mcp_sessions([_FailsToClose(url="https://mcp.example.com/mcp", guarded=True)])
+    assert "RuntimeError" in caplog.text
+    assert SECRET_PATH not in caplog.text
+
+
 async def test_two_notion_workspaces_with_long_names_both_stay_callable(monkeypatch):
     """Two connections whose 51-character names would push tool names past 64."""
     server = MCPServer(name="notion-stub")

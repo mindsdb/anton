@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 from typing import Any
 from urllib.parse import urlsplit
@@ -98,6 +99,11 @@ class McpSession:
         if self._rejected_status is not None:
             raise McpTokenRejected(self._rejected_status) from exc
 
+    @property
+    def guarded(self) -> bool:
+        """True for a session to a server URL a user chose."""
+        return self._egress is not None
+
     def _raise_if_refused(self, exc: BaseException | None = None) -> None:
         """Raise the guard's recorded refusal, if any, ahead of any other error."""
         if self._egress is not None and self._egress.refused is not None:
@@ -155,12 +161,12 @@ class McpSession:
             try:
                 await self._client.__aexit__(None, None, None)
             except Exception:
-                logger.exception("McpSession: error closing the dead client before reconnecting")
+                log_session_failure(logger, self, "McpSession: error closing the dead client before reconnecting")
         if self._http_client is not None:
             try:
                 await self._http_client.aclose()
             except Exception:
-                logger.exception("McpSession: error closing the dead http client before reconnecting")
+                log_session_failure(logger, self, "McpSession: error closing the dead http client before reconnecting")
         self._client = None
         self._http_client = None
         await self._connect()
@@ -179,7 +185,9 @@ class McpSession:
                 await self._client.__aexit__(exc_type, exc, tb)
         except Exception:
             if exc_type is not None:
-                logger.exception("McpSession: error closing session while another exception was propagating")
+                log_session_failure(
+                    logger, self, "McpSession: error closing session while another exception was propagating"
+                )
             else:
                 raise
         finally:
@@ -286,11 +294,15 @@ class McpSession:
                     last_error = exc
                 if attempt == 2:
                     break
-                logger.info("MCP tool %s: transport failure, reconnecting and retrying once: %s", name, last_error)
+                logger.info(
+                    "MCP tool %s: transport failure, reconnecting and retrying once: %s",
+                    name,
+                    type(last_error).__name__ if self.guarded else last_error,
+                )
                 try:
                     await self._reconnect()
                 except Exception:
-                    logger.exception("MCP tool %s: reconnect failed after a transport failure", name)
+                    log_session_failure(logger, self, "MCP tool %s: reconnect failed after a transport failure", name)
                     break
         assert last_error is not None
         raise last_error
@@ -309,6 +321,20 @@ class McpSession:
         else:
             target = f"url={self._url or '<in-process>'}"
         log("MCP %s took %.0fms (%s)", label, elapsed_ms, target)
+
+
+def log_session_failure(log: logging.Logger, session: McpSession, message: str, *args: object) -> None:
+    """Log the exception being handled for `session`.
+
+    A guarded session logs only the exception's type, with no message or
+    traceback: httpx errors carry the full request URL, and a user's server
+    URL may hold a secret in its path. Other sessions log as before.
+    """
+    if not session.guarded:
+        log.exception(message, *args)
+        return
+    exc = sys.exc_info()[1]
+    log.warning(message + " (%s)", *args, type(exc).__name__ if exc is not None else "no exception")
 
 
 def _flatten_content(blocks: list[Any]) -> str | list[dict]:

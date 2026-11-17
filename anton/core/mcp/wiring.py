@@ -49,7 +49,7 @@ from collections import Counter
 from typing import TYPE_CHECKING, Any
 
 from anton.core.mcp.access import AccessMode
-from anton.core.mcp.client import McpSession
+from anton.core.mcp.client import McpSession, log_session_failure
 from anton.core.mcp.egress import check_server_url
 from anton.core.mcp.errors import McpEgressBlocked
 from anton.core.mcp.registry import discover_tool_defs
@@ -228,7 +228,7 @@ async def _open_and_discover(
     try:
         await mcp_session.__aenter__()
     except Exception:
-        logger.exception("discover_mcp_tools: failed to open MCP session for %s/%s", engine, name)
+        log_session_failure(logger, mcp_session, "discover_mcp_tools: failed to open MCP session for %s/%s", engine, name)
         return [], None
     try:
         tool_defs = await discover_tool_defs(
@@ -240,7 +240,7 @@ async def _open_and_discover(
             display_name=display_name,
         )
     except Exception:
-        logger.exception("discover_mcp_tools: tool discovery failed for %s/%s", engine, name)
+        log_session_failure(logger, mcp_session, "discover_mcp_tools: tool discovery failed for %s/%s", engine, name)
         await mcp_session.__aexit__(None, None, None)
         return [], None
     return tool_defs, mcp_session
@@ -265,7 +265,7 @@ async def close_mcp_sessions(sessions: list[McpSession]) -> None:
         try:
             await session.__aexit__(None, None, None)
         except Exception:
-            logger.exception("close_mcp_sessions: error closing an MCP session")
+            log_session_failure(logger, session, "close_mcp_sessions: error closing an MCP session")
 
 
 async def call_mcp_tool(engine: str, access_token: str, tool_name: str, **kwargs: Any) -> str | list[dict]:

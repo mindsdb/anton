@@ -167,6 +167,29 @@ async def test_call_tool_never_retries_a_real_task_cancellation(stub_mcp_server,
     assert calls["n"] == 1  # no retry attempted
 
 
+async def test_a_guarded_session_retry_logs_no_part_of_its_url_path(caplog):
+    secret = "SECRET-PATH-7f3a"
+    error = RuntimeError(f"Client error for url 'https://mcp.example.com/{secret}/mcp'")
+
+    class _FailingClient:
+        async def call_tool(self, name, arguments):
+            raise error
+
+    session = McpSession(url=f"https://mcp.example.com/{secret}/mcp", guarded=True)
+    session._client = _FailingClient()
+
+    async def failed_reconnect():
+        raise error
+
+    session._reconnect = failed_reconnect
+    caplog.set_level("DEBUG")
+    with pytest.raises(McpTransientError):
+        await session.call_tool("add", {"a": 1})
+    assert "reconnect failed" in caplog.text
+    assert secret not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
 def _paged_server(page_count: int, *, endless: bool = False):
     """A stub `mcp.Client.list_tools` that serves one tool per page."""
     cursors_seen: list[str | None] = []
