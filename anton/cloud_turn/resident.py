@@ -68,6 +68,7 @@ PRELOAD_MODULES = (
     "anton.core.memory.cortex",
     "anton.core.memory.hippocampus",
     "anton.core.tools.edit_artifact",
+    "anton.minds_client",
     "anton.tools",
     # The provider's first streamed request.
     "httpcore2",
