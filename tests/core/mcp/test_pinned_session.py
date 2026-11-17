@@ -314,6 +314,31 @@ async def test_an_international_host_is_looked_up_by_the_name_the_request_carrie
     assert resolver.hosts == ["xn--strae-oqa.example"]
 
 
+class RecordingInnerTransport(httpx2.AsyncBaseTransport):
+    """Stands in for the socket layer and keeps the requests handed to it."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx2.Request] = []
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(request)
+        return httpx2.Response(200, request=request)
+
+
+async def test_an_international_host_is_dialed_with_the_ascii_tls_name_and_host_header():
+    resolver = RecordingAnswers(LOOPBACK)
+    guard = EgressGuard(resolver=resolver, address_rule=_loopback_only)
+    transport = guard.transport("xn--strae-oqa.example", 443)
+    inner = RecordingInnerTransport()
+    transport._inner = inner
+    response = await transport.handle_async_request(httpx2.Request("GET", "https://straße.example/mcp"))
+    assert response.status_code == 200
+    [sent] = inner.requests
+    assert sent.url.host == LOOPBACK
+    assert sent.extensions["sni_hostname"] == "xn--strae-oqa.example"
+    assert sent.headers["host"] == "xn--strae-oqa.example"
+
+
 @pytest.mark.parametrize(
     "url",
     ["https://elsewhere.test/mcp", f"http://{HOST}/mcp", f"https://{HOST}:8443/mcp"],

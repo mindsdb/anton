@@ -92,6 +92,8 @@ def test_the_host_returned_is_the_ascii_name_requests_carry(url, host):
         "https://mcp.ex­ample.com/mcp",
         "https://" + "a" * 64 + ".example.com/mcp",
         "https://" + ".".join(["a" * 60] * 5) + "/mcp",
+        "https://mcp.example.com../mcp",
+        "https://mcp..example.com/mcp",
     ],
 )
 def test_unusable_urls_are_refused(url):

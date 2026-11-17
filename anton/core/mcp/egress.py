@@ -111,7 +111,7 @@ def _is_dns_name(host: str) -> bool:
         return True
     except ValueError:
         pass
-    labels = host.rstrip(".").split(".")
+    labels = host.removesuffix(".").split(".")
     return len(host) <= 253 and all(1 <= len(label) <= 63 for label in labels)
 
 
