@@ -248,10 +248,16 @@ def test_a_51_character_connection_name_gives_short_unique_names_that_parse_back
         assert parts is not None and (parts.engine, parts.tool_name) == ("notion", tool)
 
 
-def test_a_connection_name_the_model_api_refuses_is_shortened():
-    name = namespaced_tool_name("custom_mcp", "search", connection_name="Acme Tracker")
-    assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name)
-    assert name == namespaced_tool_name("custom_mcp", "search", connection_name="Acme Tracker")
+def test_a_connection_name_the_model_api_refuses_is_shortened_when_registering():
+    name = registrable_tool_name("custom_mcp", "search", connection_name="Acme Tracker")
+    assert name is not None and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name)
+    assert name == registrable_tool_name("custom_mcp", "search", connection_name="Acme Tracker")
+
+
+def test_namespaced_tool_name_shortens_on_length_only():
+    """cowork-server builds labels from these names; a short name keeps its
+    connection text, and the label code redacts it there."""
+    assert namespaced_tool_name("hubspot", "search", connection_name="token=abc") == "hubspot__token=abc__search"
 
 
 @pytest.mark.parametrize("tool_name", ["files.read", "github/search", "get user", "tool:list", "über_tool", "a__b", "_private", ""])
