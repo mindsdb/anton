@@ -315,6 +315,12 @@ def _inherited_requirements(requirements: list[str]) -> list[str]:
     look there: it would install a second, unpinned copy into the pad that then
     shadows the one the image or app pinned. A requirement with a version,
     extras or a marker is a deliberate request and still goes to the installer.
+
+    Only a distribution whose installed files show it imports from the folder
+    itself counts. One that needs its own `.pth` file (pywin32, an editable
+    install) is not importable in the pad, because Python does not read `.pth`
+    files in a folder a `.pth` added; and one with no file list can't be
+    checked. Both still go to the installer.
     """
     import site
     from importlib.metadata import distributions
@@ -322,10 +328,16 @@ def _inherited_requirements(requirements: list[str]) -> list[str]:
     from packaging.requirements import InvalidRequirement, Requirement
     from packaging.utils import canonicalize_name
 
+    def importable_from_the_folder(dist) -> bool:
+        files = dist.files
+        if not files:
+            return False
+        return not any(f.suffix == ".pth" and len(f.parts) == 1 for f in files)
+
     installed = {
         canonicalize_name(dist.metadata["Name"])
         for dist in distributions(path=site.getsitepackages())
-        if dist.metadata["Name"]
+        if dist.metadata["Name"] and importable_from_the_folder(dist)
     }
     inherited = []
     for spec in requirements:
@@ -2125,7 +2137,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             return refused
         inherited = _inherited_requirements(needed)
         if inherited:
-            self._installed_packages.update(p.lower() for p in inherited)
+            # Not added to _installed_packages: that set is saved with the pad
+            # and trusted when the pad is reused, possibly under a host that
+            # no longer has the package. The check is cheap; it runs each time.
             needed = [p for p in needed if p not in inherited]
             if not needed:
                 return "All packages already installed."
