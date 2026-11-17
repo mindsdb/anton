@@ -325,6 +325,33 @@ class RecordingInnerTransport(httpx2.AsyncBaseTransport):
         return httpx2.Response(200, request=request)
 
 
+class FirstAddressDownTransport(RecordingInnerTransport):
+    """Fails to connect to `down`, answers 200 everywhere else."""
+
+    def __init__(self, down: str) -> None:
+        super().__init__()
+        self.down = down
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(request)
+        if request.url.host == self.down:
+            raise httpx2.ConnectError("connection refused", request=request)
+        return httpx2.Response(200, request=request)
+
+
+async def test_a_dead_first_address_falls_back_to_the_next_checked_one():
+    answers = Answers("127.0.0.1", "127.0.0.2")
+    guard = EgressGuard(resolver=answers, address_rule=lambda address: address.is_loopback)
+    transport = guard.transport(HOST, 443)
+    inner = FirstAddressDownTransport(down="127.0.0.1")
+    transport._inner = inner
+    response = await transport.handle_async_request(httpx2.Request("GET", f"https://{HOST}/mcp"))
+    assert response.status_code == 200
+    assert [request.url.host for request in inner.requests] == ["127.0.0.1", "127.0.0.2"]
+    assert all(request.extensions["sni_hostname"] == HOST for request in inner.requests)
+    assert guard.refused is None
+
+
 async def test_an_international_host_is_dialed_with_the_ascii_tls_name_and_host_header():
     resolver = RecordingAnswers(LOOPBACK)
     guard = EgressGuard(resolver=resolver, address_rule=_loopback_only)

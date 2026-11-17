@@ -36,6 +36,11 @@ async def _unresolvable(host: str, port: int):
         "::1",
         "::ffff:169.254.169.254",
         "64:ff9b::a9fe:a9fe",
+        "2002:a9fe:a9fe::1",
+        "2002:5db8:d70e::1",
+        "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+        "3fff::1",
+        "5f00::1",
         "fec0::1",
         "ff02::1",
         "fe80::1",
@@ -43,6 +48,18 @@ async def _unresolvable(host: str, port: int):
     ],
 )
 def test_non_public_addresses_are_refused(address):
+    assert not is_public_destination(ipaddress.ip_address(address))
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["2002:a9fe:a9fe::1", "2002:5db8:d70e::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "64:ff9b::a9fe:a9fe", "3fff::1", "5f00::1"],
+)
+def test_embedding_and_special_ranges_are_refused_even_where_ipaddress_calls_them_global(monkeypatch, address):
+    """Earlier 3.11 releases judge 6to4 global; the rule must not depend on that."""
+    for flag in ("is_private", "is_reserved", "is_loopback", "is_link_local", "is_multicast", "is_unspecified", "is_site_local"):
+        monkeypatch.setattr(ipaddress.IPv6Address, flag, property(lambda self: False))
+    monkeypatch.setattr(ipaddress.IPv6Address, "is_global", property(lambda self: True))
     assert not is_public_destination(ipaddress.ip_address(address))
 
 

@@ -167,7 +167,7 @@ def _make_handler(
         except McpEgressBlocked:
             return ToolOutcome(
                 content=(
-                    f"The {label} server is at an address Cowork does not connect to, "
+                    f"The {label} server is at an address that is not allowed, "
                     f"so this tool cannot run."
                 ),
                 ok=False,

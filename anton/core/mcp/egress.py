@@ -5,9 +5,10 @@ pod or a desktop is a server-side request forgery risk: a name can point at
 the cloud metadata service, a neighbour on the private network, or the
 user's own machine. Only plain public https endpoints pass.
 
-The address rule matches mindshub_inference's `minds/common/egress.py`
-`is_public_destination`. `is_global` alone is not enough: it is true for
-NAT64, site-local and some multicast addresses.
+`is_global` alone is not enough: it is true for NAT64, site-local and some
+multicast addresses, so those are refused explicitly. Ranges that carry an
+IPv4 address inside an IPv6 one (6to4, Teredo, NAT64) are refused outright,
+whatever the Python version's `ipaddress` makes of them.
 
 `PinnedHostTransport` resolves and checks the host on every request and
 dials the checked address itself, as cowork-server's
@@ -46,6 +47,23 @@ _REFUSED_STATUS = 421
 _UNRESOLVED_STATUS = 503
 
 
+#: IPv6 ranges refused on every Python version. Python 3.12.4 and later
+#: already treat them as private; earlier 3.11 releases let 6to4 through, and
+#: 2002:a9fe:a9fe::1 carries the cloud metadata address. Refusing the whole
+#: range, rather than judging the embedded IPv4, also keeps a 6to4 address
+#: carrying a public IPv4 out, as the desktop app's guard does.
+_ALWAYS_REFUSED_V6 = tuple(
+    ipaddress.ip_network(network)
+    for network in (
+        "64:ff9b::/96",  # NAT64
+        "2001::/23",  # IETF protocol assignments, Teredo among them
+        "2002::/16",  # 6to4
+        "3fff::/20",  # documentation
+        "5f00::/16",  # segment routing
+    )
+)
+
+
 def is_public_destination(address: Address) -> bool:
     """Whether `address` is on the public internet.
 
@@ -54,6 +72,8 @@ def is_public_destination(address: Address) -> bool:
     """
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
         address = address.ipv4_mapped
+    if isinstance(address, ipaddress.IPv6Address) and any(address in network for network in _ALWAYS_REFUSED_V6):
+        return False
     return address.is_global and not (
         address.is_private
         or address.is_loopback
