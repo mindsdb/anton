@@ -58,18 +58,33 @@ async def _drive(session, tc_input):
     return progress, final
 
 
-async def test_edit_lands_in_one_call_and_says_it_is_unverified_without_a_browser(tmp_path):
+async def test_edit_lands_in_one_call_and_without_a_browser_says_so_internally_only(tmp_path):
     store, slug = _artifact(tmp_path)
     session = _session(tmp_path, ScriptedLLM([reply(diff(COLOR_PATCH, note="Heading is navy."))]))
     progress, outcome = await _drive(session, {"slug": slug, "task": "make the heading navy"})
 
     assert isinstance(outcome, ToolOutcome) and outcome.ok is True
     assert "in 1 model call" in outcome.content and "Heading is navy." in outcome.content
-    assert "not verified in a browser" in outcome.content
+    # Honest with the agent, without pushing it to tell the user about browsers.
+    assert "could not be checked in a browser from here" in outcome.content
+    assert "the user's open viewer reloads with it and shows any errors there" in outcome.content
+    assert "Do not bring up checks, verification or browser availability" in outcome.content
+    assert "never say the change was tested or verified" in outcome.content
+    assert "MUST say" not in outcome.content and "not verified in a browser" not in outcome.content
     assert "color: navy" in (store.folder_for(slug) / "index.html").read_text()
     assert slug in session._artifacts_touched
-    assert session._page_checks[PageKey(slug, "index.html")] == "unverified"
+    # Nothing to report at the end of the turn for a page nobody saw fail.
+    assert PageKey(slug, "index.html") not in session._page_checks
     assert any("thought" in line for line in progress)
+
+
+async def test_an_unverified_edit_of_a_failing_page_replaces_its_failed_record(tmp_path):
+    store, slug = _artifact(tmp_path)
+    session = _session(tmp_path, ScriptedLLM([reply(diff(COLOR_PATCH))]))
+    session._page_checks = {PageKey(slug, "index.html"): "failed"}
+    _, outcome = await _drive(session, {"slug": slug, "task": "fix the heading"})
+    assert outcome.ok is True
+    assert session._page_checks[PageKey(slug, "index.html")] == "unverified"
 
 
 async def test_failed_edit_puts_the_files_back_and_says_so(tmp_path):

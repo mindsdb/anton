@@ -399,4 +399,7 @@ class ScratchpadRuntimeFactory(Protocol):
         # False makes the pad's classify() and classify_yes_no() raise. The
         # manager passes it only when False.
         classify_enabled: bool = True,
+        # The model the pad's generate_image() asks for. The manager passes it
+        # only when one is configured; without it the pad resolves its own.
+        image_model: str | None = None,
     ) -> ScratchpadRuntime: ...

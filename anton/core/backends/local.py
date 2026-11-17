@@ -28,8 +28,12 @@ from anton.core.backends.sandbox import (
 )
 from anton.core.backends.wire import (
     CELL_DELIM,
+    CELL_IMAGES_MARKER,
     CELL_TRACE_MARKER,
+    ARTIFACTS_ROOT_ENV,
     HEARTBEAT_MARKER,
+    IMAGE_MARKER,
+    IMAGE_MODEL_ENV,
     INSTALL_END_MARKER,
     INSTALL_START_MARKER,
     CLASSIFY_ENV,
@@ -45,8 +49,10 @@ from anton.core.backends.wire import (
     USAGE_MARKER,
     USAGE_MARKER_ENV,
 )
+from anton.core.llm.images import current_turn_images
 from anton.core.llm.provider import (
     USAGE_LOG_ENV,
+    Usage,
     log_usage_record,
     scratchpad_usage_record,
     usage_log_enabled,
@@ -94,6 +100,44 @@ def _add_salvage_chunk(chunks: list[str], chunk: str) -> bool:
         total -= len(chunks.pop(0))
         dropped = True
     return dropped
+
+
+def _record_pad_image(raw: str) -> None:
+    """Count one pad image line against the running turn's budget and books.
+
+    Only counts reach the host: the line comes from a process running cell code.
+    """
+    budget = current_turn_images()
+    if budget is None:
+        return
+    try:
+        sent = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(sent, dict):
+        return
+
+    def count(key: str) -> int:
+        value = sent.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    try:
+        if sent.get("event") == "sent":
+            budget.take()
+        elif sent.get("event") == "usage":
+            model = sent.get("model")
+            budget.record_usage(
+                model if isinstance(model, str) else "",
+                Usage(
+                    input_tokens=count("input"),
+                    output_tokens=count("output"),
+                    image_input_tokens=count("image_input"),
+                    image_output_tokens=count("image_output"),
+                ),
+            )
+    except Exception:
+        # The books must never fail the cell they count.
+        logger.warning("could not book a scratchpad image call", exc_info=True)
 
 
 def _salvage_tail(chunks: list[str], dropped: bool) -> str:
@@ -389,6 +433,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         coding_flavor: str | None = None,
         internet_research_enabled: bool = True,
         classify_enabled: bool = True,
+        image_model: str | None = None,
         _venvs_base: Path | None = None,
     ) -> None:
         # The name becomes a folder the host deletes and recreates, so one that
@@ -431,6 +476,9 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._internet_research_enabled = internet_research_enabled
         # False: the boot script injects a classify() that only raises.
         self._classify_enabled = classify_enabled
+        # The model the pad's generate_image() asks for; None lets the boot
+        # script resolve it (`anton.core.llm.images.resolve_image_model`).
+        self._image_model: str | None = image_model
         self._credential_path: Path | None = None
         self._credential_written: str | None = None
         # The Landlock policy every spawn of agent code runs under; None runs
@@ -1113,6 +1161,22 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env["ANTON_SCRATCHPAD_FLAVOR"] = self._coding_flavor
         else:
             env.pop("ANTON_SCRATCHPAD_FLAVOR", None)
+        # The runtime's image model, else the host's ANTON_IMAGE_MODEL carried
+        # under the pad's own name: a sandbox policy passes only
+        # ANTON_SCRATCHPAD_* names to the pad.
+        image_model = self._image_model or env.get("ANTON_IMAGE_MODEL", "").strip()
+        if image_model:
+            env[IMAGE_MODEL_ENV] = image_model
+        else:
+            env.pop(IMAGE_MODEL_ENV, None)
+        # A cloud pod mounts the project's artifacts folder outside the
+        # workspace (anton.cloud_turn.session._ARTIFACTS_ROOT_ENV); elsewhere
+        # the pad finds it under the workspace.
+        cloud_artifacts = env.get("ANTON_CLOUD_ARTIFACTS_ROOT", "").strip()
+        if cloud_artifacts and os.path.isabs(cloud_artifacts):
+            env[ARTIFACTS_ROOT_ENV] = cloud_artifacts
+        else:
+            env.pop(ARTIFACTS_ROOT_ENV, None)
         # Set or cleared here, after the workspace overlay, so neither an
         # inherited value nor a project .env decides it.
         if self._internet_research_enabled:
@@ -1554,6 +1618,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         trace = get_trace_context()
         if trace is not None:
             payload = f"{CELL_TRACE_MARKER} {trace_context_to_json(trace)}\n" + payload
+        # The turn's remaining image allowance; without it the pad withholds generate_image().
+        images = current_turn_images()
+        allowed = images.allowance() if images is not None else None
+        if allowed is not None:
+            line = {"allowed": allowed}
+            if allowed == 0 and images.spend_limited():
+                line["spend_limit"] = True
+            payload = f"{CELL_IMAGES_MARKER} {json.dumps(line)}\n" + payload
         try:
             self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
             self._running_code = code
@@ -1904,6 +1976,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                         self._salvage_dropped = True
                 continue
 
+            if line.startswith(IMAGE_MARKER):
+                _record_pad_image(line[len(IMAGE_MARKER):])
+                continue
+
             if line.startswith(USAGE_MARKER) and usage_log_enabled():
                 # Logged as it arrives, so a cell killed later keeps the calls it made.
                 # Off, the pad was not asked to send usage, so a line like this is cell output.
@@ -2133,6 +2209,7 @@ def local_scratchpad_runtime_factory(
     coding_flavor: str | None = None,
     internet_research_enabled: bool = True,
     classify_enabled: bool = True,
+    image_model: str | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
         name=name,
@@ -2151,4 +2228,5 @@ def local_scratchpad_runtime_factory(
         coding_flavor=coding_flavor,
         internet_research_enabled=internet_research_enabled,
         classify_enabled=classify_enabled,
+        image_model=image_model,
     )

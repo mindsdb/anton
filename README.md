@@ -250,7 +250,9 @@ A host gives a session the `browser` tool by passing `ChatSessionConfig.browser`
 - **A browser router**, for cloud turns: an `https` base URL with no credential. The cloud turn reads it from the turn request's `params.browser` block (`{base_url, profile, project?}`), and the tool calls the router with the turn's own key.
 - **The Cowork desktop app's own browser**: exactly `http://127.0.0.1:<port>` and the app's per-launch key, built by the host in its own process. It never travels in a turn request, and its client ignores system proxies.
 
-The tool reads pages as numbered elements and acts on them by number. The person shares the browser: only they hand it back after a hand-over, with Done in the browser. A step that commits something (submit, buy, send, delete, grant access) or acts by position waits for the person's Approve on a card. On the router, the browser itself holds those steps and anton shows the card when it answers `approval_required`; on the desktop, anton shows the card before it sends the step. The desktop app's browser sends no page content to MindsHub's decision service.
+The tool reads pages as numbered elements and acts on them by number. The person shares the browser: they hand it back after a hand-over with Done in the browser, or, when the hand-over names what it waits for (`wait_for`: one checkbox, toggle or text field, or the page changing after a human check), a host that watches for it and says so in its answer (`watching`) hands it back by itself once that's done. A step that commits something (submit, buy, send, delete, grant access) waits for the person's Approve on a card. On the router, the browser itself holds those steps and anton shows the card when it answers `approval_required`; a click by position runs at once there unless it lands on a commit control, which holds as that control's click. On the desktop, anton shows the card before it sends the step, and a click by position first shows an "Allow clicks by position on this page" card, once per page address, which then covers every click by position on that page, except on an OAuth authorization or consent page, where every click waits for Approve as a commit step on both hosts. The desktop app's own browser runs on the person's machine, so it needs no browser server; it picks its steps the same way as the router's.
+
+A decision model picks the browser's steps: Jev on the session's MindsHub connection, for either form, or a decision model of the host's own, which wins. A host running the turn in its own process passes it as `BrowserConfig.decisions` (a `DecisionsTarget`: the endpoint's full URL, its key and its model name); like the launch key, it stays in the host's process and never travels in a turn request. For a turn it hands to a cloud pod, the host passes `BrowserConfig.decisions_proxy` instead (a `DecisionsProxy`: the full URL of a route of the host's own and the model name, no key), which the turn request carries: the tool posts each decision there with the session's MindsHub credential, the turn key, and the host forwards it to its decision model with the key it keeps. Without any, the model picks every step.
 
 `tests/fixtures/browser_contract/` pins the HTTP contract both hosts serve, including the commit list both read; each host's tests keep a copy. Its README explains the format.
 
@@ -298,6 +300,24 @@ Each turn writes its skills into a fresh folder in the system temp dir, outside 
 | `ALWAYS_ON_OMITTED_MAX_NAMES` | 20 names on the closing line | The rest are counted as "and N more". |
 
 A request with no `skills` block at all stages no skills, with one rollout fallback. On a pod whose controller mounts the organization's whole skills tree and names it in `ANTON_CLOUD_SKILLS_ROOT`, such a request reads that mount instead, and the pod logs a warning. The mount holds every member's skills, so a request that carries a block never reads it.
+
+## Write-check card budget
+
+The write check asks the person to approve a cell before it changes a database, a listed endpoint or an existing file. A card on a cell that writes nothing costs a click, or an unattended answer the whole card timeout, so the check is measured both ways: what it catches and what it asks about for no reason.
+
+`scripts/write_check_replay.py` replays `tests/fixtures/write_check_replay_corpus.yaml` through one anton tree's write check, cell by cell with each chat's earlier cells. The corpus holds about 100 synthetic analysis chats. They mix pandas, SQL reads, helper modules, restarts between turns, page builds and real writes, and each cell is labeled by hand. Each must-hold cell is paired with must-stay-free cells that share its `pair` id. The replay prints cards per 100 cells and per 100 questions by kind, real writes carded, cards on cells that write nothing, each pair's result, and the causes the cards name. It takes a few seconds:
+
+```bash
+uv run python -I scripts/write_check_replay.py                         # this tree
+uv run python -I scripts/write_check_replay.py --tree /path/to/other/anton --commit <sha> --out other.json
+uv run python -I scripts/write_check_replay.py --tree . --compare other.json   # exit 1 on a lost hold or more noise
+```
+
+It runs any anton commit's write check, the older `earlier_code=` form included. It exits 2 when it refuses to score: Python imported the check from anywhere but `--tree`, it can't import one there, or `--compare` got a scorecard of another corpus. A failed `--compare` exits 1. `--accept <yaml>` maps cells that write nothing and may newly ask to the reason each must, under `no_write_cards`; `--compare` doesn't count those cards against the base. A lost real-write card can't be accepted. A check that raises counts as a card, as it does in a session. `--code-root` passes the project folder as a local pad's `code_root` on a tree that takes it.
+
+Every cell has an `id`, its key in scorecards and the budget: the chat's code and a number. A new cell takes its chat's next free number, so no other key moves.
+
+`tests/test_write_check_replay.py` holds this tree to `tests/fixtures/write_check_replay_budget.yaml`. Its lists are exact: the real writes carded on a rule of their own, those carded only by the "can't be checked" card, the known misses, the cells that write nothing but get a card, and the broken pairs. The test fails when the scorecard differs from any list in either direction, and names the cells. So a change that frees five cells and cards five others fails too. A change that frees cells or starts catching a write updates the lists. A change that adds cards says in its PR which cells gained one and why each must ask, and a change that narrows the "can't be checked" card says what holds each write it frees.
 
 ---
 

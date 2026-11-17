@@ -109,6 +109,13 @@ Events written back on stdout (JSONL):
       including an unknown or refused id.
       An `addon` line repeating a known `addon_id` re-reports that message's
       current state rather than adding it twice.
+  {"kind": "artifact_check", "type": "response.artifact_check", "check_id":
+   "acheck:<hex>", "artifact_slug": "...", "timeout_s": N}  - ENG-4227, only
+      when the request set `preview_checks`: the turn asks the host to reload
+      the user's open preview of that artifact and report its errors. Answered
+      by one `check_result` stdin line (below); no answer within timeout_s is
+      "unverified". The controller must relay it (as a `turn_step`, step
+      "artifact_check", like the ask_user kinds).
   {"kind": "browser", "session_id": "..."}  - the browser tool opened (or
       reopened) the person's browser session. cowork shows the browser beside
       the chat, with a viewer link it mints with the person's own credential.
@@ -165,6 +172,13 @@ Addon lines on stdin (any turn, same 64 KB bound), ENG-4194:
   The model sees each added message as a separate text block (never inside a
   tool result), wrapped in <user_addition id="..."> with a marker drawn per
   turn; any user_addition tag inside the text is stripped.
+Check lines on stdin (requests with `preview_checks`, same 64 KB bound), ENG-4227:
+  {"kind": "check_result", "check_id": "acheck:<hex>", "body": {"status":
+   "passed" | "failed" | "unavailable", "errors": [{type, message, file, line,
+   url}], "ms": N} | null}  - the answer to an `artifact_check` event; null or
+      "unavailable" (no preview open, timed out) reads as unverified. A line for
+      no pending check is ignored; pending checks resolve as unanswered when
+      stdin closes or the turn ends.
 A stdin line of any other kind, or a malformed one, is logged and skipped.
 """
 
@@ -431,7 +445,8 @@ class TurnRequestV1:
     #: DB-authoritative ordered history ({"role","content"} dicts). The pod never
     #: loads its own history; cowork-server owns persistence.
     history: list = field(default_factory=list)
-    #: Optional per-turn LLM credential set by cowork ({"provider","api_key","base_url"}).
+    #: Optional per-turn LLM credential set by cowork ({"provider","api_key","base_url"},
+    #: optionally "coding_model" and "image_model" — the user's image model, ENG-4024).
     #: MVP: always MindsHub (provider="minds-cloud"). None falls back to env settings.
     llm: dict | None = None
     #: Optional memory cowork resolved for this tenant: {"global": {slot: text},
@@ -506,6 +521,11 @@ class TurnRequestV1:
     #: session validates it (`anton.core.llm.ui_locale`); absent, or a
     #: controller that does not forward it, leaves the prompt unchanged.
     ui_locale: str | None = None
+    #: Whether the host answers `artifact_check` events with `check_result`
+    #: stdin lines (the user's open artifact preview, ENG-4227). Only a JSON
+    #: `true` turns it on: without a host that answers, every artifact edit
+    #: would wait out the check's timeout for nothing.
+    preview_checks: bool = False
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
     #: vault connects. Absent when no connected engine has notes.
@@ -519,10 +539,13 @@ class TurnRequestV1:
     #: Absent, null, blank, or non-string keeps the configured default.
     reasoning_effort: str | None = None
     #: The MindsHub browser router, when cowork-server turned the browser on for
-    #: this turn: {"base_url", "profile", "project"?}, read by
-    #: BrowserConfig.from_dict. The pod reaches the router with this turn's
+    #: this turn: {"base_url", "profile", "project"?, "decisions_proxy"?}, read
+    #: by BrowserConfig.from_dict. The pod reaches the router with this turn's
     #: `llm` key. A block with a `token`, or with any address but the https
     #: router, is refused. Absent or malformed means no browser tool this turn.
+    #: `decisions_proxy` ({"url", "model"}, no key) is cowork-server's route
+    #: to the organization's own decision model, which the pod calls with the
+    #: same `llm` key.
     browser: BrowserConfig | None = None
     #: The tenant's per-task limits cowork-server resolved: any of
     #: ``max_tool_rounds``, ``max_continuations``, ``max_turn_tokens``,
@@ -567,6 +590,7 @@ class TurnRequestV1:
             jev_decisions=d.get("jev_decisions", True) is True,
             jev_classify=d.get("jev_classify", True) is True,
             ui_locale=d.get("ui_locale") if isinstance(d.get("ui_locale"), str) else None,
+            preview_checks=d.get("preview_checks") is True,
             # Same defensive isinstance check as oauth/trace.
             connectors=(
                 d.get("connectors") if isinstance(d.get("connectors"), dict) else None

@@ -3,6 +3,7 @@ import io
 import json
 import os
 import sys
+import threading
 import traceback
 
 import dill
@@ -10,9 +11,13 @@ import dill
 from anton.core.backends.wire import (
     CELL_DELIM,
     CELL_FILENAME,
+    CELL_IMAGES_MARKER,
     CELL_TRACE_MARKER,
     CLASSIFY_ENV,
+    ARTIFACTS_ROOT_ENV,
     EXPLAINABILITY_QUERIES_NAME,
+    IMAGE_MARKER,
+    IMAGE_MODEL_ENV,
     INTERNET_RESEARCH_ENV,
     MISSING_MODULE_HINT,
     RESULT_START,
@@ -466,6 +471,12 @@ namespace[EXPLAINABILITY_QUERIES_NAME] = []
 # loop sets it from the cell's CELL_TRACE_MARKER line.
 _cell_trace = None
 
+# The turn's image allowance for the running cell (CELL_IMAGES_MARKER), and the
+# images generate_image() took from it. "allowed" None: not offered this cell.
+# Taken under the lock: a cell can call the helper from several threads at once.
+_cell_images = {"made": 0, "allowed": None, "spend_limit": False}
+_cell_images_lock = threading.Lock()
+
 # --- Inject get_llm() for LLM access from scratchpad code ---
 _scratchpad_model = os.environ.get("ANTON_SCRATCHPAD_MODEL", "")
 if _scratchpad_model:
@@ -612,7 +623,7 @@ if _scratchpad_model:
                 except _llm_asyncio.CancelledError:
                     pass
 
-        async def _with_fresh_provider(call):
+        async def _with_fresh_provider(call, role="coding"):
             """Await ``call(provider)`` on a provider built for this call, then close it.
 
             A provider's HTTP pool keeps each connection bound to the event
@@ -631,7 +642,7 @@ if _scratchpad_model:
             # does not reach an asyncio.run loop on a worker thread.
             trace_token = set_trace_context(_cell_trace)
             try:
-                with call_role("coding"):
+                with call_role(role):
                     return await _run_with_heartbeat(call(provider))
             finally:
                 reset_trace_context(trace_token)
@@ -911,8 +922,164 @@ if _scratchpad_model:
                 "unavailable. Answer from the connected data sources and the user's files."
             )
 
+        def _send_image_event(record):
+            with _wire_lock:
+                _real_stdout.write(IMAGE_MARKER + " " + json.dumps(record) + "\n")
+                _real_stdout.flush()
+
+        def _pad_path(value):
+            """A path argument as an absolute path, mapped like the host tool's `_image_path`:
+            `.anton/artifacts/...` under the artifacts root (a cloud pod's mount), else the workspace."""
+            from pathlib import Path as _Path
+
+            text = os.fspath(value)
+            path = _Path(text).expanduser()
+            if path.is_absolute():
+                return path
+            parts = _Path(text.replace("\\", "/")).parts
+            artifacts_root = os.environ.get(ARTIFACTS_ROOT_ENV)
+            if artifacts_root and parts[:2] == (".anton", "artifacts"):
+                return _Path(artifacts_root).joinpath(*parts[2:])
+            return _Path(_resolved_workspace() or os.getcwd()) / path
+
+        def generate_image(prompt, *, size=None, quality=None, reference_images=None, path=None):
+            """Generate one image with the configured image model, save it, return its path.
+
+            ``reference_images`` (paths of PNG, JPEG or WebP files) makes it an
+            edit. ``size`` is WIDTHxHEIGHT (1024x1024, 1536x1024, 1024x1536) or
+            "auto"; ``quality`` is "auto", "low", "medium" or "high". The image
+            is written to ``path`` (relative to the project, or absolute, such
+            as a file in an artifact's folder; a taken name gets "-2", "-3",
+            ...; the extension .png, .jpg or .webp picks the format), else as
+            an image artifact of its own in the project's artifacts folder.
+            Returns the absolute path of the file written. Raises with a message to relay
+            when the provider refuses, and before any request once the turn's
+            image allowance is used up.
+            """
+            from anton.core.llm import images as _images
+
+            if _scratchpad_provider_name not in ("openai", "openai-compatible"):
+                raise RuntimeError(
+                    "generate_image() needs a MindsHub or OpenAI connection, and this "
+                    "scratchpad's model provider has no images API."
+                )
+            if _cell_images["allowed"] is None:
+                raise RuntimeError("generate_image() is not available in this conversation.")
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError("generate_image() needs a non-empty prompt")
+            size = _images.normalize_size(size)
+            quality = _images.normalize_quality(quality)
+            output_format = _images.output_format_for(str(path) if path else None)
+            if isinstance(reference_images, (str, os.PathLike)):
+                reference_images = [reference_images]
+            reference_images = list(reference_images or [])
+            if len(reference_images) > _images.MAX_REFERENCE_IMAGES:
+                raise ValueError(
+                    f"at most {_images.MAX_REFERENCE_IMAGES} reference images can be passed, "
+                    f"not {len(reference_images)}"
+                )
+            refs = [_images.load_reference_image(_pad_path(ref)) for ref in reference_images]
+            api_key = _current_llm_api_key() or _llm_provider_kwargs.get("api_key")
+            model = _images.resolve_image_model(
+                os.environ.get(IMAGE_MODEL_ENV) or os.environ.get("ANTON_IMAGE_MODEL"),
+                base_url=_llm_base_url,
+                api_key=api_key,
+                verify=_llm_ssl_verify,
+                mindshub=_images.is_mindshub_endpoint(_llm_flavor, _llm_base_url),
+            )
+            # Checked and taken just before the request, so a bad argument never
+            # uses a slot. A sent request keeps it: a refusal may still be billed.
+            with _cell_images_lock:
+                allowed = _cell_images["allowed"] or 0
+                if _cell_images["made"] >= allowed:
+                    why = (
+                        "this turn reached its spend limit" if _cell_images["spend_limit"]
+                        else "this turn has used up its images (ANTON_MAX_IMAGES_PER_TURN)"
+                    )
+                    raise RuntimeError(
+                        f"generate_image() refused: {why}, so no request was sent. Use the "
+                        "images made so far and ask the user before making more."
+                    )
+                _cell_images["made"] += 1
+            _send_image_event({"event": "sent"})
+            usage = None
+            try:
+                result = _llm_asyncio.run(
+                    _with_fresh_provider(
+                        lambda provider: provider.generate_image(
+                            model=model,
+                            prompt=prompt,
+                            size=size,
+                            quality=quality,
+                            output_format=output_format,
+                            reference_images=refs,
+                        ),
+                        role=_images.IMAGE_ROLE,
+                    )
+                )
+                usage = result.usage
+            except _images.ImageGenerationError as exc:
+                usage = exc.usage
+                raise
+            finally:
+                if usage is not None:
+                    _send_image_event({
+                        "event": "usage",
+                        "model": model,
+                        "input": usage.input_tokens,
+                        "output": usage.output_tokens,
+                        "image_input": usage.image_input_tokens,
+                        "image_output": usage.image_output_tokens,
+                    })
+            if path:
+                target = _pad_path(path)
+                saved = _images.write_new_image_file(
+                    result.data, target.parent, target.stem or "image", result.extension
+                )
+                return str(saved.resolve())
+            # An image artifact of its own, like the tool's: the artifacts
+            # folder is the one every host keeps and shows, where a cloud
+            # pod's workspace may be a copy nothing syncs back.
+            from anton.core.artifacts.store import ArtifactStore
+
+            store = ArtifactStore(str(_pad_path(".anton/artifacts")))
+            stem = _images.file_stem(None, prompt)
+            title = _images.image_title(None, prompt)
+            artifact = store.create(
+                name=title,
+                description=(("Edited image: " if refs else "Generated image: ") + prompt)[:500],
+                type="image",
+                primary=f"{stem}.{result.extension}",
+            )
+            directory = store.folder_for(artifact.slug)
+            try:
+                # The conversation and turn this cell runs for, first in the
+                # provenance, as the host's artifact tools record theirs: it is
+                # how the host claims a folder that appeared during the cell.
+                conversation = getattr(_cell_trace, "session_id", None)
+                if conversation:
+                    turn = getattr(_cell_trace, "turn_id", None)
+                    store.record_turn(
+                        artifact.slug,
+                        conversation_id=str(conversation),
+                        conversation_title=None,
+                        turn_index=turn if isinstance(turn, int) else 0,
+                        summary=f"Generated image: {title}",
+                        files_touched=[],
+                    )
+                saved = _images.write_new_image_file(result.data, directory, stem, result.extension)
+            except BaseException:
+                # No empty image artifact left behind, as the host tool does.
+                from anton.utils.nofollow import rmtree_nofollow
+
+                with contextlib.suppress(OSError, ValueError):
+                    rmtree_nofollow(store.root, directory)
+                raise
+            return str(saved.resolve())
+
         _inject_helper("get_llm", get_llm)
         _inject_helper("agentic_loop", agentic_loop)
+        _inject_helper("generate_image", generate_image)
         # A stub rather than no name: a NameError would read as a missing package.
         _inject_helper(
             "web_search",
@@ -1665,6 +1832,18 @@ while True:
     if eof:
         break
 
+    _cell_image_allowance = None
+    _cell_spend_limit = False
+    if lines and lines[0].startswith(CELL_IMAGES_MARKER + " {"):
+        try:
+            _images_line = json.loads(lines.pop(0)[len(CELL_IMAGES_MARKER):])
+            _allowed = _images_line.get("allowed")
+            _cell_spend_limit = _images_line.get("spend_limit") is True
+        except (ValueError, AttributeError):
+            _allowed = None
+        if isinstance(_allowed, int) and not isinstance(_allowed, bool):
+            _cell_image_allowance = max(0, _allowed)
+
     _cell_trace = None
     # The JSON object's "{" keeps a cell line like `__ANTON_CELL_TRACE__ = 1` code.
     if lines and lines[0].startswith(CELL_TRACE_MARKER + " {"):
@@ -1706,6 +1885,18 @@ while True:
         # re-shipped duplicate chunk, never a skipped one.
         _cell_out["shipped"] = 0
         _cell_out["buf"] = out_buf
+        with _cell_images_lock:
+            _cell_images["made"] = 0
+            _cell_images["allowed"] = _cell_image_allowance
+            _cell_images["spend_limit"] = _cell_spend_limit
+        # Bound only while the host offers it this turn; an agent's own binding of the name stays.
+        _image_helper = _INJECTED_HELPERS.get("generate_image")
+        if _image_helper is not None:
+            if _cell_image_allowance is None:
+                if namespace.get("generate_image") is _image_helper:
+                    del namespace["generate_image"]
+            else:
+                namespace.setdefault("generate_image", _image_helper)
         error = None
         # The line of its own code the cell stopped at, read from the
         # traceback rather than from the error's text, which the cell shapes.

@@ -27,8 +27,10 @@ path like `.anton/.env` has no data suffix, so without a fence it would be
 copied into the artifact folder and published with it; `.anton/secrets.json`
 would be read by the gathering step and its content carried into the PRD.
 `accept_reason` below says what qualifies — an upload the host staged, or a
-plain file inside the workspace outside any dot-directory. Everything else
-is dropped with the reason, for both kinds of file.
+plain file inside the workspace outside any dot-directory. `resolve_attachments`
+also takes a file inside a folder anton manages (`owned_roots`: the artifacts
+root), so an image `generate_image` saved as an artifact can go into a page.
+Everything else is dropped with the reason, for both kinds of file.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ import mimetypes
 import os
 import re
 import shutil
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -160,18 +163,37 @@ def refusal_reason(resolved: Path, workspace: Path | None) -> str | None:
     return None
 
 
+def _inside_owned_root(resolved: Path, owned_roots: Sequence[Path]) -> bool:
+    """Whether `resolved` sits in one of `owned_roots` with no dot-component
+    below it, the rule `file_access.read_refusal` reads anton's folders by."""
+    for root in owned_roots:
+        try:
+            rel = resolved.relative_to(Path(root).resolve())
+        except (ValueError, OSError, RuntimeError):
+            continue
+        if rel.parts and not any(part.startswith(".") for part in rel.parts):
+            return True
+    return False
+
+
 def resolve_attachments(
-    paths, *, workspace: Path | None = None, policy: "CellSandbox | None" = None
+    paths,
+    *,
+    workspace: Path | None = None,
+    policy: "CellSandbox | None" = None,
+    owned_roots: Sequence[Path] = (),
 ) -> tuple[list[Attachment], list[str]]:
     """Turn the tool's `attachments` argument into records, dropping what is
     not a readable, attachable file. Returns (kept, reasons for the dropped
     ones).
 
     `workspace` is the session's workspace base; `refusal_reason` says which
-    paths pass, held under a sandbox `policy` to what the person's own cells
-    may read (`file_access.under_policy`). Duplicates collapse on the resolved path. Nothing here
-    raises: a wrong path is the calling agent's mistake, recorded in the
-    trace, and must not cost the run.
+    paths pass, and a file in one of `owned_roots` (the artifacts root, which
+    `refusal_reason` refuses as a dot-directory) passes too. Both are held
+    under a sandbox `policy` to what the person's own cells may read
+    (`file_access.under_policy`). Duplicates collapse on the resolved path.
+    Nothing here raises: a wrong path is the calling agent's mistake, recorded
+    in the trace, and must not cost the run.
     """
     kept: list[Attachment] = []
     dropped: list[str] = []
@@ -190,9 +212,10 @@ def resolve_attachments(
         except OSError as exc:
             dropped.append(f"{text}: {exc.__class__.__name__}")
             continue
-        reason = file_access.under_policy(
-            refusal_reason(resolved, workspace), resolved, policy, outside=REFUSED_OUTSIDE
-        )
+        reason = refusal_reason(resolved, workspace)
+        if reason is not None and _inside_owned_root(resolved, owned_roots):
+            reason = None
+        reason = file_access.under_policy(reason, resolved, policy, outside=REFUSED_OUTSIDE)
         if reason is not None:
             dropped.append(f"{text}: {reason}")
             continue

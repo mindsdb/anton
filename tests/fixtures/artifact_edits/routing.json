@@ -504,5 +504,268 @@
   "label": "agent",
   "message": "hi",
   "note": "not a change"
+ },
+ {
+  "id": "content-edit-01",
+  "slug": "night-sky-unicorns-5b2e91c4",
+  "label": "edit",
+  "message": "make the unicorns poop rainbow",
+  "note": "the reported case: playful, about things on the page",
+  "recent_changes": [
+   "Quick edit: Made the stars twinkle at different speeds",
+   "Quick edit: Added three flying unicorns that cross the sky from left to right",
+   "Quick edit: Gave the unicorns purple wings and a golden horn"
+  ],
+  "history": [
+   {
+    "role": "user",
+    "text": "add some unicorns flying across the sky"
+   },
+   {
+    "role": "assistant",
+    "text": "Added three flying unicorns that cross the sky from left to right."
+   },
+   {
+    "role": "user",
+    "text": "give them purple wings and a golden horn"
+   },
+   {
+    "role": "assistant",
+    "text": "The unicorns have purple wings and a golden horn now."
+   }
+  ]
+ },
+ {
+  "id": "content-edit-02",
+  "slug": "night-sky-unicorns-5b2e91c4",
+  "label": "edit",
+  "message": "slow down the stars",
+  "note": "STAR_TWINKLE_SPEED",
+  "recent_changes": [
+   "Quick edit: Made the stars twinkle at different speeds",
+   "Quick edit: Added three flying unicorns that cross the sky from left to right",
+   "Quick edit: Gave the unicorns purple wings and a golden horn"
+  ],
+  "history": [
+   {
+    "role": "user",
+    "text": "add some unicorns flying across the sky"
+   },
+   {
+    "role": "assistant",
+    "text": "Added three flying unicorns that cross the sky from left to right."
+   },
+   {
+    "role": "user",
+    "text": "give them purple wings and a golden horn"
+   },
+   {
+    "role": "assistant",
+    "text": "The unicorns have purple wings and a golden horn now."
+   }
+  ]
+ },
+ {
+  "id": "content-edit-03",
+  "slug": "night-sky-unicorns-5b2e91c4",
+  "label": "edit",
+  "message": "make the unicorns bigger and leave a sparkle trail",
+  "recent_changes": [
+   "Quick edit: Made the stars twinkle at different speeds",
+   "Quick edit: Added three flying unicorns that cross the sky from left to right",
+   "Quick edit: Gave the unicorns purple wings and a golden horn"
+  ],
+  "history": [
+   {
+    "role": "user",
+    "text": "add some unicorns flying across the sky"
+   },
+   {
+    "role": "assistant",
+    "text": "Added three flying unicorns that cross the sky from left to right."
+   },
+   {
+    "role": "user",
+    "text": "give them purple wings and a golden horn"
+   },
+   {
+    "role": "assistant",
+    "text": "The unicorns have purple wings and a golden horn now."
+   }
+  ]
+ },
+ {
+  "id": "content-edit-04",
+  "slug": "night-sky-unicorns-5b2e91c4",
+  "label": "edit",
+  "message": "add a shooting star every few seconds",
+  "recent_changes": [
+   "Quick edit: Made the stars twinkle at different speeds",
+   "Quick edit: Added three flying unicorns that cross the sky from left to right",
+   "Quick edit: Gave the unicorns purple wings and a golden horn"
+  ],
+  "history": [
+   {
+    "role": "user",
+    "text": "add some unicorns flying across the sky"
+   },
+   {
+    "role": "assistant",
+    "text": "Added three flying unicorns that cross the sky from left to right."
+   },
+   {
+    "role": "user",
+    "text": "give them purple wings and a golden horn"
+   },
+   {
+    "role": "assistant",
+    "text": "The unicorns have purple wings and a golden horn now."
+   }
+  ]
+ },
+ {
+  "id": "content-edit-05",
+  "slug": "night-sky-unicorns-5b2e91c4",
+  "label": "edit",
+  "message": "can they flap their wings?",
+  "note": "follow-up phrased as a question, about the unicorns",
+  "recent_changes": [
+   "Quick edit: Made the stars twinkle at different speeds",
+   "Quick edit: Added three flying unicorns that cross the sky from left to right",
+   "Quick edit: Gave the unicorns purple wings and a golden horn"
+  ],
+  "history": [
+   {
+    "role": "user",
+    "text": "add some unicorns flying across the sky"
+   },
+   {
+    "role": "assistant",
+    "text": "Added three flying unicorns that cross the sky from left to right."
+   },
+   {
+    "role": "user",
+    "text": "give them purple wings and a golden horn"
+   },
+   {
+    "role": "assistant",
+    "text": "The unicorns have purple wings and a golden horn now."
+   }
+  ]
+ },
+ {
+  "id": "content-edit-06",
+  "slug": "night-sky-unicorns-5b2e91c4",
+  "label": "edit",
+  "message": "make the moon glow more",
+  "recent_changes": [
+   "Quick edit: Made the stars twinkle at different speeds",
+   "Quick edit: Added three flying unicorns that cross the sky from left to right",
+   "Quick edit: Gave the unicorns purple wings and a golden horn"
+  ],
+  "history": [
+   {
+    "role": "user",
+    "text": "add some unicorns flying across the sky"
+   },
+   {
+    "role": "assistant",
+    "text": "Added three flying unicorns that cross the sky from left to right."
+   },
+   {
+    "role": "user",
+    "text": "give them purple wings and a golden horn"
+   },
+   {
+    "role": "assistant",
+    "text": "The unicorns have purple wings and a golden horn now."
+   }
+  ]
+ },
+ {
+  "id": "content-agent-07",
+  "slug": "night-sky-unicorns-5b2e91c4",
+  "label": "agent",
+  "message": "replace the random stars with the real constellations from a star catalog",
+  "note": "new data",
+  "recent_changes": [
+   "Quick edit: Made the stars twinkle at different speeds",
+   "Quick edit: Added three flying unicorns that cross the sky from left to right",
+   "Quick edit: Gave the unicorns purple wings and a golden horn"
+  ],
+  "history": [
+   {
+    "role": "user",
+    "text": "add some unicorns flying across the sky"
+   },
+   {
+    "role": "assistant",
+    "text": "Added three flying unicorns that cross the sky from left to right."
+   },
+   {
+    "role": "user",
+    "text": "give them purple wings and a golden horn"
+   },
+   {
+    "role": "assistant",
+    "text": "The unicorns have purple wings and a golden horn now."
+   }
+  ]
+ },
+ {
+  "id": "content-agent-08",
+  "slug": "night-sky-unicorns-5b2e91c4",
+  "label": "agent",
+  "message": "how many people looked at this page this week?",
+  "note": "question about usage data",
+  "recent_changes": [
+   "Quick edit: Made the stars twinkle at different speeds",
+   "Quick edit: Added three flying unicorns that cross the sky from left to right",
+   "Quick edit: Gave the unicorns purple wings and a golden horn"
+  ],
+  "history": [
+   {
+    "role": "user",
+    "text": "add some unicorns flying across the sky"
+   },
+   {
+    "role": "assistant",
+    "text": "Added three flying unicorns that cross the sky from left to right."
+   },
+   {
+    "role": "user",
+    "text": "give them purple wings and a golden horn"
+   },
+   {
+    "role": "assistant",
+    "text": "The unicorns have purple wings and a golden horn now."
+   }
+  ]
+ },
+ {
+  "id": "content-edit-09",
+  "slug": "focus-timer-9008a47d",
+  "label": "edit",
+  "message": "make the progress ring thicker",
+  "note": "SVG progress ring on the page"
+ },
+ {
+  "id": "content-edit-10",
+  "slug": "inventory-browser-8e710cda",
+  "label": "edit",
+  "message": "make the low-stock dot pulse",
+  "note": "the page's status dot"
+ },
+ {
+  "id": "content-edit-11",
+  "slug": "loan-payment-calculator-684cf670",
+  "label": "edit",
+  "message": "animate the monthly payment number when it changes"
+ },
+ {
+  "id": "content-edit-12",
+  "slug": "currency-converter-01f791d8",
+  "label": "edit",
+  "message": "put the rates table above the converter"
  }
 ]

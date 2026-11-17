@@ -3,6 +3,9 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
+# The values of `write_approval_unchecked`.
+UncheckedMode = Literal["all", "own", "off"]
+
 
 #
 class CoreSettings(BaseSettings):
@@ -68,10 +71,10 @@ class CoreSettings(BaseSettings):
     verifier_jev_min_p: float = 0.8
     # The `browser` tool. Where the browser is comes only from the host
     # (ChatSessionConfig.browser), never from settings. These tune the tool:
-    # how much Jev steers it ("on" takes its confident steps, "shadow" only
-    # records its picks against the model's, "off" never asks), the bar a Jev
-    # step must clear, Jev's time limit, and the most steps one `run` takes.
-    browser_jev: Literal["on", "shadow", "off"] = "shadow"
+    # whether Jev steers it ("on" takes its confident steps, "off" never asks;
+    # the retired "shadow" reads as off), the bar a Jev step must clear, Jev's
+    # time limit, and the most steps one `run` takes.
+    browser_jev: Literal["on", "off", "shadow"] = "on"
     browser_jev_min_p: float = 0.8
     browser_jev_timeout_s: float = 4.0
     browser_max_steps: int = 15
@@ -92,6 +95,28 @@ class CoreSettings(BaseSettings):
     # URL the code picks when it runs matches whatever it could fill. A bad
     # entry is skipped with a WARNING.
     write_approval_http: str = ""
+    # Which cells that run code the write check can't read wait on a card
+    # (ANTON_WRITE_APPROVAL_UNCHECKED). "all": the cell that runs it, a later
+    # cell that may call what it defined, and the first cell after a restart
+    # once a cell may have written a startup hook. "own": only the cell that
+    # runs it. "off": none. Under both, a cell the check stopped short on (a
+    # depth limit, a cell too deep to parse, a check that failed) or that
+    # writes a startup hook still waits, and a cell held for a write the
+    # check reads shows its whole card. Literal code past the check's exec limits
+    # (`write_check._EXEC_LIMIT`, `_LITERAL_CODE_LIMIT`) counts as code it
+    # can't read, not as a stop. So a write inside code the check can't
+    # read gets no card of its own: under "own", one a later cell makes
+    # through what such code defined, or a startup hook makes as the pad
+    # starts again; under "off", any. The write relay holds such a write
+    # only when it sends a method other than GET or HEAD to a host the
+    # relay holds, and nothing holds any other, such as a file change or a
+    # request to an https:// host. So "own" and "off" apply only while the
+    # relay holds every listed write:
+    # `write_relay_url` set, `write_relay_hosts` naming a host, and each
+    # `write_approval_http` rule an http:// rule to one of those hosts for
+    # one method other than GET or HEAD (not *, which takes in GET and HEAD).
+    # Otherwise anton uses "all" and logs a WARNING (`write_hold.unchecked_mode`).
+    write_approval_unchecked: UncheckedMode = "all"
     # The write relay's control address, where anton reads and cancels the
     # requests it holds (ANTON_WRITE_RELAY_URL, as in
     # "http://write-relay:8090"). When set, a session that can ask the user
@@ -107,7 +132,8 @@ class CoreSettings(BaseSettings):
     # (`write_hold.held_by_relay`). A bad entry is skipped with a WARNING.
     write_relay_hosts: str = ""
     # Per-turn spend ceiling in RAW tokens — input + output + cache_read +
-    # cache_creation, i.e. `TurnCost.total_tokens` (ENG-1286). 0 disables it.
+    # cache_creation, plus an image call's image tokens, i.e.
+    # `TurnCost.total_tokens` (ENG-1286). 0 disables it.
     #
     # RAW is deliberate, and the instinct to discount cache reads here is wrong:
     # they bill at ~a tenth, but they draw the user's included-token allowance at
@@ -125,6 +151,10 @@ class CoreSettings(BaseSettings):
     # sets it from the request, since a web turn otherwise meets the hosting
     # side's hard cut-off with no summary.
     max_turn_seconds: int = 0
+    # Images one turn may make (ANTON_MAX_IMAGES_PER_TURN), the `generate_image`
+    # tool and the scratchpad's `generate_image()` together; a call past it is
+    # refused before any request is sent.
+    max_images_per_turn: int = 8
     context_pressure_threshold: float = 0.7
     max_consecutive_errors: int = 5
     resilience_nudge_at: int = 2
