@@ -6,7 +6,7 @@ import socket
 import pytest
 
 from anton.core.mcp.egress import check_server_url, is_public_destination, resolve_public
-from anton.core.mcp.errors import McpEgressBlocked, McpPermanentError
+from anton.core.mcp.errors import McpEgressBlocked, McpHostUnresolved, McpPermanentError
 
 
 def _resolver(*addresses: str):
@@ -101,14 +101,20 @@ async def test_a_private_literal_host_is_refused_without_a_lookup():
         await resolve_public("[::1]", 443, resolver=must_not_resolve)
 
 
-async def test_an_unresolvable_host_is_refused():
-    with pytest.raises(McpEgressBlocked):
+async def test_an_unresolvable_host_is_reported_as_unresolved():
+    with pytest.raises(McpHostUnresolved):
         await resolve_public("nowhere.example.com", 443, resolver=_unresolvable)
 
 
-async def test_an_answer_with_no_parsable_address_is_refused():
+async def test_an_answer_with_no_parsable_address_is_reported_as_unresolved():
     async def garbage(host, port):
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("not-an-ip", port))]
 
-    with pytest.raises(McpEgressBlocked):
+    with pytest.raises(McpHostUnresolved):
         await resolve_public("mcp.example.com", 443, resolver=garbage)
+
+
+async def test_a_private_answer_is_a_refusal_not_an_unresolved_host():
+    with pytest.raises(McpEgressBlocked) as caught:
+        await resolve_public("mcp.example.com", 443, resolver=_resolver("10.0.0.5"))
+    assert not isinstance(caught.value, McpHostUnresolved)

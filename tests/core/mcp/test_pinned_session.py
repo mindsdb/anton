@@ -30,7 +30,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from anton.core.mcp.client import McpSession
 from anton.core.mcp.egress import EgressGuard, is_public_destination
-from anton.core.mcp.errors import McpEgressBlocked
+from anton.core.mcp.errors import McpEgressBlocked, McpTransientError
 from anton.core.mcp.wiring import close_mcp_sessions
 
 HOST = "mcp.pinned.test"
@@ -240,6 +240,47 @@ async def test_a_refusal_at_connect_in_a_gather_child_is_reported(tls_server):
         await asyncio.gather(session.__aenter__())
     await _assert_task_not_cancelled()
     assert tls_server.seen == []
+
+
+class FlakyAnswers(Answers):
+    """A resolver that fails `failures` lookups after `fail_after` answers, then recovers."""
+
+    def __init__(self, *addresses: str, fail_after: int, failures: int = 1) -> None:
+        super().__init__(*addresses)
+        self.calls = 0
+        self.fail_after = fail_after
+        self.failures = failures
+
+    async def __call__(self, host: str, port: int):
+        self.calls += 1
+        if self.fail_after < self.calls <= self.fail_after + self.failures:
+            raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+        return await super().__call__(host, port)
+
+
+async def test_a_failed_lookup_during_a_call_is_not_recorded_as_a_refusal(tls_server):
+    answers = FlakyAnswers(LOOPBACK, fail_after=10**6)
+    guard = _guard(tls_server, answers)
+    async with _session(tls_server, guard) as session:
+        answers.fail_after = answers.calls
+        content, is_error = await session.call_tool("echo", {"text": "hi"})
+        await _assert_task_not_cancelled()
+        assert (content, is_error) == ("hi", False)
+        assert guard.refused is None
+        assert await session.call_tool("echo", {"text": "again"}) == ("again", False)
+
+
+async def test_a_lookup_that_keeps_failing_is_a_transient_error(tls_server):
+    answers = FlakyAnswers(LOOPBACK, fail_after=10**6, failures=10**6)
+    guard = _guard(tls_server, answers)
+    session = _session(tls_server, guard)
+    await session.__aenter__()
+    answers.fail_after = answers.calls
+    with pytest.raises(McpTransientError):
+        await session.call_tool("echo", {"text": "hi"})
+    await _assert_task_not_cancelled()
+    assert guard.refused is None
+    await close_mcp_sessions([session])
 
 
 async def test_an_environment_proxy_is_ignored(tls_server, monkeypatch):

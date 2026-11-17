@@ -44,6 +44,15 @@ class McpEgressBlocked(McpPermanentError):
     """
 
 
+class McpHostUnresolved(McpEgressBlocked):
+    """A custom MCP server's host name did not resolve.
+
+    Permanent when checking a URL before any connection; a guarded session
+    in use treats it as a connection error instead, since lookups fail for
+    a moment too.
+    """
+
+
 #: HTTP status codes that mean the credential itself was rejected, not that
 #: something transient went wrong in transit. OAuth Bearer auth is checked
 #: at the HTTP transport layer (before a request ever reaches JSON-RPC

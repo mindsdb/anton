@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 
 import httpx2
 
-from anton.core.mcp.errors import McpEgressBlocked
+from anton.core.mcp.errors import McpEgressBlocked, McpHostUnresolved
 
 Address = ipaddress.IPv4Address | ipaddress.IPv6Address
 
@@ -42,6 +42,9 @@ _MAX_CONNECTION_ATTEMPTS = 4
 #: reaches the session's caller as a cancellation or a transient error,
 #: depending on which task opened the session; a response does not.
 _REFUSED_STATUS = 421
+#: What a request is answered with when the host did not resolve, for the
+#: same reason: a transient failure the session classifies and retries.
+_UNRESOLVED_STATUS = 503
 
 
 def is_public_destination(address: Address) -> bool:
@@ -101,10 +104,11 @@ async def resolve_public(
 ) -> list[Address]:
     """Every address `host` resolves to, when all of them pass `address_rule`.
 
-    Raises `McpEgressBlocked` when the name does not resolve or any answer
-    fails: one private address in a mixed answer refuses the whole host,
-    since a later connection attempt could land on it. `address_rule` is
-    replaced only by tests that serve from loopback.
+    Raises `McpHostUnresolved` when the name does not resolve, and
+    `McpEgressBlocked` when any answer fails the rule: one private address
+    in a mixed answer refuses the whole host, since a later connection
+    attempt could land on it. `address_rule` is replaced only by tests that
+    serve from loopback.
     """
     try:
         literal = ipaddress.ip_address(host.strip("[]"))
@@ -116,7 +120,7 @@ async def resolve_public(
         try:
             records = await (resolver or _loop_getaddrinfo)(host, port)
         except (OSError, UnicodeError) as exc:
-            raise McpEgressBlocked(f"MCP server host {host!r} does not resolve") from exc
+            raise McpHostUnresolved(f"MCP server host {host!r} does not resolve") from exc
         addresses = []
         for record in records:
             try:
@@ -124,7 +128,7 @@ async def resolve_public(
             except (IndexError, ValueError):
                 continue
     if not addresses:
-        raise McpEgressBlocked(f"MCP server host {host!r} does not resolve")
+        raise McpHostUnresolved(f"MCP server host {host!r} does not resolve")
     if not all(address_rule(address) for address in addresses):
         raise McpEgressBlocked(f"MCP server host {host!r} is not a public address")
     return addresses
@@ -213,6 +217,10 @@ class PinnedHostTransport(httpx2.AsyncBaseTransport):
                 resolver=self._guard.resolver,
                 address_rule=self._guard.address_rule,
             )
+        except McpHostUnresolved:
+            # A lookup can fail for a moment: an outage, not a refusal, so it
+            # is not recorded and the session's retry looks the name up again.
+            return httpx2.Response(_UNRESOLVED_STATUS, request=request)
         except McpEgressBlocked as exc:
             return self._refuse(exc, request)
         timeouts = request.extensions.get("timeout", {})
