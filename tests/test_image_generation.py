@@ -156,7 +156,7 @@ def test_unset_on_mindshub_takes_the_catalogue_image_default():
     with _catalog() as request:
         model = images.resolve_image_model(None, base_url=MINDSHUB, api_key="k", mindshub=True)
     assert model == "gpt-image-2.6-sunburst"
-    assert request.call_args.args[0] == f"{MINDSHUB}/models"
+    assert request.call_args.args[0] == f"{MINDSHUB}/models?kind=image"
 
 
 def test_a_role_default_on_a_chat_row_is_not_an_image_model():

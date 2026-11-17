@@ -308,14 +308,14 @@ def list_models(base_url: str, api_key: str, verify: bool = True) -> list[str]:
 
 
 def fetch_model_catalog(
-    base_url: str, api_key: str, verify: bool = True, *, timeout: int = 10
+    base_url: str, api_key: str, verify: bool = True, *, timeout: int = 10, kind: str | None = None
 ) -> list[dict]:
-    """The rows of ``GET /v1/models``, unfiltered. Raises like `minds_request`.
+    """The rows of ``GET /v1/models``, or only those of ``kind``. Raises like `minds_request`.
 
     `list_models` reads the chat models from it and `role_default_model` the
-    alias auth names as a role's default.
+    alias auth names as a role's default. Image models are listed only under ``kind="image"``.
     """
-    url = f"{minds_v1_base(base_url)}/models"
+    url = f"{minds_v1_base(base_url)}/models" + (f"?kind={kind}" if kind else "")
     raw = minds_request(url, api_key, verify=verify, timeout=timeout)
     data = _json.loads(raw.decode())
     entries = data.get("data") if isinstance(data, dict) else data

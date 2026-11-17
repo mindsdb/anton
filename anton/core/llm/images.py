@@ -615,7 +615,7 @@ def _catalog_images(base_url: str, api_key: str, *, verify: bool = True) -> _Cat
         if now - cached[0] < ttl:
             return cached[1]
     try:
-        entries = fetch_model_catalog(base_url, api_key, verify=verify, timeout=5)
+        entries = fetch_model_catalog(base_url, api_key, verify=verify, timeout=5, kind="image")
         usable = usable_models_of_kind(entries, "image")
         # A disabled role default falls back to the first image model the key may use.
         found: _CatalogImages | None = _CatalogImages(
