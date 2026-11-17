@@ -76,7 +76,17 @@ clipboard = [
 
 [dependency-groups]
 scratchpad = [
+    "beautifulsoup4==4.15.0",
     "boto3==1.43.117",
+    "lxml==6.1.3",
+    "pdfplumber==0.11.10",
+    "pillow==13.0.0",
+    "pypdf==6.21.2",
+    # Declared, not inherited: the reading-files skill renders scanned pages with
+    # it directly, and it would otherwise arrive only through pdfplumber.
+    "pypdfium2==5.14.0",
+    "python-docx==1.2.0",
+    "requests==2.34.2",
 ]
 dev = [
     "cryptography>=46",

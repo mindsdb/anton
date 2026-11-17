@@ -16,6 +16,7 @@ SHIPPED_LABELS = {
     "build-html-dashboard",
     "public-data-sources",
     "cowork-product",
+    "reading-files",
 }
 
 
