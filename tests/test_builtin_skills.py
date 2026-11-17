@@ -50,7 +50,7 @@ class TestShippedSkills:
         assert data_sources.provenance == "builtin"
         # spot-check endpoints + single-brace URL params (SKILL.md bodies are
         # not str.format()'d, unlike the CHAT_SYSTEM_PROMPT they moved out of)
-        assert "feedparser" in data_sources.declarative_md
+        assert "news.google.com/rss" in data_sources.declarative_md
         assert "api.worldbank.org/v2/country/{code}/indicator/{indicator}" in data_sources.declarative_md
 
     def test_descriptions_fit_prompt_budget(self, store):
@@ -144,7 +144,7 @@ class TestDataCatalogMovedToSkill:
     not inline in the always-on CHAT_SYSTEM_PROMPT (that duplication is the
     token cost this move removes)."""
 
-    CATALOG_MARKERS = ("api.worldbank.org", "hacker-news.firebaseio.com", "feedparser")
+    CATALOG_MARKERS = ("api.worldbank.org", "hacker-news.firebaseio.com", "news.google.com/rss")
 
     def test_catalog_not_inline_in_base_prompt(self):
         from anton.core.llm.prompts import CHAT_SYSTEM_PROMPT
@@ -859,3 +859,38 @@ class TestPipelineContractMirrored:
         assert "HOST CONTRACT" in body
         assert "__antonCommentsLayer" in body
         assert "<html lang>" in body
+
+
+class TestInstructionsMatchTheSandbox:
+    """The prompt and skills must not send the agent to a library it can't import.
+
+    An import never installs anything, so a library the instructions name has to
+    be installed or come with "list it in `packages`". Otherwise the agent's first
+    step fails with "not installed", and the hint then calls it an invented name.
+    """
+
+    def test_news_feeds_are_parsed_with_installed_libraries(self, store):
+        body = store.load("public-data-sources").declarative_md
+        assert 'BeautifulSoup(response.content, "xml")' in body
+        assert "(via RSS — use feedparser)" not in body
+        assert "Don't use feedparser" in body
+        assert "Parse feeds with `feedparser`" not in body
+
+    def test_fred_uses_the_csv_route_not_fredapi(self, store):
+        body = store.load("public-data-sources").declarative_md
+        assert "fredapi" not in body
+        assert "fredgraph.csv" in body
+
+    def test_yfinance_is_always_named_with_how_to_install_it(self, store):
+        from anton.core.llm.prompts import CHAT_SYSTEM_PROMPT
+
+        skill = store.load("public-data-sources").declarative_md
+        assert "list `yfinance` in the cell's `packages` array" in skill
+        assert "use yfinance (list it in the cell's `packages`)" in CHAT_SYSTEM_PROMPT
+
+    def test_one_install_rule(self):
+        from anton.core.llm.prompts import CHAT_SYSTEM_PROMPT
+
+        assert "install action" not in CHAT_SYSTEM_PROMPT
+        assert "install packages on the fly" not in CHAT_SYSTEM_PROMPT
+        assert "Importing a library never installs" in CHAT_SYSTEM_PROMPT
