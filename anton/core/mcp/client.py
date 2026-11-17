@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 #: once a real server (not a local reference/stub) is in the loop.
 _SLOW_ROUND_TRIP_MS = 500.0
 
+#: A server that never stops handing out a next cursor is cut off here.
+_MAX_TOOL_PAGES = 20
+
 
 class McpSession:
     """An open session against one MCP server.
@@ -185,19 +188,29 @@ class McpSession:
             self._client = None
 
     async def list_tools(self) -> list[McpTool]:
-        """List every tool this server advertises, unfiltered."""
+        """List every tool this server advertises, unfiltered, following the
+        server's page cursor for at most `_MAX_TOOL_PAGES` pages."""
         client = self._require_client()
         self._raise_if_refused()
         started = time.monotonic()
-        self._rejected_status = None
-        try:
-            result = await client.list_tools()
-        except Exception as exc:
-            self._raise_if_refused(exc)
-            self._raise_if_rejected(exc)
-            raise
+        tools: list[McpTool] = []
+        cursor: str | None = None
+        for _ in range(_MAX_TOOL_PAGES):
+            self._rejected_status = None
+            try:
+                result = await client.list_tools(cursor=cursor)
+            except Exception as exc:
+                self._raise_if_refused(exc)
+                self._raise_if_rejected(exc)
+                raise
+            tools.extend(result.tools)
+            cursor = result.next_cursor
+            if not cursor:
+                break
+        else:
+            logger.warning("MCP tools/list(): stopped after %d pages", _MAX_TOOL_PAGES)
         self._log_round_trip("tools/list()", started)
-        return list(result.tools)
+        return tools
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> tuple[str | list[dict], bool]:
         """Call one tool. Returns (content, is_error).

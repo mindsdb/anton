@@ -218,3 +218,85 @@ def test_a_field_required_by_any_branch_is_kept():
         {"type": "object", "properties": {"id": {"type": "string"}}},
     ]}
     assert without_empty_optionals({"q": "", "id": ""}, schema, schema) == {"q": ""}
+
+
+async def test_allowed_tools_replace_the_access_table(stub_mcp_server):
+    async with McpSession(server=stub_mcp_server) as session:
+        defs = await discover_tool_defs(
+            session, engine="custom_mcp", access_mode="read", allowed_tools=frozenset({"add"})
+        )
+    assert [d.name for d in defs] == ["custom_mcp__add"]
+
+
+async def test_an_empty_allowed_list_registers_nothing(stub_mcp_server):
+    async with McpSession(server=stub_mcp_server) as session:
+        defs = await discover_tool_defs(session, engine="custom_mcp", access_mode="write", allowed_tools=frozenset())
+    assert defs == []
+
+
+async def test_allowed_tools_still_register_nothing_when_the_connection_is_off(stub_mcp_server):
+    async with McpSession(server=stub_mcp_server) as session:
+        defs = await discover_tool_defs(
+            session, engine="custom_mcp", access_mode="none", allowed_tools=frozenset({"add"})
+        )
+    assert defs == []
+
+
+async def test_an_allowed_custom_tool_gets_its_arguments_unchanged():
+    server = MCPServer(name="custom-stub")
+
+    @server.tool()
+    def list_pages(query: str, cursor: str | None = None) -> str:
+        return f"query={query!r} cursor={cursor!r}"
+
+    async with McpSession(server=server) as session:
+        defs = await discover_tool_defs(
+            session, engine="custom_mcp", access_mode="read", allowed_tools=frozenset({"list_pages"})
+        )
+        outcome = await defs[0].handler(None, {"query": "", "cursor": ""})
+    assert outcome.content == "query='' cursor=''"
+
+
+async def test_a_refused_address_has_its_own_message_naming_the_server(stub_mcp_server, monkeypatch):
+    from anton.core.mcp.errors import McpEgressBlocked
+
+    async with McpSession(server=stub_mcp_server) as session:
+        defs = await discover_tool_defs(
+            session,
+            engine="custom_mcp",
+            access_mode="read",
+            allowed_tools=frozenset({"add"}),
+            display_name="Acme Tracker",
+        )
+
+        async def refused(name, arguments):
+            raise McpEgressBlocked("not public")
+
+        monkeypatch.setattr(session, "call_tool", refused)
+        outcome = await defs[0].handler(None, {"a": 1, "b": 1})
+    assert outcome.ok is False
+    assert outcome.reason == "mcp_egress_blocked"
+    assert "Acme Tracker" in outcome.content
+    assert "reconnect" not in outcome.content
+
+
+async def test_a_rejected_token_message_names_the_server_by_its_label(stub_mcp_server, monkeypatch):
+    from anton.core.mcp.errors import McpPermanentError
+
+    async with McpSession(server=stub_mcp_server) as session:
+        defs = await discover_tool_defs(
+            session,
+            engine="custom_mcp",
+            access_mode="read",
+            allowed_tools=frozenset({"add"}),
+            display_name="Acme Tracker",
+        )
+
+        async def rejected(name, arguments):
+            raise McpPermanentError("token rejected")
+
+        monkeypatch.setattr(session, "call_tool", rejected)
+        outcome = await defs[0].handler(None, {"a": 1, "b": 1})
+    assert outcome.reason == "mcp_permanent_error"
+    assert "The Acme Tracker connection needs to be reconnected" in outcome.content
+    assert "custom_mcp" not in outcome.content

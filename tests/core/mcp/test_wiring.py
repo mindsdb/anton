@@ -143,3 +143,126 @@ async def test_call_mcp_tool_raises_on_a_tool_level_error(monkeypatch, stub_mcp_
     )
     with pytest.raises(RuntimeError):
         await wiring.call_mcp_tool("hubspot", "tok", "boom")
+
+
+def _custom_record(**overrides) -> dict:
+    record = {
+        "_method": "mcp",
+        "_server_url": "https://mcp.example.com/mcp",
+        "_allowed_tools": '["add"]',
+        "_label": "Acme Tracker",
+        "access_token": "tok",
+    }
+    record.update(overrides)
+    return {key: value for key, value in record.items() if value is not None}
+
+
+@pytest.fixture()
+def recorded_sessions(monkeypatch, stub_mcp_server):
+    """Record every `McpSession` wiring builds; guarded ones are real
+    sessions, so the address check runs, and the rest open the stub."""
+    built: list[dict] = []
+
+    def factory(*, url=None, access_token=None, guarded=False, **kwargs):
+        built.append({"url": url, "access_token": access_token, "guarded": guarded})
+        if guarded and url is not None and "10.0.0.5" in url:
+            return McpSession(url=url, access_token=access_token, guarded=True)
+        return McpSession(server=stub_mcp_server)
+
+    monkeypatch.setattr(wiring, "McpSession", factory)
+    return built
+
+
+async def test_a_custom_connection_uses_its_own_url_through_a_guarded_session(recorded_sessions):
+    vault = FakeDataVault({("custom_mcp", "acme-tracker"): _custom_record()})
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "custom_mcp", "name": "acme-tracker"}]
+    )
+    assert recorded_sessions == [{"url": "https://mcp.example.com/mcp", "access_token": "tok", "guarded": True}]
+    assert [d.name for d in tool_defs] == ["custom_mcp__add"]
+    await wiring.close_mcp_sessions(sessions)
+
+
+async def test_a_tool_the_server_adds_later_stays_off(recorded_sessions):
+    vault = FakeDataVault({("custom_mcp", "acme-tracker"): _custom_record(_allowed_tools='["add", "renamed"]')})
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "custom_mcp", "name": "acme-tracker"}]
+    )
+    assert "custom_mcp__boom" not in {d.name for d in tool_defs}
+    await wiring.close_mcp_sessions(sessions)
+
+
+@pytest.mark.parametrize("allowed", [None, "", "not json", '{"add": true}', '["add", 1]', "add"])
+async def test_an_unreadable_tool_list_skips_the_connection_before_any_request(recorded_sessions, allowed):
+    vault = FakeDataVault({("custom_mcp", "acme-tracker"): _custom_record(_allowed_tools=allowed)})
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "custom_mcp", "name": "acme-tracker"}]
+    )
+    assert (tool_defs, sessions, recorded_sessions) == ([], [], [])
+
+
+@pytest.mark.parametrize(
+    "server_url",
+    [None, "", "http://mcp.example.com/mcp", "https://mcp.example.com/mcp?key=secret", "https://u:p@mcp.example.com/"],
+)
+async def test_an_unusable_server_url_skips_the_connection_before_any_request(recorded_sessions, server_url):
+    vault = FakeDataVault({("custom_mcp", "acme-tracker"): _custom_record(_server_url=server_url)})
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "custom_mcp", "name": "acme-tracker"}]
+    )
+    assert (tool_defs, sessions, recorded_sessions) == ([], [], [])
+
+
+async def test_a_built_in_engine_ignores_a_server_url_on_its_record(recorded_sessions):
+    vault = FakeDataVault(
+        {
+            ("hubspot", "acme"): {
+                "_method": "mcp",
+                "_access_mode": "write",
+                "_server_url": "https://attacker.example.com/mcp",
+                "access_token": "tok",
+            }
+        }
+    )
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(vault, [{"engine": "hubspot", "name": "acme"}])
+    assert recorded_sessions == [{"url": "https://mcp.hubspot.com", "access_token": "tok", "guarded": False}]
+    await wiring.close_mcp_sessions(sessions)
+
+
+async def test_a_custom_server_at_a_private_address_is_skipped_and_the_turn_keeps_its_other_tools(recorded_sessions):
+    vault = FakeDataVault(
+        {
+            ("custom_mcp", "inside"): _custom_record(_server_url="https://10.0.0.5/mcp"),
+            ("hubspot", "acme"): {"_method": "mcp", "_access_mode": "write", "access_token": "tok"},
+        }
+    )
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "custom_mcp", "name": "inside"}, {"engine": "hubspot", "name": "acme"}]
+    )
+    assert {d.name for d in tool_defs} == {"hubspot__add", "hubspot__boom"}
+    assert len(sessions) == 1
+    await wiring.close_mcp_sessions(sessions)
+
+
+async def test_a_no_login_custom_server_connects_without_a_token(recorded_sessions):
+    vault = FakeDataVault({("custom_mcp", "open-data"): _custom_record(access_token=None)})
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "custom_mcp", "name": "open-data"}]
+    )
+    assert recorded_sessions[0]["access_token"] is None
+    assert [d.name for d in tool_defs] == ["custom_mcp__add"]
+    await wiring.close_mcp_sessions(sessions)
+
+
+async def test_a_custom_connection_switched_off_registers_nothing(recorded_sessions):
+    vault = FakeDataVault({("custom_mcp", "acme-tracker"): _custom_record(_access_mode="none")})
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "custom_mcp", "name": "acme-tracker"}]
+    )
+    assert tool_defs == []
+    await wiring.close_mcp_sessions(sessions)
+
+
+async def test_call_mcp_tool_does_not_serve_custom_servers():
+    with pytest.raises(ValueError):
+        await wiring.call_mcp_tool("custom_mcp", "tok", "add")

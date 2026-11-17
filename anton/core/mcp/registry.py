@@ -34,7 +34,7 @@ from typing import Any
 
 from anton.core.mcp.access import AccessMode, allowed_for_mode
 from anton.core.mcp.client import McpSession
-from anton.core.mcp.errors import McpPermanentError, McpTransientError
+from anton.core.mcp.errors import McpEgressBlocked, McpPermanentError, McpTransientError
 from anton.core.mcp.names import namespaced_tool_name
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
@@ -46,6 +46,8 @@ async def discover_tool_defs(
     engine: str,
     access_mode: AccessMode,
     connection_name: str | None = None,
+    allowed_tools: frozenset[str] | None = None,
+    display_name: str | None = None,
 ) -> list[ToolDef]:
     """List `mcp_session`'s tools, apply the access filter, and wrap each
     surviving one as a namespaced `ToolDef` whose handler calls back into
@@ -57,10 +59,19 @@ async def discover_tool_defs(
     `connection_name` disambiguates the registered tool names when this
     engine has more than one connection in the same turn — see
     `namespaced_tool_name`.
+
+    `allowed_tools`, given for a server a user added, replaces `TOOL_ACCESS`:
+    only the listed names register, and their arguments pass through as the
+    model sent them. `display_name` names the connection in error messages
+    in place of the engine.
     """
     if access_mode == "none":
         return []
     tools = await mcp_session.list_tools()
+    if allowed_tools is not None:
+        allowed = [tool for tool in tools if tool.name in allowed_tools]
+    else:
+        allowed = [tool for tool in tools if allowed_for_mode(engine, tool.name, access_mode)]
     return [
         ToolDef(
             name=namespaced_tool_name(engine, tool.name, connection_name=connection_name),
@@ -68,14 +79,13 @@ async def discover_tool_defs(
             input_schema=tool.input_schema,
             handler=_make_handler(
                 mcp_session,
-                engine=engine,
+                label=display_name or engine,
                 bare_tool_name=tool.name,
                 input_schema=tool.input_schema or {},
-                drop_empty_optionals=allowed_for_mode(engine, tool.name, "read"),
+                drop_empty_optionals=allowed_tools is None and allowed_for_mode(engine, tool.name, "read"),
             ),
         )
-        for tool in tools
-        if allowed_for_mode(engine, tool.name, access_mode)
+        for tool in allowed
     ]
 
 
@@ -133,7 +143,7 @@ def without_empty_optionals(value: Any, schema: Any, root: dict, depth: int = 0)
 
 
 def _make_handler(
-    mcp_session: McpSession, *, engine: str, bare_tool_name: str, input_schema: dict, drop_empty_optionals: bool
+    mcp_session: McpSession, *, label: str, bare_tool_name: str, input_schema: dict, drop_empty_optionals: bool
 ):
     async def handle_mcp_call(session, tc_input: dict) -> ToolOutcome:  # noqa: ARG001 - session unused, contract requires it
         arguments = tc_input or {}
@@ -141,10 +151,19 @@ def _make_handler(
             arguments = without_empty_optionals(arguments, input_schema, input_schema)
         try:
             content, is_error = await mcp_session.call_tool(bare_tool_name, arguments)
+        except McpEgressBlocked:
+            return ToolOutcome(
+                content=(
+                    f"The {label} server is at an address Cowork does not connect to, "
+                    f"so this tool cannot run."
+                ),
+                ok=False,
+                reason="mcp_egress_blocked",
+            )
         except McpPermanentError:
             return ToolOutcome(
                 content=(
-                    f"The {engine} connection needs to be reconnected before "
+                    f"The {label} connection needs to be reconnected before "
                     f"this tool can run again."
                 ),
                 ok=False,
@@ -156,7 +175,7 @@ def _make_handler(
             # rate limit or transport hiccup, never implying the user broke
             # something (see ENG-1816 "Decisions made in review").
             return ToolOutcome(
-                content=f"{engine} is temporarily unavailable. Try again shortly.",
+                content=f"{label} is temporarily unavailable. Try again shortly.",
                 ok=False,
                 reason="mcp_transient_error",
             )
