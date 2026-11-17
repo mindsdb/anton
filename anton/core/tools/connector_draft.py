@@ -69,7 +69,7 @@ class ConnectorDraftError(ValueError):
 
 
 class ConnectorCheckError(ConnectorDraftError):
-    """The draft's check was refused."""
+    """``check.path`` tried to carry a field's value, so the refusal also says when no connector fits."""
 
 
 @dataclass(frozen=True)
@@ -298,23 +298,18 @@ def _check_path(value: Any, where: str = "check.path") -> str:
     A path the request URL could read as naming another host (``//``, ``\\``,
     a ``.`` or ``..`` segment) is refused, and so is anything a placeholder
     could reach: a value never goes into the URL. ``%`` is refused too, so an
-    encoded value cannot pass the token rule. That refusal is a
-    ``ConnectorCheckError``; every other one is a ``ConnectorDraftError``.
+    encoded value cannot pass the token rule.
     """
     text = _check_text(value, where, _CHECK_PATH_MAX, long_text=False)
     if text is None:
         raise ConnectorDraftError(f"{where} is required.")
-    message = f"{where} must be a path from the host, with any version, such as /v2/me, and no host."
-    if any(c in text for c in "{}%"):
-        # An attempt to carry a value or the key: the refusal also says when no connector fits.
-        raise ConnectorCheckError(message)
     if (
         not text.startswith("/")
         or "//" in text
         or not is_printable_ascii(text, space=False)
-        or any(c in text for c in "\\#")
+        or any(c in text for c in "\\#{}%")
     ):
-        raise ConnectorDraftError(message)
+        raise ConnectorDraftError(f"{where} must be a path from the host, with any version, such as /v2/me, and no host.")
     segments = text.split("?", 1)[0].split("/")
     if any(segment in (".", "..") for segment in segments):
         raise ConnectorDraftError(f"{where} must not have . or .. segments.")
@@ -353,14 +348,22 @@ def _parse_check(data: Any, auth: ConnectorDraftAuth, fields: tuple[ConnectorDra
     places, or the check would send the key under two values. A member can
     connect without any key only when every secret field is optional, so
     only then is ``public_path`` required, and otherwise it is refused.
+    A ``path`` naming a field's placeholder, or a parameter the auth places,
+    raises ``ConnectorCheckError``.
     """
     if data is None:
         return None
     if not isinstance(data, dict):
         raise ConnectorDraftError("check must be an object.")
     _check_keys(data, _CHECK_KEYS, "check")
-    path = _check_path(data.get("path"))
-    _check_no_collision(path, auth, "check.path")
+    raw_path = data.get("path")
+    if isinstance(raw_path, str) and any(f"{{{f.name}}}" in raw_path for f in fields):
+        raise ConnectorCheckError("check.path must not name a field; the template places the key.")
+    path = _check_path(raw_path)
+    try:
+        _check_no_collision(path, auth, "check.path")
+    except ConnectorDraftError as e:
+        raise ConnectorCheckError(str(e)) from e
     keyless_possible = any(not f.required for f in fields) and all(not f.required for f in fields if f.secret)
     public_path = data.get("public_path")
     if not keyless_possible:
@@ -383,7 +386,7 @@ def _parse_check(data: Any, auth: ConnectorDraftAuth, fields: tuple[ConnectorDra
 def _check_no_collision(path: str, auth: ConnectorDraftAuth, where: str) -> None:
     """Refuse a path whose query carries a parameter name the template's auth places."""
     if rules.query_collides(auth.to_dict(), rules.query_names(urlsplit(path).query)):
-        raise ConnectorCheckError(f"{where} may carry only plain parameter names, none of them one auth places.")
+        raise ConnectorDraftError(f"{where} may carry only plain parameter names, none of them one auth places.")
 
 
 def _parse_field(data: Any, index: int) -> ConnectorDraftField:

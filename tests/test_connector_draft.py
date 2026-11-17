@@ -419,13 +419,13 @@ def test_the_tool_refuses_a_template_without_a_check_and_says_what_to_do(check):
 
 @pytest.mark.parametrize("overrides", [
     {"check": {"path": "/v1/me?key={api_key}"}},
-    {"check": {"path": "/v1/me?key=%41"}},
+    {"check": {"path": "/v1/{region}/me"}},
     {
         "fields": [{"name": "api_key", "label": "Access key"}],
         "auth": {"type": "query", "params": {"access_key": "{api_key}"}},
         "check": {"path": "/v1/me?access_key=x"},
     },
-], ids=["placeholder-in-path", "encoded-value", "auth-parameter-in-query"])
+], ids=["key-placeholder", "other-field-placeholder", "auth-parameter-in-query"])
 def test_the_tool_says_what_to_do_when_a_check_path_tries_to_carry_the_key(overrides):
     """A check path that tries to carry the key also says when to skip the connector."""
     box = ConnectorDraftBox()
@@ -442,8 +442,10 @@ def test_the_tool_says_what_to_do_when_a_check_path_tries_to_carry_the_key(overr
     {"path": "v1/me"},
     {"path": "/v1/../me"},
     {"path": "/v1//me"},
+    {"path": "/v1/users/{id}"},
+    {"path": "/v1/search?q=a%20b"},
     {},
-], ids=["no-leading-slash", "dot-dot-segment", "double-slash", "missing-path"])
+], ids=["no-leading-slash", "dot-dot-segment", "double-slash", "non-field-brace", "percent", "missing-path"])
 def test_a_malformed_check_path_is_refused_without_the_no_connector_hint(check):
     box = ConnectorDraftBox()
 
@@ -878,6 +880,21 @@ _OPTIONAL_CHECK = {"path": "/api/3/action/user_show", "public_path": "/api/3/act
 def _optional_draft(**overrides):
     """A one-key template whose key a member may leave out, with both check paths."""
     return _draft(**{"fields": _OPTIONAL_FIELDS, "auth": _one_field_auth(), "check": _OPTIONAL_CHECK, **overrides})
+
+
+@pytest.mark.parametrize("public_path", [
+    "/api/3/action/package_list?key={api_key}",
+    "/api/3/action/../package_list",
+], ids=["key-placeholder", "dot-dot-segment"])
+def test_a_refused_public_path_gets_no_no_connector_hint(public_path):
+    check = {**_OPTIONAL_CHECK, "public_path": public_path}
+
+    outcome = asyncio.run(connector_draft_tool(ConnectorDraftBox()).handler(None, _optional_draft(check=check)))
+
+    assert outcome.ok is False
+    error = json.loads(outcome.content)["error"]
+    assert "check.public_path" in error
+    assert "call it directly from code" not in error
 
 
 def test_an_optional_key_with_a_public_path_parses_and_round_trips():
