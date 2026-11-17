@@ -2679,6 +2679,32 @@ async def test_acting_while_the_user_has_the_browser_says_wait():
     assert "click Done in the browser" in result.content
 
 
+async def test_act_says_the_step_ran_when_the_person_took_over_after_its_last_input():
+    """A Take over after the step's last input: the host answers the step 200
+    with no page and changed null, and the read after it 409
+    human_in_control. The answer says the step ran, then that the person has
+    the browser, so the model doesn't take the step again after the hand-back."""
+    host = FakeHost()
+    session = make_session(host)
+    taken = "The person is using the browser (taken over by you). Wait for them to hand back."
+    stepped: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/action"):
+            stepped.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True, "url": PAGE["url"], "changed": None})
+        if stepped and request.url.path.endswith("/page"):
+            return httpx.Response(409, json={"error": "human_in_control", "message": taken})
+        return host.handler(request)
+
+    answer_with(session, handler)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 2}})
+    assert stepped == [{"action": "click", "element": 2, "include_page": True}]
+    assert result.content.startswith(f"Done: click [2].\n\n{taken} The user has the browser.")
+    assert "click Done in the browser" in result.content
+    assert result.ok is False and result.reason == "browser_human_in_control"
+
+
 async def test_hand_to_user_without_an_elicitor_tells_the_model_to_wait():
     host = FakeHost()
     session = make_session(host, elicitor=None)

@@ -1705,11 +1705,23 @@ async def _do_act(session: "ChatSession", tc_input: dict) -> str | ToolOutcome:
     if isinstance(result, ToolOutcome):
         return result
     state.steps.append(_describe(body, typed=False))
-    page = result.page or await state.client.page(session_id=state.session_id)
+    done = f"Done: {_describe(body)}."
+    page = result.page
+    if page is None:
+        # The host answered the step, so it ran, whatever the read after it
+        # answers: a host that stops a step on a Take over answers one the
+        # person took after its last input with no page, and this read then
+        # 409 human_in_control. The answer says the step ran first, so the
+        # model doesn't take it again after the hand-back.
+        try:
+            page = await state.client.page(session_id=state.session_id)
+        except BrowserError as exc:
+            refused = _refused(session, exc)
+            return ToolOutcome(content=f"{done}\n\n{refused.content}", ok=refused.ok, reason=refused.reason)
     checked = await _unless_human_check(session, page)
     # Only a host's false says so; null is a host that can't tell.
     note = " The page did not change." if result.changed is False else ""
-    return f"Done: {_describe(body)}.{note}\n\n{checked or _show(state, page)}"
+    return f"{done}{note}\n\n{checked or _show(state, page)}"
 
 
 async def _do_screenshot(session: "ChatSession", tc_input: dict):
