@@ -430,7 +430,7 @@ def _custom_api_block(custom_api: CustomApiBlockV1) -> str:
         "the user for one.\n"
         "- The user typed only the API's host. `path` starts at that host and includes any "
         "version, with no query string: "
-        "call_minds_api(12, \"/v2/eod\", query={\"symbols\": \"AAPL\"}). Put every parameter in "
+        "call_minds_api(12, \"/v1/orders\", query={\"status\": \"open\"}). Put every parameter in "
         "`query`: a dict, or a list of [name, value] pairs to repeat a name. When usage "
         "notes show a path with `?name=value`, the part after `?` goes in `query`. Never "
         "add a key parameter; the gateway places it.\n"

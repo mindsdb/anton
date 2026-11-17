@@ -1,6 +1,6 @@
 {
   "custom_api": {
-    "turn_key": "mdb_turnkey.secret",
+    "protocol_version": 1,
     "connections": [
       {
         "connection_id": 3,

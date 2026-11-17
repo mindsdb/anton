@@ -254,9 +254,7 @@ def _cloud_turn_workspace_env(request: TurnRequestV1, settings: AntonSettings) -
             }
         )
     if request.custom_api is not None:
-        if not _carries_this_turns_inference(request, settings) or not hmac.compare_digest(
-            request.custom_api.turn_key.encode(), request.llm["api_key"].encode()
-        ):
+        if not _carries_this_turns_inference(request, settings):
             raise ValueError("the turn's inference connection cannot carry custom API calls")
         if not _is_canonical_uuid(request.correlation_id):
             raise ValueError("custom API turn credentials are unavailable")

@@ -543,7 +543,7 @@ _INPUT_SCHEMA = {
                 "the credentials, including any key parameter auth places in the URL, so leave out "
                 "auth headers, key parameters, keys and the API's address. No values. The user types "
                 "only the host, so every path starts at the host and includes any version, "
-                "with its parameters apart, e.g. path /v2/eod with query {'symbols': 'AAPL'}."
+                "with its parameters apart, e.g. path /v1/orders with query {'status': 'open'}."
             ),
         },
         "fields": {

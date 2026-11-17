@@ -18,10 +18,12 @@ from anton.cloud_turn.session import _WORKSPACE_PATH_ENV, build_cloud_chat_sessi
 from anton.core.backends import local
 from anton.core.backends.sandbox import CellSandbox, overlay_key_allowed
 from anton.core.backends.wire import CELL_DELIM, RESULT_END, RESULT_START
+from tests.test_cloud_turn_custom_api_helper import _CONTRACT, _EXAMPLE, _calls
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _FIXTURE = Path(__file__).parent / "fixtures" / "turn_custom_api_block.json"
 _PRODUCED = json.loads(_FIXTURE.read_text(encoding="utf-8"))["custom_api"]
+_TURN_KEY = "mdb_turnkey.secret"
 _CORRELATION_ID = "3f1c9a2e-8b7d-4e6f-a5c4-2d1b0e9f8a7c"
 _BASE_URL = "https://minds.internal/v1"
 _CUSTOM_ENV = {
@@ -45,7 +47,7 @@ def _request(**fields) -> TurnRequestV1:
         "input": "hello",
         "llm": {
             "provider": "minds-cloud",
-            "api_key": _PRODUCED["turn_key"],
+            "api_key": _TURN_KEY,
             "base_url": _BASE_URL,
         },
         "custom_api": _PRODUCED,
@@ -122,6 +124,14 @@ def test_a_turn_without_custom_connections_carries_none(tmp_path, monkeypatch):
     assert config.workspace_env_overlay == {"ANTON_CLOUD_TURN": "1"}
 
 
+def test_a_dropped_block_builds_the_same_turn_as_an_absent_one(tmp_path, monkeypatch):
+    dropped = {**_PRODUCED, "protocol_version": 2}
+
+    config = _captured_config(tmp_path, monkeypatch, _request(custom_api=dropped))
+
+    assert config.workspace_env_overlay == {"ANTON_CLOUD_TURN": "1"}
+
+
 @pytest.mark.parametrize(
     "pod_env",
     [
@@ -145,25 +155,32 @@ def test_a_custom_api_turn_fails_when_a_pod_setting_replaces_the_turn_connection
 @pytest.mark.parametrize(
     "llm",
     [
-        {
-            "provider": "minds-cloud",
-            "api_key": "mdb_other.secret",
-            "base_url": _BASE_URL,
-        },
-        {
-            "provider": "minds-cloud",
-            "api_key": _PRODUCED["turn_key"],
-            "base_url": "http://minds.internal/v1",
-        },
-        {"provider": "openai", "api_key": _PRODUCED["turn_key"], "base_url": _BASE_URL},
+        {"provider": "minds-cloud", "api_key": _TURN_KEY, "base_url": "http://minds.internal/v1"},
+        {"provider": "openai", "api_key": _TURN_KEY, "base_url": _BASE_URL},
     ],
-    ids=["block-key-is-not-the-turn-key", "plaintext-base", "not-minds-cloud"],
+    ids=["plaintext-base", "not-minds-cloud"],
 )
-def test_a_custom_api_turn_fails_when_its_key_or_base_is_not_this_turns(
+def test_a_custom_api_turn_fails_when_its_base_is_not_this_turns(
     tmp_path, monkeypatch, llm
 ):
     with pytest.raises(ValueError, match="cannot carry custom API calls"):
         _captured_config(tmp_path, monkeypatch, _request(llm=llm))
+
+
+def test_the_helper_sends_the_llm_settings_key(tmp_path, monkeypatch):
+    """The block carries no key; the child's OPENAI_API_KEY is the turn's llm api_key."""
+    key = "mdb_llm_only.key"
+    llm = {"provider": "minds-cloud", "api_key": key, "base_url": _BASE_URL}
+
+    config = _captured_config(tmp_path, monkeypatch, _request(llm=llm))
+
+    assert config.settings.openai_api_key == key
+    sent = _calls(
+        tmp_path,
+        [{"args": [_EXAMPLE["connection_id"], "/v1/orders"], "answers": [[200, {"json": _CONTRACT["response"]}]]}],
+        OPENAI_API_KEY=config.settings.openai_api_key,
+    )[0]["sent"]
+    assert [call["bearer_is_turn_key"] for call in sent] == [True]
 
 
 @pytest.mark.parametrize(
@@ -254,7 +271,7 @@ def test_a_scratchpad_child_holds_nothing_of_a_custom_connection_but_ids_and_ver
     request_text = [
         ref[key] for ref in _PRODUCED["connections"] for key in ("connector_id", "name")
     ]
-    for value in [*request_text, _PRODUCED["turn_key"]]:
+    for value in [*request_text, _TURN_KEY]:
         assert not [k for k, v in gained.items() if value in v], value
     assert set(custom["names"]) - set(plain["names"]) == {"call_minds_api"}
     assert set(plain["names"]) <= set(custom["names"])

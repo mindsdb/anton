@@ -785,10 +785,10 @@ def test_the_tool_says_every_path_starts_at_the_host_with_its_version():
 
     for where, text in texts.items():
         assert "only" in text and "host" in text, where
-        assert "/v2/" in text, where
+        assert re.search(r"/v\d/", text), where
         assert "includ" in text and "version" in text, where
     assert "(/v2/exchanges, not /exchanges)" in texts["description"]
-    assert "path /v2/eod with query {'symbols': 'AAPL'}" in texts["usage_notes"]
+    assert "path /v1/orders with query {'status': 'open'}" in texts["usage_notes"]
 
 
 def test_no_example_path_for_a_call_carries_its_query():
