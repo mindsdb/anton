@@ -36,10 +36,8 @@ def test_template_shows_open_store_usage(T):
 
 
 def test_rules_position_state_for_light_and_external_db_for_heavy(T):
-    low = T.lower()
-    assert "state_manifest.json" in T
-    # light state → STATE; heavy/relational → external DB
-    assert "external" in low and "relational" in low
+    assert "For HEAVY/relational needs" in T
+    assert "use an EXTERNAL database via a connected data source" in T
 
 
 # --- shared-table API guidance (ENG-704) ---
@@ -50,9 +48,9 @@ def test_state_overlay_is_url_token_not_creds(T):
 
 
 def test_store_api_mentions_collection_and_atomics(T):
-    assert "Collection" in T
-    assert "increment" in T
-    assert "update" in T
+    assert 'Collection(get_store(), "todos")' in T
+    assert "store.increment(pk, sk=None, *, field, by=1)" in T
+    assert "store.update(pk, sk=None, *, set_fields=None, add_fields=None, if_version=None)" in T
 
 
 def test_store_api_drops_gsi_index_kwarg(T):
@@ -61,7 +59,8 @@ def test_store_api_drops_gsi_index_kwarg(T):
 
 
 def test_rules_warn_against_manual_mutation_retries(T):
-    assert "retry" in T.lower()
+    assert "Do NOT wrap a STATE mutation" in T
+    assert "in your own retry loop" in T
 
 
 def test_store_api_shows_versioned_read_modify_write(T):

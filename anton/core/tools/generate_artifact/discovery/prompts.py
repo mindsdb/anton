@@ -6,8 +6,6 @@ neither has to re-derive it — only the task-specific instructions differ.
 
 from __future__ import annotations
 
-import os
-
 from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
 from anton.core.llm.prompts import ANTON_NOTE
 
@@ -66,7 +64,14 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
         "standing orders. The tool list stays the same for the whole "
         "pipeline; a tool being listed does NOT mean it is available on the "
         "current step. Calling one that is not available wastes a round and "
-        "is answered with a refusal naming the step."
+        "is answered with a refusal naming the step.\n\n"
+        # Generated pages cut day-dated rows at the last week's start and lost that week.
+        "DATE WINDOWS. For a period counted in weeks or months, set the window "
+        "end to the start of the period after the last one and filter with a "
+        "strict `<`. Example: weeks starting 2026-10-05 ... 2026-10-26 -> "
+        "end = 2026-11-02, filter `col < '2026-11-02'`. This works the same "
+        "for weekly, daily and timestamp columns. Never use the last period's "
+        "start as an inclusive end."
         + fullstack_choice
         + "\n\n" + GEOGRAPHY_GUIDANCE,
         state.project_rules,
@@ -237,19 +242,9 @@ _WHEN_TO_ASK = (
     "One question with options beats several.\n"
 )
 
-_WHEN_TO_ASK_ACT_FIRST = (
-    "- When the request leaves something open, write your choice as ONE "
-    "line under `assumptions` and keep going. Ask the user only when the "
-    "artifact cannot be built without the answer and no reasonable "
-    "assumption exists — never for taste, style or scope you can pick "
-    "yourself. Leave `open_points` empty: nobody confirms the brief, so a "
-    "point left open is decided by its default anyway — record that "
-    "default as an assumption. One question with options beats several.\n"
-)
-
 
 def _gathering_instruction(act_first: bool, *, static_completion: bool = False) -> str:
-    if act_first and os.environ.get("ANTON_STATIC_FAST_PATH") == "direct":
+    if act_first:
         return (
             "Gather the evidence needed to build the ORIGINAL user request. Use the connected "
             "source's documented API and credentials from the catalog. Reuse an existing "
@@ -270,7 +265,7 @@ def _gathering_instruction(act_first: bool, *, static_completion: bool = False) 
             "must query data at runtime, verify its access with a real sample and finish."
         )
     return _GATHERING_TEMPLATE.format(
-        when_to_ask=_WHEN_TO_ASK_ACT_FIRST if act_first else _WHEN_TO_ASK,
+        when_to_ask=_WHEN_TO_ASK,
     )
 
 

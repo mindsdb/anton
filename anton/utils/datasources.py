@@ -24,6 +24,7 @@ from anton.core.datasources.data_vault import (
     _slug_env_prefix,
     _sweep_ds_env_vars,
     is_secret_key,
+    withheld_from_env,
 )
 from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML_BLOCK_RE
 
@@ -377,6 +378,14 @@ def parse_connection_slug(
     return None
 
 
+def _engine_fields(engine_def: "DatasourceEngine") -> list["DatasourceField"]:
+    """Return every field the engine definition declares, top level and per auth method."""
+    all_fields = list(engine_def.fields)
+    for am in engine_def.auth_methods or []:
+        all_fields.extend(am.fields)
+    return all_fields
+
+
 def register_secret_vars(
     engine_def: "DatasourceEngine", *, engine: str = "", name: str = ""
 ) -> None:
@@ -385,10 +394,7 @@ def register_secret_vars(
     If engine and name are given, registers namespaced vars (DS_ENGINE_NAME__FIELD).
     Otherwise registers flat vars (DS_FIELD) — for temporary test_snippet execution.
     """
-    all_fields = list(engine_def.fields)
-    for am in engine_def.auth_methods or []:
-        all_fields.extend(am.fields)
-    for f in all_fields:
+    for f in _engine_fields(engine_def):
         if engine and name:
             prefix = _slug_env_prefix(engine, name)
             key = f"{prefix}__{f.name.upper()}"
@@ -397,6 +403,28 @@ def register_secret_vars(
         _DS_KNOWN_VARS.add(key)
         if f.secret:
             _DS_SECRET_VARS.add(key)
+
+
+def _register_stored_username(
+    vault: DataVault, engine_def: "DatasourceEngine", *, engine: str, name: str
+) -> None:
+    """Mark a connection's stored ``username`` var as known when it is the engine's login name.
+
+    Connection forms store the login as ``username`` while the engine
+    definitions call it ``user``, so without this the value falls into the
+    unknown DS_* net and is hidden wherever it appears, including in the
+    connection's own var names and in auth errors. Registers it as known
+    only, never as secret, and only when the definition has a non secret
+    ``user`` field and the record's ``secure_keys`` does not list
+    ``username``. Reads the vault record; adds to ``_DS_KNOWN_VARS``.
+    """
+    if not any(f.name == "user" and not f.secret for f in _engine_fields(engine_def)):
+        return
+    record = vault.read_record(engine, name) if hasattr(vault, "read_record") else None
+    fields = (record or {}).get("fields") or {}
+    if "username" not in fields or "username" in ((record or {}).get("secure_keys") or ()):
+        return
+    _DS_KNOWN_VARS.add(f"{_slug_env_prefix(engine, name)}__USERNAME")
 
 
 def _register_unregistered_connection_vars(vault: DataVault, engine: str, name: str) -> None:
@@ -681,10 +709,12 @@ def scrub_credentials(text: str) -> str:
     Redacts, longest value first:
       * DS_* values registered as secret via register_secret_vars (driven by
         DatasourceField.secret=true). Non-secret fields of known engines
-        (DS_HOST, DS_PORT, DS_BASE_URL, …) stay readable so the LLM can reason
-        about connection errors.
-      * Unknown DS_* vars (custom engines not yet in the registry) — any long
-        value, conservatively.
+        (DS_HOST, DS_PORT, DS_BASE_URL, …), and a stored ``username`` that is
+        the engine's ``user``, stay readable so the LLM can reason about
+        connection errors.
+      * Unknown DS_* vars (custom engines not yet in the registry, or stored
+        fields a known engine's definition does not name) — any long value,
+        conservatively.
       * Provider credentials (ENG-463): the values of _PROVIDER_SECRET_VARS.
     Each value is matched in every form `_secret_forms` builds: as printed,
     URL-encoded, escaped, or in base64, but never inside a marker already in
@@ -1348,9 +1378,11 @@ def collect_datasource_catalog(
         prefix = _slug_env_prefix(engine, c["name"])
         # Skip `_`-prefixed bookkeeping (`_connector_id`, `_method`, `_label`,
         # `_user_label`) — they're not credential env vars the agent should
-        # reference.
+        # reference — and an MCP connection's secrets, which env_for withholds.
         var_names = [
-            f"{prefix}__{k.upper()}" for k in fields if not k.startswith("_")
+            f"{prefix}__{k.upper()}"
+            for k in fields
+            if not k.startswith("_") and not withheld_from_env(fields, k, secure_keys)
         ]
         user_label = str(fields.get("_user_label", "")).strip() or str(
             fields.get("_label", "")
@@ -1545,8 +1577,17 @@ def _rebuild_ds_registries(vault: DataVault) -> None:
                 "scrubbed from this turn's output",
                 engine, name, exc_info=True,
             )
+        if edef is not None and not oauth:
+            try:
+                _register_stored_username(vault, edef, engine=engine, name=name)
+            except Exception:
+                logger.warning(
+                    "Could not read %s/%s to classify its username; it stays hidden",
+                    engine, name, exc_info=True,
+                )
         try:
             env_values.update(vault.env_for(engine, name) or {})
+            env_values.update(_withheld_values(vault, engine, name))
         except Exception:
             # Must not block the rest, but it leaves that connection
             # unscrubbable for this turn, so say so. Names only, never a value.
@@ -1557,6 +1598,21 @@ def _rebuild_ds_registries(vault: DataVault) -> None:
             )
     _ds_env_values.set(env_values)
     _hold_exact_secrets()
+
+
+def _withheld_values(vault: DataVault, engine: str, name: str) -> dict[str, str]:
+    """The MCP secrets env_for withholds, under the names it would have used,
+    for the scrub map only: the token never reaches a pad, but an MCP error
+    that echoes it must still be redacted."""
+    record = (vault.read_record(engine, name) if hasattr(vault, "read_record") else None) or {}
+    fields = record.get("fields") or {}
+    secure_keys = record.get("secure_keys")
+    prefix = _slug_env_prefix(engine, name)
+    return {
+        f"{prefix}__{key.upper()}": str(value)
+        for key, value in fields.items()
+        if value and not key.startswith("_") and withheld_from_env(fields, key, secure_keys)
+    }
 
 
 def find_matching_connection(

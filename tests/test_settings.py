@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from anton.config.settings import AntonSettings
 
@@ -237,3 +238,21 @@ def test_direct_reports_flag_reads_the_env(monkeypatch):
     assert AntonSettings(_env_file=None).direct_reports is True
     monkeypatch.setenv("ANTON_DIRECT_REPORTS", "false")
     assert AntonSettings(_env_file=None).direct_reports is False
+
+
+@pytest.mark.parametrize("value", ["all", "own", "off"])
+def test_write_approval_unchecked_reads_each_value_from_the_env(monkeypatch, value):
+    monkeypatch.setenv("ANTON_WRITE_APPROVAL_UNCHECKED", value)
+    assert AntonSettings(_env_file=None).write_approval_unchecked == value
+
+
+def test_write_approval_unchecked_defaults_to_all(monkeypatch):
+    monkeypatch.delenv("ANTON_WRITE_APPROVAL_UNCHECKED", raising=False)
+    assert AntonSettings(_env_file=None).write_approval_unchecked == "all"
+
+
+@pytest.mark.parametrize("value", ["OWN", "none", " own"])
+def test_write_approval_unchecked_refuses_any_other_value(monkeypatch, value):
+    monkeypatch.setenv("ANTON_WRITE_APPROVAL_UNCHECKED", value)
+    with pytest.raises(ValidationError, match="write_approval_unchecked"):
+        AntonSettings(_env_file=None)

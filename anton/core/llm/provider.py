@@ -46,10 +46,19 @@ def log_background_done(trace: TraceContext) -> None:
 
 def _usage_record(*, role: str | None, model: str | None, served_model: str | None,
                   input_tokens: int, output_tokens: int, cache_read: int,
-                  cache_creation: int) -> dict:
-    """One call's usage, named by the conversation, turn and tags of the current trace."""
+                  cache_creation: int, image_input: int = 0, image_output: int = 0) -> dict:
+    """One call's usage, named by the conversation, turn and tags of the current trace.
+
+    An image call's image tokens ride as ``image_input`` / ``image_output``,
+    present only when non-zero, so a chat call's record is unchanged.
+    """
     ctx = get_trace_context()
     metadata = (ctx.metadata or {}) if ctx else {}
+    images = {
+        key: value
+        for key, value in (("image_input", image_input), ("image_output", image_output))
+        if value
+    }
     return {
         # End-of-turn work runs detached from the session, its conversation in the metadata.
         "conversation": (ctx.session_id or metadata.get("conversation_id")) if ctx else None,
@@ -62,6 +71,7 @@ def _usage_record(*, role: str | None, model: str | None, served_model: str | No
         "output": output_tokens,
         "cache_read": cache_read,
         "cache_creation": cache_creation,
+        **images,
     }
 
 
@@ -87,6 +97,7 @@ def scratchpad_usage_record(sent: object) -> dict | None:
         role=text("role"), model=text("model"), served_model=text("served_model"),
         input_tokens=count("input"), output_tokens=count("output"),
         cache_read=count("cache_read"), cache_creation=count("cache_creation"),
+        image_input=count("image_input"), image_output=count("image_output"),
     )
 
 
@@ -204,6 +215,10 @@ class Usage:
     - Total context for a call = input + cache_read + cache_creation
       (cache tokens ARE context; dropping them understates a warm-cache
       call by ~10x).
+    - ``image_input_tokens`` / ``image_output_tokens``: an image call's image
+      tokens (reference images in, the picture out). Zero on chat calls. On
+      an image call ``input_tokens`` / ``output_tokens`` are its TEXT tokens
+      only, so nothing is counted twice — the split MindsHub bills by.
     """
 
     input_tokens: int = 0
@@ -211,6 +226,8 @@ class Usage:
     context_pressure: float = 0.0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    image_input_tokens: int = 0
+    image_output_tokens: int = 0
 
     @property
     def context_tokens(self) -> int:
@@ -359,6 +376,21 @@ class StreamReasoningDelta:
 
 
 @dataclass
+class StreamBrowserSession:
+    """The browser tool opened (or reopened) the user's browser session.
+
+    Hosts show the browser beside the chat so the user can watch and take
+    over: the Cowork desktop app shows its own browser, and the web app mints
+    a viewer link for the session with the person's own credential. The
+    event carries the session id only, never a link or a key. Emitted out of
+    band through ``session.emit``; ``tool_use_id`` is not known to the
+    handler, so hosts correlate by ``session_id``.
+    """
+
+    session_id: str
+
+
+@dataclass
 class StreamTurnEnded:
     """Last event of a turn that handed back before finishing.
 
@@ -381,6 +413,7 @@ StreamEvent = (
     | StreamAskUser
     | StreamAskUserAnswered
     | StreamReasoningDelta
+    | StreamBrowserSession
     | StreamTurnEnded
 )
 
@@ -776,9 +809,9 @@ def parse_reset_at(value: object) -> str | None:
 
 
 class MindsHubBillingStop(TokenLimitExceeded):
-    """The MindsHub authorization gate refused a request the org cannot pay for.
+    """The MindsHub authorization gate refused a request on billing grounds.
 
-    Base of the three denials the gate names; only the subclasses are raised,
+    Base of the four billing denials the gate names; only the subclasses are raised,
     by :func:`mindshub_billing_stop`. Subclassing ``TokenLimitExceeded`` keeps
     every existing catch working: the no-retry re-raise in
     ``ChatSession.turn_stream``, the verifier's ``_DENIED_VERDICT_ERRORS`` latch
@@ -836,6 +869,14 @@ class FreeServingPausedError(MindsHubBillingStop):
     unusual, and adding credit lifts it at once. ``reset_at`` is the end of the
     UTC day. Waiting inside a turn cannot help, so it is a billing stop, never
     a transient retry.
+    """
+
+
+class BudgetExceededError(MindsHubBillingStop):
+    """402 ``budget_exceeded``: an organization budget with a hard cap is spent.
+
+    The gate refuses paid requests until the budget's UTC period resets or an
+    admin raises it; credit does not lift it. The gateway sends no ``reset_at``.
     """
 
 
@@ -1036,11 +1077,22 @@ _TRANSIENT_ERROR_TYPES = frozenset(
     {"overloaded_error", "overloaded", "api_error", "server_error", "service_unavailable"}
 )
 
+_MINDSHUB_BILLING_CTA = (
+    "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
+)
+# Credits do not lift a budget, so its stop points at the Budgets tab instead.
+_MINDSHUB_BUDGET_CTA = (
+    "An organization owner or admin can raise it at "
+    "https://console.mindshub.ai/settings/organization/billing?tab=budgets."
+)
+
+
 class _BillingStopKind(NamedTuple):
     """Which typed error a gate billing code raises, and what its message says."""
 
     error_type: type[MindsHubBillingStop]
     what: str
+    cta: str = _MINDSHUB_BILLING_CTA
 
 
 # The MindsHub authorization gate's billing deny codes:
@@ -1048,7 +1100,9 @@ class _BillingStopKind(NamedTuple):
 # ``free_air_daily_spend_fuse_exceeded`` ride a 429. All three stop only an org
 # whose wallet cannot pay, and all three are permanent for the identical request
 # inside a turn: they belong on a billing card, never in the retry loop. The
-# fuse resets at the end of the UTC day, which no retry budget waits out. The
+# fuse resets at the end of the UTC day, which no retry budget waits out.
+# ``budget_exceeded`` (402) is the one stop a funded wallet still gets: a spent
+# hard-cap budget refuses paid requests until its period resets. The
 # gate's velocity 429 (``rate_limited``) is NOT here on purpose: that one means
 # "slow down", and stays transient.
 #
@@ -1064,12 +1118,12 @@ _MINDSHUB_BILLING_STOPS: dict[str, _BillingStopKind] = {
     "free_air_daily_spend_fuse_exceeded": _BillingStopKind(
         FreeServingPausedError,
         "free MindsHub Air is paused for everyone until the daily budget resets."),
+    "budget_exceeded": _BillingStopKind(
+        BudgetExceededError,
+        "your organization's MindsHub spending budget is used up.",
+        _MINDSHUB_BUDGET_CTA),
 }
 _WALLET_DENIAL_CODES = frozenset(_MINDSHUB_BILLING_STOPS)
-
-_MINDSHUB_BILLING_CTA = (
-    "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
-)
 
 
 # Hosts that ARE the MindsHub gateway. Only a response from one of these may
@@ -1277,8 +1331,8 @@ class ProviderErrorBody:
 def wallet_denial_code(body: Any) -> str | None:
     """The M3 gate's billing code carried in an error body, if any.
 
-    One of ``wallet_empty``, ``included_allowance_exhausted`` or
-    ``free_air_daily_spend_fuse_exceeded`` (the keys of
+    One of ``wallet_empty``, ``included_allowance_exhausted``,
+    ``free_air_daily_spend_fuse_exceeded`` or ``budget_exceeded`` (the keys of
     ``_MINDSHUB_BILLING_STOPS``). Reads ``code`` from both dialects — the
     SDK-unwrapped top level (OpenAI SDK peels the ``error`` envelope, ENG-747)
     and the wire envelope (Anthropic SDK / proxies that deliver it unmodified).
@@ -1353,7 +1407,7 @@ def mindshub_billing_stop(
     else:
         lead = f"Server returned {status_code}: {kind.what}"
     return kind.error_type(
-        f"{lead} {_MINDSHUB_BILLING_CTA}",
+        f"{lead} {kind.cta}",
         reason=reason,
         status_code=status_code,
         reset_at=_response_header(exc, "x-mindshub-reset-at"),
@@ -2238,6 +2292,7 @@ CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
     WalletEmptyError,
     AllowanceExhaustedError,
     FreeServingPausedError,
+    BudgetExceededError,
     ProviderAuthError,
     StructuredOutputError,
     TransientProviderError,
@@ -2441,6 +2496,7 @@ class LLMProvider(ABC):
             role=get_call_role() or self.trace_role, model=model, served_model=served_model,
             input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
             cache_read=usage.cache_read_tokens, cache_creation=usage.cache_creation_tokens,
+            image_input=usage.image_input_tokens, image_output=usage.image_output_tokens,
         )
         if self.usage_sink is not None:
             self.usage_sink(record)

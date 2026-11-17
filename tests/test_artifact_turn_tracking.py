@@ -26,6 +26,8 @@ from anton.core.artifacts import ArtifactStore
 from anton.core.tools.tool_handlers import (
     ArtifactFiles,
     lint_changed_artifact_files,
+    read_artifacts_snapshot,
+    snapshot_cell_artifacts,
     snapshot_existing_artifacts,
     track_edits_since,
     handle_create_artifact,
@@ -179,6 +181,13 @@ def _bump_mtime(path: Path, delta_s: int = 2) -> None:
     os.utime(path, (st.st_atime, st.st_mtime + delta_s))
 
 
+def _track_cell_edits(session: FakeSession, root: Path, before: dict[str, ArtifactFiles]) -> None:
+    """What `check_cell_artifacts` does once a cell returns: snapshot the
+    folder again, then attribute what changed since `before`."""
+    store = ArtifactStore(root)
+    track_edits_since(session, store, before, after=snapshot_existing_artifacts(store))
+
+
 async def test_edit_without_reopening_is_tracked_via_mtime(session, root):
     slug = await _create(session)
     session._artifacts_touched.clear()
@@ -189,7 +198,7 @@ async def test_edit_without_reopening_is_tracked_via_mtime(session, root):
     index.write_text("<html>v2</html>")
     _bump_mtime(index)
 
-    track_edits_since(session, ArtifactStore(root), before)
+    _track_cell_edits(session, root, before)
 
     assert session._artifacts_touched == {slug}
 
@@ -207,7 +216,7 @@ async def test_a_rename_of_an_older_draft_into_place_is_tracked(session, root):
     before = snapshot_existing_artifacts(ArtifactStore(root))
     os.replace(draft, root / slug / "index.html")
 
-    track_edits_since(session, ArtifactStore(root), before)
+    _track_cell_edits(session, root, before)
 
     assert session._artifacts_touched == {slug}
 
@@ -221,7 +230,7 @@ async def test_a_cell_that_only_deletes_a_file_is_tracked(session, root):
     before = snapshot_existing_artifacts(ArtifactStore(root))
     (root / slug / "data.js").unlink()
 
-    track_edits_since(session, ArtifactStore(root), before)
+    _track_cell_edits(session, root, before)
 
     assert session._artifacts_touched == {slug}
 
@@ -236,7 +245,7 @@ async def test_housekeeping_only_mtime_bump_is_not_an_edit(session, root):
     before = snapshot_existing_artifacts(ArtifactStore(root))
     _bump_mtime(root / slug / "README.md")
 
-    track_edits_since(session, ArtifactStore(root), before)
+    _track_cell_edits(session, root, before)
 
     assert session._artifacts_touched == set()
 
@@ -265,7 +274,7 @@ async def test_non_content_write_is_not_an_edit(session, root, rel):
     target.write_text("x")
     _bump_mtime(target)
 
-    track_edits_since(session, ArtifactStore(root), before)
+    _track_cell_edits(session, root, before)
 
     assert session._artifacts_touched == set()
 
@@ -280,7 +289,7 @@ async def test_content_write_next_to_state_files_is_an_edit(session, root):
     index.write_text("<html>v2</html>")
     _bump_mtime(index)
 
-    track_edits_since(session, ArtifactStore(root), before)
+    _track_cell_edits(session, root, before)
 
     assert session._artifacts_touched == {slug}
 
@@ -296,7 +305,7 @@ async def test_nested_name_matching_a_non_content_name_is_an_edit(session, root)
     target.write_text("x")
     _bump_mtime(target)
 
-    track_edits_since(session, ArtifactStore(root), before)
+    _track_cell_edits(session, root, before)
 
     assert session._artifacts_touched == {slug}
 
@@ -334,7 +343,7 @@ async def test_edit_without_reopening_stamps_provenance_too(session, root):
     index.write_text("<html>v2</html>")
     _bump_mtime(index)
 
-    track_edits_since(session, ArtifactStore(root), before)
+    _track_cell_edits(session, root, before)
 
     assert [e["conversation"] for e in _provenance(root, slug)] == ["conv-1"]
 
@@ -346,7 +355,7 @@ async def test_untouched_artifact_is_not_tracked_by_mtime_fallback(session, root
     before = snapshot_existing_artifacts(ArtifactStore(root))
     # Nothing written this cell — the folder is exactly as it was.
 
-    track_edits_since(session, ArtifactStore(root), before)
+    _track_cell_edits(session, root, before)
 
     assert session._artifacts_touched == set()
 
@@ -360,7 +369,7 @@ async def test_a_slug_that_did_not_exist_before_is_not_claimed_as_an_edit(sessio
     (root / "brand-new" / "metadata.json").write_text("{}")
     (root / "brand-new" / "index.html").write_text("<html></html>")
 
-    track_edits_since(session, ArtifactStore(root), before)
+    _track_cell_edits(session, root, before)
 
     assert session._artifacts_touched == set()
 
@@ -377,6 +386,169 @@ async def test_a_slug_already_tracked_is_not_tracked_again(session, root):
     index.write_text("<html>v2</html>")
     _bump_mtime(index)
 
-    track_edits_since(session, ArtifactStore(root), before)
+    _track_cell_edits(session, root, before)
 
     assert session._artifacts_touched == {slug}
+
+
+# ─── a folder the pod cannot read ──────────────────────────────────────────
+
+
+def _unreadable(monkeypatch, folder: Path) -> None:
+    """Fail every stat inside `folder` the way a folder at mode 0 does on a
+    pod that does not run as root (a chmod would not hold under root)."""
+    real_is_file = Path.is_file
+
+    def is_file(self, *args, **kwargs):
+        if self.parent == folder:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_is_file(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+
+
+async def test_a_folder_the_snapshot_cannot_stat_is_skipped_and_named(session, root, monkeypatch):
+    """One such folder used to raise out of the snapshot every exec cell takes
+    first, so no cell in the project could run, not even one to repair it."""
+    readable = await _create(session, name="Readable")
+    locked = await _create(session, name="Locked")
+    _unreadable(monkeypatch, root / locked)
+
+    snapshot = read_artifacts_snapshot(store=ArtifactStore(root))
+
+    assert set(snapshot.folders) == {readable}
+    assert snapshot.unreadable == frozenset({locked})
+    assert set(snapshot_existing_artifacts(ArtifactStore(root))) == {readable}
+
+
+async def test_a_cell_snapshot_that_skipped_a_folder_marks_the_record_incomplete(session, root, monkeypatch):
+    """An edit in the skipped folder would go unseen, so the record the cloud
+    turn sends must not claim to be whole."""
+    readable = await _create(session, name="Readable")
+    locked = await _create(session, name="Locked")
+    session._artifacts_touched_complete = True
+    _unreadable(monkeypatch, root / locked)
+
+    folders = await snapshot_cell_artifacts(session=session, store=ArtifactStore(root))
+
+    assert set(folders) == {readable}
+    assert session._artifacts_touched_complete is False
+
+
+async def test_a_cell_snapshot_that_cannot_read_the_folder_reads_as_empty(session, root, monkeypatch):
+    """The cell still runs; the record says it may be missing edits."""
+    import anton.core.tools.tool_handlers as th
+
+    await _create(session)
+    session._artifacts_touched_complete = True
+
+    def broken(*, store):
+        raise OSError(5, "Input/output error", str(store.root))
+
+    monkeypatch.setattr(th, "read_artifacts_snapshot", broken)
+
+    assert await snapshot_cell_artifacts(session=session, store=ArtifactStore(root)) == {}
+    assert session._artifacts_touched_complete is False
+
+
+async def test_a_cell_snapshot_that_reads_everything_keeps_the_record_complete(session, root):
+    slug = await _create(session)
+    session._artifacts_touched_complete = True
+
+    assert set(await snapshot_cell_artifacts(session=session, store=ArtifactStore(root))) == {slug}
+    assert session._artifacts_touched_complete is True
+
+
+# ─── a folder a task move renamed ──────────────────────────────────────────
+#
+# A host that moves a task into a project already holding a folder of the
+# same name renames the moved folder to `<conversation8>-<slug>` and leaves
+# its metadata's `slug` as it was, so the stored slug names the OTHER folder.
+
+
+async def _moved_into_a_collision(session: FakeSession, root: Path) -> tuple[str, str]:
+    """(the renamed folder, the folder its stored slug names)."""
+    other = await _create(session, name="Other")
+    moved = await _create(session, name="Moved")
+    renamed = f"abcd1234-{other}"
+    (root / moved).rename(root / renamed)
+    metadata = json.loads((root / renamed / "metadata.json").read_text())
+    metadata["slug"] = other
+    (root / renamed / "metadata.json").write_text(json.dumps(metadata))
+    session._artifacts_touched.clear()
+    return renamed, other
+
+
+async def test_an_update_after_a_rename_names_and_writes_the_renamed_folder(session, root):
+    renamed, other = await _moved_into_a_collision(session, root)
+    other_metadata = (root / other / "metadata.json").read_text()
+    other_readme = (root / other / "README.md").read_text()
+
+    await handle_update_artifact_metadata(session, {"slug": renamed, "primary": "index.html"})
+
+    assert session._artifacts_touched == {renamed}
+    written = json.loads((root / renamed / "metadata.json").read_text())
+    assert written["primary"] == "index.html"
+    assert written["slug"] == renamed
+    assert [e["conversation"] for e in written["provenance"]] == ["conv-1"]
+    assert (root / other / "metadata.json").read_text() == other_metadata
+    assert (root / other / "README.md").read_text() == other_readme
+
+
+async def test_a_cell_edit_after_a_rename_stamps_the_renamed_folder(session, root):
+    renamed, other = await _moved_into_a_collision(session, root)
+    other_metadata = (root / other / "metadata.json").read_text()
+
+    before = snapshot_existing_artifacts(ArtifactStore(root))
+    index = root / renamed / "index.html"
+    index.write_text("<html>v2</html>")
+    _bump_mtime(index)
+
+    _track_cell_edits(session, root, before)
+
+    assert session._artifacts_touched == {renamed}
+    assert [e["conversation"] for e in _provenance(root, renamed)] == ["conv-1"]
+    assert (root / other / "metadata.json").read_text() == other_metadata
+
+
+# ─── a slug that names its folder through another path form ────────────────
+#
+# `folder_for` checks containment on resolved paths, so a slug may reach a
+# folder through a form the root is not spelled in: the real path of a root
+# reached by a link, or an absolute path under a relative root. The folder
+# name `read_metadata` gives back comes from the same resolved form.
+
+
+def _assert_names_and_writes_its_folder(store: ArtifactStore, *, real_root: Path, slug: str) -> None:
+    other_form = str((real_root / slug).resolve())
+    assert other_form != str(store.root / slug)
+
+    updated = store.update(other_form, primary="index.html")
+
+    assert updated is not None
+    assert updated.slug == slug
+    written = json.loads((real_root / slug / "metadata.json").read_text())
+    assert written["primary"] == "index.html"
+    assert written["slug"] == slug
+    opened = store.open(other_form)
+    assert opened is not None
+    assert opened.slug == slug
+
+
+def test_a_store_rooted_at_a_link_names_the_folder_of_its_real_path(tmp_path):
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real_root, target_is_directory=True)
+    store = ArtifactStore(link)
+    slug = store.create(name="Deck", description="d", type="html-app").slug
+
+    _assert_names_and_writes_its_folder(store, real_root=real_root, slug=slug)
+
+
+def test_a_relative_store_root_names_the_folder_of_an_absolute_slug(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = ArtifactStore("artifacts")
+    slug = store.create(name="Deck", description="d", type="html-app").slug
+
+    _assert_names_and_writes_its_folder(store, real_root=tmp_path / "artifacts", slug=slug)

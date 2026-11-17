@@ -456,7 +456,7 @@ def test_agent_facing_texts_name_the_url_as_the_fullstack_entry_point():
 
 # ── Task 10: public generate() delegate ──────────────────────────────────────
 
-async def test_public_generate_delegates_to_run(tmp_path: Path, monkeypatch):
+async def test_public_generate_delegates_to_run(tmp_path: Path, monkeypatch, decline_fast_path):
     from anton.core.tools.generate_artifact import generate as public_generate
 
     session = AsyncMock()
@@ -2129,7 +2129,7 @@ def test_a_backend_heading_in_known_data_does_not_replace_the_specs(tmp_path: Pa
     assert ctx.rstrip().endswith(prompts.KNOWN_DATA_FOOTER) or prompts.KNOWN_DATA_FOOTER in ctx
 
 
-async def test_known_data_is_scrubbed_before_any_step_sees_it(tmp_path: Path, monkeypatch):
+async def test_known_data_is_scrubbed_before_any_step_sees_it(tmp_path: Path, monkeypatch, decline_fast_path):
     seen = {}
 
     async def fake_run(state, *, entry):

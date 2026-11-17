@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -205,16 +206,71 @@ def _artifact_files(folder: Path) -> ArtifactFiles:
     })
 
 
-def snapshot_existing_artifacts(store) -> dict[str, ArtifactFiles]:
-    """slug -> its content files, for every artifact folder that exists right now."""
+class ArtifactsSnapshot(NamedTuple):
+    """Every artifact folder's content files at one moment, by folder name,
+    and the names of the entries the read could not stat, so it cannot say
+    whether they are artifact folders."""
+
+    folders: dict[str, ArtifactFiles]
+    unreadable: frozenset[str]
+
+
+def read_artifacts_snapshot(*, store) -> ArtifactsSnapshot:
+    """The artifacts folder as it stands now. An entry whose stat fails (a
+    folder at mode 0, EIO, a stale NFS handle) is skipped and named in
+    `unreadable`, so one such entry cannot stop every cell in the project.
+    Raises OSError when the artifacts folder itself cannot be read."""
     root = store.root
     if not root.is_dir():
-        return {}
-    snapshot: dict[str, ArtifactFiles] = {}
+        return ArtifactsSnapshot(folders={}, unreadable=frozenset())
+    folders: dict[str, ArtifactFiles] = {}
+    unreadable: set[str] = set()
     for child in root.iterdir():
-        if child.is_dir() and (child / "metadata.json").is_file():
-            snapshot[child.name] = _artifact_files(child)
-    return snapshot
+        try:
+            is_artifact = child.is_dir() and (child / "metadata.json").is_file()
+        except OSError:
+            unreadable.add(child.name)
+            continue
+        if is_artifact:
+            folders[child.name] = _artifact_files(child)
+    return ArtifactsSnapshot(folders=folders, unreadable=frozenset(unreadable))
+
+
+def snapshot_existing_artifacts(store) -> dict[str, ArtifactFiles]:
+    """slug -> its content files, for every artifact folder that exists right
+    now. An entry that cannot be read is left out (`read_artifacts_snapshot`)."""
+    return read_artifacts_snapshot(store=store).folders
+
+
+async def snapshot_cell_artifacts(*, session: "ChatSession", store) -> dict[str, ArtifactFiles]:
+    """`snapshot_existing_artifacts` around one exec cell, read off the event
+    loop so a slow mount cannot hold up the turn's heartbeat.
+
+    An edit in an entry this read skipped, or in a folder it could not read
+    at all, would go unseen, so either marks the turn's artifact record
+    incomplete (`ChatSession.artifacts_touched_complete`) and the cloud turn
+    then sends no list. A folder it could not read reads as empty, so the
+    cell still runs. Raises no OSError.
+    """
+    import asyncio
+
+    try:
+        snapshot = await asyncio.to_thread(read_artifacts_snapshot, store=store)
+    except OSError:
+        _log.warning(
+            "could not read the artifacts folder around a cell",
+            exc_info=True,
+            extra={"event": "artifact_snapshot_incomplete", "reason": "artifacts_folder_unreadable"},
+        )
+        session._artifacts_touched_complete = False
+        return {}
+    if snapshot.unreadable:
+        _log.warning(
+            "skipped an artifacts folder entry that could not be read around a cell",
+            extra={"event": "artifact_snapshot_incomplete", "reason": "entry_unreadable"},
+        )
+        session._artifacts_touched_complete = False
+    return snapshot.folders
 
 
 # Bounded: never lint a huge file inline on the agent's turn.
@@ -428,12 +484,27 @@ def _primary_name(store, slug: str) -> str | None:
     return metadata.primary if metadata is not None else None
 
 
-def _repairs_left_line(left: int) -> str:
+def editor_offered(session: "ChatSession") -> bool:
+    """Whether this session offers `edit_artifact` (ENG-4207), so repairs are routed to it."""
+    registry = getattr(session, "tool_registry", None)
+    get = getattr(registry, "get_tool_defs", None)
+    if not callable(get):
+        return False
+    try:
+        return any(getattr(tool, "name", "") == "edit_artifact" for tool in get())
+    except Exception:
+        return False
+
+
+def _repairs_left_line(left: int, *, editor: bool = False) -> str:
     cells = "cell" if left == 1 else "cells"
+    how = (
+        "repair it with edit_artifact, naming each finding in the task" if editor
+        else "change it in a scratchpad cell to fix the code each finding names"
+    )
     return (
-        f"{left} repair {cells} left for this page this turn: change it in a scratchpad cell to fix "
-        "the code each finding names, and keep every view. Until a check passes it, do not call it or "
-        "any view in it browser-verified, tested or working"
+        f"{left} repair {cells} left for this page this turn: {how}, and keep every view. Until a check passes "
+        "it, do not call it or any view in it browser-verified, tested or working"
     )
 
 
@@ -501,6 +572,7 @@ def _check_pages(
     geography_request: str = "",
     geography_requirements: dict[PageKey, GeographyRequirement] | None = None,
     held_back: frozenset[PageKey] = frozenset(),
+    editor: bool = False,
 ) -> ArtifactLint:
     """Load the changed artifacts' pages in a browser.
 
@@ -673,7 +745,7 @@ def _check_pages(
                     messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                     continue
                 messages.append(f"{label} — {static_findings[page.key(store)]}")
-                messages.append(f"{label} — {_repairs_left_line(left)}")
+                messages.append(f"{label} — {_repairs_left_line(left, editor=editor)}")
                 continue
             if cell_sandbox is not None:
                 messages.append(f"{label} — {_SANDBOX_BROWSER_SKIP}")
@@ -704,7 +776,7 @@ def _check_pages(
                 messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                 continue
             messages += [f"{label} — {f.message()}" for f in findings]
-            messages.append(f"{label} — {_repairs_left_line(left)}")
+            messages.append(f"{label} — {_repairs_left_line(left, editor=editor)}")
         return ArtifactLint(
             messages=_lines(), page_checks=page_checks, repaired=frozenset(repaired), edited=edited,
             out_of_repairs=frozenset(out_of_repairs),
@@ -727,7 +799,7 @@ def _check_pages(
                     messages.append(f"{label} — {_NO_REPAIRS_LEFT}")
                 else:
                     messages.append(f"{label} — {static_findings[key]}")
-                    messages.append(f"{label} — {_repairs_left_line(left)}")
+                    messages.append(f"{label} — {_repairs_left_line(left, editor=editor)}")
             continue
         key = page.key(store)
         remaining = deadline - time.monotonic()
@@ -835,7 +907,7 @@ def _check_pages(
             messages.append(f"{label} — and {more} more distinct findings, not listed")
         if failed:
             messages += _comparison_lines(label, _notes(key, comparison))
-            messages.append(f"{label} — {_repairs_left_line(left)}")
+            messages.append(f"{label} — {_repairs_left_line(left, editor=editor)}")
     return ArtifactLint(
         messages=_lines(), screenshot=shot, screenshot_page=shot_page, page_checks=page_checks,
         findings_listed=frozenset(findings_listed), repaired=frozenset(repaired), failed_views=views_of_failed,
@@ -858,6 +930,7 @@ def lint_changed_artifact_files(
     geography_request: str = "",
     geography_requirements: dict[PageKey, GeographyRequirement] | None = None,
     held_back: frozenset[PageKey] = frozenset(),
+    editor: bool = False,
 ) -> ArtifactLint:
     """Run the format-appropriate checker on artifact folders this cell
     changed (any content file written, replaced, added or removed since
@@ -912,6 +985,7 @@ def lint_changed_artifact_files(
         findings_listed_earlier=findings_listed_earlier,
         failing=failing, repairs_used=repairs_used, failed_views=failed_views, turn_pages=turn_pages,
         geography_request=geography_request, geography_requirements=geography_requirements, held_back=held_back,
+        editor=editor,
     )
     return replace(checked, messages=messages + checked.messages)
 
@@ -1146,7 +1220,8 @@ async def check_cell_artifacts(
 
     from anton.core.artifacts.page_copies import turn_pages_of
 
-    track_edits_since(session, store, before)
+    after = await snapshot_cell_artifacts(session=session, store=store)
+    track_edits_since(session, store, before, after=after)
     turn_pages = turn_pages_of(session)
     spent = getattr(session, "_out_of_repairs", None)
     held_back: frozenset[PageKey] = frozenset()
@@ -1155,7 +1230,16 @@ async def check_cell_artifacts(
             held_back = await asyncio.to_thread(turn_pages.put_held_back, frozenset(spent), store)
         except Exception:
             _log.warning("could not put back the pages out of repair cells", exc_info=True)
-    live_app_lines = await _relaunch_live_apps(session, store, before)
+    if held_back:
+        # Putting those pages back rewrote them after `after` was read, and a
+        # running live app relaunches on its files as they are now. The edits
+        # this cell made were attributed from the read before. A failed read
+        # here keeps that one, so an app this cell edited still relaunches.
+        try:
+            after = await asyncio.to_thread(snapshot_existing_artifacts, store)
+        except OSError:
+            _log.warning("could not read the artifacts folder after putting pages back", exc_info=True)
+    live_app_lines = await _relaunch_live_apps(session, store, before, after=after)
     refused = render_screenshots_refused(session)
     listed = getattr(session, "_unverified_findings_listed", None)
     findings_listed_earlier = frozenset(listed) if isinstance(listed, set) else frozenset()
@@ -1176,6 +1260,7 @@ async def check_cell_artifacts(
             failing=failing, repairs_used=repairs_used, failed_views=failed_views, turn_pages=turn_pages,
             geography_request=getattr(session, "_artifact_geography_request", ""),
             geography_requirements=geography_pages.requirements_of(session), held_back=held_back,
+            editor=editor_offered(session),
         )
     except Exception:
         # Best-effort: a lint crash must never fail the cell's own result.
@@ -1200,16 +1285,17 @@ async def check_cell_artifacts(
     return replace(lint, live_app_lines=live_app_lines)
 
 
-async def _relaunch_live_apps(session: "ChatSession", store, before: dict[str, ArtifactFiles]) -> list[str]:
-    """Relaunch each running live app whose launch files this cell changed,
-    so the app serves the edit without a launch call. Empty unless live apps
-    run in app slots. Never raises."""
+async def _relaunch_live_apps(
+    session: "ChatSession", store, before: dict[str, ArtifactFiles], *, after: dict[str, ArtifactFiles]
+) -> list[str]:
+    """Relaunch each running live app whose launch files this cell changed
+    between `before` and `after`, so the app serves the edit without a launch
+    call. Empty unless live apps run in app slots. Never raises."""
     from anton.core.artifacts import live_app_slots
 
     if not live_app_slots.live_apps_enabled() or cell_sandbox_of(getattr(session, "_scratchpads", None)) is None:
         return []
     try:
-        after = snapshot_existing_artifacts(store)
         # A slug generate_artifact is building is its run step's to launch.
         building = getattr(session, "_live_apps_building", None) or set()
         slugs = [
@@ -1237,8 +1323,11 @@ async def _relaunch_after_metadata(session: "ChatSession", store, slug: str) -> 
         return []
 
 
-def track_edits_since(session: "ChatSession", store, before: dict[str, ArtifactFiles]) -> None:
-    """Attribute the artifact edits one scratchpad cell made.
+def track_edits_since(
+    session: "ChatSession", store, before: dict[str, ArtifactFiles], *, after: dict[str, ArtifactFiles]
+) -> None:
+    """Attribute the artifact edits one scratchpad cell made, from the
+    snapshots taken right before it ran (`before`) and right after (`after`).
 
     The agent edits artifact files from scratchpad cells, which the tool layer
     never sees, so this is how such an edit reaches `_artifacts_touched` and the
@@ -1253,11 +1342,37 @@ def track_edits_since(session: "ChatSession", store, before: dict[str, ArtifactF
     accepts for Hermes's edits.
     """
     already_touched = getattr(session, "_artifacts_touched", None) or ()
-    after = snapshot_existing_artifacts(store)
     for slug, files_before in before.items():
         files = after.get(slug)
         if files is not None and files != files_before and slug not in already_touched:
             _track_artifact(session, store, slug, summary="Edited via scratchpad")
+    # Artifacts the cell CREATED, such as the image artifact the pad's
+    # `generate_image()` registers. A sibling conversation can create one in
+    # the same window, so a new folder is claimed only when its provenance
+    # names this conversation, which the helper stamps the way
+    # `_track_artifact` does (cowork-server's cloud path claims by the same
+    # stamp). A session with no conversation (the CLI) shares its folder with
+    # nobody and claims what appeared. Added to the set directly: the folder
+    # already carries this turn's provenance.
+    conversation = str(getattr(session, "_session_id", "") or "")
+    for slug in sorted(after.keys() - before.keys()):
+        if slug in already_touched:
+            continue
+        if conversation and _provenance_origin(store, slug) != conversation:
+            continue
+        with contextlib.suppress(AttributeError):
+            session._artifacts_touched.add(slug)
+
+
+def _provenance_origin(store, slug: str) -> str | None:
+    """The conversation that created `slug`: the first in its provenance."""
+    try:
+        artifact = store.read_metadata(slug)
+    except (OSError, ValueError):
+        return None
+    if artifact is None or not artifact.provenance:
+        return None
+    return artifact.provenance[0].conversation
 
 
 async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> ToolOutcome:
@@ -1946,6 +2061,25 @@ _STATUS_INSTRUCTIONS = {
         "page still fails, tell the user it failed its browser check, and do "
         "not call it or any view in it browser-verified, tested or working."
     ),
+    # `browser_check_failed` when the session offers `edit_artifact` (ENG-4207):
+    # the repair goes through the editor, which checks and repairs in one call.
+    "browser_check_failed_editor": (
+        "The page passed the pipeline's static checks, but a browser loaded "
+        "`<path>/<page>` and found the problems `findings` lists, in the views "
+        "`views_measured` names. That page is on disk: repair it yourself now, "
+        "instead of asking the user how to proceed, by calling "
+        "`edit_artifact(slug, task)` with a task that names each finding and "
+        "says to fix the code it names and keep every view, its tab and its "
+        "`runView` call. Do not read the page with `read_text_file` or patch it "
+        "in a scratchpad cell first: edit_artifact reads it, edits it, loads it "
+        "in a browser and repairs it in one call, and this page gets "
+        "`repair_cells` repair calls this turn. Do NOT call generate_artifact "
+        "again for this page: it would rebuild the page from the spec instead of "
+        "repairing it. Once edit_artifact's check passes, say "
+        "\"browser-verified\" only of what that check names. If the page still "
+        "fails, tell the user it failed its browser check, and do not call it or "
+        "any view in it browser-verified, tested or working."
+    ),
     "stopped_over_budget": (
         "This turn reached its token budget and the pipeline stopped "
         "cleanly; what it had finished is on disk. Tell the user how far it "
@@ -2007,7 +2141,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         return
 
     slug = (tc_input.get("slug") or "").strip()
-    if not slug and os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on":
+    if not slug:
         # A new page can enter the same generator without a separate model
         # round trip solely to register its folder. Existing-slug edits keep
         # their normal path. Validate before creating any persistent resource.
@@ -2029,8 +2163,7 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
             slug = artifact.slug
             _track_artifact(session, store, slug, summary=f"Created artifact: {name}")
     if not slug:
-        yield ("Error: `slug` (an existing artifact) or `name` (a new one) is required."
-               if os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on" else "Error: `slug` is required.")
+        yield "Error: `slug` (an existing artifact) or `name` (a new one) is required."
         return
     artifact = store.open(slug)
     if artifact is None:
@@ -2164,8 +2297,6 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
 
     def failure_context(detail):
         message = detail if detail.startswith("Error:") else _generation_failed(detail)
-        if os.environ.get("ANTON_STATIC_SINGLE_CALL") != "on":
-            return message
         # Creation may have happened inside this call. Losing its identity on
         # failure makes a caller recreate the artifact or discard collected data.
         recovery = {"status": "failed", "slug": slug, "path": str(folder),
@@ -2380,7 +2511,9 @@ async def _browser_check_failed_outcome(
         if turn_pages is not None:
             await asyncio.to_thread(turn_pages.hold, (key,), store)
         return ToolOutcome(content=json.dumps(body, indent=2), ok=True)
-    instruction = _STATUS_INSTRUCTIONS["browser_check_failed"]
+    instruction = _STATUS_INSTRUCTIONS[
+        "browser_check_failed_editor" if editor_offered(session) else "browser_check_failed"
+    ]
     # A rebuild of an existing page is compared with the page as the turn
     # found it: the repair starts knowing what the build broke or dropped.
     changes = render_check.comparison_notes(result.comparison)
@@ -2644,7 +2777,7 @@ async def handle_scratchpad(
             # Before anything this cell writes: the pages as the turn found them.
             await capture_turn_pages(session, artifact_store)
         before_artifacts = (
-            snapshot_existing_artifacts(artifact_store)
+            await snapshot_cell_artifacts(session=session, store=artifact_store)
             if artifact_store is not None
             else {}
         )
@@ -2939,6 +3072,363 @@ async def handle_read_image(
         ],
         ok=True,
     )
+
+
+# `ImageGenerationError.code` -> the tool's failure reason, each tiered in
+# `root_cause._SENTINEL_REASONS`. A code not listed is `image_failed`.
+_IMAGE_FAILURE_REASONS = {
+    "moderation_blocked": "image_refused",
+    "rate_limited": "image_transient",
+    "provider_error": "image_transient",
+    "connection_error": "image_transient",
+    "no_image": "image_transient",
+    "unavailable": "image_unavailable",
+    "unsupported_model_kind": "image_unavailable",
+    "model_not_found": "image_unavailable",
+    "model_restricted": "image_unavailable",
+    "model_access_denied": "image_unavailable",
+    "model_disabled": "image_unavailable",
+    "wallet_empty": "image_unavailable",
+    "included_allowance_exhausted": "image_unavailable",
+    "free_air_daily_spend_fuse_exceeded": "image_unavailable",
+    "budget_exceeded": "image_unavailable",
+    "payment_required": "image_unavailable",
+    "auth": "image_unavailable",
+}
+
+# Where the project keeps its artifacts, as a project path, on every host: the
+# desktop has them under the workspace, and a cloud pod mounts the project's
+# folder at a path of its own (ANTON_CLOUD_ARTIFACTS_ROOT). Cowork reads a
+# file by its project path (`files-raw/<path>`).
+_PROJECT_ARTIFACTS = (".anton", "artifacts")
+
+
+def _image_roots(session: "ChatSession") -> "tuple[Path, Path | None]":
+    """The workspace base, and the artifacts root when the session has one."""
+    workspace = getattr(session, "_workspace", None)
+    base = getattr(workspace, "base", None)
+    artifacts = getattr(workspace, "artifacts_dir", None)
+    return (
+        Path(base) if isinstance(base, (str, Path)) else Path.cwd(),
+        Path(artifacts) if isinstance(artifacts, (str, Path)) else None,
+    )
+
+
+def _image_path(session: "ChatSession", text: str, policy: "CellSandbox | None") -> Path:
+    """`text` as an absolute path, unresolved: as given when absolute (or
+    `~`), under the artifacts root when it starts `.anton/artifacts/` (true on
+    a cloud pod, whose artifacts sit outside its workspace), else under the
+    workspace."""
+    path = _expand_home(text, policy)
+    if path.is_absolute():
+        return path
+    base, artifacts = _image_roots(session)
+    parts = Path(text.replace("\\", "/")).parts
+    if artifacts is not None and parts[: len(_PROJECT_ARTIFACTS)] == _PROJECT_ARTIFACTS:
+        return artifacts.joinpath(*parts[len(_PROJECT_ARTIFACTS):])
+    return base / path
+
+
+def _project_path(session: "ChatSession", saved: Path) -> str:
+    """`saved` as a path relative to the project root, the form Cowork's
+    `files-raw` route resolves; the absolute path when it is in neither root."""
+    base, artifacts = _image_roots(session)
+    for root, prefix in ((base, ()), (artifacts, _PROJECT_ARTIFACTS)):
+        if root is None:
+            continue
+        try:
+            rel = saved.resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            continue
+        return Path(*prefix, rel).as_posix()
+    return str(saved)
+
+
+def _relative_inside(target: Path, root: Path) -> "Path | None":
+    """`target` relative to `root` when it is inside it, as written or once
+    links resolve (a path copied from a resolved listing); else None."""
+    try:
+        return target.relative_to(os.path.normpath(root))
+    except ValueError:
+        pass
+    try:
+        return target.resolve().relative_to(root.resolve())
+    except (ValueError, OSError, RuntimeError):
+        return None
+
+
+class _ImageDestination(NamedTuple):
+    """Where `generate_image` writes: ``slug`` None makes a new image artifact."""
+
+    directory: Path | None
+    root: Path | None
+    stem: str | None
+    slug: str | None
+
+
+def _image_destination(session: "ChatSession", store, filename: str | None) -> "_ImageDestination | str":
+    """Where the `filename` argument says to write, or the reason it may not.
+
+    A bare name (or none) makes a new image artifact. A path writes there: in
+    an existing artifact's folder (`.anton/artifacts/<slug>/...`, so the
+    artifact can use the image) or elsewhere in the project. Never in a
+    dot-folder otherwise, never outside the project, never through `..`.
+    """
+    if filename is None or ("/" not in filename and "\\" not in filename):
+        return _ImageDestination(None, None, None, None)
+    if ".." in Path(filename.replace("\\", "/")).parts:
+        return f"filename may not climb out of a folder with '..': {filename}"
+    policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
+    try:
+        target = Path(os.path.normpath(_image_path(session, filename, policy)))
+    except (OSError, RuntimeError, ValueError) as exc:
+        return f"invalid filename '{filename}': {exc}"
+    base, artifacts = _image_roots(session)
+    if not target.name or not target.stem:
+        return f"filename must end in a file name: {filename}"
+    for root, is_artifacts in ((artifacts, True), (base, False)):
+        if root is None:
+            continue
+        rel = _relative_inside(target, root)
+        if rel is None or not rel.parts:
+            continue
+        directory = root.joinpath(*rel.parts[:-1])
+        if is_artifacts:
+            if len(rel.parts) < 2:
+                return f"name an artifact's folder and a file in it, as in .anton/artifacts/<slug>/image.png: {filename}"
+            if any(part.startswith(".") for part in rel.parts):
+                return f"filename may not be a dot-file or in a dot-folder: {filename}"
+            if store.read_metadata(rel.parts[0]) is None:
+                return (
+                    f"there is no artifact '{rel.parts[0]}': register it with create_artifact "
+                    "first, or pass a bare file name to save the image as an artifact of its own."
+                )
+            return _ImageDestination(directory, root, target.stem, rel.parts[0])
+        if any(part.startswith(".") for part in rel.parts):
+            return (
+                f"filename may not be a dot-file or in a dot-folder, except an artifact's "
+                f"folder under .anton/artifacts/: {filename}"
+            )
+        return _ImageDestination(directory, root, target.stem, None)
+    return f"filename must be inside the project: {filename}"
+
+
+def _image_references(session: "ChatSession", raw: object) -> "tuple[list, str | None]":
+    """The `reference_images` argument read into `ReferenceImage`s, or an error.
+
+    Resolved like `read_image` resolves its path: relative to the project
+    (`.anton/artifacts/...` under the artifacts root), `~` as the person's
+    cells see it, and under a sandbox policy only what their cells may read.
+    """
+    from anton.core.llm.images import MAX_REFERENCE_IMAGES, load_reference_image
+
+    if raw is None or raw == "" or raw == []:
+        return [], None
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        return [], "reference_images must be a list of image file paths."
+    texts = [item.strip() for item in raw if item.strip()]
+    if len(texts) > MAX_REFERENCE_IMAGES:
+        return [], f"at most {MAX_REFERENCE_IMAGES} reference images can be passed, not {len(texts)}."
+    policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
+    refs = []
+    for text in texts:
+        try:
+            path = _image_path(session, text, policy).resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            return [], f"invalid path '{text}': {exc}"
+        if policy is not None and not policy.allows_read(path):
+            return [], (
+                f"access denied: {text} is outside the files this conversation may read. "
+                "If the user wants it edited, ask them to attach it to the conversation."
+            )
+        try:
+            refs.append(load_reference_image(path))
+        except ValueError as exc:
+            return [], f"reference image {text}: {exc}."
+    return refs, None
+
+
+async def handle_generate_image(session: "ChatSession", tc_input: dict):
+    """Generate (or, with `reference_images`, edit) one image and save it
+    (ENG-4024): as a new `image` artifact, or where `filename` says — in an
+    existing artifact's folder, or elsewhere in the project.
+
+    An async generator: a progress line while the provider works, then the
+    `ToolOutcome`. The result is JSON naming the saved file, never the image
+    itself — base64 in a tool result would fill the context with nothing the
+    model can read. Its `path` is relative to the project root, the form
+    Cowork reads a file by; `ChatSession` relays the same JSON to the host as
+    a `StreamToolResult` so the picture can show inline.
+
+    Refused before any request when the turn has made `max_images_per_turn`
+    images already, or when `filename` names a place it may not write.
+    """
+    from anton.core.llm.images import (
+        DEFAULT_MAX_IMAGES,
+        ImageGenerationError,
+        file_stem,
+        image_title,
+        normalize_quality,
+        normalize_size,
+        output_format_for,
+        usage_summary,
+        write_new_image_file,
+    )
+    import asyncio
+
+    from anton.core.llm.provider import ProviderAuthError
+    from anton.core.tools.progress import ToolProgress
+
+    prompt = tc_input.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        yield ToolOutcome(content="Error: prompt is required.", ok=False, reason="missing_name")
+        return
+    prompt = prompt.strip()
+    filename = tc_input.get("filename")
+    filename = filename.strip() if isinstance(filename, str) and filename.strip() else None
+    try:
+        size = normalize_size(tc_input.get("size"))
+        quality = normalize_quality(tc_input.get("quality"))
+        output_format = output_format_for(filename)
+    except ValueError as exc:
+        yield ToolOutcome(content=f"Error: {exc}.", ok=False, reason="invalid_type")
+        return
+
+    store = resolve_artifact_store(session)
+    if store is None:
+        yield ToolOutcome(
+            content="Error: no project is bound to this session, so there is nowhere to save an image.",
+            ok=False, reason="store_unavailable",
+        )
+        return
+
+    destination = _image_destination(session, store, filename)
+    if isinstance(destination, str):
+        yield ToolOutcome(content=f"Error: {destination}", ok=False, reason="invalid_path")
+        return
+
+    limit = getattr(session, "_max_images_per_turn", DEFAULT_MAX_IMAGES)
+    used = getattr(session, "_images_this_turn", 0)
+    if used >= limit:
+        yield ToolOutcome(
+            content=(
+                f"Error: no image was made. This turn already asked for {used} image(s), the most "
+                f"one turn may (ANTON_MAX_IMAGES_PER_TURN={limit}), so no request was sent. Finish "
+                "with the images you have and tell the user; they can ask for more in their next message."
+            ),
+            ok=False, reason="image_limit",
+        )
+        return
+
+    # Off the event loop: a reference image can be tens of megabytes, and the
+    # host serves other turns from this loop.
+    refs, ref_error = await asyncio.to_thread(
+        _image_references, session, tc_input.get("reference_images")
+    )
+    if ref_error is not None:
+        yield ToolOutcome(content=f"Error: {ref_error}", ok=False, reason="invalid_path")
+        return
+    # Counted before the call: a refused or failed request may still be billed,
+    # and a loop of refusals must hit the cap too.
+    with contextlib.suppress(AttributeError):
+        session._images_this_turn = used + 1
+
+    llm = session._llm
+    model = await llm.resolve_image_model()
+    yield ToolProgress(f"{'Editing an image' if refs else 'Generating an image'} with {model}")
+    try:
+        result = await llm.generate_image(
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            output_format=output_format,
+            reference_images=refs,
+            model=model,
+        )
+    except ImageGenerationError as exc:
+        yield ToolOutcome(
+            content=f"Error: {exc}",
+            ok=False, reason=_IMAGE_FAILURE_REASONS.get(exc.code, "image_failed"),
+        )
+        return
+    except ProviderAuthError as exc:
+        yield ToolOutcome(
+            content=f"Error: {exc} No image was made; tell the user to check their sign-in or API key.",
+            ok=False, reason=_IMAGE_FAILURE_REASONS["auth"],
+        )
+        return
+
+    title = image_title(filename, prompt)
+    new_artifact = destination.directory is None
+    if new_artifact:
+        stem = file_stem(filename, prompt)
+        artifact = store.create(
+            name=title,
+            description=(("Edited image: " if refs else "Generated image: ") + prompt)[:500],
+            type="image",
+            primary=f"{stem}.{result.extension}",
+        )
+        slug = artifact.slug
+        directory, root = store.folder_for(slug), store.root
+    else:
+        slug = destination.slug
+        directory, root = destination.directory, destination.root
+        stem = file_stem(destination.stem, prompt)
+    try:
+        saved = write_new_image_file(result.data, directory, stem, result.extension, root=root)
+    except (OSError, ValueError) as exc:
+        if new_artifact:
+            from anton.utils.nofollow import rmtree_nofollow
+
+            with contextlib.suppress(OSError, ValueError):
+                rmtree_nofollow(store.root, directory)
+        yield ToolOutcome(
+            content=f"Error: the image was generated but could not be saved: {exc}",
+            ok=False, reason="image_failed",
+        )
+        return
+    if slug is not None:
+        _track_artifact(
+            session, store, slug,
+            summary=f"Generated image: {title}" if new_artifact else f"Added image {saved.name}",
+        )
+
+    payload: dict = {
+        "status": "generated",
+        # Relative to the project root, so a host can read it by that path;
+        # `absolute_path` is what this process's tools and cells open.
+        "path": _project_path(session, saved),
+        "absolute_path": str(saved),
+        "artifact_slug": slug,
+        "mime_type": result.mime_type,
+        "width": result.width,
+        "height": result.height,
+        "bytes": len(result.data),
+        "model": result.model,
+        "usage": usage_summary(result.usage),
+        "images_left_this_turn": max(0, limit - used - 1),
+    }
+    if refs:
+        payload["edited_from"] = [ref.name for ref in refs]
+    if result.revised_prompt:
+        payload["revised_prompt"] = result.revised_prompt
+    if new_artifact:
+        where = f"Saved as the image artifact `{slug}`, which the user can open."
+    elif slug is not None:
+        where = (
+            f"Saved in the folder of artifact `{slug}`: reference it from that artifact by its "
+            f"path inside the folder ({saved.relative_to(store.folder_for(slug)).as_posix()})."
+        )
+    else:
+        where = "Saved in the project."
+    payload["note"] = (
+        f"{where} The picture is not in your context: describe it from your prompt, or "
+        "read_image `absolute_path` if you must check it. To use it in a page generate_artifact "
+        "builds, pass `absolute_path` in its `attachments`."
+    )
+    yield ToolOutcome(content=json.dumps(payload), ok=True)
 
 
 def _expand_home(file_path: str, policy: "CellSandbox | None") -> Path:

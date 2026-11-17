@@ -126,8 +126,8 @@ def test_declared_datasource_credentials_are_collected():
 
 
 def test_bookkeeping_fields_never_reach_the_backend():
-    """`TurnKeyDataVault.env_for` does not drop `_`-prefixed fields despite its
-    contract, so the filter lives here."""
+    """The launcher drops `_`-prefixed fields itself, whatever the vault
+    returns."""
     ref = _ref()
     vault = _Vault({"postgres-prod_db": {
         f"{ref.env_prefix}__HOST": "db.internal",

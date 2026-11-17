@@ -197,6 +197,14 @@ async def test_generate_reads_anton_md_into_the_run_without_marking_it_read(tmp_
     assert workspace.anton_md_modified_since_last_read() is True
 
 
+def test_an_untouched_template_workspace_has_no_rules(tmp_path):
+    workspace = Workspace(tmp_path)
+    workspace.initialize()
+    session = _session()
+    session._workspace = workspace
+    assert orchestrator._project_rules(session) == ""
+
+
 def test_a_session_without_a_workspace_has_no_rules():
     session = _session()
     session._workspace = None
@@ -210,7 +218,7 @@ def test_a_test_double_workspace_yields_no_rules_and_no_stray_coroutine(recwarn)
 
 def test_an_unreadable_anton_md_builds_without_rules_and_says_so(caplog):
     class Refusing:
-        def read_anton_md(self):
+        def read_anton_md_user_text(self):
             raise OSError("anton.md is a link")
 
     session = _session()

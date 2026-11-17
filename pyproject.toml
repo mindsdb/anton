@@ -81,6 +81,7 @@ scratchpad = [
 dev = [
     "pytest>=9.0.0",
     "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.6",
 ]
 
 [project.urls]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import os
 import sys
@@ -16,6 +17,8 @@ from anton.core.datasources.data_vault import DataVault
 from anton.utils.nofollow import read_text_nofollow, replace_text_nofollow
 
 logger = logging.getLogger(__name__)
+
+_AGENT_PADS_FILE = "_agent_pads.json"
 
 # Set once a factory without internet_research_enabled was warned about: hosts
 # build a manager for every message, and the factory doesn't change.
@@ -81,6 +84,7 @@ class ScratchpadManager:
         coding_api_key_supplier: ApiKeySupplier | None = None,
         coding_flavor: str | None = None,
         internet_research_enabled: bool = True,
+        image_model: str | None = None,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
         self._runtime_factory = runtime_factory
@@ -121,6 +125,12 @@ class ScratchpadManager:
         self._factory_takes_internet_research = self._probe_factory_kwarg(
             runtime_factory, "internet_research_enabled"
         )
+        # The image model the pads' generate_image() asks for; None leaves a
+        # pad to resolve it itself (`anton.core.llm.images.resolve_image_model`).
+        self._image_model = image_model.strip() if isinstance(image_model, str) and image_model.strip() else None
+        self._factory_takes_image_model = self._probe_factory_kwarg(runtime_factory, "image_model")
+        # Only a runtime that names `image_model` (the local one) speaks the pad's image protocol.
+        self.pads_offer_images = self._factory_names_kwarg(runtime_factory, "image_model")
         global _warned_no_internet_research_kwarg
         if (not internet_research_enabled and not self._factory_takes_internet_research
                 and not _warned_no_internet_research_kwarg):
@@ -182,19 +192,19 @@ class ScratchpadManager:
         """
         return self._cell_sandbox
 
-    def _agent_pads_file(self):
-        """Where this conversation's agent-chosen pad names are recorded, or None.
+    def _conversation_file(self, name: str) -> Path | None:
+        """Where a per-conversation record named `name` is kept, or None.
 
         Sits inside the namespace-snapshot directory so it is scoped per conversation
         and reclaimed by the same cleanup (cowork-server prunes that directory on
-        conversation delete). Underscore-prefixed so the `*.pkl` snapshot glob skips it.
+        conversation delete). Names are underscore-prefixed so the `*.pkl` snapshot
+        glob skips them.
 
         Returns None without a `session_id`, matching `snapshot_dir`, which refuses to
         hand out a directory at all when the conversation scope is unknown. That is also
-        the behaviour this record wants on its own terms: anything shared across unscoped
-        conversations (bare CLI, tests) would pool their pad names, and the guard would
-        start challenging on names from unrelated past sessions. Unscoped callers keep the
-        previous in-memory-only behaviour.
+        the behaviour these records want on their own terms: anything shared across
+        unscoped conversations (bare CLI, tests) would pool their contents. Unscoped
+        callers keep the previous in-memory-only behaviour.
         """
         if not self._session_id:
             return None
@@ -202,9 +212,47 @@ class ScratchpadManager:
             from anton.core.backends.local import default_venvs_base, snapshot_dir
 
             base = snapshot_dir(default_venvs_base(self._workspace_path), self._session_id)
-            return None if base is None else base / "_agent_pads.json"
+            return None if base is None else base / name
         except Exception:
             return None
+
+    def read_conversation_text(self, name: str) -> str | None:
+        """A per-conversation record's text, or None when there is none.
+
+        Under a sandbox policy the record is read from the workspace root without
+        following a link, as `write_conversation_text` writes it, so a linked folder or
+        file never shows another person's record.
+        """
+        path = self._conversation_file(name)
+        if path is None:
+            return None
+        try:
+            if self._cell_sandbox is not None and self._workspace_path is not None:
+                return read_text_nofollow(self._workspace_path, path)
+            return path.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return None
+
+    def write_conversation_text(self, name: str, text: str) -> None:
+        """Replace a per-conversation record. Best-effort: a failed write is dropped."""
+        path = self._conversation_file(name)
+        if path is None:
+            return
+        try:
+            # The snapshot folder sits in the project, which agent code can
+            # write, so on Linux and macOS neither it nor the file may be a
+            # link, and the file is written fresh and renamed in. Under a sandbox
+            # policy no folder below the workspace may be one either; without
+            # one, the sessions folder is opened as before, following a
+            # linked `.anton`.
+            if self._cell_sandbox is not None and self._workspace_path is not None:
+                root = self._workspace_path
+            else:
+                root = path.parent.parent
+            root.mkdir(parents=True, exist_ok=True)
+            replace_text_nofollow(root, path, text, create_parents=True)
+        except (OSError, ValueError):
+            pass
 
     def agent_pads(self) -> set[str]:
         """Pad names the AGENT has exec'd in this conversation, including earlier turns.
@@ -224,19 +272,14 @@ class ScratchpadManager:
         following a link, as `record_agent_pad` writes it, so a linked folder or
         file never shows another person's pad names.
         """
-        path = self._agent_pads_file()
-        if path is None:
+        text = self.read_conversation_text(_AGENT_PADS_FILE)
+        if text is None:
             return set()
         try:
-            import json
 
-            if self._cell_sandbox is not None and self._workspace_path is not None:
-                text = read_text_nofollow(self._workspace_path, path)
-            else:
-                text = path.read_text(encoding="utf-8")
             names = json.loads(text)
             return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
-        except (OSError, ValueError):
+        except ValueError:
             return set()
 
     def record_agent_pad(self, name: str) -> None:
@@ -244,31 +287,12 @@ class ScratchpadManager:
 
         Best-effort: losing this only returns the guard to its previous behaviour.
         """
-        path = self._agent_pads_file()
-        if path is None or not name:
+        if not name:
             return
-        try:
-            import json
 
-            current = self.agent_pads()
-            if name in current:
-                return
-            # The snapshot folder sits in the project, which agent code can
-            # write, so on Linux and macOS neither it nor the file may be a
-            # link, and the file is written fresh and renamed in. Under a sandbox
-            # policy no folder below the workspace may be one either; without
-            # one, the sessions folder is opened as before, following a
-            # linked `.anton`.
-            if self._cell_sandbox is not None and self._workspace_path is not None:
-                root = self._workspace_path
-            else:
-                root = path.parent.parent
-            root.mkdir(parents=True, exist_ok=True)
-            replace_text_nofollow(
-                root, path, json.dumps(sorted(current | {name})), create_parents=True
-            )
-        except (OSError, ValueError):
-            pass
+        current = self.agent_pads()
+        if name not in current:
+            self.write_conversation_text(_AGENT_PADS_FILE, json.dumps(sorted(current | {name})))
 
     @property
     def available_packages(self) -> list[str]:
@@ -361,6 +385,11 @@ class ScratchpadManager:
                 **(
                     {"internet_research_enabled": False}
                     if not self._internet_research_enabled and self._factory_takes_internet_research
+                    else {}
+                ),
+                **(
+                    {"image_model": self._image_model}
+                    if self._factory_takes_image_model and self._image_model is not None
                     else {}
                 ),
             )

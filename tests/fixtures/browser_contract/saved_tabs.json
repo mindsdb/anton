@@ -1,0 +1,54 @@
+{
+  "description": "A project's saved tabs, newest first. Saving a name again replaces it. A project keeps at most limits.saved_tabs_per_project tabs, on the web and on the desktop; a save past that answers 409 too_many_saved_tabs.",
+  "limits": {
+    "saved_tabs_per_project": 100
+  },
+  "examples": {
+    "the project's saved tabs": {
+      "where": "GET /saved-tabs?project={project}",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "tabs": [
+          {
+            "name": "Q3 pipeline report",
+            "url": "https://crm.example.test/reports/q3",
+            "notes": "start here",
+            "saved_at": "2026-11-05T18:00:00.000Z"
+          }
+        ]
+      }
+    },
+    "save a tab": {
+      "where": "POST /saved-tabs",
+      "kind": "request",
+      "body": {
+        "project": "p-89abcdef0123456789abcdef",
+        "name": "Q3 pipeline report",
+        "url": "https://crm.example.test/reports/q3",
+        "notes": "start here"
+      }
+    },
+    "the saved tab": {
+      "where": "POST /saved-tabs",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "tab": {
+          "name": "Q3 pipeline report",
+          "url": "https://crm.example.test/reports/q3",
+          "notes": "start here",
+          "saved_at": "2026-11-05T18:00:00.000Z"
+        }
+      }
+    },
+    "the saved tab deleted": {
+      "where": "DELETE /saved-tabs?project={project}&name={name}",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "ok": true
+      }
+    }
+  }
+}

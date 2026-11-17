@@ -1,0 +1,13 @@
+{
+  "description": "The browser tool opened the person's browser session. The cloud turn writes this line on stdout; cowork-server stores the session id only. It carries no viewer link and no key: the web app mints a viewer link with the person's own credential, and the desktop app shows its own browser.",
+  "examples": {
+    "the cloud turn's line": {
+      "where": "cloud turn stdout",
+      "kind": "event",
+      "body": {
+        "kind": "browser",
+        "session_id": "t-0123456789abcdef01234567"
+      }
+    }
+  }
+}

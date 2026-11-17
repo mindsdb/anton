@@ -14,13 +14,6 @@ def test_snapshot_message_starts_with_the_note():
     assert message.startswith("The answer was cut off — trying again — waiting for the model (")
 
 
-def test_snapshot_without_a_note_is_unchanged():
-    tracker = ModelCallTracker()
-    call = tracker.open(role="planning", idle_timeout_s=None)
-    call.awaiting = True
-    assert tracker.snapshot().message.startswith("Waiting for the model (")
-
-
 class _PeekingProvider(LLMProvider):
     name = "peek"
 

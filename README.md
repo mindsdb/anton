@@ -243,6 +243,19 @@ The same host supplies `learned_memory_scope` as `personal`, `shared`, `off` or 
 
 These are in-process session inputs. The cloud-turn wire does not transport deployment identity or learned-memory scope.
 
+## The shared browser
+
+A host gives a session the `browser` tool by passing `ChatSessionConfig.browser`, a `BrowserConfig` from `anton.core.browser.config`. Nothing else turns it on: no setting, environment variable or `.env` line gives a session a browser. It takes one of two forms:
+
+- **A browser router**, for cloud turns: an `https` base URL with no credential. The cloud turn reads it from the turn request's `params.browser` block (`{base_url, profile, project?}`), and the tool calls the router with the turn's own key.
+- **The Cowork desktop app's own browser**: exactly `http://127.0.0.1:<port>` and the app's per-launch key, built by the host in its own process. It never travels in a turn request, and its client ignores system proxies.
+
+The tool reads pages as numbered elements and acts on them by number. The person shares the browser: they hand it back after a hand-over with Done in the browser, or, when the hand-over names what it waits for (`wait_for`: one checkbox, toggle or text field, or the page changing after a human check), a host that watches for it and says so in its answer (`watching`) hands it back by itself once that's done. A step that commits something (submit, buy, send, delete, grant access) waits for the person's Approve on a card. On the router, the browser itself holds those steps and anton shows the card when it answers `approval_required`; a click by position runs at once there unless it lands on a commit control, which holds as that control's click. On the desktop, anton shows the card before it sends the step, and a click by position first shows an "Allow clicks by position on this page" card, once per page address, which then covers every click by position on that page, except on an OAuth authorization or consent page, where every click waits for Approve as a commit step on both hosts. The desktop app's own browser runs on the person's machine, so it needs no browser server; it picks its steps the same way as the router's.
+
+A decision model picks the browser's steps: Jev on the session's MindsHub connection, for either form, or a decision model of the host's own, which wins. A host running the turn in its own process passes it as `BrowserConfig.decisions` (a `DecisionsTarget`: the endpoint's full URL, its key and its model name); like the launch key, it stays in the host's process and never travels in a turn request. For a turn it hands to a cloud pod, the host passes `BrowserConfig.decisions_proxy` instead (a `DecisionsProxy`: the full URL of a route of the host's own and the model name, no key), which the turn request carries: the tool posts each decision there with the session's MindsHub credential, the turn key, and the host forwards it to its decision model with the key it keeps. Without any, the model picks every step.
+
+`tests/fixtures/browser_contract/` pins the HTTP contract both hosts serve, including the commit list both read; each host's tests keep a copy. Its README explains the format.
+
 ## Shared live-app slots
 
 Hosts that enable live apps can set `ANTON_LIVE_APPS_PER_PERSON` from zero through their configured slot count. Empty uses the slot count; zero refuses launches and leaves running apps alone. At the cap, or when every slot is full, the person chooses one of their own apps to replace. Cancel, Skip and unanswered cards leave the apps running.
@@ -259,6 +272,12 @@ export ANTON_MODEL_CALL_IDLE_TIMEOUT_S=600
 ```
 
 While a model call is silent, hosts can show that the turn is still working. `ChatSession.model_calls` is `None` before the first turn. Its `snapshot()` returns the oldest call waiting on the model, or `None` when nothing is waiting, a question is open, or the turn has ended. The cloud turn entrypoint uses it: when a call is waiting and nothing else has gone out for 20 seconds, it writes a progress line with phase `model_wait`, such as "Waiting for the model (2m 40s)". A hung tool or cell reports no wait, so it still goes quiet and the host's idle limits still end it.
+
+## Artifacts a turn touched
+
+`ChatSession.artifacts_touched` names the artifact folders the current turn created or updated through its artifact tools, or edited from a scratchpad cell. Anton finds a cell's edits by reading every artifact folder's files just before and just after the cell, on a worker thread, so a slow mount does not hold up the turn. A process a cell starts that writes into an artifact after the cell returns goes unlisted. An entry in the artifacts folder that one of those reads cannot stat is skipped, so the cell still runs, and `ChatSession.artifacts_touched_complete` turns false for the rest of the turn. When the artifacts folder itself cannot be read, that read counts as empty: the cell still runs, without lint, live-app relaunch or edit tracking for that cell, and `ChatSession.artifacts_touched_complete` turns false. An artifact is named by its folder, even when its `metadata.json` holds an older `slug`, so every write goes back to the folder it was read from.
+
+The cloud turn entrypoint sends the list as `artifacts_touched` on `turn_completed`. It leaves the key out when the record is incomplete or would name more than 1,000 folders, and the host then reads the whole artifacts folder. `anton/cloud_turn/contract.py` holds the key and the cap.
 
 ## Cloud turn skills
 
@@ -281,6 +300,24 @@ Each turn writes its skills into a fresh folder in the system temp dir, outside 
 | `ALWAYS_ON_OMITTED_MAX_NAMES` | 20 names on the closing line | The rest are counted as "and N more". |
 
 A request with no `skills` block at all stages no skills, with one rollout fallback. On a pod whose controller mounts the organization's whole skills tree and names it in `ANTON_CLOUD_SKILLS_ROOT`, such a request reads that mount instead, and the pod logs a warning. The mount holds every member's skills, so a request that carries a block never reads it.
+
+## Write-check card budget
+
+The write check asks the person to approve a cell before it changes a database, a listed endpoint or an existing file. A card on a cell that writes nothing costs a click, or an unattended answer the whole card timeout, so the check is measured both ways: what it catches and what it asks about for no reason.
+
+`scripts/write_check_replay.py` replays `tests/fixtures/write_check_replay_corpus.yaml` through one anton tree's write check, cell by cell with each chat's earlier cells. The corpus holds about 100 synthetic analysis chats. They mix pandas, SQL reads, helper modules, restarts between turns, page builds and real writes, and each cell is labeled by hand. Each must-hold cell is paired with must-stay-free cells that share its `pair` id. The replay prints cards per 100 cells and per 100 questions by kind, real writes carded, cards on cells that write nothing, each pair's result, and the causes the cards name. It takes a few seconds:
+
+```bash
+uv run python -I scripts/write_check_replay.py                         # this tree
+uv run python -I scripts/write_check_replay.py --tree /path/to/other/anton --commit <sha> --out other.json
+uv run python -I scripts/write_check_replay.py --tree . --compare other.json   # exit 1 on a lost hold or more noise
+```
+
+It runs any anton commit's write check, the older `earlier_code=` form included. It exits 2 when it refuses to score: Python imported the check from anywhere but `--tree`, it can't import one there, or `--compare` got a scorecard of another corpus. A failed `--compare` exits 1. `--accept <yaml>` maps cells that write nothing and may newly ask to the reason each must, under `no_write_cards`; `--compare` doesn't count those cards against the base. A lost real-write card can't be accepted. A check that raises counts as a card, as it does in a session. `--code-root` passes the project folder as a local pad's `code_root` on a tree that takes it.
+
+Every cell has an `id`, its key in scorecards and the budget: the chat's code and a number. A new cell takes its chat's next free number, so no other key moves.
+
+`tests/test_write_check_replay.py` holds this tree to `tests/fixtures/write_check_replay_budget.yaml`. Its lists are exact: the real writes carded on a rule of their own, those carded only by the "can't be checked" card, the known misses, the cells that write nothing but get a card, and the broken pairs. The test fails when the scorecard differs from any list in either direction, and names the cells. So a change that frees five cells and cards five others fails too. A change that frees cells or starts catching a write updates the lists. A change that adds cards says in its PR which cells gained one and why each must ask, and a change that narrows the "can't be checked" card says what holds each write it frees.
 
 ---
 

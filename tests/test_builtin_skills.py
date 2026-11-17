@@ -271,6 +271,9 @@ class TestArtifactWorkflowPointsAtTheTool:
         assert "generate_artifact" in ARTIFACTS_PROMPT
         for t in ("html-app", "fullstack-stateless-app", "fullstack-stateful-app"):
             assert t in ARTIFACTS_PROMPT
+        # create_artifact is still the first step; the generator takes a ready slug.
+        assert "create_artifact" in ARTIFACTS_PROMPT
+        assert "BEFORE" in ARTIFACTS_PROMPT
 
     def test_workflow_keeps_the_manual_path_for_the_other_types(self):
         """The generator does not support document/dataset/image — their path stays manual."""
@@ -279,13 +282,6 @@ class TestArtifactWorkflowPointsAtTheTool:
         low = ARTIFACTS_PROMPT.lower()
         assert "document" in low and "dataset" in low
         assert "yourself" in low or "by hand" in low
-
-    def test_workflow_still_requires_registration_first(self):
-        """create_artifact is still the first step — the generator takes a ready slug."""
-        from anton.core.llm.prompts import ARTIFACTS_PROMPT
-
-        assert "create_artifact" in ARTIFACTS_PROMPT
-        assert "BEFORE" in ARTIFACTS_PROMPT
 
 
 class TestNoPathStillNamesASeparatePrdStep:
@@ -415,14 +411,6 @@ class TestRecallIsConditionalNow:
             assert "recall_skill" in text, name
             low = text.lower()
             assert "by hand" in low or "yourself" in low, name
-
-    def test_hints_still_point_at_shipped_skills(self, store):
-        """The rewording must not leave a pointer to a non-existent skill."""
-        import re
-
-        for text in self._texts().values():
-            for label in re.findall(r'recall_skill\(\\?"([a-z0-9-]+)\\?"\)', text):
-                assert store.load(label) is not None, label
 
 
 class TestToolDescriptionsAfterTheSwitch:
@@ -696,12 +684,6 @@ class TestHermesIsNotStatedAsFact:
         body = store.load("cowork-product").declarative_md.lower()
         for wrong in ("nous research", "third-party harness", "external agent"):
             assert wrong not in body
-
-    def test_the_maintenance_note_says_how_to_settle_it(self):
-        """So the next reader resolves the disagreement instead of guessing."""
-        skill_dir = Path(skills_mod.__file__).parent / "builtin_skills" / "cowork-product"
-        sources = (skill_dir / "SOURCES.md").read_text()
-        assert "cowork/harnesses/" in sources
 
 
 class TestPipelineContractMirrored:

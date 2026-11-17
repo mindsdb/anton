@@ -92,6 +92,14 @@ class AntonSettings(CoreSettings):
     router_provider: str | None = None
     router_model: str | None = None
 
+    # Image role (ENG-4024) — the model the `generate_image` tool and the
+    # scratchpad's `generate_image()` ask for (ANTON_IMAGE_MODEL). It has no
+    # provider of its own: images go to the OpenAI images API on the endpoint
+    # and key of a role already on MindsHub or OpenAI. Unset resolves per call:
+    # on MindsHub, the alias its catalogue marks `default_for: ["image"]`; else
+    # `anton.core.llm.images.DEFAULT_IMAGE_MODEL`.
+    image_model: str | None = None
+
     max_tokens: int = 8192  # max output tokens per LLM call
 
     anthropic_api_key: str | None = None
@@ -190,6 +198,11 @@ class AntonSettings(CoreSettings):
     posthog_host: str = "https://us.i.posthog.com"
     posthog_key: str = "phc_ypFMKbvAwRsLuDCToox2AkEg5wx6ReBfkyi3kX2zw6VK"
 
+    # Names the deployment that sent an event (`prod`, `staging`, `dev`, ...).
+    # Set by the host that knows it; empty wherever none does, such as the CLI,
+    # so empty means "unknown", never "prod".
+    deployment_env: str = ""
+
     # Minds datasource integration
     minds_api_key: str | None = None
     minds_url: str = "https://mdb.ai"
@@ -218,7 +231,14 @@ class AntonSettings(CoreSettings):
         return v
 
     def model_post_init(self, __context) -> None:
-        """Derive openai vars from minds credentials when appropriate."""
+        """Derive openai vars from minds credentials when appropriate, then the decisions model."""
+        self._derive_openai_from_minds()
+        if self.decisions_model is None:
+            from anton.core.llm.jev import default_decisions_model
+
+            self.decisions_model = default_decisions_model(self)
+
+    def _derive_openai_from_minds(self) -> None:
         if (
             self.minds_api_key
             and not self.openai_api_key

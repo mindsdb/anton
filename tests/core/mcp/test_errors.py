@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx2
 import mcp
 
-from anton.core.mcp.errors import McpPermanentError, McpTransientError, classify_mcp_error
+from anton.core.mcp.errors import McpPermanentError, McpTokenRejected, McpTransientError, classify_mcp_error
 
 
 def test_classification_is_idempotent():
@@ -23,7 +23,10 @@ def test_http_401_and_403_are_permanent():
     for status in (401, 403):
         response = httpx2.Response(status, request=request)
         exc = httpx2.HTTPStatusError("auth failed", request=request, response=response)
-        assert isinstance(classify_mcp_error(exc), McpPermanentError)
+        classified = classify_mcp_error(exc)
+        assert isinstance(classified, McpTokenRejected)
+        assert isinstance(classified, McpPermanentError)
+        assert classified.status_code == status
 
 
 def test_http_5xx_is_transient():

@@ -63,8 +63,12 @@ PRELOAD_MODULES = (
     "anton.core.artifacts.store",
     "anton.core.artifacts.xlsx_lint",
     "anton.core.artifacts.xlsx_office_check",
+    "anton.core.browser.config",
+    "anton.core.browser.tool",
     "anton.core.memory.cortex",
     "anton.core.memory.hippocampus",
+    "anton.core.tools.edit_artifact",
+    "anton.minds_client",
     "anton.tools",
     # The provider's first streamed request.
     "httpcore2",

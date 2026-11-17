@@ -1,0 +1,21 @@
+{
+  "request_fingerprint": "26057131cc41a148ea1545383bf65e64796e934575a82b478d69c5326e4b2479",
+  "call_fingerprint": "967aa8608b128eb3f4d88bb4dc0a68e7e74ae7c2052bb87114b1e30d9b3c68c0",
+  "pipeline_stage": "generated",
+  "artifact_type": "html-app",
+  "gathering_complete": true,
+  "declared_sources": [],
+  "unverified_sources": [],
+  "brief_markdown": "Here’s a short overview of the proposed calculator.\n\n### Goal\nA single-page loan calculator that estimates monthly payments and shows how principal, interest, and remaining balance change each year.\n\n### Artifact type\nSingle-page HTML app.\n\n### Data model\nNo external data or saved information; calculations use the values entered in the calculator.\n\n### Requirements\nEnter a loan amount, annual interest rate, and term in years. Press **Calculate** to show the monthly payment, total interest, and a yearly amortization table. Defaults: 250,000, 6.5%, and 30 years.\n\n### Assumptions\n- Display monetary amounts in USD.\n- Use fixed monthly payments with monthly compounding, grouped into 12-month yearly rows.\n- Round displayed monetary amounts to cents.\n\nThe calculator is being built with these assumptions; you can ask for changes once it’s ready.",
+  "data_notes": "### Code executed while fetching\nScratchpad `loan-calc-gathering`:\n```python\nimport os, json, math, inspect\nfrom pathlib import Path\nfolder = Path('/workspace/.anton/artifacts/loan-payment-calculator-684cf670')\nfolder.mkdir(parents=True, exist_ok=True)\nP = 250000.0\nannual_rate = 0.065\nterm_years = 30\nn = term_years * 12\nr = annual_rate / 12\npayment = P * r / (1 - (1 + r) ** (-n))\nbalance = P\nrows=[]\nfor year in range(1, term_years + 1):\n    principal_paid = interest_paid = 0.0\n    for month in range(12):\n        interest = balance * r\n        principal = payment - interest\n        balance -= principal\n        if month == 11 and year == term_years:\n            principal += balance\n            balance = 0.0\n        principal_paid += principal\n        interest_paid += interest\n    rows.append({\"year\": year, \"principal_paid\": round(principal_paid,2), \"interest_paid\": round(interest_paid,2), \"remaining_balance\": round(max(0,balance),2)})\ntotal_interest = payment*n - P\npayload={\"units\":{\"loan_amount\":\"USD\",\"annual_interest_rate\":\"percent per year\",\"term\":\"years\",\"payment\":\"USD per month\",\"amortization_amounts\":\"USD\"},\"filters\":None,\"time_scope\":\"30-year loan; monthly payments aggregated by loan year\",\"inputs\":{\"loan_amount\":250000,\"annual_interest_rate_percent\":6.5,\"term_years\":30},\"calculated_figures\":{\"monthly_payment\":round(payment,2),\"total_interest\":round(total_interest,2),\"total_payments\":round(payment*n,2)},\"amortization_by_year\":rows}\npath=folder/'observed-data.json'\npath.write_text(json.dumps(payload, indent=2)+ '\\n')\nprint(json.dumps({\"file\":str(path),\"year_rows\":len(rows),\"monthly_payment\":round(payment,2),\"total_interest\":round(total_interest,2),\"first_year\":rows[0],\"final_year\":rows[-1],\"complete_static_artifact_available\":'complete_static_artifact' in globals()}))\nif 'complete_static_artifact' in globals(): print('signature', inspect.signature(complete_static_artifact))\n```\nOutput: [output] {\"file\": \"/workspace/.anton/artifacts/loan-payment-calculator-684cf670/observed-data.json\", \"year_rows\": 30, \"monthly_payment\": 1580.17, \"total_interest\": 318861.22, \"first_ye …",
+  "web_notes": "",
+  "assumptions": [
+    "Treat monetary amounts as USD for display and calculations.",
+    "Calculate fixed monthly payments with monthly compounding; aggregate 12 monthly payment periods into each yearly amortization row.",
+    "Round displayed monetary values to cents."
+  ],
+  "open_points": [],
+  "attachments": [],
+  "known_data": "",
+  "known_data_verified": []
+}

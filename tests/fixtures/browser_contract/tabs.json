@@ -1,0 +1,67 @@
+{
+  "description": "The session's tabs. The active tab is the one actions, page reads and the viewer use. Closing the last tab leaves a blank one.",
+  "examples": {
+    "the open tabs": {
+      "where": "GET /sessions/{id}/tabs",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "tabs": [
+          {
+            "id": "t1",
+            "url": "https://shop.example.test/",
+            "title": "Shop",
+            "active": true
+          },
+          {
+            "id": "t2",
+            "url": "https://docs.example.test/",
+            "title": "Docs",
+            "active": false
+          }
+        ]
+      }
+    },
+    "open a tab": {
+      "where": "POST /sessions/{id}/tabs",
+      "kind": "request",
+      "body": {
+        "url": "https://docs.example.test/"
+      }
+    },
+    "the opened tab": {
+      "where": "POST /sessions/{id}/tabs",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "tab": {
+          "id": "t3",
+          "url": "https://docs.example.test/",
+          "title": "",
+          "active": true
+        }
+      }
+    },
+    "the activated tab": {
+      "where": "POST /sessions/{id}/tabs/{tab}/activate",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "tab": {
+          "id": "t2",
+          "url": "https://docs.example.test/",
+          "title": "Docs",
+          "active": true
+        }
+      }
+    },
+    "the tab closed": {
+      "where": "DELETE /sessions/{id}/tabs/{tab}",
+      "kind": "response",
+      "status": 200,
+      "body": {
+        "ok": true
+      }
+    }
+  }
+}

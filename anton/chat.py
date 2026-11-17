@@ -80,6 +80,7 @@ from anton.utils.prompt import (
 from anton.minds_client import (
     normalize_minds_url,
     describe_minds_connection_error,
+    describe_minds_request_failure,
     list_minds,
     list_datasources,
     resolve_and_probe,
@@ -802,6 +803,8 @@ async def _handle_publish(
             elif isinstance(e, ArtifactShareOrgRequiredError):
                 console.print(f"  [anton.error]Publish failed: {escape(e.reason)}[/]")
             elif isinstance(e, urllib.error.HTTPError) and e.code == 401:
+                failure = describe_minds_request_failure(e) or str(e)
+                console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
                 rejected = settings.minds_api_key
                 settings.minds_api_key = None
                 # Clear it where it is WRITTEN — but only if the global vault is
@@ -832,7 +835,8 @@ async def _handle_publish(
                         "ANTON_MINDS_API_KEY.[/]"
                     )
             else:
-                console.print(f"  [anton.error]Publish failed: {escape(str(e))}[/]")
+                failure = describe_minds_request_failure(e) or str(e)
+                console.print(f"  [anton.error]Publish failed: {escape(failure)}[/]")
             console.print()
             return
 
@@ -920,7 +924,8 @@ async def _handle_unpublish(
                 ssl_verify=settings.minds_ssl_verify,
             )
         except Exception as e:
-            console.print(f"  [anton.error]Failed to list reports: {e}[/]")
+            failure = describe_minds_request_failure(e) or str(e)
+            console.print(f"  [anton.error]Failed to list reports: {escape(failure)}[/]")
             console.print()
             return
 
@@ -992,7 +997,8 @@ async def _handle_unpublish(
                 ssl_verify=settings.minds_ssl_verify,
             )
         except Exception as e:
-            console.print(f"  [anton.error]Failed to remove: {e}[/]")
+            failure = describe_minds_request_failure(e) or str(e)
+            console.print(f"  [anton.error]Failed to remove: {escape(failure)}[/]")
             console.print()
             return
 

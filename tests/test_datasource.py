@@ -15,7 +15,6 @@ from anton.chat import (
 )
 from anton.core.session import ChatSessionConfig
 from anton.commands.datasource import (
-    _PROMPT_RECONNECT_CANCEL,
     handle_add_custom_datasource,
     handle_connect_datasource,
     handle_test_datasource,
@@ -421,7 +420,7 @@ class TestDatasourceRegistry:
 
     @pytest.mark.parametrize("query", ["PostgreSQL", "postgresql", "POSTGRESQL"])
     def test_find_by_name_variants(self, registry, query):
-        assert registry.find_by_name(query) is not None
+        assert registry.find_by_name(query).engine == "postgresql"
 
     def test_find_unknown_returns_none(self, registry):
         assert registry.find_by_name("MySQL") is None
@@ -4501,22 +4500,6 @@ class TestPromptCopyConsistency:
             lbl = fuzzy_labels[0]
             assert "(y/n)" in lbl
             assert "[y/n]" not in lbl
-
-    @pytest.mark.parametrize(
-        "label",
-        [
-            "(y/n)",
-            "(reconnect/cancel)",
-            "(anton) Would you like to re-enter your credentials? (y/n)",
-            "(anton) Use this datasource? (y/n)",
-            "(anton) (reconnect/cancel)",
-        ],
-    )
-    def test_canonical_labels_no_bracket_style(self, label):
-        """None of the canonical prompt strings use the old bracket style."""
-        assert "[y/n]" not in label
-        assert "[reconnect/cancel]" not in label
-        assert "(y/n" in label or _PROMPT_RECONNECT_CANCEL in label
 
 
 class TestToolConnectResultParsing:

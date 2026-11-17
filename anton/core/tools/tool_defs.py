@@ -3,6 +3,7 @@ from anton.core.tools.tool_handlers import (
     handle_ask_user,
     handle_create_artifact,
     handle_generate_artifact,
+    handle_generate_image,
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
@@ -19,7 +20,6 @@ from anton.core.utils.scratchpad import SCRATCHPAD_ACTIONS
 from anton.core.utils.write_hold import handle_approve_held_write
 from anton.core.tools.text_file import DEFAULT_LINE_COUNT, MAX_OUTPUT_CHARS
 
-import os
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
@@ -71,7 +71,9 @@ SCRATCHPAD_TOOL = ToolDef(
         "sizes the total budget (roughly 2x the estimate; without one the default "
         "budget is small). Call progress(message) to narrate long phases — it is "
         "user-visible status, not a survival requirement.\n\n"
-        "Use print() to produce output. Host Python packages are available by default. "
+        "Use print() to produce output; printed output stops at 10,000 characters, so read "
+        "text files with read_text_file rather than printing them. Host Python packages are "
+        "available by default. "
         "Include a 'packages' array on exec calls for any libraries your code needs — "
         "they'll be auto-installed before the cell runs (already-installed ones are skipped).\n"
         "get_llm() returns a pre-configured LLM client (sync) — call "
@@ -489,8 +491,9 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "attached or pasted for this artifact, exactly as the conversation "
         "shows them. Data files (csv, json, xlsx, ...) are read by the "
         "pipeline's own data step; images and other assets are copied into "
-        "the artifact and referenced by name. Only files the user provided "
-        "— never a path you guessed or a file you produced.\n\n"
+        "the artifact and referenced by name. Only files the user provided, or "
+        "images `generate_image` made — never a path you guessed or another "
+        "file you produced.\n\n"
         "Returns a `status`:\n"
         '- `generated` — done. `files_written` are the artifact\'s own files '
         "(report those), `internal_files` are generation inputs like "
@@ -582,10 +585,11 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                     "(`.cowork/files/<uuid>/<name>`, `.anton/uploads/...`). "
                     "Data files are read by the pipeline; images and other "
                     "assets are copied into the artifact and referenced by "
-                    "name. Only files the user actually provided: a path "
-                    "outside the workspace, or under a dot-directory such "
-                    "as `.anton/`, is refused unless it is one of those "
-                    "upload locations."
+                    "name. Only files the user actually provided, or images "
+                    "`generate_image` saved: a path outside the workspace, "
+                    "or under a dot-directory such as `.anton/`, is refused "
+                    "unless it is one of those upload locations or a file "
+                    "of an artifact."
                 ),
             },
         },
@@ -724,41 +728,46 @@ STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_C
 GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(GENERATE_ARTIFACT_TOOL)
 STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS = _without_direct_reports(STATIC_GENERATE_ARTIFACT_TOOL)
 
+_single_call_instructions = (
+    "For a NEW web artifact, call generate_artifact directly with name, user_request, "
+    "user_language and agent_understanding; omit slug. It registers the artifact and "
+    "runs source discovery, generation and the normal verifiers in one operation. "
+    "Do not make a separate create_artifact call or pre-fetch data solely for this "
+    "handoff. Preserve the user's request verbatim. For an EDIT, pass the existing "
+    "slug instead of name so the existing artifact is updated."
+)
 
 
-if os.environ.get("ANTON_STATIC_SINGLE_CALL") == "on":
-    _single_call_instructions = (
-        "For a NEW web artifact, call generate_artifact directly with name, user_request, "
-        "user_language and agent_understanding; omit slug. It registers the artifact and "
-        "runs source discovery, generation and the normal verifiers in one operation. "
-        "Do not make a separate create_artifact call or pre-fetch data solely for this "
-        "handoff. Preserve the user's request verbatim. For an EDIT, pass the existing "
-        "slug instead of name so the existing artifact is updated."
+# No top-level anyOf: providers reject it in tool schemas. The handler requires slug or name.
+def _single_call(tool: ToolDef) -> ToolDef:
+    return replace(
+        tool,
+        description=_single_call_instructions + "\n\n" + tool.description,
+        input_schema={
+            **tool.input_schema,
+            "properties": {**tool.input_schema["properties"],
+                           "name": {"type": "string", "description": "Name of a NEW artifact; omit for an existing-slug edit."}},
+            "required": [key for key in tool.input_schema["required"] if key != "slug"],
+        },
+        prompt="ARTIFACT GENERATION:\n" + _single_call_instructions +
+               "\n`user_language` is the language the user writes to you in; talk to the user in that "
+               "language while the artifact is built and when you report the result. "
+               "`needs_confirmation` means show `brief_summary` and, if the user agrees, call again "
+               "with the SAME `user_request` and `user_language`."
+               "\nFollow the returned instruction; the existing approval and verification rules still apply.",
     )
 
-    # No top-level anyOf: providers reject it in tool schemas. The handler requires slug or name.
-    def _single_call(tool: ToolDef) -> ToolDef:
-        return replace(
-            tool,
-            description=_single_call_instructions + "\n\n" + tool.description,
-            input_schema={
-                **tool.input_schema,
-                "properties": {**tool.input_schema["properties"],
-                               "name": {"type": "string", "description": "Name of a NEW artifact; omit for an existing-slug edit."}},
-                "required": [key for key in tool.input_schema["required"] if key != "slug"],
-            },
-            prompt="ARTIFACT GENERATION:\n" + _single_call_instructions +
-                   "\nFollow the returned instruction; the existing approval and verification rules still apply.",
-        )
 
-    def _registration_only(tool: ToolDef) -> ToolDef:
-        return replace(tool, description="For end-to-end generation, prefer generate_artifact(name=...) directly. "
-                                         "Use this registration-only tool when writing the files manually.\n\n" + tool.description)
+def _registration_only(tool: ToolDef) -> ToolDef:
+    return replace(tool, description="For end-to-end generation, prefer generate_artifact(name=...) directly. "
+                                     "Use this registration-only tool when writing the files manually.\n\n" + tool.description)
 
-    GENERATE_ARTIFACT_TOOL = _single_call(GENERATE_ARTIFACT_TOOL)
-    STATIC_GENERATE_ARTIFACT_TOOL = _single_call(STATIC_GENERATE_ARTIFACT_TOOL)
-    CREATE_ARTIFACT_TOOL = _registration_only(CREATE_ARTIFACT_TOOL)
-    STATIC_CREATE_ARTIFACT_TOOL = _registration_only(STATIC_CREATE_ARTIFACT_TOOL)
+
+GENERATE_ARTIFACT_TOOL = _single_call(GENERATE_ARTIFACT_TOOL)
+STATIC_GENERATE_ARTIFACT_TOOL = _single_call(STATIC_GENERATE_ARTIFACT_TOOL)
+CREATE_ARTIFACT_TOOL = _registration_only(CREATE_ARTIFACT_TOOL)
+STATIC_CREATE_ARTIFACT_TOOL = _registration_only(STATIC_CREATE_ARTIFACT_TOOL)
+
 
 RECALL_TOOL = ToolDef(
     name="recall",
@@ -819,6 +828,112 @@ READ_IMAGE_TOOL = ToolDef(
 )
 
 
+_IMAGES_PROMPT_HEAD = (
+    "IMAGES:\n"
+    "- When the user wants a picture — an illustration, a photo, a hero or banner image, "
+    "slide or page images, an icon or a logo concept — make a real one with "
+    "`generate_image`. Never fake it by drawing with matplotlib, PIL, SVG, HTML canvas or "
+    "CSS shapes, and never say you cannot make images. Charts, plots and diagrams of data "
+    "are still drawn with code.\n"
+    "- To change an image (the user's upload, or one you made), pass its path in "
+    "`reference_images` and say what to change and what to keep.\n"
+    "- A picture the user asked for on its own: `generate_image` registers it as an "
+    "`image` artifact itself, so do not call `create_artifact` for it. The picture is not "
+    "in your context: describe it from your prompt, or `read_image` its `absolute_path` "
+    "if you must check it.\n"
+    "- A picture for an artifact (a slide, a document, an app page): an artifact reads "
+    "only files inside its own folder, so save the image there by passing `filename` as a "
+    "path in that folder — `.anton/artifacts/<slug>/hero.png`, or under `static/` for a "
+    "fullstack app — and reference it from the artifact by its path inside the folder. "
+    "For a page `generate_artifact` builds, pass the image's `absolute_path` in its "
+    "`attachments` instead; for a single-file HTML page you write, embed it as a "
+    "`data:` URI.\n"
+)
+# The scratchpad's generate_image(), offered only where it can work (see
+# GENERATE_IMAGE_TOOL_NO_PAD_HELPER).
+_IMAGES_PROMPT_PAD_HELPER = (
+    "- For several images that are parts of one piece of work (a deck's slide images), "
+    "call `generate_image(prompt, size=None, quality=None, reference_images=None, "
+    "path=None)` in the scratchpad instead — a global there, do not import it. It saves "
+    "each image to `path` (relative to the project, or absolute, such as a file in the "
+    "folder `create_artifact` returned), else as an image artifact of its own, returns "
+    "the saved file's absolute path, and counts against the turn's image limit.\n"
+)
+_IMAGES_PROMPT_TAIL = (
+    "- Each image costs the user money: make the images asked for, not unrequested "
+    "variations."
+)
+
+
+GENERATE_IMAGE_TOOL = ToolDef(
+    name="generate_image",
+    description=(
+        "Make a real image from a text prompt: an illustration, a photo-like picture, a hero "
+        "or banner image, a slide or page image, an icon or a logo concept. Pass "
+        "`reference_images` to edit images or work from them instead (the user's upload, or "
+        "an image you made). One image per call.\n\n"
+        "Write the prompt as a full description: the subject, composition, style, lighting "
+        "and colors, any text that must appear in the image, and what to avoid. For an edit, "
+        "say what to change and what to keep.\n\n"
+        "The image is saved as a new `image` artifact, or where `filename` says. Returns JSON "
+        "with `status: generated`, `path` (relative to the project), `absolute_path`, "
+        "`artifact_slug`, `width`, `height`, `mime_type`, `model` and `usage` — never the "
+        "image itself. On failure it returns a message to "
+        "relay to the user: a safety refusal, a rate limit, no credits, a provider error. A "
+        "turn may make a limited number of images; the tool says when that is reached."
+    ),
+    prompt=_IMAGES_PROMPT_HEAD + _IMAGES_PROMPT_PAD_HELPER + _IMAGES_PROMPT_TAIL,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "What the image shows, in full; for an edit, what to change and what to keep.",
+            },
+            "reference_images": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Images to edit or work from: PNG, JPEG or WebP paths, absolute or "
+                    "relative to the project. Given, the call is an edit."
+                ),
+            },
+            "size": {
+                "type": "string",
+                "description": (
+                    "WIDTHxHEIGHT: 1024x1024 (square), 1536x1024 (landscape), 1024x1536 "
+                    "(portrait), or auto (the default) to let the model choose."
+                ),
+            },
+            "quality": {
+                "type": "string",
+                "enum": ["auto", "low", "medium", "high"],
+                "description": "low is fastest and cheapest, for drafts; high for final, detailed work. Default auto.",
+            },
+            "filename": {
+                "type": "string",
+                "description": (
+                    "A file name, such as 'hero-banner.png', saves the image as a new image "
+                    "artifact. A path relative to the project saves it there instead: in an "
+                    "artifact's folder ('.anton/artifacts/<slug>/hero.png') to use it in that "
+                    "artifact, or elsewhere in the project ('images/fox.png'). A taken name "
+                    "gets -2, -3, ...; nothing is overwritten. The extension picks the format: "
+                    ".png (the default), .jpg or .webp."
+                ),
+            },
+        },
+        "required": ["prompt"],
+    },
+    handler=handle_generate_image,
+)
+
+# Where the scratchpad's model provider has no images API (an Anthropic coding
+# model), its generate_image() only raises, so the prompt does not offer it.
+GENERATE_IMAGE_TOOL_NO_PAD_HELPER = replace(
+    GENERATE_IMAGE_TOOL, prompt=_IMAGES_PROMPT_HEAD + _IMAGES_PROMPT_TAIL
+)
+
+
 READ_TEXT_FILE_TOOL = ToolDef(
     name="read_text_file",
     description=(
@@ -828,7 +943,8 @@ READ_TEXT_FILE_TOOL = ToolDef(
         f"Returns the first {DEFAULT_LINE_COUNT} lines unless you pass a range; "
         f"`end_line=-1` reads to the end. One call returns at most {MAX_OUTPUT_CHARS:,} "
         "characters. The first line of the result is a header naming the lines "
-        "returned and where to continue; the file's text starts on the next line."
+        "returned and where to continue; the file's text starts on the next line. To read "
+        "several files, call it once per file in the same response."
     ),
     input_schema={
         "type": "object",

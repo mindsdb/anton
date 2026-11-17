@@ -71,6 +71,8 @@ SCRIPT_CELL = "SCRIPT = open('job.py').read()\n"
 EXEC_SCRIPT_CELL = 'exec(compile(SCRIPT, "job", "exec"))\n'
 PLANNER_RULE = "POST https://planner.example.com/api/*/orders/*"
 PLANNER_POST = "import requests\nrequests.post('https://planner.example.com/api/v2/orders/9', json={'qty': 5})\n"
+# The write relay's control address.
+RELAY_URL = "http://write-relay:8090"
 
 APPROVE = AskAnswer(status="answered", values=("approve",))
 CANCEL = AskAnswer(status="answered", values=("cancel",))
@@ -230,7 +232,7 @@ class _TurnSeen:
 
 def _session(
     project: Path, *cells: str, write_approval: bool = True, packages: tuple[str, ...] = (), http: str = "",
-    relay_hosts: str = "",
+    relay_hosts: str = "", unchecked: str = "all",
 ) -> _Harness:
     workspace = MagicMock(base=project)
     workspace.artifacts_dir = project / "artifacts"
@@ -239,7 +241,8 @@ def _session(
         workspace=workspace,
         settings=CoreSettings(
             write_approval=write_approval, write_approval_http=http, write_relay_hosts=relay_hosts,
-            write_relay_url="http://write-relay:8090" if relay_hosts else None,
+            write_relay_url=RELAY_URL if relay_hosts else None,
+            write_approval_unchecked=unchecked,
         ),
     ))
     pad = _Pad()
@@ -338,7 +341,7 @@ async def test_a_card_from_the_check_after_a_cell_reaches_the_host(project, monk
     from anton.core.tools import tool_handlers
     from anton.core.utils.scratchpad import ask_approval_card
 
-    async def relaunch(session, store, before):
+    async def relaunch(session, store, before, *, after):
         cause = await ask_approval_card(
             session, "**Launch this live app?**", approve_detail="Start", cancel_detail="Leave",
         )
@@ -654,7 +657,7 @@ async def test_data_and_file_changes_beside_a_relayed_request_still_wait(project
 
 async def test_the_relay_hosts_setting_reads_its_environment_variable(project, monkeypatch, caplog):
     monkeypatch.setenv("ANTON_WRITE_RELAY_HOSTS", "GW.example.internal:8765, planner.example.internal\nbad/entry")
-    monkeypatch.setenv("ANTON_WRITE_RELAY_URL", "http://write-relay:8090")
+    monkeypatch.setenv("ANTON_WRITE_RELAY_URL", RELAY_URL)
     workspace = MagicMock(base=project)
     workspace.artifacts_dir = project / "artifacts"
     with caplog.at_level(logging.WARNING, logger="anton.core.utils.write_hold"):
@@ -681,6 +684,7 @@ async def test_a_cell_that_runs_code_the_check_cant_read_waits_and_says_so(proje
     seen = await _run(harness=harness, answers=[answer])
     assert len(seen.cards) == 1 and seen.ran_before == [1]
     assert "This step can't be checked before it runs." in seen.cards[0].request.prompt
+    assert f"```\n{EXEC_SCRIPT_CELL}\n```" in seen.cards[0].request.prompt, "the card shows the step's code"
     assert harness.pad.ran == ([SCRIPT_CELL, EXEC_SCRIPT_CELL] if answer == APPROVE else [SCRIPT_CELL])
     if answer != APPROVE:
         assert "Not run: this step would run code the check couldn't read." in _history_text(harness.session)
@@ -710,8 +714,273 @@ async def test_a_cell_the_check_cant_read_that_posts_to_a_relayed_host_raises_on
     assert len(seen.cards) == 1 and seen.ran_before == [1]
     prompt = seen.cards[0].request.prompt
     assert "This step can't be checked before it runs." in prompt
-    assert RELAYED not in prompt, "the relay holds the request, so the card leaves it out"
+    assert "would send" not in prompt, "the relay holds the request, so the card lists no request"
+    assert f"```\n{exec_cell}\n```" in prompt, "the card shows the step's code"
     assert harness.pad.ran == ([SCRIPT_CELL, exec_cell] if answer == APPROVE else [SCRIPT_CELL])
+
+
+CALL_SCRIPT_CELL = "job_main()\n"
+
+
+@pytest.mark.parametrize(("unchecked", "held"), [
+    ("all", [EXEC_SCRIPT_CELL, CALL_SCRIPT_CELL, UPDATE_CELL]),
+    ("own", [EXEC_SCRIPT_CELL, UPDATE_CELL]),
+    ("off", [UPDATE_CELL]),
+])
+async def test_the_unchecked_setting_picks_which_unread_cells_wait(project, unchecked, held):
+    """`all` holds the cell that runs code the check can't read and a later
+    call into what it defined; `own` only the first; `off` neither. A real
+    write waits whatever the setting. `own` and `off` apply only with the
+    write relay holding every listed write (`unchecked_mode`)."""
+    harness = _session(project, SCRIPT_CELL, EXEC_SCRIPT_CELL, CALL_SCRIPT_CELL, UPDATE_CELL, unchecked=unchecked,
+                       http=RELAY_RULE, relay_hosts=RELAYED)
+    seen = await _run(harness=harness, answers=[APPROVE] * len(held))
+    cells = [SCRIPT_CELL, EXEC_SCRIPT_CELL, CALL_SCRIPT_CELL, UPDATE_CELL]
+    assert seen.ran_before == [cells.index(cell) for cell in held]
+    assert harness.pad.ran == cells
+    assert "UPDATE suppliers" in seen.cards[-1].request.prompt
+    if unchecked == "off":
+        assert "can't be checked" not in seen.cards[-1].request.prompt
+
+
+async def test_the_unchecked_setting_reads_its_environment_variable(project, monkeypatch):
+    monkeypatch.setenv("ANTON_WRITE_APPROVAL_UNCHECKED", "own")
+    workspace = MagicMock(base=project)
+    workspace.artifacts_dir = project / "artifacts"
+    session = ChatSession(ChatSessionConfig(
+        llm_client=_llm(), workspace=workspace, settings=CoreSettings(
+            write_approval=True, write_relay_url=RELAY_URL, write_relay_hosts=RELAYED,
+        ),
+    ))
+    try:
+        assert session._write_gate.unchecked == "own"
+    finally:
+        await session.close()
+
+
+HOLD_LOG = "anton.core.utils.write_hold"
+NOT_RELAYED_RULE = ("an ANTON_WRITE_APPROVAL_HTTP rule names GET, HEAD or * as its method, or an address that "
+                    "is not an http:// address of a host in ANTON_WRITE_RELAY_HOSTS")
+
+
+@pytest.mark.parametrize(("unchecked", "settings", "missing"), [
+    ("own", {}, "ANTON_WRITE_RELAY_URL is unset"),
+    ("off", {}, "ANTON_WRITE_RELAY_URL is unset"),
+    ("own", {"write_relay_url": RELAY_URL}, "ANTON_WRITE_RELAY_HOSTS names no host"),
+    ("off", {"write_relay_url": RELAY_URL, "write_relay_hosts": RELAYED, "write_approval_http": PLANNER_RULE},
+     NOT_RELAYED_RULE),
+    ("own", {"write_relay_url": RELAY_URL, "write_relay_hosts": RELAYED,
+             "write_approval_http": f"{RELAY_RULE}\nPOST http://other.example.internal:8765/**"},
+     NOT_RELAYED_RULE),
+    # The relay forwards a GET or HEAD without holding it.
+    ("own", {"write_relay_url": RELAY_URL, "write_relay_hosts": RELAYED,
+             "write_approval_http": f"{RELAY_RULE}\nGET http://{RELAYED}/api/trigger/**"},
+     NOT_RELAYED_RULE),
+    ("off", {"write_relay_url": RELAY_URL, "write_relay_hosts": RELAYED, "write_approval_http": f"* http://{RELAYED}/**"},
+     NOT_RELAYED_RULE),
+    # In a rule's glob `?` matches any character, so this rule lists writes to other hosts too.
+    ("own", {"write_relay_url": RELAY_URL, "write_relay_hosts": RELAYED, "write_approval_http": f"POST http://{RELAYED}?**"},
+     NOT_RELAYED_RULE),
+], ids=["own-no-relay", "off-no-relay", "no-relayed-hosts", "https-rule", "rule-to-another-host", "get-rule",
+        "any-method-rule", "wildcard-after-host"])
+async def test_own_and_off_without_the_relay_holding_every_listed_write_fall_back_to_all(
+    project, caplog, unchecked, settings, missing,
+):
+    """Under `own` and `off` a write inside code the check can't read gets
+    no card, so they apply only while the write relay holds every listed
+    write. Otherwise the session uses `all` and says why once, in a fixed
+    line that carries no URL or rule."""
+    workspace = MagicMock(base=project)
+    workspace.artifacts_dir = project / "artifacts"
+    with caplog.at_level(logging.WARNING, logger=HOLD_LOG):
+        session = ChatSession(ChatSessionConfig(
+            llm_client=_llm(), workspace=workspace,
+            settings=CoreSettings(write_approval=True, write_approval_unchecked=unchecked, **settings),
+        ))
+    try:
+        assert session._write_gate.unchecked == "all"
+    finally:
+        await session.close()
+    warned = [r for r in caplog.records if r.name == HOLD_LOG and r.levelno == logging.WARNING]
+    assert [r.getMessage() for r in warned] == [
+        "write approval: ANTON_WRITE_APPROVAL_UNCHECKED falls back to all: own and off need the write relay"
+        + (", and " if "URL" in missing else " to hold the listed writes, and ") + missing,
+    ]
+    assert warned[0].args == (), "a fixed line, with no setting's text in it"
+
+
+@pytest.mark.parametrize("unchecked", ["all", "own", "off"])
+async def test_own_and_off_apply_while_the_relay_holds_every_listed_write(project, caplog, unchecked):
+    workspace = MagicMock(base=project)
+    workspace.artifacts_dir = project / "artifacts"
+    with caplog.at_level(logging.WARNING, logger=HOLD_LOG):
+        session = ChatSession(ChatSessionConfig(
+            llm_client=_llm(), workspace=workspace, settings=CoreSettings(
+                write_approval=True, write_approval_unchecked=unchecked, write_relay_url=RELAY_URL,
+                write_relay_hosts=RELAYED, write_approval_http=RELAY_RULE,
+            ),
+        ))
+    try:
+        assert session._write_gate.unchecked == unchecked
+    finally:
+        await session.close()
+    assert [r for r in caplog.records if r.name == HOLD_LOG] == []
+
+
+async def test_all_needs_no_relay_and_says_nothing(project, caplog):
+    workspace = MagicMock(base=project)
+    workspace.artifacts_dir = project / "artifacts"
+    with caplog.at_level(logging.WARNING, logger=HOLD_LOG):
+        session = ChatSession(ChatSessionConfig(
+            llm_client=_llm(), workspace=workspace, settings=CoreSettings(write_approval=True),
+        ))
+    try:
+        assert session._write_gate.unchecked == "all"
+    finally:
+        await session.close()
+    assert [r for r in caplog.records if r.name == HOLD_LOG] == []
+
+
+SQL_AND_CALL_CELL = UPDATE_CELL + CALL_SCRIPT_CELL
+PUT_AND_EXEC_CELL = PUT_CELL + EXEC_SCRIPT_CELL
+
+
+@pytest.mark.parametrize("unchecked", ["own", "off"])
+async def test_a_readable_write_beside_a_call_into_what_unread_code_defined_shows_the_whole_card(project, unchecked):
+    """The UPDATE holds the cell whatever the setting, and Approve also runs
+    the call into what code the check couldn't read defined, so the card
+    says so and shows the step's code, as under `all`."""
+    harness = _session(project, SCRIPT_CELL, EXEC_SCRIPT_CELL, SQL_AND_CALL_CELL, unchecked=unchecked,
+                       http=RELAY_RULE, relay_hosts=RELAYED)
+    seen = await _run(harness=harness, answers=[APPROVE, APPROVE])
+    prompt = seen.cards[-1].request.prompt
+    assert seen.ran_before[-1] == 2
+    assert "UPDATE suppliers" in prompt
+    assert "This step can't be checked before it runs." in prompt
+    assert "It uses `job_main`, which code an earlier step ran may have set." in prompt
+    assert f"The step's code:\n\n```\n{SQL_AND_CALL_CELL}\n```" in prompt
+
+
+@pytest.mark.parametrize("unchecked", ["own", "off"])
+async def test_a_readable_put_beside_exec_shows_the_whole_card(project, unchecked):
+    harness = _session(project, SCRIPT_CELL, PUT_AND_EXEC_CELL, unchecked=unchecked,
+                       http=RELAY_RULE, relay_hosts=RELAYED)
+    seen = await _run(harness=harness, answers=[CANCEL])
+    assert len(seen.cards) == 1 and seen.ran_before == [1]
+    prompt = seen.cards[0].request.prompt
+    assert "This step would send PUT to:" in prompt
+    assert "This step can't be checked before it runs." in prompt
+    assert "It runs code the check can't read:" in prompt
+    assert f"The step's code:\n\n```\n{PUT_AND_EXEC_CELL}\n```" in prompt
+    assert harness.pad.ran == [SCRIPT_CELL]
+
+
+async def test_own_lets_a_call_into_what_unread_code_defined_run_beside_a_post_the_relay_holds(project):
+    """The setting decides after the requests the relay holds are left out,
+    so a POST the relay holds doesn't keep the card of a cell `own` lets run."""
+    cell = CALL_SCRIPT_CELL + RELAYED_POST
+    harness = _session(project, SCRIPT_CELL, EXEC_SCRIPT_CELL, cell, unchecked="own", http=RELAY_RULE,
+                       relay_hosts=RELAYED)
+    seen = await _run(harness=harness, answers=[APPROVE])
+    assert seen.ran_before == [1], "only the exec waits; the relay holds the POST"
+    assert harness.pad.ran == [SCRIPT_CELL, EXEC_SCRIPT_CELL, cell]
+
+
+# A call chain five calls deep from the cell: the read stops at `_CALL_DEPTH`
+# on f4, the function that sends the DELETE.
+CHAIN_CELL = "\n".join(f"def f{i}():\n    return f{i + 1}()" for i in range(4)) + (
+    "\ndef f4():\n"
+    "    import os, psycopg2\n"
+    "    conn = psycopg2.connect(host=os.environ['DS_POSTGRES_QA__HOST'])\n"
+    "    conn.cursor().execute('DELETE FROM orders')\n"
+)
+
+
+def _pad_after(*cells: str) -> _Pad:
+    """A pad whose earlier cells are `cells`, each run to its end."""
+    pad = _Pad()
+    pad.cells = [Cell(code=code, stdout="", stderr="", error=None) for code in cells]
+    return pad
+
+
+@pytest.mark.parametrize("unchecked", ["own", "off"])
+async def test_a_call_chain_past_the_depth_limit_keeps_its_card_and_says_where_the_read_stopped(
+    project, unchecked,
+):
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    outcome = await _hold()(session, pad=_pad_after(CHAIN_CELL), code="f0()")
+    assert elicitor.asked == 1, "the read stopped short of the DELETE, so the cell waits"
+    assert outcome is not None and outcome.reason == "write_not_approved"
+    prompt = elicitor.prompts[0]
+    assert "Its code goes too deep for the check to follow all of it.\n\nThe check stopped at:\n\n```\ndef f4():" in prompt
+    assert "DELETE FROM orders" in prompt
+
+
+async def test_off_keeps_the_card_on_a_chain_past_the_depth_limit_in_a_cell_that_also_runs_exec(project):
+    """The read goes past the limit even when the cell already runs code the
+    check can't read, so `off`, which lets the exec run, still holds the
+    DELETE the chain may send."""
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = "off"
+    outcome = await _hold()(session, pad=_pad_after(SCRIPT_CELL, CHAIN_CELL), code=EXEC_SCRIPT_CELL + "f0()\n")
+    assert elicitor.asked == 1 and outcome is not None
+    assert "Its code goes too deep for the check to follow all of it." in elicitor.prompts[0]
+
+
+PTH_CELL = (
+    "import os, site\n"
+    "open(os.path.join(site.getsitepackages()[0], 'zz_boot.pth'), 'w').write('import boot\\n')\n"
+)
+USERCUSTOMIZE_CELL = (
+    "import os, site\n"
+    "open(os.path.join(site.getusersitepackages(), 'usercustomize.py'), 'w').write('import boot\\n')\n"
+)
+
+
+@pytest.mark.parametrize("unchecked", ["all", "own", "off"])
+@pytest.mark.parametrize("code", [PTH_CELL, USERCUSTOMIZE_CELL], ids=["pth", "usercustomize"])
+async def test_a_startup_hook_write_keeps_its_card(project, unchecked, code):
+    """Every later Python process runs the hook unchecked, so no setting lets its write run unasked."""
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    outcome = await _hold()(session, pad=_Pad(), code=code)
+    assert elicitor.asked == 1 and outcome is not None
+    assert "This step can't be checked before it runs." in elicitor.prompts[0]
+
+
+@pytest.mark.parametrize("unchecked", ["own", "off"])
+async def test_a_cell_too_deep_to_parse_keeps_its_card(project, unchecked):
+    """The check's parser gives up on the cell, which may still run (the pad
+    may run another Python), so no setting lets it run unasked."""
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    code = RENAME_CELL + "x = " + "-" * 200_000 + "1\n"
+    outcome = await _hold()(session, pad=_Pad(), code=code)
+    assert elicitor.asked == 1 and outcome is not None
+    assert "Its code goes too deep for the check to follow all of it." in elicitor.prompts[0]
+    assert (project / "report.pdf").exists()
+
+
+@pytest.mark.parametrize(("unchecked", "pad", "code", "causes"), [
+    ("own", (SCRIPT_CELL, EXEC_SCRIPT_CELL), CALL_SCRIPT_CELL, '["uses"]'),
+    ("off", (SCRIPT_CELL,), EXEC_SCRIPT_CELL, '["runs"]'),
+], ids=["own-call", "off-exec"])
+async def test_a_hold_the_setting_drops_is_logged_without_the_code(project, caplog, unchecked, pad, code, causes):
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    with caplog.at_level(logging.WARNING, logger=GATE_LOG):
+        outcome = await _hold()(session, pad=_pad_after(*pad), code=code)
+    assert outcome is None and elicitor.asked == 0
+    assert _decisions(caplog) == [
+        '{"kinds":[],"count":0,"status":"not_held_unchecked","mode":"' + unchecked + '","causes":' + causes + "}",
+    ]
+    assert "job_main" not in caplog.text and "SCRIPT" not in caplog.text
 
 
 # ── One unanswered card ───────────────────────────────────────────────────
@@ -897,10 +1166,27 @@ async def test_a_check_that_fails_asks_instead_of_clearing_the_cell(project, mon
     with caplog.at_level(logging.WARNING, logger=GATE_LOG):
         outcome = await _hold()(session, pad=_Pad(), code="print('hello')")
     assert elicitor.asked == 1
+    assert "The check failed on this step." in elicitor.prompts[0]
     assert outcome is not None and "the check couldn't read" in outcome.content
     failed = [r for r in caplog.records if r.name == GATE_LOG and "the check failed" in r.getMessage()]
     assert [r.getMessage() for r in failed] == ["write approval: the check failed (RecursionError)"]
     assert failed[0].exc_info is None, "a traceback's frames would print the cell's code"
+
+
+@pytest.mark.parametrize("unchecked", ["own", "off"])
+async def test_a_check_that_fails_asks_even_with_unchecked_cards_off(project, monkeypatch, unchecked):
+    def boom(**kwargs):
+        raise RecursionError("too deep")
+
+    from anton.core.utils import scratchpad as scratchpad_mod
+
+    monkeypatch.setattr(scratchpad_mod, "find_cell_writes", boom)
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    outcome = await _hold()(session, pad=_Pad(), code="print('hello')")
+    assert elicitor.asked == 1, "a check that read nothing can't clear the cell"
+    assert outcome is not None
 
 
 async def test_each_decision_is_logged_without_the_code(project, caplog):

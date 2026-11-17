@@ -137,6 +137,17 @@ _SENTINEL_REASONS = {
     "missing_name": (TIER_SELF, "missing_argument"),
     "missing_slug": (TIER_SELF, "missing_argument"),
     "missing_description": (TIER_SELF, "missing_argument"),
+    # `edit_artifact` (ENG-4207). A missing task is the agent's own argument.
+    "missing_task": (TIER_SELF, "missing_argument"),
+    # The editor gave up and put every file back: its patches would not place,
+    # or the model stopped answering. The agent can try again or edit another
+    # way, so it is its own to recover from, never a wall.
+    "edit_not_applied": (TIER_SELF, "edit_not_applied"),
+    # The edit landed but failed its browser check twice, so it was put back.
+    # Self-inflicted: the code the editor wrote is what failed.
+    "edit_check_failed": (TIER_SELF, "edit_check_failed"),
+    # The page has no repair cells left this turn (`_out_of_repairs`).
+    "out_of_repairs": (TIER_SELF, "invalid_argument"),
     "invalid_type": (TIER_SELF, "invalid_argument"),
     "invalid_port": (TIER_SELF, "invalid_argument"),
     "invalid_health_timeout": (TIER_SELF, "invalid_argument"),
@@ -185,6 +196,10 @@ _SENTINEL_REASONS = {
     "not_text": (TIER_SELF, "invalid_argument"),
     "invalid_range": (TIER_SELF, "invalid_argument"),
     "invalid_fields": (TIER_SELF, "invalid_argument"),
+    # `create_connector_draft`: a draft outside the allowlist, or a fourth
+    # template in one turn. The message says which field or the cap.
+    "invalid_draft": (TIER_SELF, "invalid_argument"),
+    "draft_limit": (TIER_SELF, "invalid_argument"),
     # Genuine walls: the environment is missing something the agent cannot add.
     "package_install_failed": (TIER_WALL, "missing_dependency"),
     "store_unavailable": (TIER_WALL, "service_unavailable"),
@@ -229,6 +244,21 @@ _SENTINEL_REASONS = {
     # input, or the refusal may have had another cause the provider only
     # worded around an image, so it stays out of every trip rung.
     "images_refused": (TIER_UNCLASSIFIED, "unclassified"),
+    # `generate_image` (ENG-4024), from `tool_handlers._IMAGE_FAILURE_REASONS`.
+    # A safety refusal is about the agent's own prompt, which it may reword.
+    "image_refused": (TIER_SELF, "invalid_argument"),
+    # The per-turn image cap: the agent's own call count, and the message tells
+    # it to stop, so never a wall.
+    "image_limit": (TIER_SELF, "invalid_argument"),
+    # A rate limit, a provider 5xx, a dropped connection, a reply with no
+    # image: retrying later can succeed.
+    "image_transient": (TIER_TRANSIENT, "image_transient"),
+    # No credits, a model that is not an image model or not on the plan, a
+    # refused key, no images API at the endpoint: only the user or the
+    # operator can fix these.
+    "image_unavailable": (TIER_WALL, "service_unavailable"),
+    # Any other refusal, or the file could not be written: nothing says which side.
+    "image_failed": (TIER_UNCLASSIFIED, "unclassified"),
     # MCP connectors (ENG-1816): a rejected/expired token needs a user
     # reconnect, same shape as a 401 (`_STATUS_WALLS["401"] = "auth_missing"`)
     # — the agent cannot fix this by retrying, so it's a genuine wall.
@@ -242,6 +272,53 @@ _SENTINEL_REASONS = {
     # wall, with nothing here to tell them apart — stays out of every trip
     # rung, same reasoning as `read_failed`/`bmp_convert_failed` above.
     "mcp_tool_error": (TIER_UNCLASSIFIED, "unclassified"),
+    # The browser tool. A malformed step, or an element number from
+    # a page that has since changed: the agent re-reads the page and fixes it.
+    "browser_bad_input": (TIER_SELF, "invalid_argument"),
+    "browser_stale_element": (TIER_SELF, "unknown_resource"),
+    # The agent tried to act while the user holds the browser (a hand-over in
+    # progress). Waiting is the fix, and the agent caused the clash: self.
+    "browser_human_in_control": (TIER_SELF, "invalid_argument"),
+    # The agent tried to type into a password, code or card field, which only
+    # the user fills. The tool or the browser refused it; handing over is the fix.
+    "browser_secret_field": (TIER_SELF, "invalid_argument"),
+    # A step held for the user's Approve and not approved: their call, like a
+    # held cell, never a wall.
+    "browser_step_not_approved": (TIER_SELF, "invalid_argument"),
+    # A dialog is open, or the page didn't answer a read in time. Closing the
+    # dialog or waiting is the fix.
+    "browser_page_blocked": (TIER_TRANSIENT, "browser_page_blocked"),
+    # The browser refused the session's credential: the user has to reconnect
+    # MindsHub, or the desktop app's browser restarted. The agent cannot fix
+    # it by retrying (same as a 401).
+    "browser_unauthorized": (TIER_WALL, "auth_missing"),
+    # The router doesn't know this turn's key: the host never scoped the turn,
+    # so no call in it can work. The next message's turn is scoped afresh.
+    "browser_unscoped": (TIER_WALL, "browser_unscoped"),
+    # The user's account doesn't have the browser.
+    "browser_not_entitled": (TIER_WALL, "browser_not_entitled"),
+    # The account used today's browsing allowance; nothing works until it resets.
+    "browser_daily_limit": (TIER_WALL, "browser_daily_limit"),
+    # A call outside the turn's own browser session or project, or with a
+    # credential the browser never takes: the tool sends neither, so code
+    # that used the turn's key directly did. Retrying can't fix it.
+    "browser_out_of_scope": (TIER_WALL, "browser_out_of_scope"),
+    "browser_forbidden": (TIER_WALL, "browser_forbidden"),
+    # MindsHub couldn't confirm the account's browser access for a moment.
+    "browser_entitlements_unavailable": (TIER_TRANSIENT, "service_unavailable"),
+    # Every browser is busy, or this person's browser runs its most tasks at once.
+    "browser_at_capacity": (TIER_TRANSIENT, "browser_at_capacity"),
+    # The site's edge firewall blocked typed text before it reached the
+    # browser; rewording the text is the fix.
+    "browser_edge_blocked": (TIER_SELF, "invalid_argument"),
+    # A host refused the agent a change only the person may make. The tool
+    # never asks for one, so reaching this says nothing about whose fault it is.
+    "browser_person_only": (TIER_UNCLASSIFIED, "unclassified"),
+    # The browser is starting, waking from idle, or unreachable for a moment.
+    "browser_unreachable": (TIER_TRANSIENT, "service_unavailable"),
+    # Any other error the browser reported, or an answer the tool couldn't
+    # read; its code doesn't say whose fault.
+    "browser_error": (TIER_UNCLASSIFIED, "unclassified"),
 }
 
 # Identifier extraction, per class. Kept narrow on purpose: a wrong identifier

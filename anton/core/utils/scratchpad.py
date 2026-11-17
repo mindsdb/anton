@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 from pydantic import BaseModel, ConfigDict
 
 from anton.core.backends.sandbox import cell_sandbox_of, validate_pad_name
+from anton.core.settings import UncheckedMode
 from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.write_check import (
     PACKAGE_FILE_SUFFIXES,
@@ -23,9 +24,11 @@ from anton.core.utils.write_check import (
     HttpWriteRule,
     ProjectSnapshot,
     SqlWrite,
+    UncheckedCause,
     find_cell_writes,
     snapshot_project_files,
 )
+from anton.utils.datasources import scrub_output
 
 if TYPE_CHECKING:
     from anton.core.backends.manager import ScratchpadManager
@@ -71,8 +74,9 @@ def fill_in_scratchpad_action(tc_input: dict) -> None:
 
 RefusalCause = Literal["cancelled", "timeout", "unavailable", "error", "unanswered_earlier"]
 # What a logged decision says came of a held cell: "stopped" when the turn
-# ended while its card waited, so no refusal went back to the model.
-DecisionStatus = RefusalCause | Literal["approved", "not_held", "stopped"]
+# ended while its card waited, so no refusal went back to the model;
+# "not_held_unchecked" when `write_approval_unchecked` let it run with no card.
+DecisionStatus = RefusalCause | Literal["approved", "not_held", "not_held_unchecked", "stopped"]
 
 _WHY = {
     "cancelled": "they declined it",
@@ -113,6 +117,8 @@ class WriteGate:
     unanswered: bool = False
     http_rules: tuple[HttpWriteRule, ...] = ()
     relayed_hosts: frozenset[str] = frozenset()
+    # Which cells that run code the check can't read wait (`write_approval_unchecked`).
+    unchecked: UncheckedMode = "all"
 
     async def begin_turn(self, *, manager: ScratchpadManager) -> None:
         self.unanswered = False
@@ -140,6 +146,10 @@ class WriteApprovalDecision(BaseModel):
     kinds: tuple[str, ...]
     count: int
     status: DecisionStatus
+    # For "not_held_unchecked": the setting's value, and the kinds of the
+    # reasons the card would have given.
+    mode: UncheckedMode | None = None
+    causes: tuple[str, ...] = ()
 
 
 def _inert(text: str) -> str:
@@ -323,10 +333,11 @@ def _request_lines(request: HttpWrite) -> list[str]:
     return lines
 
 
-def _card_prompt(writes: CellWrites) -> str:
+def _card_prompt(writes: CellWrites, code: str = "") -> str:
     """The card: every statement, file change and request the step would
     make, whole, since one Approve runs them all. Statements, paths, URLs and
-    code go in fences, so Cowork's Markdown shows them as written."""
+    code go in fences, so Cowork's Markdown shows them as written. A step the
+    check can't read also shows its `code`, so the person can judge it."""
     lines = ["**Approve this change?**", ""]
     if writes.sql:
         lines += ["This step would change data in a connected source:", ""]
@@ -355,8 +366,44 @@ def _card_prompt(writes: CellWrites) -> str:
                   "and `\\\\` a backslash.", ""]
     if writes.unchecked:
         lines += ["This step can't be checked before it runs.", ""]
+        lines += _cause_lines(writes)
+        try:
+            shown = _fence(scrub_output(code)) if code.strip() else ""
+        except Exception as exc:
+            # Leave the code off rather than lose the card or show it unscrubbed.
+            logger.warning("write approval: the card's code failed (%s)", type(exc).__name__)
+            shown = ""
+        if shown:
+            lines += ["The step's code:", "", shown, ""]
     lines.append("It runs only if you approve. Cancel, Skip or no answer stops it.")
     return "\n".join(lines)
+
+
+_WHOLE_STEP_CAUSES = {
+    "restart": "The scratchpad starts again before this step, and an earlier step may have written a file "
+               "Python runs as it starts.",
+    "limit": "Its code goes too deep for the check to follow all of it.",
+    "failed": "The check failed on this step.",
+}
+
+
+def _cause_lines(writes: CellWrites) -> list[str]:
+    """Why the check couldn't read the step, each with the line it quotes."""
+    lines: list[str] = []
+    for cause in writes.causes:
+        if cause.kind in _WHOLE_STEP_CAUSES:
+            lines += [_WHOLE_STEP_CAUSES[cause.kind], ""]
+            if cause.code:
+                lines += ["The check stopped at:", "", _fence(cause.code), ""]
+        elif cause.kind == "uses" and cause.name and cause.earlier:
+            lines += [f"It uses {_code_span(cause.name)}, which code an earlier step ran may have set. "
+                      "The check couldn't read that code:", "", _fence(cause.earlier), ""]
+        elif cause.kind == "uses" and cause.name:
+            lines += [f"It uses {_code_span(cause.name)}, which code an earlier step ran may have set. "
+                      "The check couldn't read that code.", ""]
+        elif cause.code:
+            lines += ["It runs code the check can't read:", "", _fence(cause.code), ""]
+    return lines
 
 
 def _refusal(writes: CellWrites, cause: RefusalCause) -> ToolOutcome:
@@ -376,10 +423,10 @@ def _refusal(writes: CellWrites, cause: RefusalCause) -> ToolOutcome:
     )
 
 
-async def _ask_approval(session: ChatSession, writes: CellWrites) -> RefusalCause | None:
+async def _ask_approval(session: ChatSession, writes: CellWrites, code: str) -> RefusalCause | None:
     """Ask Approve or Cancel for a held cell. None when the user picks Approve, else why not."""
     return await ask_approval_card(
-        session, _card_prompt(writes),
+        session, _card_prompt(writes, code),
         approve_detail="Run this step once", cancel_detail="Leave the data and files as they are",
     )
 
@@ -462,19 +509,36 @@ async def ask_approval_choice(
     return ApprovalChoice(None, "error")
 
 
-def _log_decision(*, writes: CellWrites, status: DecisionStatus) -> None:
+def _log_decision(*, writes: CellWrites, status: DecisionStatus, mode: UncheckedMode | None = None) -> None:
     """Log what came of a cell: for one that ran with no card, the changes
-    it was let make (appends, and overwrites of the agent's own files);
-    otherwise what its card held."""
-    if status == "not_held":
+    it was let make (appends, and overwrites of the agent's own files),
+    and, for one `write_approval_unchecked` let run (`mode`), the setting
+    and the kinds of its reasons; otherwise what its card held."""
+    if status in ("not_held", "not_held_unchecked"):
         kinds = tuple(sorted({f.action for f in writes.not_held_files}))
         count = len(writes.not_held_files)
     else:
         kinds, count = writes.kinds(), len(writes.sql) + len(writes.calls) + len(writes.held_files) + len(writes.http)
-    decision = WriteApprovalDecision(kinds=kinds, count=count, status=status)
+    causes = tuple(dict.fromkeys(c.kind for c in writes.causes)) if mode is not None else ()
+    decision = WriteApprovalDecision(kinds=kinds, count=count, status=status, mode=mode, causes=causes)
     # WARNING: hosts log at WARNING by default, and this line is the record of
-    # a held write.
-    logger.warning("write approval: %s", decision.model_dump_json())
+    # a held write. `mode` and `causes` show only on a "not_held_unchecked" line.
+    logger.warning("write approval: %s", decision.model_dump_json(exclude_defaults=True))
+
+
+def _unchecked_hold_dropped(writes: CellWrites, mode: UncheckedMode) -> bool:
+    """Whether `write_approval_unchecked` lets a cell held because the check
+    can't read all of it run with no card: under `own`, when the hold is
+    carried from code an earlier cell ran or from a restart, not code the
+    cell itself runs; under `off`, whatever it comes from. Never when the
+    check stopped short (`CellWrites.stopped`) or the cell writes a startup
+    hook, which every later Python process runs unchecked, and never when
+    the cell holds for anything else, so a card that shows, shows whole."""
+    if mode == "all" or not writes.unchecked or writes.stopped or writes.writes_startup_hook:
+        return False
+    if mode == "own" and writes.unread_here:
+        return False
+    return not writes.model_copy(update={"unchecked": False, "causes": ()}).needs_approval()
 
 
 async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> ToolOutcome | None:
@@ -484,6 +548,8 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
 
     Only sessions with a `WriteGate` (the `write_approval` setting) check
     anything. A check that fails asks too, since it can't clear the cell.
+    `write_approval_unchecked` lets a cell held only because the check
+    can't read all of it run (`_unchecked_hold_dropped`).
     """
     gate = getattr(session, "_write_gate", None)
     if not isinstance(gate, WriteGate):
@@ -517,7 +583,8 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     except Exception as exc:
         # The type only, as for a failed question.
         logger.warning("write approval: the check failed (%s)", type(exc).__name__)
-        writes = CellWrites(unchecked=True)
+        # `stopped`: a check that read nothing can't clear the cell, whatever the setting.
+        writes = CellWrites(unchecked=True, stopped=True, causes=(UncheckedCause(kind="failed"),))
     if gate.relayed_hosts and writes.http:
         # The write relay holds a request to a host it relays and raises its
         # own card through approve_held_write, so a second card here would
@@ -528,12 +595,17 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
 
         kept = tuple(w for w in writes.http if not held_by_relay(w, gate.relayed_hosts))
         writes = writes.model_copy(update={"http": kept})
+    # After the relay's requests are left out: a request the relay holds
+    # doesn't keep the cell's card on its own.
+    if _unchecked_hold_dropped(writes, gate.unchecked):
+        _log_decision(writes=writes, status="not_held_unchecked", mode=gate.unchecked)
+        return None
     if not writes.needs_approval():
         if writes.not_held_files:
             _log_decision(writes=writes, status="not_held")
         return None
     try:
-        cause = await _ask_approval(session, writes)
+        cause = await _ask_approval(session, writes, code)
     except asyncio.CancelledError:
         # Stop, or the host ending the turn, while the card waited.
         _log_decision(writes=writes, status="stopped")
@@ -680,6 +752,93 @@ _DISCOVERY_MAX_PADS = 10
 _DISCOVERY_MAX_ROOT_ENTRIES = 30
 
 
+def workspace_discovery_names(manager) -> dict:
+    """The pad and project-root names the workspace block lists: ``{"pads", "root"}``,
+    each a sorted list of names. Best-effort: a part that fails is an empty list."""
+    try:
+        pads = sorted(manager.agent_pads())
+    except Exception:
+        pads = []
+    root_names: list[str] = []
+    try:
+        root = manager.workspace_path
+        if root is not None:
+            # Hidden entries are excluded deliberately: this block ships to
+            # the model, and filenames hinting at secret locations (.env,
+            # .aws) don't belong in LLM-visible context — even names-only.
+            # scandir rather than iterdir+is_dir: dir-ness comes from the
+            # dirent for free instead of a stat per entry, and this runs
+            # every turn. Full iteration is inherent to a sorted first-30.
+            with os.scandir(root) as it:
+                root_names = sorted(
+                    entry.name + ("/" if entry.is_dir() else "")
+                    for entry in it
+                    if not entry.name.startswith(".")
+                )
+    except Exception:
+        root_names = []
+    return {"pads": pads, "root": root_names}
+
+
+_NAME_LIMIT = 255
+_SAVED_NAMES_LIMIT = 1000
+
+
+def valid_workspace_names(value) -> dict | None:
+    """`value` as workspace names if it is that shape, else None. A saved copy is
+    written where agent code can write, so only plain names pass: no control
+    characters, no path separators but a directory's trailing slash, no hidden names."""
+    if not isinstance(value, dict) or set(value) != {"pads", "root"}:
+        return None
+    for key, names in value.items():
+        if not isinstance(names, list) or len(names) > _SAVED_NAMES_LIMIT:
+            return None
+        for name in names:
+            if not isinstance(name, str) or not 0 < len(name) <= _NAME_LIMIT:
+                return None
+            bare = name[:-1] if key == "root" and name.endswith("/") else name
+            if not bare or bare.startswith(".") or "/" in bare or any(
+                    ord(c) < 32 or ord(c) == 127 for c in bare):
+                return None
+    return {"pads": list(value["pads"]), "root": list(value["root"])}
+
+
+def render_workspace_discovery(names: dict) -> str:
+    """The workspace block for `names` (see `workspace_discovery_names`)."""
+    pads_line = ""
+    known = names.get("pads") or []
+    if known:
+        shown = known[:_DISCOVERY_MAX_PADS]
+        # Names only: no snapshot age, no live/active flag. Both changed
+        # between turns without the workspace changing.
+        more = (
+            f" … and {len(known) - len(shown)} more"
+            if len(known) > len(shown)
+            else ""
+        )
+        pads_line = (
+            "\nScratchpads for this conversation: "
+            + ", ".join(shown)
+            + more
+            + " — reuse via scratchpad exec with the same name; each name is a "
+            "separate environment."
+        )
+    root_line = ""
+    entries = names.get("root") or []
+    if entries:
+        shown_entries = entries[:_DISCOVERY_MAX_ROOT_ENTRIES]
+        more = (
+            f" … and {len(entries) - len(shown_entries)} more"
+            if len(entries) > len(shown_entries)
+            else ""
+        )
+        root_line = "\nProject root: " + ", ".join(shown_entries) + more
+    if not pads_line and not root_line:
+        return ""
+    # The session pins this block for the conversation, so say when it is from.
+    return "\n\nWorkspace state when this conversation started:" + pads_line + root_line
+
+
 def build_workspace_discovery_context(manager) -> str:
     """Compact turn-start block: known pads + project-root names (ENG-578).
 
@@ -693,58 +852,7 @@ def build_workspace_discovery_context(manager) -> str:
     anything that varies while that set is unchanged re-writes the conversation
     cache on the next turn.
     """
-    pads_line = ""
-    try:
-        known = sorted(manager.agent_pads())
-        if known:
-            shown = known[:_DISCOVERY_MAX_PADS]
-            # Names only: no snapshot age, no live/active flag. Both changed
-            # between turns without the workspace changing.
-            more = (
-                f" … and {len(known) - len(shown)} more"
-                if len(known) > len(shown)
-                else ""
-            )
-            pads_line = (
-                "\nScratchpads for this conversation: "
-                + ", ".join(shown)
-                + more
-                + " — reuse via scratchpad exec with the same name; each name is a "
-                "separate environment."
-            )
-    except Exception:
-        pads_line = ""
-
-    root_line = ""
-    try:
-        root = manager.workspace_path
-        if root is not None:
-            # Hidden entries are excluded deliberately: this block ships to
-            # the model, and filenames hinting at secret locations (.env,
-            # .aws) don't belong in LLM-visible context — even names-only.
-            # scandir rather than iterdir+is_dir: dir-ness comes from the
-            # dirent for free instead of a stat per entry, and this runs
-            # every turn. Full iteration is inherent to a sorted first-30.
-            with os.scandir(root) as it:
-                entries = sorted(
-                    entry.name + ("/" if entry.is_dir() else "")
-                    for entry in it
-                    if not entry.name.startswith(".")
-                )
-            if entries:
-                shown_entries = entries[:_DISCOVERY_MAX_ROOT_ENTRIES]
-                more = (
-                    f" … and {len(entries) - len(shown_entries)} more"
-                    if len(entries) > len(shown_entries)
-                    else ""
-                )
-                root_line = "\nProject root: " + ", ".join(shown_entries) + more
-    except Exception:
-        root_line = ""
-
-    if not pads_line and not root_line:
-        return ""
-    return "\n\nWorkspace state:" + pads_line + root_line
+    return render_workspace_discovery(workspace_discovery_names(manager))
 
 
 def observe_scratchpad_cell(session, name: str, cell) -> None:
@@ -953,8 +1061,12 @@ def format_cell_result(cell) -> str:
     parts: list[str] = []
     if cell.stdout:
         stdout = cell.stdout
-        if len(stdout) > 10_000:
-            stdout = stdout[:10_000] + f"\n\n... (truncated, {len(stdout)} chars total)"
+        from anton.core.backends.wire import MAX_OUTPUT, TRUNCATION_PREFIX, truncation_note
+
+        # Output the scratchpad already cut carries its note, which scrubbing can move before
+        # MAX_OUTPUT; cutting again would split it and misstate the total.
+        if len(stdout) > MAX_OUTPUT and TRUNCATION_PREFIX not in stdout:
+            stdout = stdout[:MAX_OUTPUT] + truncation_note(len(stdout))
         parts.append(f"[output]\n{stdout}")
     if cell.logs if hasattr(cell, "logs") else False:
         logs = cell.logs.strip()

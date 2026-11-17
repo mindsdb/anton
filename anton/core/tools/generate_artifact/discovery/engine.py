@@ -9,7 +9,6 @@ idea — but with a different, smaller tool set and a control tool
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
 
 from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
@@ -215,9 +214,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 continue
 
             if name == "finish_gathering":
-                if os.environ.get("ANTON_STATIC_FAST_PATH") == "direct" and (
-                    batch_failed or call_index != len(response.tool_calls) - 1
-                ):
+                if batch_failed or call_index != len(response.tool_calls) - 1:
                     reason = ("A source execution in this batch failed; inspect and fix it before finishing."
                               if batch_failed else "finish_gathering must follow all source tool calls in the batch.")
                     state.trace_log.tool_rejected(node=step, tool=name, reason=reason)

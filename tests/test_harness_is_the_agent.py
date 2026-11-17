@@ -8,7 +8,9 @@ trace could not say which agent ran, and an "anton" trace could not say where.
 cannot quietly reacquire a second meaning, which is how it got here.
 """
 
-import inspect
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from anton.core.llm.tracing import (
     HARNESS_ANTON,
@@ -18,6 +20,7 @@ from anton.core.llm.tracing import (
     VALID_SURFACES,
     TraceContext,
 )
+from tests.conftest import make_mock_llm
 
 
 class TestTheTwoVocabulariesAreDisjoint:
@@ -40,23 +43,53 @@ class TestTheTwoVocabulariesAreDisjoint:
 class TestEveryFirstPartyCallerReportsAnAgent:
     """All three call sites named a place before this change."""
 
-    def test_the_cli_entrypoints_report_anton_and_the_cli_surface(self):
-        from anton import chat, chat_session
+    async def test_the_cli_entrypoints_report_anton_and_the_cli_surface(self, tmp_path):
+        """Both CLI session builders report anton as the agent and cli as the surface."""
+        import anton.chat as chat
+        import anton.chat_session as chat_session
 
-        for mod in (chat, chat_session):
-            src = inspect.getsource(mod)
-            assert "harness=HARNESS_ANTON" in src, f"{mod.__name__} does not report its agent"
-            assert "surface=SURFACE_CLI" in src, f"{mod.__name__} lost its surface"
-            assert 'harness="cli"' not in src, f"{mod.__name__} still names a place as its harness"
+        configs: list = []
 
-    def test_the_cloud_pod_reports_anton(self):
-        # The pod image is "anton + boot" — the agent running there IS anton, so
-        # "cloud" was factually wrong rather than merely overloaded.
-        from anton.cloud_turn import session as cloud_session
+        class Built(Exception):
+            """Stops _chat_loop once it has built its session."""
 
-        src = inspect.getsource(cloud_session)
-        assert "harness=HARNESS_ANTON" in src
-        assert 'harness="cloud"' not in src
+        def fake_session(config):
+            configs.append(config)
+            raise Built
+
+        settings = MagicMock(
+            workspace_path=tmp_path,
+            context_dir=str(tmp_path / "context"),
+            episodic_memory=False,
+            memory_mode="off",
+        )
+        vault = MagicMock()
+        vault.list_connections.return_value = []
+        with (
+            patch("anton.core.llm.client.LLMClient.from_settings", return_value=make_mock_llm()),
+            patch.object(chat, "LocalDataVault", return_value=vault),
+            patch.object(chat, "ChatSession", fake_session),
+            patch.object(chat, "build_runtime_context", lambda _s: ""),
+            patch.object(chat_session, "get_runtime_factory", lambda *a, **k: MagicMock()),
+            patch.object(chat_session, "refresh_knowledge", lambda *a, **k: None),
+            patch.object(chat_session, "build_runtime_context", lambda _s: ""),
+        ):
+            with pytest.raises(Built):
+                await chat._chat_loop(MagicMock(), settings)
+            with pytest.raises(Built):
+                await chat_session.rebuild_session(
+                    settings=MagicMock(),
+                    state={},
+                    self_awareness=None,
+                    cortex=None,
+                    workspace=MagicMock(),
+                    console=MagicMock(),
+                )
+
+        assert len(configs) == 2
+        for config in configs:
+            assert config.harness == HARNESS_ANTON
+            assert config.surface == SURFACE_CLI
 
 
 class TestTheTraceNameIsRestored:

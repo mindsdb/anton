@@ -1,8 +1,9 @@
 """`python -m anton.cloud_turn` - the sandbox-pod turn entrypoint.
 
 Contract (matches scratchpad-controller + cowork-server):
-  stdin : the TurnRequestV1 JSON line; then, for an interactive turn only, one
-          answer line per user answer (see contract.py). The live-pod exec
+  stdin : the TurnRequestV1 JSON line; then, for an interactive turn, one
+          answer line per user answer, and for any turn one line per message
+          the user adds or takes back (see contract.py). The live-pod exec
           never closes stdin.
   stdout: JSONL events (see contract.py) - deltas, steps, ask_user questions,
           then exactly one terminal
@@ -31,22 +32,27 @@ import time
 from collections.abc import Callable
 from typing import BinaryIO, TextIO
 
-from anton.cloud_turn.contract import TurnRequestV1
+from anton.cloud_turn.addons import CloudAddons
+from anton.cloud_turn.contract import ARTIFACTS_TOUCHED_KEY, MAX_ARTIFACTS_TOUCHED, TurnRequestV1
 from anton.cloud_turn.elicitor import (
     CloudElicitor,
     ask_user_answered_event,
     ask_user_event,
 )
 from anton.cloud_turn.history_rows import split_turn_into_rows
+from anton.cloud_turn.launcher import forbid_same_user_access
 from anton.cloud_turn.session import (
     build_cloud_chat_session,
     build_turn_content,
+    drain_pending_connectors,
     drain_pending_memory,
     resolve_trusted_workspace_path,
     drain_pending_skills,
     remove_staged_skills,
 )
+from anton.cloud_turn.preview_check import CloudPreviewChecks
 from anton.cloud_turn.stdin import start_answer_reader
+from anton.core.browser.tool import tidy_after_turn
 from anton.core.llm.liveness import MODEL_WAIT_PHASE, MODEL_WAIT_TICK_S
 from anton.core.llm.provider import ProviderErrorFilter
 
@@ -229,6 +235,17 @@ async def _settle_memory(session) -> None:
         logger.warning("memory settle failed (non-fatal)", exc_info=True)
 
 
+def _accepts(builder, name: str) -> bool:
+    """Whether the session builder takes keyword NAME (a test double or an older builder may not)."""
+    import inspect
+
+    try:
+        params = inspect.signature(builder).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 async def stream_turn(
     raw_line: str, emit, session_builder=None, stdin: BinaryIO | None = None
 ) -> None:
@@ -242,9 +259,10 @@ async def _stream_turn(
     """Parse the request, run one turn, and emit exactly one terminal event.
 
     Streaming: assistant text is emitted as ``delta`` events as it arrives, then
-    a bare ``turn_completed``. Any failure (parse or turn) -> one ``turn_failed``
-    with a scrubbed error string, plus ``reset_at`` when the failure is a
-    MindsHub billing stop that knows when its limit lifts.
+    a ``turn_completed`` naming the artifacts the turn touched. Any failure
+    (parse or turn) -> one ``turn_failed`` with a scrubbed error string, plus
+    ``reset_at`` when the failure is a MindsHub billing stop that knows when
+    its limit lifts.
 
     A background ticker emits a bare ``heartbeat`` event every
     ``ANTON_CLOUD_TURN_HEARTBEAT_SECONDS`` (default 5) so long-but-alive turns
@@ -260,6 +278,7 @@ async def _stream_turn(
         MindsHubBillingStop,
         StreamAskUser,
         StreamAskUserAnswered,
+        StreamBrowserSession,
         StreamComplete,
         StreamContextCompacted,
         StreamTaskProgress,
@@ -293,6 +312,8 @@ async def _stream_turn(
     # the controller reports a silent "unexpected error".
     terminal_emitted = False
     elicitor = None
+    preview_checks = None
+    addons = CloudAddons(wire)
     try:
         req = TurnRequestV1.from_json(raw_line)
         bind_contextvars(conversation_id=req.conversation_id)
@@ -301,13 +322,28 @@ async def _stream_turn(
             # Before the build: the build is what registers `ask_user`, and a
             # question must never be asked with nothing reading its answer.
             elicitor = CloudElicitor(wire)
-            start_answer_reader(stdin, asyncio.get_running_loop(), elicitor.deliver)
             build = functools.partial(builder, req, elicitor=elicitor)
+        if req.preview_checks and stdin is not None and _accepts(builder, "preview_checker"):
+            # The user's open preview checks an edited artifact; the host
+            # answers on stdin (cloud_turn/preview_check.py).
+            preview_checks = CloudPreviewChecks(wire)
+            build = functools.partial(build, preview_checker=preview_checks)
+        if stdin is not None:
+            # For every turn, not only interactive ones: a message the user
+            # adds mid-task (ENG-4194) arrives here too. Lines that land before
+            # `addons.attach` below are refused (see cloud_turn/addons.py).
+            checks = ({"deliver_check": preview_checks.deliver, "on_close": preview_checks.close}
+                      if preview_checks is not None else {})
+            start_answer_reader(stdin, asyncio.get_running_loop(),
+                                elicitor.deliver if elicitor else None, addons.deliver, **checks)
         # build_cloud_chat_session() can block synchronously for several
         # seconds (a turn-key OAuth token fetch per connector) — run it off
         # the event loop thread so the heartbeat ticker above keeps firing
         # instead of the controller seeing the turn go silent and stall it.
         session = await asyncio.to_thread(build)
+        # `ready` goes out at turn start, before any model call, and only when
+        # the stdin reader above is there to take the lines it invites.
+        addons.attach(session, announce=stdin is not None)
         # Fold in any attachments cowork-server staged into the workspace (read
         # off the mount, so image bytes never crossed the stdin wire). Plain
         # string when there are none. Never fail the turn over this — degrade to
@@ -394,6 +430,10 @@ async def _stream_turn(
                 wire({"kind": "tool_result", "id": event.id, "name": event.name,
                       "action": event.action,
                       "content": _clip_result_content(event.content or "")})
+            elif isinstance(event, StreamBrowserSession):
+                # cowork shows the browser beside the chat.
+                logger.info("browser session opened: %s", event.session_id)
+                wire({"kind": "browser", "session_id": event.session_id})
             elif isinstance(event, StreamContextCompacted):
                 logger.debug("Context compacted", extra={"event": "context_compacted"})
                 wire({"kind": "compacted", "message": event.message})
@@ -413,6 +453,9 @@ async def _stream_turn(
             elif isinstance(event, StreamTurnEnded):
                 logger.info("turn handed back: %s", event.ended_by)
                 wire({"kind": "turn_ended", "ended_by": event.ended_by})
+        # The turn no longer takes added messages; the ones the model never
+        # saw go back to cowork, which runs them as the next task.
+        addons.return_unread()
         await _settle_memory(session)
         entries = drain_pending_memory(session)
         if entries:
@@ -426,6 +469,13 @@ async def _stream_turn(
             logger.info("emitting %d skill draft(s): %s",
                         len(drafts), ", ".join(d["slug"] for d in drafts))
             wire({"kind": "skill", "entries": drafts})
+        connectors = drain_pending_connectors(session)
+        if connectors:
+            # Pre-terminal like skills, and staged the same way: cowork shows a
+            # card the member saves. Ids only in the log; the rest is model text.
+            logger.info("emitting %d connector draft(s): %s",
+                        len(connectors), ", ".join(c["connector_id"] for c in connectors))
+            wire({"kind": "connector", "entries": connectors})
         # Pre-terminal like memory and skills. Without this the pod compacts
         # every turn and throws the result away: the host owns history, so it
         # must be told which seeded messages the summary now covers.
@@ -461,8 +511,23 @@ async def _stream_turn(
             if rows:
                 logger.info("emitting %d turn-history row(s)", len(rows))
                 wire({"kind": "history", "rows": rows})
+        # Before the terminal: the browser tidy asks its decision with the
+        # turn key, which the host revokes once `turn_completed` arrives.
+        # Bounded by TIDY_TIMEOUT_S and never raises; close() then skips it.
+        await tidy_after_turn(session)
         logger.info("cloud turn completed")
-        wire({"kind": "turn_completed"})
+        completed = {"kind": "turn_completed"}
+        # The folders this turn's tools and cells touched, so the host stats
+        # only those at turn end instead of the whole artifacts folder. Left
+        # out, and the host then diffs the whole folder, when the session
+        # keeps no such record (`getattr`: a session double), when a snapshot
+        # around a cell could not read the folder, and when the list is
+        # longer than the host reads.
+        touched = getattr(session, "artifacts_touched", None)
+        complete = getattr(session, "artifacts_touched_complete", False)
+        if touched is not None and complete is True and len(touched) <= MAX_ARTIFACTS_TOUCHED:
+            completed[ARTIFACTS_TOUCHED_KEY] = sorted(touched)
+        wire(completed)
         terminal_emitted = True
     except Exception as exc:
         # ProviderErrorFilter omits provider bodies from diagnostics; the wire is unchanged.
@@ -474,13 +539,19 @@ async def _stream_turn(
         # no instant that parses, and then the key is left off.
         if isinstance(exc, MindsHubBillingStop) and exc.reset_at:
             failed["reset_at"] = exc.reset_at
+        with contextlib.suppress(Exception):
+            addons.return_unread()  # before the terminal: cowork stops reading at it
         wire(failed)
         terminal_emitted = True
     finally:
+        if preview_checks is not None:
+            preview_checks.close()  # a check still waiting reads as unanswered
         # No terminal yet = BaseException/teardown path; emit one (guarded — a
         # broken pipe here must not mask the original error).
         if not terminal_emitted:
             logger.warning("cloud turn ended without a terminal event; emitting turn_failed")
+            with contextlib.suppress(Exception):
+                addons.return_unread()
             with contextlib.suppress(Exception):
                 # Shaped like a scrubbed exception ("TypeName: message"), same as
                 # UNRESPONSIVE_WORKER_ERROR on the cowork-server side, so
@@ -500,6 +571,15 @@ async def _stream_turn(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before the request is read: it carries the turn's credentials, and cell
+    # code runs as this process's user. A turn the launcher hands to the
+    # resident already has this; one exec'd directly has not, since exec resets it.
+    if sys.platform == "linux":
+        try:
+            forbid_same_user_access()
+        except OSError as exc:
+            # The launcher makes the same choice: losing it is not worth losing the turn.
+            print(f"cloud turn: could not close /proc access: {exc}", file=sys.stderr, flush=True)
     with _isolated_protocol_stdout() as emit:
         # A private reader over a dup of fd 0, never `sys.stdin` (why: see the
         # cloud_turn/stdin.py docstring).

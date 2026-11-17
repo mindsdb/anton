@@ -11,14 +11,9 @@ _NOW = datetime(2026, 7, 28, 13, 33)
 
 
 def test_stamps_string_content():
-    assert _stamp_user_content("ναι", _NOW) == "[2026-07-28 13:33] ναι"
-
-
-def test_format_matches_cowork_server_history_stamp():
     # Must match anton_harness/harness.py `%Y-%m-%d %H:%M` so a message reads
     # identically live and when replayed from persisted history (cache-safe).
-    stamped = _stamp_user_content("hello", _NOW)
-    assert stamped.startswith("[2026-07-28 13:33] ")
+    assert _stamp_user_content("ναι", _NOW) == "[2026-07-28 13:33] ναι"
 
 
 def test_empty_string_passes_through():

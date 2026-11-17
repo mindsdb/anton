@@ -20,7 +20,6 @@ import asyncio
 import functools
 import json
 import logging
-import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -484,10 +483,14 @@ async def generate(
     # supposed to be inside of; a session without one (bench, some tests)
     # gets the strict reading, not a permissive one.
     ws_base = getattr(getattr(session, "_workspace", None), "base", None)
+    # The artifacts root is anton's own, so an image `generate_image` saved
+    # there can go into the page.
+    artifacts_root = getattr(getattr(session, "_workspace", None), "artifacts_dir", None)
     kept, dropped = resolve_attachments(
         attachments,
         workspace=ws_base if isinstance(ws_base, Path) else None,
         policy=cell_sandbox_of(getattr(session, "_scratchpads", None)),
+        owned_roots=(artifacts_root,) if isinstance(artifacts_root, Path) else (),
     )
     state.attachments = kept
     if kept or dropped:
@@ -517,7 +520,7 @@ async def generate(
     try:
         from . import fast_static
 
-        if (os.environ.get("ANTON_STATIC_FAST_PATH") == "direct" and state.act_first
+        if (state.act_first
                 and all(attachment.kind == KIND_DATA for attachment in state.attachments)
                 and fast_static.fits(state) and await fast_static.prepare(state)):
             result = await fast_static.run(state)
