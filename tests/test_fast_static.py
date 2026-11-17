@@ -65,6 +65,34 @@ async def test_direct_generation_uses_one_coding_call_and_the_existing_verifiers
     assert (tmp_path / "index.html").read_text() == html
 
 
+async def test_the_direct_writer_reads_the_recalled_preferences(tmp_path, monkeypatch):
+    from anton.core.tools.generate_artifact.prompts import (
+        RECALLED_PREFERENCES_FOOTER,
+        RECALLED_PREFERENCES_HEADING,
+    )
+
+    html = '<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width"></head><body>ok</body></html>'
+    calls = []
+
+    async def stream(**kwargs):
+        calls.append(kwargs)
+        yield StreamComplete(LLMResponse(content=html))
+
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live",
+                        lambda *args, **kwargs: BrowserCheck(status="passed"))
+    session = SimpleNamespace(_llm=SimpleNamespace(code_stream=stream), history=[])
+    state = GenState(session=session, artifact_type="html-app", artifact_path=tmp_path,
+                     slug="sales", user_request="Chart sales", user_preferences="Use a dark theme",
+                     recalled_preferences="- Always use teal (#008080) for chart bars", act_first=True)
+    assert (await fast_static.run(state))["status"] == "generated"
+    content = calls[0]["messages"][0]["content"]
+    # The footer closes the recalled block, so the data line after it is not
+    # read as one more recalled rule the writer must never print.
+    assert (f"Preferences: Use a dark theme\n\n{RECALLED_PREFERENCES_HEADING}\n"
+            f"- Always use teal (#008080) for chart bars\n{RECALLED_PREFERENCES_FOOTER}\n"
+            "Caller-provided data: ") in content
+
+
 async def test_primary_cannot_read_or_write_outside_the_artifact(tmp_path):
     session = SimpleNamespace(history=[])
     state = GenState(session=session, artifact_type="html-app", artifact_path=tmp_path,

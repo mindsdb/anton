@@ -10,7 +10,7 @@ from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
 from anton.core.llm.prompts import ANTON_NOTE
 
 from ..attachments import render_for_gathering
-from ..prompts import KNOWN_DATA_HEADER, datasources_or_none, with_project_rules
+from ..prompts import KNOWN_DATA_HEADER, datasources_or_none, preferences_text, with_project_rules
 from .state import PrdState
 
 
@@ -131,7 +131,7 @@ def build_call_kickoff(state: PrdState) -> str:
         f"{KNOWN_DATA_HEADER}\n{state.known_data or '(none provided)'}\n\n"
         + (f"{attached}\n\n" if attached else "")
         + (f"{pads}\n\n" if pads else "")
-        + f"## User preferences\n{state.user_preferences or '(none known)'}\n\n"
+        + f"## User preferences\n{preferences_text(state) or '(none known)'}\n\n"
         f"{connections}\n"
     )
 

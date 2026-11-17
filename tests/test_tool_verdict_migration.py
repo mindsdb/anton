@@ -431,6 +431,7 @@ _ALL_HANDLERS = frozenset({
     "handle_create_artifact",
     "handle_create_skill_draft",
     "handle_edit_artifact",
+    "handle_forget",
     "handle_generate_artifact",
     "handle_generate_image",
     "handle_launch_backend",
@@ -454,6 +455,9 @@ _VERDICT_DECLARING_HANDLERS = frozenset({
     # its reason ends the turn. Every other result stays a bare return.
     "handle_ask_user",
     "handle_create_skill_draft",
+    # Tier 1 when an entry is removed, or on a cloud turn when its removal is
+    # asked of the host; tier 2 when nothing matched or the call was malformed.
+    "handle_forget",
     # Streaming handler: it YIELDS its verdicts rather than returning them.
     # Tier 1 on success (every listed file was statically verified by the
     # pipeline), tier 2 on a pipeline failure — `ok=False, reason="pipeline"`,

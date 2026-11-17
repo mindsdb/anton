@@ -96,6 +96,53 @@ def test_a_saved_checkpoint_keeps_the_brief_for_the_same_language_only(tmp_path)
     assert changed.call_changed is True
 
 
+async def test_generate_hands_the_recalled_preferences_to_the_run(tmp_path, monkeypatch):
+    seen = {}
+
+    async def fake_run(state, *, entry):
+        seen["state"] = state
+        return {"status": "generated", "files_written": [], "internal_files": [], "trace": []}
+
+    monkeypatch.setattr(orchestrator, "run", fake_run)
+    monkeypatch.setattr(engine, "_scratchpads_context", lambda session: "")
+    art = tmp_path / "art"
+    art.mkdir()
+
+    await engine.generate(
+        session=_session(), slug="a", artifact_path=art, artifact_type="html-app",
+        user_request="r", agent_understanding="u", user_preferences="dark theme",
+        recalled_preferences="- Always use teal (#008080) for chart bars",
+    )
+
+    state = seen["state"]
+    assert state.user_preferences == "dark theme"
+    assert state.recalled_preferences == "- Always use teal (#008080) for chart bars"
+
+
+def test_a_change_in_the_recalled_preferences_alone_keeps_the_confirmed_brief(tmp_path):
+    # A new process rebuilds the recalled text from current memory, so it can
+    # differ between the call that drew the brief and the one confirming it.
+    # Only the agent's own preferences make the call a correction.
+    art = tmp_path / "art"
+    art.mkdir()
+    orchestrator._save_checkpoint(
+        _state(tmp_path, artifact_path=art, user_preferences="dark theme",
+               recalled_preferences="- Always use teal (#008080) for chart bars"),
+        cp.STAGE_AWAITING_CONFIRMATION,
+    )
+    stored = cp.load(art)
+
+    same = _state(tmp_path, artifact_path=art, user_preferences="dark theme",
+                  recalled_preferences="- Always use teal (#008080) for chart bars\n- A rule learned since")
+    engine._restore(same, stored)
+    assert same.call_changed is False
+
+    changed = _state(tmp_path, artifact_path=art, user_preferences="light theme",
+                     recalled_preferences="- Always use teal (#008080) for chart bars")
+    engine._restore(changed, stored)
+    assert changed.call_changed is True
+
+
 def test_the_page_is_written_in_the_stated_language_unless_the_prd_asks_otherwise():
     html = prompts.build_subagent_system_prompt(Path("/tmp/a"), user_language="Russian")
     front = prompts.build_frontend_system_prompt(Path("/tmp/a"), user_language="Russian")

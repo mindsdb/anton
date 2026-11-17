@@ -1764,3 +1764,88 @@ class TestManagedLayer:
         assert "Name: Ada" in (g / "profile.md").read_text()
         assert "Reports go out on Mondays" in (p / "lessons.md").read_text()
         assert _snapshot(managed) == before
+
+
+class TestPromptPreferences:
+    """The rule and identity sections the system prompt held, kept so the page
+    build gets the user's saved preferences even when the agent passes none."""
+
+    async def test_it_keeps_identity_and_rules_but_not_lessons(self, person):
+        g, p = person
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot")
+        assert cortex.prompt_preferences == ""
+
+        prompt = await cortex.build_memory_context("hola")
+        kept = cortex.prompt_preferences
+
+        assert "- Name: Ada" in kept
+        assert "- Use httpx" in kept and "- Use the Django ORM" in kept
+        assert "Lessons" not in kept and "CoinGecko" not in kept
+        assert "Datasource Context" not in kept and "Warehouse schema notes" not in kept
+        # The same text the prompt renders, not a second rendering.
+        assert prompt.startswith("\n\n" + kept + "\n\n## Your Memory — Global Lessons")
+
+    async def test_operator_rules_lead_and_operator_lessons_stay_out(self, person, managed):
+        cortex = _managed_cortex(person, managed)
+        await cortex.build_memory_context("hola")
+        kept = cortex.prompt_preferences
+
+        assert kept.startswith("## Operator Memory — Rules\n" + _OPERATOR_WINS)
+        assert "Sales figures are in thousands" not in kept
+        assert "- Name: Ada" in kept
+
+    async def test_with_learned_memory_off_only_operator_rules_are_kept(self, person, managed):
+        cortex = _managed_cortex(person, managed)
+        await cortex.build_memory_context("hola", learned_memory_scope="off")
+        kept = cortex.prompt_preferences
+
+        assert kept.startswith("## Operator Memory — Rules")
+        assert "Name: Ada" not in kept and "Use httpx" not in kept
+
+    async def test_nothing_saved_keeps_nothing(self, cortex):
+        await cortex.build_memory_context("hola")
+        assert cortex.prompt_preferences == ""
+
+    async def test_shared_memory_leads_with_the_notice_the_agent_gets(self, person):
+        # Shared entries may be another person's, so the page build must not
+        # read the shared profile as this user's without the agent's warning.
+        g, p = person
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot")
+        prompt = await cortex.build_memory_context("hola", learned_memory_scope="shared")
+        kept = cortex.prompt_preferences
+
+        notice = prompt.split("\n\n## Shared Memory", 1)[0].strip()
+        assert notice.startswith("## Learned memory status\nLearned memory is shared across people")
+        assert kept.startswith(notice + "\n\n## Shared Memory — Identity")
+        assert "- Name: Ada" in kept and "- Use httpx" in kept
+
+    async def test_personal_memory_keeps_no_notice(self, person):
+        g, p = person
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot")
+        await cortex.build_memory_context("hola", learned_memory_scope="personal")
+        assert cortex.prompt_preferences.startswith("## Your Memory — Identity")
+        assert "Learned memory status" not in cortex.prompt_preferences
+
+    @pytest.mark.parametrize("profile", ["# Profile\n\n", "# Profile\n", "# Profile\n## Facts\n"])
+    async def test_a_profile_with_headings_alone_recalls_no_identity(self, dirs, profile):
+        # Forgetting the last profile fact leaves "# Profile\n\n" on disk.
+        g, p = dirs
+        (g / "profile.md").write_text(profile)
+        (g / "rules.md").write_text("# Rules\n\n## Always\n- Use httpx\n")
+        cortex = Cortex(global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="autopilot")
+
+        prompt = await cortex.build_memory_context("hola")
+
+        assert "Identity" not in prompt
+        assert cortex.prompt_preferences == "## Your Memory — Global Rules\n## Always\n- Use httpx"
+        assert cortex.memory_read.profile_lines == 0
+
+    async def test_a_profile_with_headings_alone_and_nothing_else_keeps_nothing(self, cortex, dirs):
+        g, _ = dirs
+        (g / "profile.md").write_text("# Profile\n\n")
+        assert await cortex.build_memory_context("hola") == ""
+        assert cortex.prompt_preferences == ""
+
+    async def test_shared_memory_with_nothing_saved_keeps_nothing(self, cortex):
+        await cortex.build_memory_context("hola", learned_memory_scope="shared")
+        assert cortex.prompt_preferences == ""

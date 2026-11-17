@@ -216,3 +216,85 @@ async def test_a_saved_pin_of_the_wrong_shape_is_rebuilt(tmp_path, memory_dirs):
     prompt = await later._build_system_prompt("next")
     assert "verify totals before writing them" in prompt and "Project root: notes.md" in prompt
     assert isinstance(later.memory_read, MemoryRead)
+
+
+async def test_recalled_preferences_are_pinned_with_the_prompt(tmp_path, memory_dirs):
+    # The page build reads the rules the agent's prompt holds, so a rule saved
+    # mid-conversation reaches neither until the next conversation.
+    global_dir, project_dir = memory_dirs
+    (global_dir / "rules.md").write_text("# Rules\n\n## Always\n- Always use teal (#008080) for chart bars\n")
+    _add_rule(project_dir, "verify totals before writing them")
+    (project_dir / "lessons.md").write_text("# Lessons\n- Orders are partitioned by month\n")
+    first = _session(tmp_path, memory_dirs)
+    assert first.recalled_preferences() == ""
+    await first._build_system_prompt("hello")
+    recalled = first.recalled_preferences()
+    assert "Always use teal (#008080) for chart bars" in recalled
+    assert "verify totals before writing them" in recalled
+    assert "Orders are partitioned by month" not in recalled
+
+    _add_rule(project_dir, "a rule learned mid-conversation")
+    later = _session(tmp_path, memory_dirs)
+    await later._build_system_prompt("second question")
+    assert later.recalled_preferences() == recalled
+
+
+async def test_a_pin_without_recalled_preferences_reads_as_none(tmp_path, memory_dirs):
+    _, project_dir = memory_dirs
+    _add_rule(project_dir, "verify totals before writing them")
+    first = _session(tmp_path, memory_dirs)
+    await first._build_system_prompt("hello")
+    first._memory_pin().pop("preferences", None)
+
+    later = _session(tmp_path, memory_dirs)
+    await later._build_system_prompt("next")
+    assert later.recalled_preferences() == ""
+
+
+async def test_a_compaction_mid_turn_keeps_what_the_prompt_recalled(tmp_path, memory_dirs):
+    # The turn goes on with the system prompt it built, so a page built after
+    # a compaction must still get the rules that prompt holds.
+    global_dir, _ = memory_dirs
+    (global_dir / "rules.md").write_text("# Rules\n\n## Always\n- Always use teal (#008080) for chart bars\n")
+    history = [{"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 50} for i in range(10)]
+    session = _session(tmp_path, memory_dirs, initial_history=history)
+    await session._build_system_prompt("chart my sales")
+
+    session._llm.summarize = AsyncMock(return_value=LLMResponse(
+        content="## Goal\nx", usage=Usage(input_tokens=1, output_tokens=1)))
+    assert await session._summarize_history() is True
+    assert "preferences" not in session._memory_pin()              # the pin is gone
+    assert "Always use teal (#008080) for chart bars" in session.recalled_preferences()
+
+
+async def test_recalled_preferences_are_not_read_back_from_the_saved_pin(tmp_path, memory_dirs):
+    # Agent code can write the saved pin, so a new process rebuilds the text
+    # from memory rather than trusting the file.
+    from anton.core import session as session_module
+    from anton.core.session import _MEMORY_PIN_FILE
+
+    _, project_dir = memory_dirs
+    _add_rule(project_dir, "verify totals before writing them")
+    first = _session(tmp_path, memory_dirs)
+    await first._build_system_prompt("hello")
+    first._scratchpads.write_conversation_text(
+        _MEMORY_PIN_FILE, json.dumps({"scope": None, "workspace": {"pads": [], "root": []},
+                                      "preferences": "FORGED PREFERENCE"}))
+
+    session_module._MEMORY_PINS.clear()
+    later = _session(tmp_path, memory_dirs)
+    await later._build_system_prompt("next")
+    assert "FORGED" not in later.recalled_preferences()
+    assert "verify totals before writing them" in later.recalled_preferences()
+
+
+async def test_the_page_build_reads_what_a_real_session_recalled(tmp_path, memory_dirs):
+    # The handler looks the method up by name, so this joins the two sides: a
+    # rename on either one fails here instead of quietly recalling nothing.
+    from anton.core.tools.tool_handlers import _recalled_preferences
+
+    global_dir, _ = memory_dirs
+    (global_dir / "rules.md").write_text("# Rules\n\n## Always\n- Always use teal (#008080) for chart bars\n")
+    session = _session(tmp_path, memory_dirs)
+    await session._build_system_prompt("chart my sales")
+    assert "- Always use teal (#008080) for chart bars" in _recalled_preferences(session)

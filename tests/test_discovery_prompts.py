@@ -8,6 +8,7 @@ is locked in test_artifact_prefix_stability.py.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,12 @@ from anton.core.tools.generate_artifact.discovery.prompts import (
     step_message,
 )
 from anton.core.tools.generate_artifact import engine
+from anton.core.tools.generate_artifact.prompts import (
+    RECALLED_PREFERENCES_FOOTER,
+    RECALLED_PREFERENCES_HEADING,
+    preferences_text,
+    recalled_preferences_section,
+)
 from anton.core.tools.generate_artifact.discovery.prompts import (
     SCRATCHPADS_HEADER,
     render_scratchpads_context,
@@ -42,6 +49,26 @@ def _state(**over) -> GenState:
     )
     base.update(over)
     return GenState(**base)
+
+
+#: Words that would name a page's look in the recalled-preferences framing.
+_LOOK_EXAMPLE = re.compile(
+    r"#[0-9a-f]{3,8}\b|rgb|\b(?:teal|red|blue|green|orange|purple|yellow|indigo|navy|"
+    r"black|white|gray|grey|pink|serif|sans|bold|italic|dark|light)\b",
+    re.I,
+)
+
+
+def test_the_recalled_preferences_framing_gives_no_example_of_a_look():
+    """Shown over a profile with nothing saved, a framing whose example said
+    "chart bars are teal" made most pages teal-like. It names no look, so it
+    adds none of its own to the recalled text it frames."""
+    heading = RECALLED_PREFERENCES_HEADING
+    section = recalled_preferences_section("## Your Memory — Global Rules\n## Always\n- x")
+    for text in (heading, section):
+        assert not _LOOK_EXAMPLE.search(text), _LOOK_EXAMPLE.search(text)
+    assert "such as" not in heading
+    assert "Write what a rule changes as a plain requirement, never the rule itself" in heading
 
 
 def test_pipeline_system_prompt_lists_every_buildable_artifact_type_and_no_other():
@@ -80,6 +107,54 @@ def test_call_kickoff_carries_the_request_understanding_and_context():
     assert "a live BTC price dashboard" in kickoff
     assert "CoinGecko" in kickoff
     assert "prefers dark mode" in kickoff
+
+
+_TEAL = "## Your Memory — Global Rules\n## Always\n- Always use teal (#008080) for chart bars"
+_OPERATOR = "## Operator Memory — Rules\n## Never\n- Never load scripts from external CDNs"
+
+
+def test_call_kickoff_carries_the_recalled_preferences_after_the_agents_own():
+    kickoff = build_call_kickoff(_state(recalled_preferences=_TEAL))
+    section = kickoff.split("## User preferences\n", 1)[1]
+    assert section.startswith(
+        f"prefers dark mode\n\n{RECALLED_PREFERENCES_HEADING}\n{_TEAL}\n{RECALLED_PREFERENCES_FOOTER}\n\n"
+    )
+
+
+def test_call_kickoff_carries_the_recalled_preferences_when_the_agent_passed_none():
+    kickoff = build_call_kickoff(_state(user_preferences="", recalled_preferences=_TEAL))
+    assert (
+        f"## User preferences\n{RECALLED_PREFERENCES_HEADING}\n{_TEAL}\n{RECALLED_PREFERENCES_FOOTER}\n\n"
+    ) in kickoff
+
+
+def test_nothing_recalled_leaves_the_preferences_as_the_agent_wrote_them():
+    assert preferences_text(_state(recalled_preferences="  \n")) == "prefers dark mode"
+    assert "## User preferences\n(none known)" in build_call_kickoff(_state(user_preferences=""))
+
+
+def test_the_recalled_heading_frames_them_as_instructions_and_says_what_wins():
+    # The heading covers every recalled section, the operator's included, so
+    # "the request wins" must stop at the user's own rules. Nothing of the
+    # user's profile may be printed on a page that can be shared, or in the
+    # brief, PRD or spec the steps write into the project's artifacts folder,
+    # unless the request itself asks for it.
+    text = preferences_text(_state(recalled_preferences=f"{_OPERATOR}\n\n{_TEAL}"))
+    assert text.index(RECALLED_PREFERENCES_HEADING) < text.index(_OPERATOR)
+    assert text.endswith(f"{_TEAL}\n{RECALLED_PREFERENCES_FOOTER}")
+    heading = RECALLED_PREFERENCES_HEADING
+    assert "instructions to you, not content" in heading
+    assert "never print, quote or summarize them, or the user's name or profile" in heading
+    assert "unless the request itself contains or asks for it" in heading
+    assert "in the brief, PRD, spec or notes, in any file a step writes" in heading
+    assert "Write what a rule changes as a plain requirement" in heading
+    assert "never the rule itself or who the user is" in heading
+    assert "The operator's rules apply where they concern the page." in heading
+    assert "always apply" not in heading
+    assert (
+        "where the user's own saved rules or profile differ from the request or from the "
+        "preferences stated above for this request, the request and those preferences win"
+    ) in heading.replace("Where", "where")
 
 
 def test_the_gathering_step_asks_for_finish_gathering():

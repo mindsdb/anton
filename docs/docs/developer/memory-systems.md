@@ -91,6 +91,7 @@ budgets add to the totals below.
 | Method | Purpose |
 |---|---|
 | `build_memory_context()` | Assemble memories for system-prompt injection (~5800-token budget, plus the operator layer's when there is one) |
+| `prompt_preferences` | The rule and identity sections (operator rules, identity, global and project rules; no lessons) the latest `build_memory_context()` rendered, led by the shared-memory notice when learned memory is shared. The session pins it with the prompt and keeps the turn's copy through a compaction, and `generate_artifact` hands it to the page build beside the agent's own `user_preferences` |
 | `get_scratchpad_context()` | Combine scratchpad wisdom from both scopes, after the operator's layer when there is one, for the tool-description injection — the channel cerebellum lessons flow through |
 | `encode(engrams)` | Route engrams to the right hippocampus by scope. Called by `memorize`, the consolidator, the cerebellum, and the ACC |
 | `encoding_gate(engram)` | Mode-dependent check: does this engram need user confirmation? |
@@ -108,6 +109,10 @@ budgets add to the totals below.
 
 Confirmations are *never* shown mid-turn — only after the full response, right
 before the next prompt.
+
+A cloud turn runs in `off` when its request sets `memory_writable` to false,
+and in `autopilot` otherwise (see the cloud pod notes under
+[the `forget` tool](#the-forget-tool)).
 
 **Compaction (synaptic homeostasis).** When a memory file exceeds the
 threshold (`COMPACTION_THRESHOLD = 20` entries in `cortex.py`), session start
@@ -201,6 +206,22 @@ The LLM-facing encoding primitive. `handle_memorize()` in
 `confidence="high"` and `source="user"` (explicit tool calls are trusted), then
 encodes via a fire-and-forget `asyncio.create_task` — explicit memorize calls
 never interrupt the turn; confirmations are reserved for the consolidator.
+
+An entry whose kind is none of always, never, when, lesson or profile is not saved. The tool result names it with the valid kinds, so a guessed kind such as "forget" never saves the line again as a lesson.
+
+In memory mode `off` it saves nothing. The CLI (`surface` `cli`) says so and points at `/setup`, which changes the mode. Every other host has no `/setup`, so there the tool answers that saved memory is read-only in this conversation and nothing was saved.
+
+## The `forget` tool
+
+The LLM-facing removal primitive, registered only with a Cortex. `handle_forget()` in `anton/core/tools/tool_handlers.py` takes saved lines as they appear in the prompt's `Your Memory` sections, each with a scope of `global`, `project` or `any`, and calls `Cortex.forget()`. One call reads at most 100 entries and counts the rest as skipped. In memory mode `off` it removes nothing and says memory is read-only, as `memorize` encodes nothing there.
+
+An entry matches a request when the entry's text after `normalize_entry_text()` equals the requested line after `normalize_prompt_line()` (both in `anton/core/memory/hippocampus.py`). The first drops the trailing `<!-- ... -->` metadata and the surrounding whitespace, turns runs of whitespace into one space, folds case, and drops the sentence punctuation (`. ! ? ; :`) that ends the text; cowork-server compares saved entries in the same form. The second also drops the `- ` list marker the prompt puts before each entry. Two entries that differ only in their ending punctuation are removed together. There is no substring or fuzzy match, and the operator's managed layer is never searched. Each tier is read once per call.
+
+- **In-process:** `Cortex.forget()` deletes each match by id through `del_rule`, `del_lesson` or `del_identity` on the tiers the scope names. The handler drops the conversation's memory pin and takes the removed lines out of the preferences the turn recalled, each only from its own tier's section (`drop_forgotten_lines()`), so the operator's rules stay. Where learned memory is shared (`learned_memory_scope="shared"`, with or without a `deployment_identity`), the tool refuses and removes nothing.
+- **Cloud pod:** `_CloudCortex.forget()` deletes nothing. It records each entry that matched its read-only copies in `pending_forget`, as the entry's `normalize_entry_text()` form with the tier it was found in (`MemoryForgetEntry`), and the entrypoint sends them in a `memory_forget` event right before the `memory` event. The pod's copies and the memory pin still hold each line, so the session keeps the matches (`_forget_pending`) and leaves their lines out of the recalled preferences of every prompt the turn builds again, after a retried model call or a compaction. cowork removes them in that tier under its own access checks, before it saves the turn's new entries, and may refuse: a project entry another member saved, a turn in memory mode `off`, a comparison side, or an organization's channel turn, which has no member (cowork drops every removal such a turn asks for).
+- **Read-only cloud turn:** when cowork-server will drop every save and removal a turn sends (memory off or in mode `off`, a model comparison side, or an organization's channel turn with no member), the request carries `memory_writable: false`. `_build_cortex()` in `anton/cloud_turn/session.py` then builds the Cortex in memory mode `off`, as the in-process harness does for the same turns: `forget` and `memorize` answer that saved memory is read-only, and the pod sends no `memory_forget` or `memory` event. The prompt recalls the request's memory exactly as on a writable turn, since the memory section does not read the mode. As in-process, mode `off` also stops the ACC's observations. A request without the field, or with `true`, stays writable; any other value reads as false.
+
+The result names what was removed and each line that matched nothing. On a cloud turn it names the removals as asked of the host, which decides after the turn, not as done, since cowork may refuse one.
 
 ## Concurrency safety
 

@@ -982,6 +982,8 @@ async def _gen_verify_frontend(
             user_language=state.user_language,
             project_rules=state.project_rules,
             artifact_skills=state.artifact_skills,
+            recalled_preferences=state.recalled_preferences,
+            stated_preferences=state.user_preferences,
         )
     else:
         system = prompts.build_subagent_system_prompt(
@@ -990,6 +992,8 @@ async def _gen_verify_frontend(
             user_language=state.user_language,
             project_rules=state.project_rules,
             artifact_skills=state.artifact_skills,
+            recalled_preferences=state.recalled_preferences,
+            stated_preferences=state.user_preferences,
         )
     verdict = None  # guards the terminal message when no attempt ever verified
     # The loop's failure reason (round budget, no tool calls) is kept separately:

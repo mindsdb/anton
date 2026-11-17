@@ -310,6 +310,26 @@ def test_jev_decisions_turn_off_on_anything_else(value):
     assert _jev_request(value).jev_decisions is False
 
 
+def _memory_writable_request(value):
+    body = {"protocol_version": 1, "conversation_id": "c", "input": "hi"}
+    if value is not ...:
+        body["memory_writable"] = value
+    return TurnRequestV1.from_json(json.dumps(body))
+
+
+@pytest.mark.parametrize("value", [..., True])
+def test_memory_stays_writable_when_the_field_is_missing_or_true(value):
+    """A server or controller that does not send the field changes nothing."""
+    assert _memory_writable_request(value).memory_writable is True
+
+
+@pytest.mark.parametrize("value", [False, None, 0, 1, "true", "false", {"on": True}])
+def test_memory_is_read_only_on_false_or_anything_else(value):
+    """cowork keeps the turn's writes only when it said true, so a malformed
+    value must not let the tools report a change that never happens."""
+    assert _memory_writable_request(value).memory_writable is False
+
+
 def _limits_request(value):
     body = {"protocol_version": 1, "conversation_id": "conv-7", "input": "q"}
     if value is not ...:

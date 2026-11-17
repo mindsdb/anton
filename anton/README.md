@@ -340,6 +340,10 @@ Anton has a tool called `memorize` that it can call during conversation to encod
 - **lesson** — A factual discovery. Written to `lessons.md` and optionally to `topics/{slug}.md`.
 - **profile** — A fact about the user. Rewrites `profile.md` as a coherent snapshot.
 
+An entry with any other kind, or none, is not saved: the tool result names it with the five valid kinds. `memorize` only adds; the `forget` tool below removes.
+
+In memory mode `off` the tool saves nothing. In the CLI (`surface` `cli`) it says so and points at `/setup`, which changes the mode. Every other host has no `/setup`, so there it answers that saved memory is read-only in this conversation and nothing was saved.
+
 **Scope determines where the memory lives:**
 - **global** — Universal knowledge useful across any project. Written to `~/.anton/memory/`.
 - **project** — Specific to this workspace. Written to `<project>/.anton/memory/`.
@@ -351,6 +355,29 @@ Anton has a tool called `memorize` that it can call during conversation to encod
 4. Any entries needing confirmation are queued in `session._pending_memory_confirmations`
 5. The confirmation UI shows before the next user prompt
 
+## The `forget` Tool
+
+`forget` removes saved rules, lessons and profile facts when the user asks Anton to forget something. It is registered only with a Cortex. Each entry is a saved line, copied from the prompt's `Your Memory` sections, and a scope that names the tier to search:
+
+```json
+{
+  "entries": [
+    {"text": "- Always use teal (#008080) for chart bars", "scope": "global"},
+    {"text": "- CoinGecko rate-limits at 50/min <!-- topic:api-coingecko ts:2026-11-01 -->", "scope": "any"}
+  ]
+}
+```
+
+**Matching:** two functions in `anton/core/memory/hippocampus.py` compare a request with a saved entry. `normalize_entry_text()` takes the entry's text: it drops the trailing `<!-- ... -->` metadata and the surrounding whitespace, turns each run of whitespace into one space, folds case, and drops the sentence punctuation (`. ! ? ; :`) that ends the text, so a line that adds or drops a final period still names its entry; cowork-server compares its saved entries in the same form. `normalize_prompt_line()` takes the requested line and also drops the one `- ` list marker the prompt puts before each entry, so an entry saved as `- text` is named by the prompt's `- - text`. An entry matches when the two forms are equal, so two entries that differ only in their ending punctuation are removed together. A paraphrase or part of a line matches nothing. `scope` is `global`, `project` or `any` (both tiers). The operator's managed layer is never searched. One call reads at most 100 entries and counts the rest as skipped; each tier is read once per call.
+
+**In-process** (CLI, desktop, self-hosted): `Cortex.forget()` deletes each match by id through `del_rule`, `del_lesson` or `del_identity`. The handler then drops the conversation's memory pin, so the next turn's prompt is built from memory as it now is, and takes the removed lines out of the preferences this turn recalled (`drop_forgotten_lines()` in `anton/core/memory/cortex.py`), so a page built later in the turn doesn't use them. A line goes only from its own tier's section: the operator's rules, and a line with the same text in the other tier, stay. In memory mode `off` the tool removes nothing and says memory is read-only, as `memorize` encodes nothing there; a host's model comparison side, which reads the person's memory in that mode, can't change it. Where learned memory is shared by everyone on a deployment (`learned_memory_scope="shared"`, with or without a `deployment_identity`), it refuses and removes nothing, since one person's request would remove the entry for all.
+
+**Cloud turns:** the pod deletes nothing. `_CloudCortex.forget()` checks its read-only copies and records each entry that matched in `pending_forget`, as its own text in `normalize_entry_text()` form with the tier it was found in. The entrypoint sends them as one `{"kind": "memory_forget", "entries": [{"text", "scope"}]}` event right before the `memory` event. cowork removes them in that tier under its own access checks, before it saves the turn's new entries, so a line the turn saves again in another tier or under another kind stays saved. The pod's copies and the memory pin still hold each line, so the session keeps the matches (`_forget_pending`) and leaves their lines out of the recalled preferences of every prompt the turn builds again, after a retried model call or a compaction. cowork may refuse a removal: a project entry another member saved, a turn in memory mode `off`, a comparison side, or an organization's channel turn, which has no member (cowork drops every removal such a turn asks for).
+
+**Read-only cloud turns:** cowork-server tells the pod up front when it will drop every save and removal a turn sends: the user's memory is off or in mode `off`, the turn is a model comparison side, or it is an organization's channel turn with no member. The request then carries `memory_writable: false`, and `_build_cortex()` in `anton/cloud_turn/session.py` builds the Cortex in memory mode `off`, as the in-process harness does for the same turns. `forget` and `memorize` answer that saved memory is read-only, and the pod sends no `memory_forget` or `memory` event. The prompt still recalls the memory the request carries, exactly as on a writable turn, because the memory section does not read the mode. As in-process, mode `off` also stops the ACC's observations, so the turn gets no mid-turn self-check notes. A request without the field, or with `true`, stays writable; any other value reads as false.
+
+The tool result lists what was removed and each line that matched nothing, so the model never reports a removal that didn't happen. On a cloud turn it lists the removals as asked of the host, which decides after the turn, says the host keeps an entry this user may not change, such as a project entry another member saved, which only that member or an organization admin can remove, and tells the model to say the removal was asked for, not done.
+
 ## Memory Modes — The Encoding Gate
 
 Like the Locus Coeruleus-Norepinephrine system that controls how aggressively the brain writes new memories, Anton has three memory modes:
@@ -361,7 +388,7 @@ Like the Locus Coeruleus-Norepinephrine system that controls how aggressively th
 | **copilot** | Auto-save high-confidence memories, confirm ambiguous ones after the answer | Moderate NE — selective encoding |
 | **off** | Never save (still reads existing memory) | Suppressed — encoding blocked |
 
-Configure via `/setup` > Memory, or the `ANTON_MEMORY_MODE` environment variable. `ANTON_MEMORY_ENABLED=false` runs the cortex in **off** whatever the mode says (`AntonSettings.effective_memory_mode`).
+Configure via `/setup` > Memory, or the `ANTON_MEMORY_MODE` environment variable. `ANTON_MEMORY_ENABLED=false` runs the cortex in **off** whatever the mode says (`AntonSettings.effective_memory_mode`). A cloud turn runs in **off** when its request sets `memory_writable` to false, and in **autopilot** otherwise (see [Read-only cloud turns](#the-forget-tool)).
 
 **The encoding gate logic** (in `cortex.py`):
 ```python
