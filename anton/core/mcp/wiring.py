@@ -150,7 +150,7 @@ async def _discover_one(
     `asyncio.gather` — a bad connector never fails the whole turn over it,
     it just contributes `([], None)`."""
     if engine == CUSTOM_MCP_ENGINE:
-        return await _discover_custom(vault, name, disambiguate=disambiguate)
+        return await _discover_custom(vault, name)
     url = mcp_server_url(engine)
     if url is None:
         logger.warning("discover_mcp_tools: no known MCP server URL for engine %s", engine)
@@ -169,12 +169,12 @@ async def _discover_one(
     )
 
 
-async def _discover_custom(
-    vault: "DataVault", name: str, *, disambiguate: bool
-) -> tuple[list["ToolDef"], McpSession | None]:
+async def _discover_custom(vault: "DataVault", name: str) -> tuple[list["ToolDef"], McpSession | None]:
     """Discover a user-added server's tools: its own URL, a guarded session,
-    and only the tools listed in `_allowed_tools`. A URL that fails the check
-    or an unreadable tool list skips the connection before any request."""
+    and only the tools listed in `_allowed_tools`. Tool names always carry
+    the connection, since `custom_mcp` alone says nothing about the server.
+    A URL that fails the check or an unreadable tool list skips the
+    connection before any request."""
     fields = (vault.read_record(CUSTOM_MCP_ENGINE, name) or {}).get("fields") or {}
     url = str(fields.get("_server_url") or "")
     try:
@@ -192,7 +192,7 @@ async def _discover_custom(
         engine=CUSTOM_MCP_ENGINE,
         name=name,
         access_mode=_access_mode_of(vault, CUSTOM_MCP_ENGINE, name),
-        connection_name=name if disambiguate else None,
+        connection_name=name,
         allowed_tools=allowed_tools,
         display_name=str(fields.get("_label") or name),
     )

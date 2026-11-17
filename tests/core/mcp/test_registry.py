@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import re
+
+import pytest
 from mcp.server.mcpserver import MCPServer
 
 from anton.core.mcp.access import TOOL_ACCESS
 from anton.core.mcp.client import McpSession
-from anton.core.mcp.names import ToolNameParts, namespaced_tool_name, parse_namespaced_tool_name
+from anton.core.mcp.names import (
+    ToolNameParts,
+    namespaced_tool_name,
+    parse_namespaced_tool_name,
+    registrable_tool_name,
+)
 from anton.core.mcp.registry import discover_tool_defs, without_empty_optionals
 from anton.core.tools.registry import ToolOutcome
 
@@ -218,6 +226,59 @@ def test_a_field_required_by_any_branch_is_kept():
         {"type": "object", "properties": {"id": {"type": "string"}}},
     ]}
     assert without_empty_optionals({"q": "", "id": ""}, schema, schema) == {"q": ""}
+
+
+def test_a_name_that_fits_keeps_its_connection_name():
+    assert namespaced_tool_name("hubspot", "add", connection_name="other-org") == "hubspot__other-org__add"
+    assert namespaced_tool_name("hubspot", "add", connection_name="my_org") == "hubspot__my_org__add"
+
+
+def test_a_51_character_connection_name_gives_short_unique_names_that_parse_back():
+    notion_tools = ["notion-search", "notion-fetch", "notion-get-comments", "notion-query-data-sources"]
+    connections = ["jo-example-com-" + f"1b2c3d4e-0000-4000-8000-00000000000{n}" for n in (1, 2)]
+    names = [
+        registrable_tool_name("notion", tool, connection_name=connection)
+        for connection in connections
+        for tool in notion_tools
+    ]
+    assert all(name is not None and len(name) <= 64 for name in names)
+    assert len(set(names)) == len(names)
+    for name, tool in zip(names, notion_tools * 2):
+        parts = parse_namespaced_tool_name(name=name)
+        assert parts is not None and (parts.engine, parts.tool_name) == ("notion", tool)
+
+
+def test_a_connection_name_the_model_api_refuses_is_shortened():
+    name = namespaced_tool_name("custom_mcp", "search", connection_name="Acme Tracker")
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name)
+    assert name == namespaced_tool_name("custom_mcp", "search", connection_name="Acme Tracker")
+
+
+@pytest.mark.parametrize("tool_name", ["files.read", "github/search", "get user", "tool:list", "über_tool", "a__b", "_private", ""])
+def test_a_tool_name_without_a_valid_registered_name_is_refused(tool_name):
+    assert registrable_tool_name("custom_mcp", tool_name, connection_name="my-team-search-server") is None
+
+
+def test_a_tool_name_still_too_long_after_shortening_is_refused():
+    assert registrable_tool_name("custom_mcp", "x" * 60, connection_name="my-team-search-server") is None
+
+
+async def test_unusable_tool_names_are_left_out_and_their_siblings_register():
+    server = MCPServer(name="odd-names")
+    for odd in ["files.read", "github/search", "get user", "tool:list", "über_tool", "a__b", "_private"]:
+        server.tool(name=odd)(lambda: "x")
+    server.tool(name="search_issues")(lambda: "ok")
+
+    async with McpSession(server=server) as session:
+        defs = await discover_tool_defs(
+            session,
+            engine="custom_mcp",
+            access_mode="read",
+            connection_name="my-team-search-server",
+            allowed_tools=frozenset({tool.name for tool in await session.list_tools()}),
+        )
+    assert [d.name for d in defs] == ["custom_mcp__my-team-search-server__search_issues"]
+    assert all(parse_namespaced_tool_name(name=d.name) is not None for d in defs)
 
 
 async def test_allowed_tools_replace_the_access_table(stub_mcp_server):

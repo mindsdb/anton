@@ -30,14 +30,17 @@ nothing new to design.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from anton.core.mcp.access import AccessMode, allowed_for_mode
 from anton.core.mcp.client import McpSession
 from anton.core.mcp.errors import McpEgressBlocked, McpPermanentError, McpTransientError
-from anton.core.mcp.names import namespaced_tool_name
+from anton.core.mcp.names import registrable_tool_name
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
+
+logger = logging.getLogger(__name__)
 
 
 async def discover_tool_defs(
@@ -64,6 +67,10 @@ async def discover_tool_defs(
     only the listed names register, and their arguments pass through as the
     model sent them. `display_name` names the connection in error messages
     in place of the engine.
+
+    A tool with no valid registered name (`registrable_tool_name`) is left
+    out with a warning; one such tool would make the model API reject every
+    request of the turn.
     """
     if access_mode == "none":
         return []
@@ -72,21 +79,27 @@ async def discover_tool_defs(
         allowed = [tool for tool in tools if tool.name in allowed_tools]
     else:
         allowed = [tool for tool in tools if allowed_for_mode(engine, tool.name, access_mode)]
-    return [
-        ToolDef(
-            name=namespaced_tool_name(engine, tool.name, connection_name=connection_name),
-            description=tool.description or "",
-            input_schema=tool.input_schema,
-            handler=_make_handler(
-                mcp_session,
-                label=display_name or engine,
-                bare_tool_name=tool.name,
-                input_schema=tool.input_schema or {},
-                drop_empty_optionals=allowed_tools is None and allowed_for_mode(engine, tool.name, "read"),
-            ),
+    tool_defs: list[ToolDef] = []
+    for tool in allowed:
+        name = registrable_tool_name(engine, tool.name, connection_name=connection_name)
+        if name is None:
+            logger.warning("MCP tool %r of %s left out: no valid tool name for it", tool.name, display_name or engine)
+            continue
+        tool_defs.append(
+            ToolDef(
+                name=name,
+                description=tool.description or "",
+                input_schema=tool.input_schema,
+                handler=_make_handler(
+                    mcp_session,
+                    label=display_name or engine,
+                    bare_tool_name=tool.name,
+                    input_schema=tool.input_schema or {},
+                    drop_empty_optionals=allowed_tools is None and allowed_for_mode(engine, tool.name, "read"),
+                ),
+            )
         )
-        for tool in allowed
-    ]
+    return tool_defs
 
 
 _MAX_SCHEMA_DEPTH = 20

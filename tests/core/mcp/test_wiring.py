@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import pytest
+from mcp.server.mcpserver import MCPServer
 
 from anton.core.mcp import wiring
 from anton.core.mcp.client import McpSession
+from anton.core.mcp.names import parse_namespaced_tool_name
 
 
 class FakeDataVault:
@@ -179,7 +181,7 @@ async def test_a_custom_connection_uses_its_own_url_through_a_guarded_session(re
         vault, [{"engine": "custom_mcp", "name": "acme-tracker"}]
     )
     assert recorded_sessions == [{"url": "https://mcp.example.com/mcp", "access_token": "tok", "guarded": True}]
-    assert [d.name for d in tool_defs] == ["custom_mcp__add"]
+    assert [d.name for d in tool_defs] == ["custom_mcp__acme-tracker__add"]
     await wiring.close_mcp_sessions(sessions)
 
 
@@ -250,7 +252,7 @@ async def test_a_no_login_custom_server_connects_without_a_token(recorded_sessio
         vault, [{"engine": "custom_mcp", "name": "open-data"}]
     )
     assert recorded_sessions[0]["access_token"] is None
-    assert [d.name for d in tool_defs] == ["custom_mcp__add"]
+    assert [d.name for d in tool_defs] == ["custom_mcp__open-data__add"]
     await wiring.close_mcp_sessions(sessions)
 
 
@@ -266,3 +268,36 @@ async def test_a_custom_connection_switched_off_registers_nothing(recorded_sessi
 async def test_call_mcp_tool_does_not_serve_custom_servers():
     with pytest.raises(ValueError):
         await wiring.call_mcp_tool("custom_mcp", "tok", "add")
+
+
+async def test_two_notion_workspaces_with_long_names_both_stay_callable(monkeypatch):
+    """Two connections whose 51-character names would push tool names past 64."""
+    server = MCPServer(name="notion-stub")
+
+    @server.tool(name="notion-search")
+    def search(query: str) -> str:
+        return f"found {query}"
+
+    @server.tool(name="notion-fetch")
+    def fetch(id: str) -> str:
+        return f"page {id}"
+
+    monkeypatch.setattr(wiring, "McpSession", lambda **kwargs: McpSession(server=server))
+    first = "jo-example-com-" + "1b2c3d4e-0000-4000-8000-000000000001"
+    second = "jo-example-com-" + "1b2c3d4e-0000-4000-8000-000000000002"
+    assert len(first) == len(second) == 51
+    record = {"_method": "mcp", "_access_mode": "read", "access_token": "tok"}
+    vault = FakeDataVault({("notion", first): dict(record), ("notion", second): dict(record)})
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "notion", "name": first}, {"engine": "notion", "name": second}]
+    )
+    names = [d.name for d in tool_defs]
+    assert len(names) == len(set(names)) == 4
+    assert all(len(name) <= 64 for name in names)
+    for tool_def in tool_defs:
+        parts = parse_namespaced_tool_name(name=tool_def.name)
+        assert parts is not None and parts.engine == "notion"
+    fetch_def = next(d for d in tool_defs if d.name.endswith("__notion-fetch"))
+    outcome = await fetch_def.handler(None, {"id": "abc"})
+    assert (outcome.ok, outcome.content) == (True, "page abc")
+    await wiring.close_mcp_sessions(sessions)
