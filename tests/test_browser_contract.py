@@ -1573,6 +1573,34 @@ def test_the_action_fixture_says_whether_the_step_changed_anything():
     assert ActionResult.model_validate({"ok": True, "url": "https://shop.example.test/cart"}).changed is None
 
 
+def test_the_action_fixture_says_what_a_host_that_stops_a_step_on_a_take_over_answers():
+    """A host that stops a step when the person takes the browser over
+    answers that step 409 human_in_control. A Take over too late to stop it
+    (after its last input) leaves a step that ran: 200 with no page and
+    changed null, since what the page shows may be the person's. A page read
+    or a screenshot the person took over answers 409 human_in_control. The
+    messages are the router's browser's, as examples; the code is the
+    contract. anton keeps the step's Done line when its read after a
+    page-less answer is refused (tool.py _do_act)."""
+    action = _load("action")
+    assert "The answer carries the page after the step when include_page is true." not in action.description
+    for sentence in (
+        "The answer carries the page after the step when include_page is true, unless the person took the browser "
+        "over during the step (a Take over).",
+        "A host that stops a step on a Take over answers that step 409 human_in_control (the router's browser: "
+        "\"The person took over the browser during this step, so it stopped before its next press or key. Wait for "
+        "them to hand back.\").",
+        "When the Take over came too late to stop the step (after its last input), the step ran, and such a host "
+        "answers 200 with no page and changed null, since what the page shows may be the person's.",
+        "A page read or a screenshot the person took over answers 409 human_in_control (the router's browser: "
+        "\"The browser passed to the person during the read.\").",
+    ):
+        assert sentence in action.description, sentence
+    answer = ActionResult.model_validate(action.examples["the answer after a Take over too late to stop the step"].body)
+    assert answer.page is None and answer.changed is None
+    assert _load("error").examples["human_in_control"].status == 409
+
+
 def test_the_action_fixture_says_a_step_that_changed_the_page_in_place_settles_too():
     """The settle both hosts run: no settle ends for quiet, or for a step
     that started nothing, inside the first settle_quiet_ms (the request

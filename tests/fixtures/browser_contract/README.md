@@ -23,7 +23,7 @@ Each file is one JSON object:
 |---|---|
 | `sessions.json` | Opening a conversation's session, and the one answer shape both hosts give |
 | `page.json` | The page snapshot: elements, `value_hidden` on secret fields, `focus` for the focused node, `challenges` for visible check frames, `frames` for child frames, and the card-field rule both hosts hold |
-| `action.json` | Step requests, the focused steps both hosts refuse, and the action answer |
+| `action.json` | Step requests, the focused steps both hosts refuse, and the action answer, after a Take over too |
 | `control.json` | The control record (`holder`, `reason`, `since`, `seq`, `by`), the hand-over request and its answer's `watching`, and the refused take-back |
 | `tabs.json` | Tab list, open, activate and close |
 | `sites.json` | Signed-in sites the browser records |
