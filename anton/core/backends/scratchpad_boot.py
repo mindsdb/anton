@@ -1104,6 +1104,12 @@ if _scratchpad_model:
         )
 
         def _run_decisions(texts, question):
+            # list() would split a str into characters and a dict into its keys.
+            if isinstance(texts, (str, bytes, dict)):
+                raise TypeError(
+                    "texts must be a list of texts, not a single "
+                    f"{type(texts).__name__}: wrap one text in a list, such as [text]"
+                )
             items = list(texts)
             if any(not isinstance(item, (str, dict)) for item in items):
                 raise TypeError("each text must be a str (or a dict of fields)")
@@ -1186,26 +1192,28 @@ if _scratchpad_model:
         else:
             _classify_helper = _classify_yes_no_helper = _classify_off
 
-        import logging
-
-        _jev_url_prefix = f"{(_llm_base_url or '').rstrip('/')}/decisions"
-
-        class _DropDecisionRequestLogs(logging.Filter):
-            """Drop httpx2's per-request INFO line for decision calls.
-
-            The pad captures INFO logs into the cell output, where a long
-            labelling run would add one line per request.
-            """
-
-            def filter(self, record):
-                args = record.args if isinstance(record.args, tuple) else ()
-                return not (
-                    str(record.msg).startswith("HTTP Request")
-                    and len(args) > 1
-                    and str(args[1]).startswith(_jev_url_prefix)
-                )
-
+        # Only for a pad that uses Jev: _llm_base_url exists for openai-compatible
+        # providers alone, so an Anthropic pad must not reach it.
         if _classify_helper is classify:
+            import logging
+
+            _jev_url_prefix = f"{(_llm_base_url or '').rstrip('/')}/decisions"
+
+            class _DropDecisionRequestLogs(logging.Filter):
+                """Drop httpx2's per-request INFO line for decision calls.
+
+                The pad captures INFO logs into the cell output, where a long
+                labelling run would add one line per request.
+                """
+
+                def filter(self, record):
+                    args = record.args if isinstance(record.args, tuple) else ()
+                    return not (
+                        str(record.msg).startswith("HTTP Request")
+                        and len(args) > 1
+                        and str(args[1]).startswith(_jev_url_prefix)
+                    )
+
             logging.getLogger("httpx2").addFilter(_DropDecisionRequestLogs())
 
         _inject_helper("classify", _classify_helper)

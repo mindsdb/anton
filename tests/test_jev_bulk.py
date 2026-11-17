@@ -165,16 +165,39 @@ async def test_a_refusal_for_the_whole_batch_stops_it(status):
     assert calls["n"] == 1
 
 
-async def test_a_batch_whose_texts_all_fail_is_abandoned():
+async def test_the_call_is_abandoned_once_the_first_batches_all_fail():
     calls = {"n": 0}
 
     def handler(request):
         calls["n"] += 1
         return httpx.Response(422, json={"error": {"message": "bad criteria"}})
 
+    # 1,000 texts are 5 batches; the first 3 failing whole stop the call.
     with pytest.raises(jev.JevUnavailable, match="http_422"):
-        await _run(handler, ["x"] * 500, concurrency=1)
-    assert calls["n"] == 1
+        await _run(handler, ["x"] * 1000, concurrency=1)
+    assert calls["n"] == 3
+
+
+async def test_one_failed_batch_does_not_abandon_the_others():
+    def handler(request):
+        if "t0" in json.loads(request.content)["questions"]:
+            return httpx.Response(503, json={"error": {}})
+        return _label_all(request)
+
+    results = await _run(handler, ["invoice"] * 450, concurrency=1)
+
+    errors = [jev.choice_result(d).get("error") for d in results]
+    assert errors[:200] == ["http_503"] * 200
+    assert errors[200:] == [None] * 250
+
+
+async def test_texts_too_long_on_their_own_do_not_abandon_the_call():
+    def handler(request):
+        return httpx.Response(400, json={"detail": {"error_type": "max_tokens_exceeded"}})
+
+    results = await _run(handler, ["huge"] * 4, concurrency=1)
+
+    assert [jev.choice_result(d)["error"] for d in results] == [jev.TEXT_TOO_LONG] * 4
 
 
 async def test_progress_is_reported_per_finished_batch():
@@ -198,7 +221,7 @@ def test_choice_question_takes_a_list_or_described_categories():
 
 def test_yes_no_question_and_its_result():
     assert jev.yes_no_question("Billing?") == {"type": "noul", "instructions": "Billing?"}
-    assert jev.yes_no_question("Billing?", yes="about payments")["criteria"] == {"true": "about payments", "false": None}
+    assert jev.yes_no_question("Billing?", yes="about payments")["criteria"] == {"true": "about payments", "false": ""}
     with pytest.raises(ValueError):
         jev.yes_no_question(" ")
 

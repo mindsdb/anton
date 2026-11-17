@@ -791,6 +791,26 @@ def test_classify_raises_without_a_request_off_the_mindshub_gateway(tmp_path, ce
     assert server.seen == []
 
 
+def test_classify_raises_on_an_anthropic_pad(tmp_path):
+    """An Anthropic pad has no base URL of its own; the helpers still stand in."""
+    with _serving() as server:
+        (result,) = _run_cells(['classify(["a"], ["X", "Y"])'], tmp_path,
+                               base_url=f"http://127.0.0.1:{server.server_port}/v1",
+                               extra_env={"ANTON_SCRATCHPAD_PROVIDER": "anthropic",
+                                          "ANTHROPIC_API_KEY": "test-key"})
+
+    assert result.error is not None and "need the MindsHub gateway" in result.error
+
+
+@pytest.mark.parametrize("texts", ['"one text"', '{"title": "a", "body": "b"}'], ids=["str", "dict"])
+def test_classify_refuses_a_single_text_instead_of_a_list(tmp_path, texts):
+    (result,) = _run_cells([f'classify({texts}, ["X", "Y"])'], tmp_path,
+                           base_url="https://api.mindshub.ai/v1")
+
+    assert result.error is not None and "TypeError" in result.error
+    assert "wrap one text in a list" in result.error
+
+
 def test_classify_raises_without_a_request_when_turned_off(tmp_path):
     with _serving() as server:
         (result,) = _run_cells(['classify(["a"], ["X", "Y"])'], tmp_path,

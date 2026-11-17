@@ -322,8 +322,9 @@ BATCH_STATE = "Answer each question about the text that question contains. The q
 
 _MAX_ATTEMPTS = 4
 _RATE_LIMIT_PAUSE_S = 60.0
-# This many failed texts with no success means the request itself is wrong.
-_FAILURES_BEFORE_ABORT = 20
+# This many failed batches with no success means Jev cannot serve the call.
+# Counted per batch: one batch carries up to CLASSIFY_BATCH_ITEMS texts.
+_FAILED_BATCHES_BEFORE_ABORT = 3
 # Refusals that would repeat for every remaining batch.
 _FATAL = {
     "http_401": "the MindsHub key was rejected",
@@ -419,10 +420,12 @@ async def decide_many(
     does not fit fails alone. Per-item failures come back as decisions with
     ``error`` set; their answers hold the one answer under ``ANSWER``.
     Raises ``JevUnavailable`` when a refusal would repeat for every batch, or
-    when the first ``_FAILURES_BEFORE_ABORT`` finished items all failed.
+    when the first ``_FAILED_BATCHES_BEFORE_ABORT`` batches (or all of them,
+    when there are fewer) failed whole. A text too long on its own does not
+    count: it fails alone.
     """
     results: list[JevDecision | None] = [None] * len(items)
-    counts = {"done": 0, "ok": 0, "failed": 0}
+    counts = {"done": 0, "ok_batches": 0, "failed_batches": 0}
     questions: dict[int, dict] = {}
     for i, item in enumerate(items):
         if isinstance(item, str) and not item.strip():
@@ -436,14 +439,11 @@ async def decide_many(
     for batch in batches:
         queue.put_nowait(batch)
 
+    abort_after = min(_FAILED_BATCHES_BEFORE_ABORT, len(batches))
+
     def finish(i: int, decision: JevDecision) -> None:
         results[i] = decision
         counts["done"] += 1
-        counts["failed" if decision.error else "ok"] += 1
-        if counts["ok"] == 0 and counts["failed"] >= _FAILURES_BEFORE_ABORT:
-            raise JevUnavailable(
-                f"The first {counts['failed']} texts all failed (last error: {decision.error})"
-            )
 
     async def send(batch: list[int]) -> JevDecision:
         decision = JevDecision(answers={})
@@ -478,6 +478,15 @@ async def decide_many(
                 queue.put_nowait(batch[:half])
                 queue.put_nowait(batch[half:])
                 continue
+            if decision.error and decision.error != TOO_LONG:
+                counts["failed_batches"] += 1
+                if counts["ok_batches"] == 0 and counts["failed_batches"] >= abort_after:
+                    raise JevUnavailable(
+                        f"The first {counts['failed_batches']} batches all failed "
+                        f"(last error: {decision.error})"
+                    )
+            elif not decision.error:
+                counts["ok_batches"] += 1
             for i in batch:
                 if decision.error:
                     error = TEXT_TOO_LONG if decision.error == TOO_LONG else decision.error
@@ -522,7 +531,7 @@ def yes_no_question(question: str, *, yes: str | None = None, no: str | None = N
         raise ValueError("question must not be empty")
     built: dict = {"type": "noul", "instructions": question}
     if yes is not None or no is not None:
-        built["criteria"] = {"true": yes, "false": no}
+        built["criteria"] = {"true": "" if yes is None else yes, "false": "" if no is None else no}
     return built
 
 
