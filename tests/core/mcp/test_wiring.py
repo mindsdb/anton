@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp_types import ToolAnnotations
@@ -192,7 +194,7 @@ async def test_a_tool_the_server_adds_later_stays_off(recorded_sessions):
     tool_defs, sessions = await wiring.discover_mcp_tools_async(
         vault, [{"engine": "custom_mcp", "name": "acme-tracker"}]
     )
-    assert "custom_mcp__boom" not in {d.name for d in tool_defs}
+    assert [d.name for d in tool_defs] == ["custom_mcp__acme-tracker__add"]
     await wiring.close_mcp_sessions(sessions)
 
 
@@ -380,6 +382,35 @@ async def test_closing_a_custom_session_logs_no_part_of_its_url_path(caplog):
     await wiring.close_mcp_sessions([_FailsToClose(url="https://mcp.example.com/mcp", guarded=True)])
     assert "RuntimeError" in caplog.text
     assert SECRET_PATH not in caplog.text
+
+
+async def test_two_hubspot_portals_with_long_names_both_stay_callable(monkeypatch):
+    """HubSpot connection names are `<email>-<portal name>`, uncapped."""
+    server = MCPServer(name="hubspot-stub")
+
+    @server.tool(name="search_crm_objects")
+    def search(query: str) -> str:
+        return f"found {query}"
+
+    @server.tool(name="discover_hubspot_schema")
+    def schema() -> str:
+        return "schema"
+
+    monkeypatch.setattr(wiring, "McpSession", lambda **kwargs: McpSession(server=server))
+    first = "jo@example.com-Acme Corporation Sales Portal EU"
+    second = "jo@example.com-Acme Corporation Sales Portal US"
+    record = {"_method": "mcp", "_access_mode": "read", "access_token": "tok"}
+    vault = FakeDataVault({("hubspot", first): dict(record), ("hubspot", second): dict(record)})
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "hubspot", "name": first}, {"engine": "hubspot", "name": second}]
+    )
+    names = [d.name for d in tool_defs]
+    assert len(names) == len(set(names)) == 4
+    assert all(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) for name in names)
+    search_def = next(d for d in tool_defs if d.name.endswith("__search_crm_objects"))
+    outcome = await search_def.handler(None, {"query": "deals"})
+    assert (outcome.ok, outcome.content) == (True, "found deals")
+    await wiring.close_mcp_sessions(sessions)
 
 
 async def test_two_notion_workspaces_with_long_names_both_stay_callable(monkeypatch):
