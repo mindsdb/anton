@@ -46,12 +46,14 @@ import asyncio
 import json
 import logging
 from collections import Counter
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from anton.core.mcp.access import AccessMode
 from anton.core.mcp.client import McpSession, log_session_failure
 from anton.core.mcp.egress import check_server_url
 from anton.core.mcp.errors import McpEgressBlocked
+from anton.core.mcp.names import registrable_tool_name
 from anton.core.mcp.registry import discover_tool_defs
 from anton.core.mcp.servers import mcp_server_url
 
@@ -266,6 +268,37 @@ async def close_mcp_sessions(sessions: list[McpSession]) -> None:
             await session.__aexit__(None, None, None)
         except Exception:
             log_session_failure(logger, session, "close_mcp_sessions: error closing an MCP session")
+
+
+@dataclass(frozen=True)
+class ServerTool:
+    """One tool a custom server offers, as the connect screen shows it."""
+
+    name: str
+    description: str
+    read_only: bool
+
+
+async def list_custom_server_tools(url: str, access_token: str | None, *, connection_name: str) -> list[ServerTool]:
+    """The tools the custom server at `url` offers, for the user to switch on.
+
+    Opens a guarded session, so `McpEgressBlocked` is raised for a URL or
+    address anton will not connect to, and `McpTokenRejected` for a refused
+    token. `read_only` is true only when the server marks the tool read only.
+    Tools discovery would leave out under `connection_name` are left out
+    here too, so the user never switches on a tool that cannot register.
+    """
+    async with McpSession(url=url, access_token=access_token, guarded=True) as mcp_session:
+        tools = await mcp_session.list_tools()
+    return [
+        ServerTool(
+            name=tool.name,
+            description=tool.description or "",
+            read_only=bool(tool.annotations is not None and tool.annotations.read_only_hint is True),
+        )
+        for tool in tools
+        if registrable_tool_name(CUSTOM_MCP_ENGINE, tool.name, connection_name=connection_name) is not None
+    ]
 
 
 async def call_mcp_tool(engine: str, access_token: str, tool_name: str, **kwargs: Any) -> str | list[dict]:

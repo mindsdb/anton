@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import pytest
 from mcp.server.mcpserver import MCPServer
+from mcp_types import ToolAnnotations
 
 from anton.core.mcp import wiring
 from anton.core.mcp.client import McpSession
+from anton.core.mcp.errors import McpEgressBlocked
 from anton.core.mcp.names import parse_namespaced_tool_name
 
 
@@ -268,6 +270,54 @@ async def test_a_custom_connection_switched_off_registers_nothing(recorded_sessi
 async def test_call_mcp_tool_does_not_serve_custom_servers():
     with pytest.raises(ValueError):
         await wiring.call_mcp_tool("custom_mcp", "tok", "add")
+
+
+async def test_listing_a_custom_servers_tools_reports_the_read_only_label(monkeypatch):
+    server = MCPServer(name="labelled")
+
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True))
+    def search_issues(query: str) -> str:
+        return query
+
+    @server.tool(annotations=ToolAnnotations(read_only_hint=False))
+    def create_issue(title: str) -> str:
+        return title
+
+    @server.tool()
+    def sync() -> str:
+        return "ok"
+
+    @server.tool(annotations=ToolAnnotations(destructive_hint=False))
+    def archive(issue_id: str) -> str:
+        return issue_id
+
+    @server.tool(name="files.read")
+    def files_read() -> str:
+        return "x"
+
+    built: list[dict] = []
+
+    def factory(*, url=None, access_token=None, guarded=False, **kwargs):
+        built.append({"url": url, "access_token": access_token, "guarded": guarded})
+        return McpSession(server=server)
+
+    monkeypatch.setattr(wiring, "McpSession", factory)
+    tools = await wiring.list_custom_server_tools(
+        "https://mcp.example.com/mcp", "tok", connection_name="acme-tracker"
+    )
+    assert built == [{"url": "https://mcp.example.com/mcp", "access_token": "tok", "guarded": True}]
+    assert {(tool.name, tool.read_only) for tool in tools} == {
+        ("search_issues", True),
+        ("create_issue", False),
+        ("sync", False),
+        ("archive", False),
+    }
+
+
+@pytest.mark.parametrize("url", ["https://10.0.0.5/mcp", "https://169.254.169.254/mcp", "http://mcp.example.com/mcp"])
+async def test_listing_tools_at_a_refused_address_raises_before_connecting(url):
+    with pytest.raises(McpEgressBlocked):
+        await wiring.list_custom_server_tools(url, "tok", connection_name="acme-tracker")
 
 
 SECRET_PATH = "SECRET-PATH-7f3a"
