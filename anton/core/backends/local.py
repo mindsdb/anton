@@ -307,6 +307,38 @@ def _clip_stdout(raw: str, total: int, cwd_note: str) -> str:
 # turns). Keeping it in one place is the point: if these two disagreed, the guard
 # would silently stop firing again.
 
+def _inherited_requirements(requirements: list[str]) -> list[str]:
+    """The bare names in `requirements` the pad already has from this interpreter.
+
+    A pad sees this interpreter's site-packages, through `_parent_venv.pth` or
+    as its system site-packages, but `uv pip install --python <pad>` does not
+    look there: it would install a second, unpinned copy into the pad that then
+    shadows the one the image or app pinned. A requirement with a version,
+    extras or a marker is a deliberate request and still goes to the installer.
+    """
+    import site
+    from importlib.metadata import distributions
+
+    from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import canonicalize_name
+
+    installed = {
+        canonicalize_name(dist.metadata["Name"])
+        for dist in distributions(path=site.getsitepackages())
+        if dist.metadata["Name"]
+    }
+    inherited = []
+    for spec in requirements:
+        try:
+            req = Requirement(spec)
+        except InvalidRequirement:
+            continue
+        bare = not (req.specifier or req.extras or req.url or req.marker)
+        if bare and canonicalize_name(req.name) in installed:
+            inherited.append(spec)
+    return inherited
+
+
 def default_venvs_base(workspace_path: Path | None) -> Path:
     """Where a workspace's scratchpad venvs live."""
     if workspace_path is not None:
@@ -2091,6 +2123,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         refused = reject_invalid_packages(needed)
         if refused:
             return refused
+        inherited = _inherited_requirements(needed)
+        if inherited:
+            self._installed_packages.update(p.lower() for p in inherited)
+            needed = [p for p in needed if p not in inherited]
+            if not needed:
+                return "All packages already installed."
         await self._run_venv_work(self._ensure_venv)
 
         uv = self._uv()

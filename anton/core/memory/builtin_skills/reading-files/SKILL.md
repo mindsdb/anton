@@ -10,7 +10,7 @@ metadata:
 ---
 READING WEB PAGES, DOCUMENTS AND SCANS
 
-Libraries: `requests`, `beautifulsoup4` with `lxml`, `pypdf`, `pdfplumber` (with `pypdfium2`), `python-docx` and `pillow`. Cowork on the web has all of them; on a person's own computer some may be missing. Check the installed packages listed in the scratchpad tool's description: put any of these libraries that is not listed there in the `packages` array of the first cell that needs it. Do not list one that is already installed; that installs a second copy. An import alone never installs anything.
+Libraries: `requests`, `beautifulsoup4` with `lxml`, `pypdf`, `pdfplumber` (with `pypdfium2`), `python-docx` and `pillow`. Cowork on the web has all of them; on a person's own computer some may be missing. Put every one of these libraries that a cell imports in that cell's `packages` array: one already installed is skipped, and a missing one is installed before the cell runs. An import alone never installs anything.
 
 Use these Python libraries, not command-line tools such as pdftotext, pdftoppm, qpdf, tesseract or LibreOffice. The web sandbox has none of them and a person's computer usually doesn't either, so trying them costs a step.
 
