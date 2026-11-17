@@ -620,7 +620,9 @@ class TestCoworkProductSkill:
         body = store.load("cowork-product").declarative_md
         section = self._section(body, "WHAT COWORK CANNOT MAKE", "PLANS, ALLOWANCE AND MODELS")
         assert "does not generate video or audio" in section
-        assert "`generate_image`" in section
+        # Image generation exists where the tool is offered; the skill must say
+        # to use it there, not that Cowork cannot make images at all.
+        assert "Cowork generates images when a `generate_image` tool" in section
         assert "first sentence" in section
         assert "Never describe a drawing made with code as the photo" in section
         # Simple drawings are real output, not a substitute; the rule must not
