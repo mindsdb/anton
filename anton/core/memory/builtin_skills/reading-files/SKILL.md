@@ -58,10 +58,8 @@ llm = get_llm()
 SYSTEM = ("Transcribe all text in the image exactly, in reading order. Keep the original "
           "language. Write [illegible] for anything you cannot read; never guess.")
 
-def page_images(pdf_path, pages):
-    pdf = pdfium.PdfDocument(pdf_path)
-    for i in pages:
-        yield i, pdf[i].render(scale=2).to_pil()
+def render(pdf, i):
+    return pdf[i].render(scale=2).to_pil()
 
 def to_block(img):
     img = img.convert("RGB")
@@ -71,9 +69,12 @@ def to_block(img):
     data = base64.b64encode(buf.getvalue()).decode()
     return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}
 
-async def read_page(i, img, out_dir):
+async def read_page(pdf, i, out_dir):
+    # Rendered here, inside the page's own task, so a page that cannot be
+    # rendered fails alone instead of stopping the batch.
+    block = to_block(render(pdf, i))
     r = await llm.complete_async(system=SYSTEM, messages=[{"role": "user", "content": [
-        {"type": "text", "text": f"Page {i + 1}."}, to_block(img)]}], max_tokens=4000)
+        {"type": "text", "text": f"Page {i + 1}."}, block]}], max_tokens=4000)
     text = (r.content or "").strip()
     if not text:
         raise ValueError("the model returned no text")
@@ -82,13 +83,12 @@ async def read_page(i, img, out_dir):
 async def read_pages(pdf_path, pages, out_dir, batch=8):
     """Read the pages not saved yet. Returns {page number: error} for pages that failed."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    pdf = pdfium.PdfDocument(pdf_path)
     todo = [i for i in pages if not (out_dir / f"page_{i + 1:04d}.txt").exists()]
     failed = {}
     for start in range(0, len(todo), batch):
         chunk = todo[start:start + batch]
-        results = await asyncio.gather(
-            *(read_page(i, img, out_dir) for i, img in page_images(pdf_path, chunk)),
-            return_exceptions=True)
+        results = await asyncio.gather(*(read_page(pdf, i, out_dir) for i in chunk), return_exceptions=True)
         for i, result in zip(chunk, results):
             if isinstance(result, Exception):
                 failed[i + 1] = f"{type(result).__name__}: {result}"[:200]

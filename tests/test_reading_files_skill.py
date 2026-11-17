@@ -157,6 +157,30 @@ def test_a_page_that_always_fails_does_not_stop_the_rest(tmp_path, monkeypatch):
     assert llm.asked[20:] == ["Page 3."]
 
 
+def test_a_page_that_cannot_be_rendered_does_not_stop_the_rest(tmp_path):
+    scanned_pdf = tmp_path / "scan.pdf"
+    _scanned_pdf(scanned_pdf, 20)
+    llm = _FakeLLM()
+    ns = {"get_llm": lambda: llm, "progress": lambda message: None}
+    # The snippet's helpers without its final call, so one renderer can be swapped in.
+    exec(_block("read_pages").split("# Call it with asyncio.run")[0], ns)
+    real_render = ns["render"]
+
+    def render(pdf, i):
+        if i == 2:
+            raise RuntimeError("page could not be rendered")
+        return real_render(pdf, i)
+
+    ns["render"] = render
+    out_dir = tmp_path / "out"
+
+    failed = asyncio.run(ns["read_pages"](str(scanned_pdf), range(20), out_dir))
+
+    assert failed == {3: "RuntimeError: page could not be rendered"}
+    assert len(list(out_dir.iterdir())) == 19
+    assert "Page 3." not in llm.asked
+
+
 def test_an_empty_reply_is_a_failed_page_not_a_saved_one(tmp_path, monkeypatch):
     llm = _FakeLLM(empty={"Page 2."})
     ns, scanned_pdf, out_dir, progress, printed = _run_scan_snippet(tmp_path, monkeypatch, 3, llm)

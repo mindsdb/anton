@@ -6,6 +6,9 @@ failed cell, so the skill is left out of the prompt there.
 """
 from __future__ import annotations
 
+import ast
+import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -58,14 +61,38 @@ async def test_names_are_compared_without_case(tmp_path, monkeypatch, builtin_sk
     assert "- `reading-files` — " in system
 
 
-def test_gate_lists_every_library_the_skill_imports():
-    # A library the skill starts importing must join the gate, or the skill is
-    # offered where that import fails.
+# The distribution behind each module the skill's code may import.
+_DISTRIBUTION = {
+    "requests": "requests", "bs4": "beautifulsoup4", "lxml": "lxml", "pypdf": "pypdf",
+    "pdfplumber": "pdfplumber", "pypdfium2": "pypdfium2", "docx": "python-docx", "PIL": "pillow",
+}
+
+
+def _skill_imports() -> set[str]:
+    """Top-level modules the skill's code imports, outside the standard library.
+
+    Parsed from the code blocks rather than listed, so an import the skill
+    gains is seen here. `BeautifulSoup(..., "lxml")` loads lxml by name, so
+    a parser named that way counts as an import too.
+    """
     skill = (Path(skills_mod.__file__).parent / "builtin_skills" / "reading-files" / "SKILL.md").read_text()
-    import_names = {
-        "requests": "requests", "bs4": "beautifulsoup4", "pdfplumber": "pdfplumber",
-        "pypdfium2": "pypdfium2", "docx": "python-docx", "PIL": "pillow",
-    }
-    imported = {dist for module, dist in import_names.items() if f"import {module}" in skill or f"from {module} " in skill}
-    assert imported <= ChatSession._READING_FILES_PACKAGES
-    assert '"lxml"' in skill and "pypdf" in skill
+    code = "\n".join(re.findall(r"```python\n(.*?)```", skill, re.S))
+    modules: set[str] = set()
+    for node in ast.walk(ast.parse(code)):
+        if isinstance(node, ast.Import):
+            modules |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            modules.add(node.module.split(".")[0])
+    modules |= set(re.findall(r'BeautifulSoup\([^)]*"(\w+)"\)', code))
+    return modules - set(sys.stdlib_module_names)
+
+
+def test_gate_lists_every_library_the_skill_imports():
+    modules = _skill_imports()
+    unknown = modules - set(_DISTRIBUTION)
+    # A new import must be added to the gate (ChatSession._READING_FILES_PACKAGES)
+    # and to _DISTRIBUTION here, or the skill is offered where that import fails.
+    assert not unknown, f"the skill imports {sorted(unknown)}, which the gate does not check"
+    assert {_DISTRIBUTION[m] for m in modules} <= ChatSession._READING_FILES_PACKAGES
+    # The parse itself works: these are imported by the skill today.
+    assert {"requests", "bs4", "lxml", "pdfplumber", "pypdfium2", "docx", "PIL"} <= modules
