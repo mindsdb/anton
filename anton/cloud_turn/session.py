@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from anton.cloud_turn.contract import TurnRequestV1, TurnSkillEntry, parse_turn_skills
+from anton.cloud_turn.host_tools import CloudHostTools, proxy_tool_defs
 from anton.core.llm.tracing import HARNESS_ANTON
 from anton.core.memory.always_on_skills import AlwaysOnSkill, render_always_on_skills
 from anton.core.tools.connector_draft import ConnectorDraftBox, connector_draft_tool
@@ -90,6 +91,31 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         # images API serves it: the session exempts it from the fatal
         # unknown-name check when it withholds the tool.
         "generate_image",
+    }
+)
+
+#: Tools anton's core may register that the cloud allowlist withholds. A host
+#: tool may not take one of these names either: core registers its tools
+#: first and a later tool of the same name is skipped, so the name would stay
+#: core's tool and the host tool's allowlist entry would expose it. The drift
+#: test covers one configuration only; tools core registers under other
+#: conditions (web_search, recall, ...) are kept here by hand.
+_CORE_TOOL_NAMES = frozenset(
+    {
+        "read_image",
+        "select_path",
+        "ask_user",
+        "approve_held_write",
+        "recall",
+        "web_search",
+        "web_fetch",
+        "launch_backend",
+        "generate_artifact",
+        "edit_artifact",
+        "browser",
+        # Host tools of other surfaces that the session's dispatch treats specially.
+        "connect_new_datasource",
+        "publish_or_preview",
     }
 )
 
@@ -921,6 +947,7 @@ def _connector_usage_notes(connectors: dict | None) -> dict[str, str]:
 
 def build_cloud_chat_session(
     request: TurnRequestV1, elicitor: "Elicitor | None" = None, preview_checker=None,
+    host_tools: CloudHostTools | None = None,
 ) -> "ChatSession":
     """Assemble a cloud-safe ChatSession for one turn.
 
@@ -929,7 +956,10 @@ def build_cloud_chat_session(
     for an interactive turn; it is what makes ``ask_user`` available.
     *preview_checker* (``cloud_turn/preview_check.py``) is given only when the
     request set ``preview_checks``: it checks an edited artifact in the user's
-    open preview.
+    open preview. *host_tools* (``cloud_turn/host_tools.py``) is given only
+    when stdin can carry the host's answers: with it, each entry of
+    ``request.host_tools`` whose name no other tool of the turn has becomes a
+    proxy tool.
     """
     from anton.config.settings import AntonSettings
     from anton.core.backends.local import local_scratchpad_runtime_factory
@@ -1097,6 +1127,18 @@ def build_cloud_chat_session(
         extra_tools.append(draft_tool)
         tool_allowlist |= {draft_tool.name}
 
+    # Tools the host runs, offered only with a bridge to carry their answers.
+    # A name another tool of this turn has, or one core may register, is
+    # skipped (see _CORE_TOOL_NAMES).
+    if host_tools is not None and request.host_tools:
+        proxies = proxy_tool_defs(
+            host_tools,
+            request.host_tools,
+            taken=set(tool_allowlist) | {t.name for t in extra_tools} | _CORE_TOOL_NAMES,
+        )
+        extra_tools.extend(proxies)
+        tool_allowlist |= {p.name for p in proxies}
+
     custom_api_notes = render_custom_api_notes(request.custom_api, request.connectors)
     config = ChatSessionConfig(
         llm_client=llm_client,
@@ -1162,9 +1204,9 @@ def build_cloud_chat_session(
         data_vault=data_vault,              # connectors ON iff request.oauth is set
         connector_usage_notes=_connector_usage_notes(request.connectors),
         history_store=None,                 # disk history OFF (DB authoritative)
-        tools=extra_tools,                   # this turn's MCP tools, and the connector draft tool
-        # Static CLOUD_TOOL_ALLOWLIST plus this turn's own MCP and draft
-        # tool names — _build_tools() re-enforces the allowlist on every
+        tools=extra_tools,                   # this turn's MCP tools, the connector draft tool and host tool proxies
+        # Static CLOUD_TOOL_ALLOWLIST plus this turn's own MCP, draft and
+        # host tool names — _build_tools() re-enforces the allowlist on every
         # call (not just the first), so an extra tool left out of it would
         # survive exactly one round then vanish on the turn's next rebuild.
         tool_allowlist=tool_allowlist,

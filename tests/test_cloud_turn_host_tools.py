@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 import anton.cloud_turn.host_tools as host_tools_mod
-from anton.cloud_turn.contract import HostToolSpecV1
+import anton.core.llm.client as llm_client_mod
+import anton.core.session as session_mod
+from anton.cloud_turn.contract import HostToolSpecV1, TurnRequestV1
 from anton.cloud_turn.host_tools import (
     NO_ANSWER_TEXT,
     PROGRESS_KIND,
@@ -18,9 +22,17 @@ from anton.cloud_turn.host_tools import (
     CloudHostTools,
     proxy_tool_defs,
 )
+from anton.cloud_turn.session import (
+    CLOUD_TOOL_ALLOWLIST,
+    _CORE_TOOL_NAMES,
+    _WORKSPACE_PATH_ENV,
+    build_cloud_chat_session,
+)
 from anton.core.llm.provider import StreamTaskProgress
 from anton.core.tools.progress import ToolProgress
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
+from anton.core.tools.tool_defs import ToolDef
+from tests.test_cloud_turn_session import _mock_llm
 
 NO_ANSWER = ToolOutcome(content=NO_ANSWER_TEXT, ok=False, reason="host_no_answer")
 SPEC = HostToolSpecV1(name="read_note", description="Read a note.", input_schema={"type": "object"},
@@ -228,3 +240,127 @@ def test_the_proxy_code_names_no_host_feature():
     """The proxy is generic: it knows tool names only from the request."""
     source = Path(host_tools_mod.__file__).read_text(encoding="utf-8")
     assert not re.search(r"(?i)\bdoc|artifact", source)
+
+
+# ── the session ──────────────────────────────────────────────────────
+
+NOTE_TOOL = {"name": "read_note", "description": "Read a note.", "input_schema": {"type": "object"},
+             "prompt": "HOST TOOL RULE: read notes with read_note before you quote them."}
+ROUTER = {"base_url": "https://app.example.test/browser", "profile": "t-1"}
+
+
+def _request(**over) -> TurnRequestV1:
+    body = {"protocol_version": 1, "conversation_id": "c", "input": "hi", **over}
+    return TurnRequestV1.from_json(json.dumps(body))
+
+
+def _config(tmp_path, monkeypatch, *, bridge, elicitor=None, **over):
+    """The ChatSessionConfig the builder hands to ChatSession, for a request read off the wire."""
+    captured = {}
+
+    def fake_chat_session(config):
+        captured["config"] = config
+        return config
+
+    monkeypatch.setattr(session_mod, "ChatSession", fake_chat_session)
+    monkeypatch.setattr(llm_client_mod.LLMClient, "from_settings", classmethod(lambda cls, settings: object()))
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    build_cloud_chat_session(_request(**over), elicitor=elicitor, host_tools=bridge)
+    return captured["config"]
+
+
+def _real_session(tmp_path, monkeypatch, *, bridge, elicitor=None, **over):
+    """A REAL ChatSession off the cloud builder: the registry is built lazily, so only this proves it."""
+    monkeypatch.setenv(_WORKSPACE_PATH_ENV, str(tmp_path))
+    monkeypatch.setattr(llm_client_mod.LLMClient, "from_settings", classmethod(lambda cls, settings: _mock_llm()))
+    session = build_cloud_chat_session(_request(**over), elicitor=elicitor, host_tools=bridge)
+    session._scratchpads = MagicMock(available_packages=[])
+    return session
+
+
+def test_a_host_tool_goes_into_both_tools_and_the_allowlist(tmp_path, monkeypatch):
+    cfg = _config(tmp_path, monkeypatch, bridge=CloudHostTools(lambda e: None), host_tools=[NOTE_TOOL])
+    assert [t.name for t in cfg.tools] == ["read_note"]
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {"read_note"}
+
+
+def test_without_a_bridge_no_proxy_is_registered(tmp_path, monkeypatch):
+    cfg = _config(tmp_path, monkeypatch, bridge=None, host_tools=[NOTE_TOOL])
+    assert cfg.tools == []
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST
+
+
+def test_a_request_without_host_tools_builds_as_before(tmp_path, monkeypatch):
+    cfg = _config(tmp_path, monkeypatch, bridge=CloudHostTools(lambda e: None))
+    assert cfg.tools == []
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST
+
+
+def _with_mcp_tool(monkeypatch):
+    import anton.core.mcp.wiring as wiring
+    import anton.utils.datasources as datasources
+
+    mcp_tool = ToolDef(name="mcp_lookup", description="MCP lookup.", input_schema={"type": "object"},
+                       handler=lambda session, tc_input: None)
+    monkeypatch.setattr(wiring, "discover_mcp_tools", lambda vault, connections: ([mcp_tool], []))
+    monkeypatch.setattr(datasources, "restore_namespaced_env", lambda vault: None)
+    return {"oauth": {"turn_key": "tk", "connections": [{"engine": "google_drive", "name": "primary"}]}}
+
+
+@pytest.mark.parametrize("clash,extra", [
+    ("scratchpad", "none"),            # the static allowlist
+    ("generate_image", "none"),        # allowlisted, even where it is withheld
+    ("ask_user", "elicitor"),
+    ("browser", "browser"),
+    ("create_connector_draft", "drafts"),
+    ("mcp_lookup", "mcp"),
+    ("read_image", "none"),            # a core tool the cloud withholds
+    ("launch_backend", "none"),        # a core tool the cloud withholds
+])
+def test_a_host_tool_named_like_any_tool_of_the_turn_is_skipped(clash, extra, tmp_path, monkeypatch, caplog):
+    over: dict = {}
+    elicitor = None
+    if extra == "elicitor":
+        elicitor = object()
+    elif extra == "browser":
+        over["browser"] = ROUTER
+    elif extra == "drafts":
+        over["connector_drafts"] = True
+    elif extra == "mcp":
+        over.update(_with_mcp_tool(monkeypatch))
+    bridge = CloudHostTools(lambda e: None)
+    base = _config(tmp_path, monkeypatch, bridge=bridge, elicitor=elicitor, **over)
+    host = dict(NOTE_TOOL, name=clash, description="Host version.")
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.host_tools"):
+        cfg = _config(tmp_path, monkeypatch, bridge=bridge, elicitor=elicitor,
+                      host_tools=[host, NOTE_TOOL], **over)
+    assert [t.name for t in cfg.tools] == [t.name for t in base.tools] + ["read_note"]
+    assert all(t.description != "Host version." for t in cfg.tools)
+    assert cfg.tool_allowlist == base.tool_allowlist | {"read_note"}
+    assert any("skipped host tool" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_real_session_offers_the_proxy_and_puts_its_prompt_in_the_system_prompt(tmp_path, monkeypatch):
+    session = _real_session(tmp_path, monkeypatch, bridge=CloudHostTools(lambda e: None), host_tools=[NOTE_TOOL])
+    prompt = await session._build_system_prompt()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    # `generate_image` is withheld where no images API serves it, as with this mock client.
+    assert names == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}) | {"read_note"}
+    assert NOTE_TOOL["prompt"] in prompt
+
+
+async def test_a_real_session_without_host_tools_has_no_host_prompt(tmp_path, monkeypatch):
+    session = _real_session(tmp_path, monkeypatch, bridge=CloudHostTools(lambda e: None))
+    prompt = await session._build_system_prompt()
+    assert "HOST TOOL RULE" not in prompt
+
+
+def test_every_tool_core_registers_in_a_cloud_turn_is_reserved(tmp_path, monkeypatch):
+    """A core tool missing from both sets could be shadowed into the allowlist by a host tool of its name."""
+    from anton.cloud_turn.elicitor import CloudElicitor
+
+    session = _real_session(tmp_path, monkeypatch, bridge=None, elicitor=CloudElicitor(lambda e: None),
+                            browser=ROUTER, connector_drafts=True)
+    session._build_core_tools()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert names <= CLOUD_TOOL_ALLOWLIST | _CORE_TOOL_NAMES, sorted(names - CLOUD_TOOL_ALLOWLIST - _CORE_TOOL_NAMES)
