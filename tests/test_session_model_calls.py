@@ -33,6 +33,7 @@ from anton.core.llm.provider import (
     StreamToolUseStart,
     ToolCall,
     Usage,
+    classify_responses_failure,
 )
 from anton.core.session import ChatSession, ChatSessionConfig
 from anton.core.tools.tool_defs import ToolDef
@@ -613,6 +614,51 @@ async def test_a_verifier_deadline_ends_the_turn_quietly_on_the_answer():
     assert fields["verification_skipped"] == "true"
     assert fields["verifier_failure"] == "timeout"
     assert fields["verifier_error_type"] == "ModelCallTimeoutError:coding"
+    assert session._verifier_latch.no_verdict_failures == 0
+    assert not session._verifier_latch.latched
+
+
+def _in_band_rate_limit():
+    async def _call():
+        # Azure's Responses API reports a rate limit inside a 200, as a failed response.
+        raise classify_responses_failure(
+            {"code": "rate_limit_exceeded", "message": "Requests have exceeded the token rate limit."},
+            provider="Azure OpenAI", model="gpt",
+        )
+
+    return _call
+
+
+def _filtered_refusal():
+    return _stream_of(LLMResponse(
+        content="I'm sorry, but I cannot assist with that request.", stop_reason="content_filter",
+    ))
+
+
+async def test_a_rate_limited_verifier_ends_the_turn_quietly_on_the_answer():
+    """The answer already streamed. Azure rate-limits the verdict call, and would
+    filter a diagnosis after it, so the turn ends unverified on the answer, with
+    no further model call and the verifier latch left alone."""
+    provider = _ScriptedProvider(
+        streams=[_stream_of(_tool_response()), _stream_of(_text_response("done")), _filtered_refusal()],
+        completes=[_in_band_rate_limit()],
+    )
+    session = _session(provider, session_id="conv-model-calls")
+    try:
+        with patch("anton.analytics.send_event") as send:
+            events = await asyncio.wait_for(_drain(session), timeout=GUARD_S)
+    finally:
+        await _close(session)
+
+    text = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert text == "done"
+    assert len(provider.complete_budgets) == 1, "the verdict call was retried"
+    assert len(provider.stream_budgets) == 2, "a hand-back ran after the rate-limited check"
+    fields = send.call_args.kwargs
+    assert fields["ended_by"] == "completed"
+    assert fields["verification_skipped"] == "true"
+    assert fields["verifier_failure"] == "transient"
+    assert fields["verifier_error_type"] == "TransientProviderError"
     assert session._verifier_latch.no_verdict_failures == 0
     assert not session._verifier_latch.latched
 

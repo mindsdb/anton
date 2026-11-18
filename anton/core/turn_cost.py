@@ -137,8 +137,10 @@ class TurnCost:
     # out of repair cells and the check was skipped (`ChatSession._out_of_repairs`),
     # with `verifier_failure="out_of_repairs"`; an earlier round may have had a verdict.
     verification_skipped: bool = False
-    # A model call this turn ended with the provider's content filter. The
-    # turn books ended_by="content_filter" unless it was cancelled or failed.
+    # The provider's content filter stopped the turn's reply, or a hand-back
+    # diagnosis with no answer before it. A filtered diagnosis after an answer
+    # doesn't set it. The turn books ended_by="content_filter" unless it was
+    # cancelled or failed.
     content_filtered: bool = False
     # The one-time spend-ceiling grace, if granted this turn: "" or "ceiling".
     # Without this a turn that used the grace and finished is
@@ -161,7 +163,9 @@ class TurnCost:
     # both say only THAT it failed; 343 such turns / 14 days (5.3% of real
     # turns, 3x the tokens of a completed one) had no groupable cause. Values
     # are the classification the verdict loop already draws for the latch —
-    # `truncated` / `transient` / `hard` / `denied`. Also `timeout`: a model
+    # `truncated` / `transient` / `hard` / `denied`. A `transient` failure after
+    # an answer ends the turn quietly on it with `verification_skipped=True`;
+    # with no answer, the turn hands back. Also `timeout`: a model
     # call ran out its idle deadline, and the turn ended quietly on the
     # streamed answer with `verification_skipped=True` and no latch.
     # `verifier_error_type` names the call's role: `ModelCallTimeoutError:coding`
