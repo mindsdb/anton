@@ -54,7 +54,7 @@ from anton.core.mcp.client import McpSession, log_session_failure
 from anton.core.mcp.egress import check_server_url, resolve_public
 from anton.core.mcp.errors import McpEgressBlocked
 from anton.core.mcp.names import registrable_tool_name
-from anton.core.mcp.registry import discover_tool_defs
+from anton.core.mcp.registry import discover_tool_defs, marked_read_only
 from anton.core.mcp.servers import mcp_server_url
 
 if TYPE_CHECKING:
@@ -298,7 +298,7 @@ async def list_custom_server_tools(url: str, access_token: str | None, *, connec
         ServerTool(
             name=tool.name,
             description=tool.description or "",
-            read_only=bool(tool.annotations is not None and tool.annotations.read_only_hint is True),
+            read_only=marked_read_only(tool),
         )
         for tool in tools
         if registrable_tool_name(CUSTOM_MCP_ENGINE, tool.name, connection_name=connection_name) is not None

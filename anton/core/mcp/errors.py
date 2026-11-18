@@ -44,12 +44,11 @@ class McpEgressBlocked(McpPermanentError):
     """
 
 
-class McpHostUnresolved(McpEgressBlocked):
+class McpHostUnresolved(McpTransientError):
     """A custom MCP server's host name did not resolve.
 
-    Permanent when checking a URL before any connection; a guarded session
-    in use treats it as a connection error instead, since lookups fail for
-    a moment too.
+    Transient, and not an `McpEgressBlocked`: lookups fail for a moment too,
+    so a caller must never show one as an address that is not allowed.
     """
 
 

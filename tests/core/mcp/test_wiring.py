@@ -158,6 +158,8 @@ def _custom_record(**overrides) -> dict:
         "_server_url": "https://mcp.example.com/mcp",
         "_allowed_tools": '["add"]',
         "_label": "Acme Tracker",
+        # What cowork-server sends for a custom connection: the tool list decides.
+        "_access_mode": "write",
         "access_token": "tok",
     }
     record.update(overrides)

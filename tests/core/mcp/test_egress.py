@@ -6,7 +6,7 @@ import socket
 import pytest
 
 from anton.core.mcp.egress import check_server_url, is_public_destination, resolve_public
-from anton.core.mcp.errors import McpEgressBlocked, McpHostUnresolved, McpPermanentError
+from anton.core.mcp.errors import McpEgressBlocked, McpHostUnresolved, McpPermanentError, McpTransientError
 
 
 def _resolver(*addresses: str):
@@ -148,6 +148,12 @@ async def test_a_private_literal_host_is_refused_without_a_lookup():
 async def test_an_unresolvable_host_is_reported_as_unresolved():
     with pytest.raises(McpHostUnresolved):
         await resolve_public("nowhere.example.com", 443, resolver=_unresolvable)
+
+
+def test_an_unresolved_host_is_transient_and_never_a_refusal():
+    assert issubclass(McpHostUnresolved, McpTransientError)
+    assert not issubclass(McpHostUnresolved, McpEgressBlocked)
+    assert not issubclass(McpHostUnresolved, McpPermanentError)
 
 
 async def test_an_answer_with_no_parsable_address_is_reported_as_unresolved():

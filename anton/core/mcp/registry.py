@@ -31,7 +31,7 @@ nothing new to design.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from anton.core.mcp.access import AccessMode, allowed_for_mode
 from anton.core.mcp.client import McpSession
@@ -39,6 +39,9 @@ from anton.core.mcp.errors import McpEgressBlocked, McpPermanentError, McpTransi
 from anton.core.mcp.names import registrable_tool_name
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
+
+if TYPE_CHECKING:
+    from mcp_types import Tool as McpTool
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +67,9 @@ async def discover_tool_defs(
     `namespaced_tool_name`.
 
     `allowed_tools`, given for a server a user added, replaces `TOOL_ACCESS`:
-    only the listed names register, and their arguments pass through as the
-    model sent them. `display_name` names the connection in error messages
+    only the listed names register, and in read mode only those the server
+    marks read-only; their arguments pass through as the model sent them.
+    `display_name` names the connection in error messages
     in place of the engine.
 
     A tool with no valid registered name (`registrable_tool_name`) is left
@@ -76,7 +80,11 @@ async def discover_tool_defs(
         return []
     tools = await mcp_session.list_tools()
     if allowed_tools is not None:
-        allowed = [tool for tool in tools if tool.name in allowed_tools]
+        # Read mode keeps to the tools the server itself marks read-only.
+        allowed = [
+            tool for tool in tools
+            if tool.name in allowed_tools and (access_mode != "read" or marked_read_only(tool))
+        ]
     else:
         allowed = [tool for tool in tools if allowed_for_mode(engine, tool.name, access_mode)]
     tool_defs: list[ToolDef] = []
@@ -100,6 +108,18 @@ async def discover_tool_defs(
             )
         )
     return tool_defs
+
+
+def marked_read_only(tool: McpTool) -> bool:
+    """Whether the server marks `tool` read-only (`readOnlyHint: true`).
+
+    Args:
+        tool: A tool as the server listed it.
+
+    Returns:
+        True only for an explicit `true`; a missing hint counts as not read-only.
+    """
+    return tool.annotations is not None and tool.annotations.read_only_hint is True
 
 
 _MAX_SCHEMA_DEPTH = 20

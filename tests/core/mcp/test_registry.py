@@ -4,6 +4,7 @@ import re
 
 import pytest
 from mcp.server.mcpserver import MCPServer
+from mcp_types import ToolAnnotations
 
 from anton.core.mcp.access import TOOL_ACCESS
 from anton.core.mcp.client import McpSession
@@ -280,7 +281,7 @@ async def test_unusable_tool_names_are_left_out_and_their_siblings_register():
         defs = await discover_tool_defs(
             session,
             engine="custom_mcp",
-            access_mode="read",
+            access_mode="write",
             connection_name="my-team-search-server",
             allowed_tools=frozenset({tool.name for tool in await session.list_tools()}),
         )
@@ -291,9 +292,23 @@ async def test_unusable_tool_names_are_left_out_and_their_siblings_register():
 async def test_allowed_tools_replace_the_access_table(stub_mcp_server):
     async with McpSession(server=stub_mcp_server) as session:
         defs = await discover_tool_defs(
-            session, engine="custom_mcp", access_mode="read", allowed_tools=frozenset({"add"})
+            session, engine="custom_mcp", access_mode="write", allowed_tools=frozenset({"add"})
         )
     assert [d.name for d in defs] == ["custom_mcp__add"]
+
+
+async def test_read_mode_keeps_an_allowed_list_to_tools_the_server_marks_read_only():
+    server = MCPServer(name="marked")
+    server.tool(name="search", annotations=ToolAnnotations(read_only_hint=True))(lambda: "ok")
+    server.tool(name="delete_issue", annotations=ToolAnnotations(read_only_hint=False))(lambda: "ok")
+    server.tool(name="create_issue")(lambda: "ok")
+    allowed = frozenset({"search", "delete_issue", "create_issue"})
+
+    async with McpSession(server=server) as session:
+        read = await discover_tool_defs(session, engine="custom_mcp", access_mode="read", allowed_tools=allowed)
+        write = await discover_tool_defs(session, engine="custom_mcp", access_mode="write", allowed_tools=allowed)
+    assert [d.name for d in read] == ["custom_mcp__search"]
+    assert sorted(d.name for d in write) == ["custom_mcp__create_issue", "custom_mcp__delete_issue", "custom_mcp__search"]
 
 
 async def test_an_empty_allowed_list_registers_nothing(stub_mcp_server):
@@ -321,7 +336,7 @@ async def test_an_allowed_custom_tool_gets_its_arguments_unchanged(monkeypatch):
 
     async with McpSession(server=server) as session:
         defs = await discover_tool_defs(
-            session, engine="custom_mcp", access_mode="read", allowed_tools=frozenset({"list_pages"})
+            session, engine="custom_mcp", access_mode="write", allowed_tools=frozenset({"list_pages"})
         )
         outcome = await defs[0].handler(None, {"query": "", "cursor": ""})
     assert outcome.content == "query='' cursor=''"
@@ -332,7 +347,7 @@ async def test_a_refused_address_has_its_own_message_naming_the_server(stub_mcp_
         defs = await discover_tool_defs(
             session,
             engine="custom_mcp",
-            access_mode="read",
+            access_mode="write",
             allowed_tools=frozenset({"add"}),
             display_name="Acme Tracker",
         )
@@ -353,7 +368,7 @@ async def test_a_rejected_token_message_names_the_server_by_its_label(stub_mcp_s
         defs = await discover_tool_defs(
             session,
             engine="custom_mcp",
-            access_mode="read",
+            access_mode="write",
             allowed_tools=frozenset({"add"}),
             display_name="Acme Tracker",
         )
