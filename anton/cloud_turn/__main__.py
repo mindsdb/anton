@@ -262,8 +262,8 @@ async def _stream_turn(
     a ``turn_completed`` naming the artifacts the turn touched. Any failure
     (parse or turn) -> one ``turn_failed`` with a scrubbed error string, plus
     ``reset_at`` when the failure is a MindsHub billing stop that knows when
-    its limit lifts, and ``budget_scope`` when it is a spent budget whose scope
-    the gateway named.
+    its limit lifts, and ``budget_scope`` / ``budget_period`` when it is a spent
+    budget whose scope or period the gateway named.
 
     A background ticker emits a bare ``heartbeat`` event every
     ``ANTON_CLOUD_TURN_HEARTBEAT_SECONDS`` (default 5) so long-but-alive turns
@@ -544,6 +544,8 @@ async def _stream_turn(
         # A spent budget's scope rides the same way, so the host can say whose budget it is.
         if isinstance(exc, BudgetExceededError) and exc.budget_scope:
             failed["budget_scope"] = exc.budget_scope
+        if isinstance(exc, BudgetExceededError) and exc.budget_period:
+            failed["budget_period"] = exc.budget_period
         with contextlib.suppress(Exception):
             addons.return_unread()  # before the terminal: cowork stops reading at it
         wire(failed)

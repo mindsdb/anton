@@ -1763,7 +1763,54 @@ def test_a_budget_stop_reads_the_scope_in_the_anthropic_dialect():
     assert "this workspace's MindsHub spending budget" in str(err.value)
 
 
-@pytest.mark.parametrize("scope", ["team", "all_members"])
+@pytest.mark.parametrize("scope,owner", [
+    ("team", "your team's"), ("user", "your"), ("all_members", "your"),
+])
+def test_team_and_member_budgets_are_named_with_their_period(scope, owner):
+    exc = _sdk_error(402, json_body={"error": {"code": "budget_exceeded"}},
+                     headers={"X-MindsHub-Budget-Scope": scope, "X-MindsHub-Budget-Period": "month"})
+    with pytest.raises(BudgetExceededError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.budget_scope == scope
+    assert err.value.budget_period == "month"
+    assert str(err.value) == f"Server returned 402: {owner} monthly MindsHub spending budget is used up. {_SCOPED_BUDGET_CTA}"
+
+
+@pytest.mark.parametrize("period,adjective", [("day", "daily"), ("month", "monthly"), ("year", "yearly")])
+@pytest.mark.parametrize("carrier", ["header", "envelope"])
+def test_a_budget_stop_names_the_period_the_gateway_sent(period, adjective, carrier):
+    error = {"code": "budget_exceeded", "budget_scope": "org"}
+    if carrier == "envelope":
+        error["budget_period"] = period
+    headers = {"X-MindsHub-Budget-Period": period} if carrier == "header" else None
+    exc = _sdk_error(402, json_body={"error": error}, headers=headers)
+    with pytest.raises(BudgetExceededError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.budget_period == period
+    assert str(err.value) == (
+        f"Server returned 402: your organization's {adjective} MindsHub spending budget is used up. {_BUDGET_CTA}"
+    )
+
+
+@pytest.mark.parametrize("period", ["week", "Day", "", 3])
+def test_an_unknown_budget_period_is_dropped(period):
+    exc = _sdk_error(402, json_body={"error": {"code": "budget_exceeded", "budget_period": period}})
+    with pytest.raises(BudgetExceededError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.budget_period is None
+    assert "a MindsHub spending budget is used up." in str(err.value)
+
+
+def test_an_unnamed_scope_still_names_the_period():
+    exc = _sdk_error(402, json_body={"error": {"code": "budget_exceeded"}},
+                     headers={"X-MindsHub-Budget-Period": "day"})
+    with pytest.raises(BudgetExceededError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert "a daily MindsHub spending budget is used up." in str(err.value)
+    assert _SCOPED_BUDGET_CTA in str(err.value)
+
+
+@pytest.mark.parametrize("scope", ["guild", "project"])
 def test_a_newer_budget_scope_is_kept_but_worded_neutrally(scope):
     exc = _sdk_error(402, json_body={"error": {"code": "budget_exceeded"}},
                      headers={"X-MindsHub-Budget-Scope": scope})

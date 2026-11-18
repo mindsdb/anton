@@ -820,7 +820,7 @@ class MindsHubBillingStop(TokenLimitExceeded):
     ``turn_failed`` frame (``cloud_turn.__main__.stream_turn``): the subclass
     NAME, as the ``"TypeName: message"`` string ``_scrub`` puts in ``error``,
     ``reset_at``, as its own key when the gateway sent one, and a budget stop's
-    ``budget_scope``, likewise.
+    ``budget_scope`` and ``budget_period``, likewise.
 
     ``reason`` is the gate's code, ``status_code`` the HTTP status (``None`` for
     a denial inside an open stream, which has no error status), and
@@ -878,13 +878,18 @@ class BudgetExceededError(MindsHubBillingStop):
 
     The gate refuses paid requests until the budget's UTC period resets or an
     admin raises it; credit does not lift it. The gateway sends no ``reset_at``.
-    ``budget_scope`` is whose budget it is (``org``, ``workspace``, ``api_key``
-    or a newer one), as the gateway named it, or ``None`` when it named none.
+    ``budget_scope`` is whose budget it is (``org``, ``workspace``, ``api_key``,
+    ``team``, ``user``, ``all_members`` or a newer one), as the gateway named it,
+    or ``None`` when it named none. ``budget_period`` is ``day``, ``month``,
+    ``year`` or ``None``.
     """
 
-    def __init__(self, message: str, *, budget_scope: str | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self, message: str, *, budget_scope: str | None = None, budget_period: str | None = None, **kwargs: Any,
+    ) -> None:
         super().__init__(message, **kwargs)
         self.budget_scope = budget_scope
+        self.budget_period = budget_period
 
 
 class ProviderAuthError(ConnectionError):
@@ -1130,12 +1135,16 @@ _MINDSHUB_BILLING_STOPS: dict[str, _BillingStopKind] = {
         "a MindsHub spending budget is used up.",
         _MINDSHUB_BUDGET_CTA),
 }
-# A spent budget's ``what`` per scope the gateway names; any other scope keeps the neutral one above.
-_BUDGET_SCOPE_WHAT = {
-    "org": "your organization's MindsHub spending budget is used up.",
-    "workspace": "this workspace's MindsHub spending budget is used up.",
-    "api_key": "this API key's MindsHub spending budget is used up.",
+# Whose budget a spent stop names, per scope; any other scope reads "a".
+_BUDGET_SCOPE_OWNER = {
+    "org": "your organization's",
+    "workspace": "this workspace's",
+    "api_key": "this API key's",
+    "team": "your team's",
+    "user": "your",
+    "all_members": "your",
 }
+_BUDGET_PERIOD_ADJECTIVE = {"day": "daily", "month": "monthly", "year": "yearly"}
 _BUDGET_SCOPE_PATTERN = re.compile(r"[a-z_]{1,32}")
 _WALLET_DENIAL_CODES = frozenset(_MINDSHUB_BILLING_STOPS)
 
@@ -1284,6 +1293,7 @@ class ErrorBodyFields:
     detail: object = None
     deny_detail: object = None
     budget_scope: object = None
+    budget_period: object = None
     status: object = None
 
     @classmethod
@@ -1296,6 +1306,7 @@ class ErrorBodyFields:
             detail=fields.get("detail"),
             deny_detail=fields.get("deny_detail"),
             budget_scope=fields.get("budget_scope"),
+            budget_period=fields.get("budget_period"),
             status=fields.get("status"),
         )
 
@@ -1423,10 +1434,12 @@ def mindshub_billing_stop(
     extra: dict[str, Any] = {}
     if kind.error_type is BudgetExceededError:
         scope = _budget_scope(exc, body)
-        what = _BUDGET_SCOPE_WHAT.get(scope or "", what)
+        period = _budget_period(exc, body)
+        what = _budget_what(scope, period)
         if scope != "org":
             cta = _MINDSHUB_SCOPED_BUDGET_CTA
         extra["budget_scope"] = scope
+        extra["budget_period"] = period
     if status_code is None:
         lead = what[:1].upper() + what[1:]
     else:
@@ -1449,6 +1462,24 @@ def _budget_scope(exc: BaseException, body: Any) -> str | None:
         if isinstance(value, str) and _BUDGET_SCOPE_PATTERN.fullmatch(value):
             return value
     return None
+
+
+def _budget_period(exc: BaseException, body: Any) -> str | None:
+    """The spent budget's period (``day``, ``month``, ``year``): the header, else the body."""
+    parsed = ProviderErrorBody.parse(body)
+    for value in (_response_header(exc, "x-mindshub-budget-period"), parsed.top.budget_period,
+                  parsed.envelope.budget_period):
+        if isinstance(value, str) and value in _BUDGET_PERIOD_ADJECTIVE:
+            return value
+    return None
+
+
+def _budget_what(scope: str | None, period: str | None) -> str:
+    """The stop's lead: whose budget, and its period when known."""
+    owner = _BUDGET_SCOPE_OWNER.get(scope or "", "a")
+    adjective = _BUDGET_PERIOD_ADJECTIVE.get(period or "")
+    budget = f"{adjective} MindsHub spending budget" if adjective else "MindsHub spending budget"
+    return f"{owner} {budget} is used up."
 
 
 def mindshub_model_restriction(
