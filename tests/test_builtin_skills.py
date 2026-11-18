@@ -627,6 +627,10 @@ class TestCoworkProductSkill:
         # but has no tools, so without this it told users whose agent can make
         # images that Cowork cannot.
         assert "If you are replying without tools, do not say it cannot" in section
+        # The gateway bills images to credits only, never the free Air
+        # allowance, so a free user told "yes" must also hear where to add them.
+        assert "Image generation uses credits; the free Air allowance does not cover it" in section
+        assert "When an image call is refused for credits" in section
         assert "first sentence" in section
         assert "Never describe a drawing made with code as the photo" in section
         # Simple drawings are real output, not a substitute; the rule must not
@@ -650,6 +654,7 @@ class TestCoworkProductSkill:
         assert "MindsHub Air is free up to a usage allowance that refills" in section
         assert "credit balance" in section
         assert "Every other MindsHub model needs credits" in section
+        assert "and so does image generation" in section
         assert "https://console.mindshub.ai/settings/organization/billing" in section
         assert "Do not state an allowance size, a price or a refill time" in section
         assert not re.search(r"[$€£]\s?\d|\d+\s?(?:M|million|k)\s+tokens", section)

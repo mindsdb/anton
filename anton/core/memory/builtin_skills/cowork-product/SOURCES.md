@@ -38,7 +38,11 @@ fails automatically when that code changes, so re-check these when touching:
   has no video or audio generator). Images: `generate_image` (ENG-4024) is
   offered per turn by `ChatSession._settle_image_offer` and
   `_provider_offers_images` in `anton/core/session.py` — on MindsHub when an
-  image model is configured or the key's catalogue lists one. The section is
+  image model is configured or the key's catalogue lists one; it does not
+  look at the balance. Images use credits only: mindshub_inference
+  `minds/api/v1/endpoints/images.py` ("Billed to the wallet ... never to the
+  included allowance"), refused with a 402 `wallet_empty` when there are none,
+  which anton's `image_call_error` relays as a billing stop. The section is
   worded in terms of that tool; revisit it when a video or audio tool lands
 - free Air allowance, refill and balance fallback — cowork's own copy:
   `chatView.usageAlert.freeLow*` / `freeUsed*` and
