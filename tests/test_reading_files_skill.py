@@ -169,6 +169,40 @@ def test_only_scanned_pages_of_a_mixed_pdf_reach_the_model(tmp_path, monkeypatch
     assert printed == ["pages not read: none"]
 
 
+def test_the_scan_step_reads_the_current_files_pages_not_a_previous_ones(tmp_path, monkeypatch):
+    # A scratchpad keeps its variables between cells. Reading file A with the
+    # PDF step and then file B with only the scan step must send B's scanned
+    # pages, not A's leftover list.
+    from pypdf import PdfReader, PdfWriter
+
+    def mixed(name: str, text_pages: int, scanned_pages: int) -> Path:
+        text_pdf, scan_pdf, out = tmp_path / f"{name}-t.pdf", tmp_path / f"{name}-s.pdf", tmp_path / f"{name}.pdf"
+        _text_pdf(text_pdf)
+        _scanned_pdf(scan_pdf, scanned_pages)
+        writer = PdfWriter()
+        for _ in range(text_pages):
+            writer.add_page(PdfReader(text_pdf).pages[0])
+        for page in PdfReader(scan_pdf).pages:
+            writer.add_page(page)
+        with out.open("wb") as fh:
+            writer.write(fh)
+        return out
+
+    file_a, file_b = mixed("a", 3, 2), mixed("b", 1, 6)
+    monkeypatch.chdir(tmp_path)
+    llm = _FakeLLM()
+    ns = {"get_llm": lambda: llm, "progress": lambda message: None, "print": lambda *a: None}
+
+    ns["path"] = str(file_a)
+    exec(_block("pdfplumber.open"), ns)
+    exec(_block("read_pages"), ns)
+    assert llm.asked == ["Page 4.", "Page 5."]
+
+    ns["path"] = str(file_b)
+    exec(_block("read_pages"), ns)
+    assert llm.asked[2:] == [f"Page {n}." for n in range(2, 8)]
+
+
 def test_a_page_that_always_fails_does_not_stop_the_rest(tmp_path, monkeypatch):
     llm = _FakeLLM(fail={"Page 3."})
     ns, scanned_pdf, out_dir, progress, printed = _run_scan_snippet(tmp_path, monkeypatch, 20, llm)

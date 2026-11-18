@@ -96,12 +96,11 @@ async def read_pages(pdf_path, pages, out_dir, batch=8):
     return failed
 
 # Call it with asyncio.run: a cell has no running event loop, so a bare `await` is a SyntaxError.
-# Read only pages with no text layer: each page sent is a model call. `scanned` comes
-# from the PDF step above; if that didn't run, find them here. (For an image file,
-# there are no pages: send the image itself, as below.)
-if "scanned" not in globals():
-    doc = pdfium.PdfDocument(path)
-    scanned = [i for i in range(len(doc)) if len(doc[i].get_textpage().get_text_range().strip()) < 20]
+# Read only this file's pages with no text layer: each page sent is a model call.
+# Found here for `path` every time, never from an earlier cell or another file.
+# (For an image file, there are no pages: send the image itself, as below.)
+doc = pdfium.PdfDocument(path)
+scanned = [i for i in range(len(doc)) if len(doc[i].get_textpage().get_text_range().strip()) < 20]
 out_dir = pathlib.Path(".anton/output/extracted_text") / pathlib.Path(path).stem
 failed = asyncio.run(read_pages(path, scanned, out_dir))
 print("pages not read:", failed or "none")
