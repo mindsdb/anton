@@ -116,6 +116,12 @@ Events written back on stdout (JSONL):
       by one `check_result` stdin line (below); no answer within timeout_s is
       "unverified". The controller must relay it (as a `turn_step`, step
       "artifact_check", like the ask_user kinds).
+  {"kind": "host_tool_call", "call_id": "htool:<32 hex>", "tool": "...",
+   "input": {...}}  - only for a tool the request listed in `host_tools`, and
+      only when stdin is open: the turn asks the host to run that tool.
+      Answered by `host_tool_progress` and `host_tool_result` stdin lines
+      (below). The controller relays it as a `turn_step` (step
+      "host_tool_call"). The host runs each call_id at most once.
   {"kind": "browser", "session_id": "..."}  - the browser tool opened (or
       reopened) the person's browser session. cowork shows the browser beside
       the chat, with a viewer link it mints with the person's own credential.
@@ -177,6 +183,15 @@ Check lines on stdin (requests with `preview_checks`, same 64 KB bound), ENG-422
       "unavailable" (no preview open, timed out) reads as unverified. A line for
       no pending check is ignored; pending checks resolve as unanswered when
       stdin closes or the turn ends.
+Host tool lines on stdin (requests with `host_tools`, same 64 KB bound):
+  {"kind": "host_tool_progress", "call_id", "entry_id", "text"}  - one step of
+      a running call, shown on the tool's line; text at most 500 characters.
+  {"kind": "host_tool_result", "call_id", "entry_id", "seq", "last", "ok",
+   "text"}  - one part of the call's result; parts join in seq order once the
+      `last` part and every part before it arrived. No complete result within
+      the tool's timeout_s, stdin closing, or the turn ending reads as ok false
+      with "The host did not answer. The call may have been applied; check
+      its effect before retrying." A line for no pending call is ignored.
 A stdin line of any other kind, or a malformed one, is logged and skipped.
 """
 
@@ -517,6 +532,87 @@ def _parse_limits(value: object, conversation_id: str) -> dict[str, int]:
     return limits
 
 
+#: A host tool's name; cowork-server and the controller hold the same rule.
+_HOST_TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+DEFAULT_HOST_TOOL_TIMEOUT_S = 60
+MAX_HOST_TOOL_TIMEOUT_S = 120
+
+
+@dataclass(frozen=True)
+class HostToolSpecV1:
+    """One tool the host runs for this turn; the pod only forwards its calls."""
+
+    name: str
+    description: str
+    input_schema: dict
+    #: Added to the system prompt the way ``ToolDef.prompt`` is.
+    prompt: str | None = None
+    timeout_s: int = DEFAULT_HOST_TOOL_TIMEOUT_S
+
+
+def _host_tool_spec(entry: object) -> HostToolSpecV1 | str:
+    """One ``host_tools`` entry as a spec, or a fixed phrase naming why it is malformed."""
+    if not isinstance(entry, dict):
+        return "entry_not_an_object"
+    name = entry.get("name")
+    if not isinstance(name, str) or not _HOST_TOOL_NAME.fullmatch(name):
+        return "invalid_name"
+    description = entry.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return "invalid_description"
+    input_schema = entry.get("input_schema")
+    if not isinstance(input_schema, dict):
+        return "invalid_input_schema"
+    prompt = entry.get("prompt")
+    if prompt is not None and not isinstance(prompt, str):
+        return "invalid_prompt"
+    timeout_s = entry.get("timeout_s")
+    if timeout_s is None:
+        timeout_s = DEFAULT_HOST_TOOL_TIMEOUT_S
+    if not _positive_int(timeout_s) or timeout_s > MAX_HOST_TOOL_TIMEOUT_S:
+        return "invalid_timeout"
+    return HostToolSpecV1(name, description, input_schema, prompt or None, timeout_s)
+
+
+def parse_host_tools(value: object, conversation_id: str) -> tuple[HostToolSpecV1, ...]:
+    """The usable entries of a request's ``host_tools`` block, in order.
+
+    Absent, null or empty means no host tools and logs nothing: the controller
+    always sends the key, null when the host sent no block. A block that is not
+    a list, a malformed entry, and a second entry with a name already taken are
+    dropped, each with one warning that names the reason, never a value; the turn
+    goes on with the rest. Names that clash with the turn's own tools are dropped
+    later, where the turn's tool set is known (``session.py``).
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        logger.warning(
+            "cloud turn ignoring a host_tools block that is not a list",
+            extra={
+                "event": "host_tools_ignored",
+                "reason": "host_tools_not_a_list",
+                "conversation_id": conversation_id,
+            },
+        )
+        return ()
+    specs: list[HostToolSpecV1] = []
+    seen: set[str] = set()
+    for entry in value:
+        spec = _host_tool_spec(entry)
+        if isinstance(spec, HostToolSpecV1) and spec.name in seen:
+            spec = "duplicate_name"
+        if isinstance(spec, str):
+            logger.warning(
+                "cloud turn dropping a host tool",
+                extra={"event": "host_tool_dropped", "reason": spec, "conversation_id": conversation_id},
+            )
+            continue
+        seen.add(spec.name)
+        specs.append(spec)
+    return tuple(specs)
+
+
 @dataclass
 class TurnRequestV1:
     """One turn to run in the pod. Sent as a single JSON line on stdin."""
@@ -642,6 +738,10 @@ class TurnRequestV1:
     #: present replaces the pod's own default for this turn; an absent one (or
     #: an older controller that sends no block) leaves the default.
     limits: dict[str, int] = field(default_factory=dict)
+    #: Tools the host runs for this turn, from the request's ``host_tools``
+    #: block. Only a turn whose stdin is open offers them, one proxy tool each.
+    #: Empty means none.
+    host_tools: tuple[HostToolSpecV1, ...] = ()
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -688,4 +788,5 @@ class TurnRequestV1:
             reasoning_effort=reasoning_effort.strip() or None,
             browser=BrowserConfig.from_dict(d.get("browser")),
             limits=_parse_limits(d.get("limits"), str(d["conversation_id"])),
+            host_tools=parse_host_tools(d.get("host_tools"), str(d["conversation_id"])),
         )
