@@ -1,0 +1,230 @@
+"""Tools the host runs, called from a cloud turn: an event out, stdin lines back."""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import anton.cloud_turn.host_tools as host_tools_mod
+from anton.cloud_turn.contract import HostToolSpecV1
+from anton.cloud_turn.host_tools import (
+    NO_ANSWER_TEXT,
+    PROGRESS_KIND,
+    RESULT_KIND,
+    CloudHostTools,
+    proxy_tool_defs,
+)
+from anton.core.llm.provider import StreamTaskProgress
+from anton.core.tools.progress import ToolProgress
+from anton.core.tools.registry import ToolOutcome, ToolRegistry
+
+NO_ANSWER = ToolOutcome(content=NO_ANSWER_TEXT, ok=False, reason="host_no_answer")
+SPEC = HostToolSpecV1(name="read_note", description="Read a note.", input_schema={"type": "object"},
+                      prompt="Read notes with read_note.", timeout_s=60)
+
+
+async def _collect(gen):
+    return [item async for item in gen]
+
+
+async def _first_event(events: list[dict]) -> dict:
+    for _ in range(100):
+        if events:
+            return events[0]
+        await asyncio.sleep(0)
+    raise AssertionError("no event was emitted")
+
+
+async def _settle():
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+def _part(call_id: str, seq: int, text: str, *, last: bool, ok: bool = True) -> dict:
+    return {"kind": RESULT_KIND, "call_id": call_id, "seq": seq, "last": last, "ok": ok, "text": text}
+
+
+# ── CloudHostTools ───────────────────────────────────────────────────
+
+
+async def test_a_call_emits_the_event_and_returns_the_result():
+    events: list[dict] = []
+    bridge = CloudHostTools(events.append)
+    task = asyncio.ensure_future(_collect(bridge.call("read_note", {"id": "n1"}, 60)))
+    event = await _first_event(events)
+    assert event["kind"] == "host_tool_call"
+    assert re.fullmatch(r"htool:[0-9a-f]{32}", event["call_id"])
+    assert event["tool"] == "read_note" and event["input"] == {"id": "n1"}
+    assert set(event) == {"kind", "call_id", "tool", "input"}
+    bridge.deliver(_part(event["call_id"], 0, "hello", last=True))
+    assert await task == [ToolOutcome(content="hello", ok=True)]
+    assert bridge.pending == 0
+
+
+async def test_progress_lines_come_out_as_tool_progress_before_the_result():
+    events: list[dict] = []
+    bridge = CloudHostTools(events.append)
+    task = asyncio.ensure_future(_collect(bridge.call("read_note", {}, 60)))
+    call_id = (await _first_event(events))["call_id"]
+    bridge.deliver({"kind": PROGRESS_KIND, "call_id": call_id, "text": "Reading"})
+    bridge.deliver({"kind": PROGRESS_KIND, "call_id": call_id, "text": "Rendering"})
+    bridge.deliver(_part(call_id, 0, "hello", last=True))
+    assert await task == [ToolProgress(text="Reading"), ToolProgress(text="Rendering"),
+                          ToolOutcome(content="hello", ok=True)]
+
+
+async def test_parts_join_in_seq_order_once_all_arrived():
+    events: list[dict] = []
+    bridge = CloudHostTools(events.append)
+    task = asyncio.ensure_future(_collect(bridge.call("read_note", {}, 60)))
+    call_id = (await _first_event(events))["call_id"]
+    bridge.deliver(_part(call_id, 2, "c", last=True))
+    bridge.deliver(_part(call_id, 0, "a", last=False))
+    await _settle()
+    assert not task.done()  # part 1 is still missing
+    bridge.deliver(_part(call_id, 1, "b", last=False))
+    assert await task == [ToolOutcome(content="abc", ok=True)]
+
+
+async def test_repeated_and_out_of_range_parts_are_ignored():
+    events: list[dict] = []
+    bridge = CloudHostTools(events.append)
+    task = asyncio.ensure_future(_collect(bridge.call("read_note", {}, 60)))
+    call_id = (await _first_event(events))["call_id"]
+    bridge.deliver(_part(call_id, 2, "z", last=False))   # beyond the last part named below
+    bridge.deliver(_part(call_id, 1, "b", last=True))
+    bridge.deliver(_part(call_id, 1, "y", last=False))   # a repeat of part 1
+    bridge.deliver(_part(call_id, 3, "w", last=True))    # a second last part
+    await _settle()
+    assert not task.done()
+    bridge.deliver(_part(call_id, 0, "a", last=False))
+    assert await task == [ToolOutcome(content="ab", ok=True)]
+
+
+async def test_a_failed_result_keeps_its_text_and_reports_not_ok():
+    events: list[dict] = []
+    bridge = CloudHostTools(events.append)
+    task = asyncio.ensure_future(_collect(bridge.call("read_note", {}, 60)))
+    call_id = (await _first_event(events))["call_id"]
+    bridge.deliver(_part(call_id, 0, "Refused ", last=False, ok=False))
+    bridge.deliver(_part(call_id, 1, "(not_owner)", last=True, ok=False))
+    assert await task == [ToolOutcome(content="Refused (not_owner)", ok=False, reason="host_tool_failed")]
+
+
+async def test_no_complete_answer_within_the_timeout_is_a_failure():
+    events: list[dict] = []
+    bridge = CloudHostTools(events.append)
+    started = asyncio.get_running_loop().time()
+    task = asyncio.ensure_future(_collect(bridge.call("read_note", {}, 0.05)))
+    call_id = (await _first_event(events))["call_id"]
+    bridge.deliver(_part(call_id, 1, "b", last=True))  # part 0 never comes
+    assert await task == [NO_ANSWER]
+    assert asyncio.get_running_loop().time() - started < 2
+    assert bridge.pending == 0
+
+
+async def test_closing_answers_pending_calls_and_later_calls_send_nothing():
+    events: list[dict] = []
+    bridge = CloudHostTools(events.append)
+    task = asyncio.ensure_future(_collect(bridge.call("read_note", {}, 60)))
+    await _first_event(events)
+    bridge.close()
+    assert await task == [NO_ANSWER]
+    assert await _collect(bridge.call("read_note", {}, 60)) == [NO_ANSWER]
+    assert len(events) == 1  # no event for a call made after the close
+
+
+async def test_a_complete_result_queued_before_the_close_still_wins():
+    events: list[dict] = []
+    bridge = CloudHostTools(events.append)
+    task = asyncio.ensure_future(_collect(bridge.call("read_note", {}, 60)))
+    call_id = (await _first_event(events))["call_id"]
+    bridge.deliver(_part(call_id, 0, "hello", last=True))
+    bridge.close()
+    assert await task == [ToolOutcome(content="hello", ok=True)]
+
+
+async def test_lines_for_no_pending_call_are_ignored():
+    events: list[dict] = []
+    bridge = CloudHostTools(events.append)
+    bridge.deliver(_part("htool:" + "0" * 32, 0, "late", last=True))
+    task = asyncio.ensure_future(_collect(bridge.call("read_note", {}, 60)))
+    call_id = (await _first_event(events))["call_id"]
+    bridge.deliver(_part("htool:" + "1" * 32, 0, "someone else", last=True))
+    await _settle()
+    assert not task.done()
+    bridge.deliver(_part(call_id, 0, "mine", last=True))
+    assert await task == [ToolOutcome(content="mine", ok=True)]
+    bridge.deliver(_part(call_id, 0, "repeat after the end", last=True))  # no error
+
+
+async def test_a_call_that_cannot_be_sent_fails_without_waiting():
+    def broken_emit(event):
+        raise BrokenPipeError("stdout closed")
+
+    bridge = CloudHostTools(broken_emit)
+    assert await asyncio.wait_for(_collect(bridge.call("read_note", {}, 60)), 2) == [NO_ANSWER]
+    assert bridge.pending == 0
+
+
+async def test_a_cancelled_call_leaves_nothing_pending():
+    events: list[dict] = []
+    bridge = CloudHostTools(events.append)
+    task = asyncio.ensure_future(_collect(bridge.call("read_note", {}, 60)))
+    await _first_event(events)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert bridge.pending == 0
+
+
+# ── proxy tools ──────────────────────────────────────────────────────
+
+
+def test_a_proxy_carries_the_spec_and_skips_taken_names(caplog):
+    taken_spec = HostToolSpecV1(name="scratchpad", description="Host version.", input_schema={"type": "object"})
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.host_tools"):
+        tools = proxy_tool_defs(CloudHostTools(lambda e: None), [taken_spec, SPEC], {"scratchpad"})
+    [tool] = tools
+    assert (tool.name, tool.description, tool.input_schema, tool.prompt) == (
+        "read_note", "Read a note.", {"type": "object"}, "Read notes with read_note.")
+    assert any("skipped host tool" in r.getMessage() for r in caplog.records)
+
+
+async def test_progress_reaches_the_session_with_the_tool_call_id():
+    events: list[dict] = []
+    bridge = CloudHostTools(events.append)
+    registry = ToolRegistry()
+    for tool in proxy_tool_defs(bridge, [SPEC], set()):
+        registry.register_tool(tool)
+
+    class _Emitter:
+        def __init__(self):
+            self.events = []
+
+        async def emit(self, event):
+            self.events.append(event)
+
+    session = SimpleNamespace(emitter=_Emitter(), tool_messages=False, live_tool_peek=False)
+
+    async def host():
+        call_id = (await _first_event(events))["call_id"]
+        bridge.deliver({"kind": PROGRESS_KIND, "call_id": call_id, "text": "Reading"})
+        bridge.deliver(_part(call_id, 0, "hello", last=True))
+
+    outcome, _ = await asyncio.gather(
+        registry.dispatch_tool(session, "read_note", {"id": "n1"}, tool_call_id="toolu_1"), host())
+    assert outcome == ToolOutcome(content="hello", ok=True)
+    [progress] = session.emitter.events
+    assert isinstance(progress, StreamTaskProgress)
+    assert (progress.phase, progress.message, progress.id) == ("tool_progress", "Reading", "toolu_1")
+
+
+def test_the_proxy_code_names_no_host_feature():
+    """The proxy is generic: it knows tool names only from the request."""
+    source = Path(host_tools_mod.__file__).read_text(encoding="utf-8")
+    assert not re.search(r"(?i)\bdoc|artifact", source)
