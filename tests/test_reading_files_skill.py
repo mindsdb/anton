@@ -95,6 +95,19 @@ class _FakeLLM:
         return SimpleNamespace(content=f"text of {text_part['text']}")
 
 
+def test_the_scan_section_says_to_copy_the_cell_not_write_an_async_loop():
+    # In live Web turns the agent wrote its own async loop around get_llm()
+    # instead of copying read_pages, and lost a cell each time to a top-level
+    # `await` or `asyncio.run(asyncio.gather(...))`. The instruction sits right
+    # above the code, and the code it points at is the one that runs (tests below).
+    skill = SKILL.read_text()
+    section = skill[skill.index("IMAGES, PHOTOS AND SCANNED PAGES"):skill.index("```python", skill.index("IMAGES, PHOTOS"))]
+    assert "Copy this cell as it is" in section
+    assert "top-level `await` is a SyntaxError" in section
+    assert "asyncio.run(asyncio.gather(...))` fails" in section
+    assert "asyncio.run(read_pages(" in _block("read_pages")
+
+
 def test_pdf_snippet_extracts_text_and_flags_scanned_pages(tmp_path):
     text_pdf, scanned_pdf = tmp_path / "text.pdf", tmp_path / "scan.pdf"
     _text_pdf(text_pdf)

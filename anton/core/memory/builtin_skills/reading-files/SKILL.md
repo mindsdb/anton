@@ -48,7 +48,7 @@ tables = [[[c.text for c in row.cells] for row in t.rows] for t in d.tables]
 Only `.docx` can be read. For an old `.doc` file, tell the person plainly and ask for a `.docx` or PDF copy.
 
 IMAGES, PHOTOS AND SCANNED PAGES
-Read them with the model. Render each page, then send it to `get_llm()` as an image:
+Read them with the model. Copy this cell as it is and run it; set `path` first. Don't write your own async loop: a cell has no running event loop, so a top-level `await` is a SyntaxError and `asyncio.run(asyncio.gather(...))` fails. To change how pages are read, edit `read_page` and keep the `asyncio.run(read_pages(...))` call.
 ```python
 import asyncio, base64, io, pathlib
 import pypdfium2 as pdfium
