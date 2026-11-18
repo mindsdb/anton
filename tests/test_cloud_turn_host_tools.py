@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,10 +29,11 @@ from anton.cloud_turn.session import (
     _WORKSPACE_PATH_ENV,
     build_cloud_chat_session,
 )
-from anton.core.llm.provider import StreamTaskProgress
+from anton.core.llm.provider import StreamTaskProgress, StreamTextDelta
 from anton.core.tools.progress import ToolProgress
 from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.tools.tool_defs import ToolDef
+from tests.test_cloud_turn_entrypoint import _FakeSession
 from tests.test_cloud_turn_session import _mock_llm
 
 NO_ANSWER = ToolOutcome(content=NO_ANSWER_TEXT, ok=False, reason="host_no_answer")
@@ -364,3 +366,149 @@ def test_every_tool_core_registers_in_a_cloud_turn_is_reserved(tmp_path, monkeyp
     session._build_core_tools()
     names = {t.name for t in session.tool_registry.get_tool_defs()}
     assert names <= CLOUD_TOOL_ALLOWLIST | _CORE_TOOL_NAMES, sorted(names - CLOUD_TOOL_ALLOWLIST - _CORE_TOOL_NAMES)
+
+
+# ── the turn ─────────────────────────────────────────────────────────
+
+TURN = {"protocol_version": 1, "conversation_id": "c", "input": "hi", "host_tools": [NOTE_TOOL]}
+
+
+class _HostToolSession(_FakeSession):
+    """Calls its one host tool through the real proxy ToolDef, the way the session's dispatch would."""
+
+    def __init__(self, *, in_background: bool = False):
+        super().__init__()
+        self.bridge = None
+        self.tools: list = []
+        self.items = None
+        self.background = None
+        self._in_background = in_background
+
+    def builder(self, req, elicitor=None, preview_checker=None, host_tools=None):
+        self.bridge = host_tools
+        self.tools = proxy_tool_defs(host_tools, req.host_tools, set()) if host_tools is not None else []
+        return self
+
+    async def _call(self):
+        return [item async for item in self.tools[0].handler(self, {"id": "n1"})]
+
+    async def turn_stream(self, user_input, **kwargs):
+        if self._in_background:
+            # The call is still waiting when the turn ends.
+            self.background = asyncio.ensure_future(self._call())
+            while self.bridge.pending == 0:
+                await asyncio.sleep(0)
+        else:
+            self.items = await self._call()
+        yield StreamTextDelta(text="done")
+
+
+def _run_turn(request: dict, builder, host=None):
+    """Drive one turn over a pipe stdin. *host(event)* returns the stdin lines to write, or "close"."""
+    from anton.cloud_turn.__main__ import stream_turn
+
+    read_fd, write_fd = os.pipe()
+    stdin = os.fdopen(read_fd, "rb")
+    events: list[dict] = []
+    write_open = [True]
+
+    def emit(event):
+        events.append(event)
+        reply = host(event) if host is not None else None
+        if reply == "close":
+            os.close(write_fd)
+            write_open[0] = False
+        elif reply:
+            os.write(write_fd, b"".join((json.dumps(line) + "\n").encode() for line in reply))
+
+    try:
+        asyncio.run(stream_turn(json.dumps(request), emit, session_builder=builder, stdin=stdin))
+    finally:
+        if write_open[0]:
+            os.close(write_fd)
+        stdin.close()
+    return events
+
+
+def test_a_turn_sends_the_call_and_takes_progress_and_parts_from_stdin():
+    session = _HostToolSession()
+
+    def host(event):
+        if event["kind"] != "host_tool_call":
+            return None
+        call_id = event["call_id"]
+        return [
+            {"kind": "host_tool_progress", "call_id": call_id, "entry_id": call_id + ":0", "text": "Reading"},
+            {"kind": "host_tool_result", "call_id": call_id, "entry_id": call_id + ":1",
+             "seq": 1, "last": True, "ok": True, "text": "world"},
+            {"kind": "host_tool_result", "call_id": call_id, "entry_id": call_id + ":0",
+             "seq": 0, "last": False, "ok": True, "text": "hello "},
+        ]
+
+    events = _run_turn(TURN, session.builder, host)
+    assert session.items == [ToolProgress(text="Reading"), ToolOutcome(content="hello world", ok=True)]
+    call = next(e for e in events if e["kind"] == "host_tool_call")
+    assert call["tool"] == "read_note" and call["input"] == {"id": "n1"}
+    assert re.fullmatch(r"htool:[0-9a-f]{32}", call["call_id"])
+    assert events[-1]["kind"] == "turn_completed"
+
+
+def test_stdin_closing_answers_a_pending_call_as_unanswered():
+    session = _HostToolSession()
+    events = _run_turn(TURN, session.builder, lambda e: "close" if e["kind"] == "host_tool_call" else None)
+    assert session.items == [NO_ANSWER]
+    assert events[-1]["kind"] == "turn_completed"
+
+
+def test_the_turn_ending_answers_a_pending_call_as_unanswered():
+    from anton.cloud_turn.__main__ import stream_turn
+
+    session = _HostToolSession(in_background=True)
+    read_fd, write_fd = os.pipe()
+    stdin = os.fdopen(read_fd, "rb")
+
+    async def scenario():
+        await stream_turn(json.dumps(TURN), lambda e: None, session_builder=session.builder, stdin=stdin)
+        return await asyncio.wait_for(session.background, 5)
+
+    try:
+        assert asyncio.run(scenario()) == [NO_ANSWER]
+    finally:
+        os.close(write_fd)
+        stdin.close()
+
+
+def test_without_stdin_no_bridge_is_built():
+    from anton.cloud_turn.__main__ import stream_turn
+
+    built = {}
+
+    def builder(req, elicitor=None, preview_checker=None, host_tools=None):
+        built["host_tools"] = host_tools
+        return _FakeSession()
+
+    events: list[dict] = []
+    asyncio.run(stream_turn(json.dumps(TURN), events.append, session_builder=builder, stdin=None))
+    assert built["host_tools"] is None
+    assert events[-1]["kind"] == "turn_completed"
+
+
+def test_a_request_without_host_tools_builds_no_bridge():
+    built = {}
+
+    def builder(req, elicitor=None, preview_checker=None, host_tools=None):
+        built["host_tools"] = host_tools
+        return _FakeSession(deltas=["ok"])
+
+    request = {k: v for k, v in TURN.items() if k != "host_tools"}
+    events = _run_turn(request, builder)
+    assert built["host_tools"] is None
+    assert not any(e["kind"] == "host_tool_call" for e in events)
+    assert events[-1]["kind"] == "turn_completed"
+
+
+def test_a_builder_that_takes_no_bridge_still_runs():
+    def builder(req, elicitor=None):
+        return _FakeSession()
+
+    assert _run_turn(TURN, builder)[-1]["kind"] == "turn_completed"
