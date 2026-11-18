@@ -30,14 +30,20 @@ nothing new to design.
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+from typing import TYPE_CHECKING, Any
 
 from anton.core.mcp.access import AccessMode, allowed_for_mode
 from anton.core.mcp.client import McpSession
-from anton.core.mcp.errors import McpPermanentError, McpTransientError
-from anton.core.mcp.names import namespaced_tool_name
+from anton.core.mcp.errors import McpEgressBlocked, McpPermanentError, McpTransientError
+from anton.core.mcp.names import registrable_tool_name
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
+
+if TYPE_CHECKING:
+    from mcp_types import Tool as McpTool
+
+logger = logging.getLogger(__name__)
 
 
 async def discover_tool_defs(
@@ -46,6 +52,8 @@ async def discover_tool_defs(
     engine: str,
     access_mode: AccessMode,
     connection_name: str | None = None,
+    allowed_tools: frozenset[str] | None = None,
+    display_name: str | None = None,
 ) -> list[ToolDef]:
     """List `mcp_session`'s tools, apply the access filter, and wrap each
     surviving one as a namespaced `ToolDef` whose handler calls back into
@@ -57,26 +65,61 @@ async def discover_tool_defs(
     `connection_name` disambiguates the registered tool names when this
     engine has more than one connection in the same turn — see
     `namespaced_tool_name`.
+
+    `allowed_tools`, given for a server a user added, replaces `TOOL_ACCESS`:
+    only the listed names register, and in read mode only those the server
+    marks read-only; their arguments pass through as the model sent them.
+    `display_name` names the connection in error messages
+    in place of the engine.
+
+    A tool with no valid registered name (`registrable_tool_name`) is left
+    out with a warning; one such tool would make the model API reject every
+    request of the turn.
     """
     if access_mode == "none":
         return []
     tools = await mcp_session.list_tools()
-    return [
-        ToolDef(
-            name=namespaced_tool_name(engine, tool.name, connection_name=connection_name),
-            description=tool.description or "",
-            input_schema=tool.input_schema,
-            handler=_make_handler(
-                mcp_session,
-                engine=engine,
-                bare_tool_name=tool.name,
-                input_schema=tool.input_schema or {},
-                drop_empty_optionals=allowed_for_mode(engine, tool.name, "read"),
-            ),
+    if allowed_tools is not None:
+        # Read mode keeps to the tools the server itself marks read-only.
+        allowed = [
+            tool for tool in tools
+            if tool.name in allowed_tools and (access_mode != "read" or marked_read_only(tool))
+        ]
+    else:
+        allowed = [tool for tool in tools if allowed_for_mode(engine, tool.name, access_mode)]
+    tool_defs: list[ToolDef] = []
+    for tool in allowed:
+        name = registrable_tool_name(engine, tool.name, connection_name=connection_name)
+        if name is None:
+            logger.warning("MCP tool %r of %s left out: no valid tool name for it", tool.name, display_name or engine)
+            continue
+        tool_defs.append(
+            ToolDef(
+                name=name,
+                description=tool.description or "",
+                input_schema=tool.input_schema,
+                handler=_make_handler(
+                    mcp_session,
+                    label=display_name or engine,
+                    bare_tool_name=tool.name,
+                    input_schema=tool.input_schema or {},
+                    drop_empty_optionals=allowed_tools is None and allowed_for_mode(engine, tool.name, "read"),
+                ),
+            )
         )
-        for tool in tools
-        if allowed_for_mode(engine, tool.name, access_mode)
-    ]
+    return tool_defs
+
+
+def marked_read_only(tool: McpTool) -> bool:
+    """Whether the server marks `tool` read-only (`readOnlyHint: true`).
+
+    Args:
+        tool: A tool as the server listed it.
+
+    Returns:
+        True only for an explicit `true`; a missing hint counts as not read-only.
+    """
+    return tool.annotations is not None and tool.annotations.read_only_hint is True
 
 
 _MAX_SCHEMA_DEPTH = 20
@@ -133,7 +176,7 @@ def without_empty_optionals(value: Any, schema: Any, root: dict, depth: int = 0)
 
 
 def _make_handler(
-    mcp_session: McpSession, *, engine: str, bare_tool_name: str, input_schema: dict, drop_empty_optionals: bool
+    mcp_session: McpSession, *, label: str, bare_tool_name: str, input_schema: dict, drop_empty_optionals: bool
 ):
     async def handle_mcp_call(session, tc_input: dict) -> ToolOutcome:  # noqa: ARG001 - session unused, contract requires it
         arguments = tc_input or {}
@@ -141,10 +184,19 @@ def _make_handler(
             arguments = without_empty_optionals(arguments, input_schema, input_schema)
         try:
             content, is_error = await mcp_session.call_tool(bare_tool_name, arguments)
+        except McpEgressBlocked:
+            return ToolOutcome(
+                content=(
+                    f"The {label} server is at an address that is not allowed, "
+                    f"so this tool cannot run."
+                ),
+                ok=False,
+                reason="mcp_egress_blocked",
+            )
         except McpPermanentError:
             return ToolOutcome(
                 content=(
-                    f"The {engine} connection needs to be reconnected before "
+                    f"The {label} connection needs to be reconnected before "
                     f"this tool can run again."
                 ),
                 ok=False,
@@ -156,7 +208,7 @@ def _make_handler(
             # rate limit or transport hiccup, never implying the user broke
             # something (see ENG-1816 "Decisions made in review").
             return ToolOutcome(
-                content=f"{engine} is temporarily unavailable. Try again shortly.",
+                content=f"{label} is temporarily unavailable. Try again shortly.",
                 ok=False,
                 reason="mcp_transient_error",
             )
