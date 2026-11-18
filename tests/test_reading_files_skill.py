@@ -141,6 +141,34 @@ def test_scan_snippet_reads_every_page_through_the_model_and_resumes(tmp_path, m
     assert progress[-1] == "Read 1 of 1 pages"
 
 
+def test_only_scanned_pages_of_a_mixed_pdf_reach_the_model(tmp_path, monkeypatch):
+    # Every page sent is a model call against the person's usage, and the
+    # ask-above-20 rule counts only scanned pages, so the snippet as written
+    # must not send the text pages too.
+    from pypdf import PdfReader, PdfWriter
+
+    text_pdf, scan_pdf, mixed = tmp_path / "text.pdf", tmp_path / "scan.pdf", tmp_path / "mixed.pdf"
+    _text_pdf(text_pdf)
+    _scanned_pdf(scan_pdf, 2)
+    writer = PdfWriter()
+    for _ in range(5):
+        writer.add_page(PdfReader(text_pdf).pages[0])
+    for page in PdfReader(scan_pdf).pages:
+        writer.add_page(page)
+    with mixed.open("wb") as fh:
+        writer.write(fh)
+    monkeypatch.chdir(tmp_path)
+    llm = _FakeLLM()
+    printed = []
+    ns = {"get_llm": lambda: llm, "progress": lambda message: None, "path": str(mixed),
+          "print": lambda *a: printed.append(" ".join(map(str, a)))}
+
+    exec(_block("read_pages"), ns)
+
+    assert llm.asked == ["Page 6.", "Page 7."]
+    assert printed == ["pages not read: none"]
+
+
 def test_a_page_that_always_fails_does_not_stop_the_rest(tmp_path, monkeypatch):
     llm = _FakeLLM(fail={"Page 3."})
     ns, scanned_pdf, out_dir, progress, printed = _run_scan_snippet(tmp_path, monkeypatch, 20, llm)

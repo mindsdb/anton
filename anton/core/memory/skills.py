@@ -699,10 +699,13 @@ class SkillStore:
 
     # ── search ──────────────────────────────────────────────────────
 
-    def closest_match(self, bad_label: str, *, cutoff: float = 0.6) -> str | None:
-        """Find the existing label closest to `bad_label`, or None."""
+    def closest_match(
+        self, bad_label: str, *, cutoff: float = 0.6, exclude: frozenset[str] = frozenset()
+    ) -> str | None:
+        """Find the existing label closest to `bad_label`, or None. Labels in
+        `exclude` are never returned."""
         bad = slugify(bad_label)
-        candidates = [s["label"] for s in self.list_summaries()]
+        candidates = [s["label"] for s in self.list_summaries() if s["label"] not in exclude]
         if not candidates:
             return None
         if bad in candidates:

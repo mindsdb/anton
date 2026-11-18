@@ -53,6 +53,17 @@ _INPUT_SCHEMA = {
 }
 
 
+def _hidden_labels(session) -> frozenset[str]:
+    """Skills this session must not load: `reading-files` where its libraries
+    aren't installed (`ChatSession._reading_files_offered`). Hiding it from the
+    prompt's list alone isn't enough: a recall by name, or a near-miss that
+    resolves to it, would still steer the agent to imports that fail here."""
+    offered = getattr(session, "_reading_files_offered", None)
+    if callable(offered) and not offered():
+        return frozenset({"reading-files"})
+    return frozenset()
+
+
 def _recall_marker(label: str) -> str:
     """Stable marker embedded in every recall payload.
 
@@ -166,12 +177,17 @@ async def handle_recall_skill(
             reason="store_unavailable",
         )
 
-    skill = store.load(label_in)
+    from anton.core.memory.skills import slugify
+
+    hidden = _hidden_labels(session)
+    skill = None if slugify(label_in) in hidden else store.load(label_in)
+    if skill is not None and skill.label in hidden:
+        skill = None
     warning = ""
     if skill is None:
-        closest = store.closest_match(label_in)
+        closest = store.closest_match(label_in, exclude=hidden)
         if closest is None:
-            available = [s["label"] for s in store.list_summaries()]
+            available = [s["label"] for s in store.list_summaries() if s["label"] not in hidden]
             # Tier 3 (ENG-2248): deliberately ok=None, NOT a failure. The tool
             # worked — it looked, found nothing, and told the model to proceed.
             # This is the most common non-success on the highest-volume tool, so
