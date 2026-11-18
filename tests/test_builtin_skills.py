@@ -629,10 +629,17 @@ class TestCoworkProductSkill:
         assert "If you are replying without tools, do not say it cannot" in section
         # The gateway bills images to credits only, never the free Air
         # allowance, so a free user told "yes" must also hear where to add them.
-        assert "Image generation uses credits; the free Air allowance does not cover it" in section
+        assert ("On MindsHub's image models, image generation uses MindsHub credits; "
+                "the free Air allowance does not cover it") in section
         assert ("give the link to add credits: "
                 "https://console.mindshub.ai/settings/organization/billing") in section
-        assert "When an image call is refused for credits" in section
+        assert "When an image call is refused for MindsHub credits" in section
+        # generate_image is also offered on the user's own OpenAI key, which
+        # MindsHub credits do not pay for: the credits guidance must not be
+        # stated for every image provider.
+        assert "With the user's own OpenAI key in the desktop app, images are billed to" in section
+        assert "MindsHub credits do not pay for them" in section
+        assert "Image generation uses credits" not in section
         assert "first sentence" in section
         assert "Never describe a drawing made with code as the photo" in section
         # Simple drawings are real output, not a substitute; the rule must not
@@ -656,7 +663,7 @@ class TestCoworkProductSkill:
         assert "MindsHub Air is free up to a usage allowance that refills" in section
         assert "credit balance" in section
         assert "Every other MindsHub model needs credits" in section
-        assert "and so does image generation" in section
+        assert "and so do MindsHub's image models" in section
         assert "https://console.mindshub.ai/settings/organization/billing" in section
         assert "Do not state an allowance size, a price or a refill time" in section
         assert not re.search(r"[$€£]\s?\d|\d+\s?(?:M|million|k)\s+tokens", section)

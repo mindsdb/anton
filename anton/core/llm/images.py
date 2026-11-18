@@ -34,6 +34,7 @@ from typing import Any, NamedTuple
 import openai
 
 from .provider import (
+    BudgetExceededError,
     ProviderAuthError,
     ProviderErrorBody,
     Usage,
@@ -530,11 +531,17 @@ def image_call_error(exc: "openai.APIStatusError", model: str) -> Exception:
         # An image request never recalls the product skill, so this message is
         # the only guidance the model has here. Without it, replies dropped the
         # link and blamed "the image service" instead of the user's account.
+        # Only MindsHub's gateway produces a billing stop (it is origin-gated),
+        # so this never speaks about another provider's billing.
+        if isinstance(billing, BudgetExceededError):
+            what = ("this is their organization's MindsHub spending budget, not a fault in "
+                    "Cowork, that an owner or admin can raise it")
+        else:
+            what = ("this is their own MindsHub account, not a fault in Cowork, that image "
+                    "generation uses credits (the free Air allowance does not cover it)")
         return ImageGenerationError(
-            f"{billing} No image was made. Tell the user this is their own MindsHub "
-            "account, not a fault in Cowork, that image generation uses credits (the free "
-            "Air allowance does not cover it), and give them the link in this message "
-            "exactly as written.",
+            f"{billing} No image was made. Tell the user {what}, and give them the link in "
+            "this message exactly as written.",
             code=billing.reason, status_code=status,
         )
     restriction = mindshub_model_restriction(exc=exc, body=body, status_code=status, model=model)

@@ -64,7 +64,12 @@ _DEFAULT_LINES = [
     "Do not draw a substitute unasked. Charts and diagrams are drawn with code. "
     "Without an image tool, a request that is itself for a simple drawing, such as "
     "line art or a coloring page, is made with code too: that is real output. Call a "
-    "drawing what it is, never a photo, an illustration or a video.",
+    "drawing what it is, never a photo, an illustration or a video. The same holds for "
+    "pictures inside a larger piece of work, such as slides or a page: without an image "
+    "tool, draw simple graphics for it with code. Every time your reply names them, "
+    "summary included, call them simple drawn graphics, never illustrations, artwork or "
+    "images, and add one sentence saying that real illustrations or photos need image "
+    "generation, which you do not have here.",
 ]
 _DEFAULT_RULE = (
     "- If asked what Cowork is, who makes it, how to install, update or remove it, "
@@ -91,10 +96,10 @@ def test_default_product_lines_are_byte_identical(surface, line):
 
 
 @pytest.mark.parametrize(("surface", "digest"), [
-    (None, "2f53f9da2cfa290c78e9a784bcfc2ae721c6ef49590f280f13cd9dd306799764"),
-    ("desktop", "e2cf3d7c23cd654ca3c8aa8cd2b4e1323db9191f8ab1a6835faac335a45cc668"),
-    ("web", "954ba6189cc8e3e8b013789537e24221a42f1db12f7feed05344a6bd4aa6d83f"),
-    ("cli", "b6c796983c8d053f628c43715d9d9fccd1862257273ed2497e1b9deda636b540"),
+    (None, "12310b53810a4a04dfc033b0806740fac4a404424d3663e6556f159172b9db50"),
+    ("desktop", "3285b235fa34086be2253193c5707001bd93b8358201deeb80dbe0664bd9ca60"),
+    ("web", "b3495187806d695b943df5a4bcbea617e039a7fb324198b67da7284ed2df353a"),
+    ("cli", "557d2c880e1d5238fe82bbdd6add5ae46102a5462b06b5524760325cfa73e6bf"),
 ])
 def test_complete_default_builder_output_is_byte_identical(surface, digest):
     # Snapshot the current complete default prompt for each surface, including
@@ -270,6 +275,11 @@ def test_every_prompt_says_what_cannot_be_made(surface, identity):
     # Asked for a realistic picture, it offers a drawing rather than making one.
     assert "Do not draw a substitute unasked" in joined
     assert "never a photo, an illustration or a video" in joined
+    # Asked for "a pitch deck with nice illustrations" without an image tool,
+    # the agent drew SVGs and called them illustrations.
+    assert "pictures inside a larger piece of work" in joined
+    assert "summary included, call them simple drawn graphics, never illustrations" in joined
+    assert "real illustrations or photos need image generation" in joined
 
 
 # Where generate_image is offered, its prompt sends illustrations, icons and
