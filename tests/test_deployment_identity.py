@@ -61,10 +61,10 @@ _DEFAULT_LINES = [
     "- Unless one of your tools or a service the user connected generates them, you "
     "cannot make photos, realistic or detailed illustrations, video or audio. When "
     "asked for one, say so in your first sentence and offer what you can do instead. "
-    "Do not draw a substitute unasked. When the request is itself for a simple "
-    "drawing, such as line art, a coloring page, an icon, a chart or a diagram, make "
-    "it with code: that is real output. Call a drawing what it is, never a photo, an "
-    "illustration or a video.",
+    "Do not draw a substitute unasked. Charts and diagrams are drawn with code. "
+    "Without an image tool, a request that is itself for a simple drawing, such as "
+    "line art or a coloring page, is made with code too: that is real output. Call a "
+    "drawing what it is, never a photo, an illustration or a video.",
 ]
 _DEFAULT_RULE = (
     "- If asked what Cowork is, who makes it, how to install, update or remove it, "
@@ -91,10 +91,10 @@ def test_default_product_lines_are_byte_identical(surface, line):
 
 
 @pytest.mark.parametrize(("surface", "digest"), [
-    (None, "2f7ffe5fae3f83abb5ba092e588237c5ad19b811c95db34c217cb8a4c7018a13"),
-    ("desktop", "96008e06d78992ad07269e1de00c94280bcf9f80c2642f98288fef5cf515b0e3"),
-    ("web", "51a31cb70d3e4b57226c76c6d5592e1ad488bfbc9e52160c85e923386c9ee004"),
-    ("cli", "8fa806b471418859eb84f57cf1c5f03993f51e4a0fd123198bf36786420672b8"),
+    (None, "2f53f9da2cfa290c78e9a784bcfc2ae721c6ef49590f280f13cd9dd306799764"),
+    ("desktop", "e2cf3d7c23cd654ca3c8aa8cd2b4e1323db9191f8ab1a6835faac335a45cc668"),
+    ("web", "954ba6189cc8e3e8b013789537e24221a42f1db12f7feed05344a6bd4aa6d83f"),
+    ("cli", "b6c796983c8d053f628c43715d9d9fccd1862257273ed2497e1b9deda636b540"),
 ])
 def test_complete_default_builder_output_is_byte_identical(surface, digest):
     # Snapshot the current complete default prompt for each surface, including
@@ -270,3 +270,20 @@ def test_every_prompt_says_what_cannot_be_made(surface, identity):
     # Asked for a realistic picture, it offers a drawing rather than making one.
     assert "Do not draw a substitute unasked" in joined
     assert "never a photo, an illustration or a video" in joined
+
+
+# Where generate_image is offered, its prompt sends illustrations, icons and
+# logos to it and forbids drawing them with code. The always-on line rides in
+# that same prompt, so its draw-with-code sentence must stay conditional on
+# there being no image tool and must not name an icon or a logo.
+def test_draw_with_code_sentence_does_not_contradict_the_image_tool():
+    from anton.core.llm.identity import _CANNOT_MAKE_LINE
+    from anton.core.tools.tool_defs import _IMAGES_PROMPT_HEAD
+
+    drawn = _CANNOT_MAKE_LINE.split("Charts and diagrams are drawn with code.")[1]
+    drawn = drawn.split("Call a drawing what it is")[0]
+    assert drawn.startswith(" Without an image tool,")
+    for word in ("icon", "logo", "illustration"):
+        assert word not in drawn
+    # The image prompt still draws charts and diagrams with code, as this line does.
+    assert "Charts, plots and diagrams of data are still drawn with code" in _IMAGES_PROMPT_HEAD

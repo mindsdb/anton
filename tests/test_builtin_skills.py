@@ -632,8 +632,13 @@ class TestCoworkProductSkill:
         # Simple drawings are real output, not a substitute; the rule must not
         # stop them. A bare "cannot make an image" made the agent refuse a
         # coloring page.
-        assert "Simple drawings made with code are real output" in section
+        assert "simple drawings made with code are real output too" in section
         assert "a coloring page" in section and "data visualisations" in section
+        # Where generate_image is offered, its prompt sends icons and logos to
+        # it and forbids drawing them with code; this list must not disagree.
+        drawn = section.split("Charts, diagrams and data visualisations")[1].split("\n-")[0]
+        assert "Without an image tool" in drawn
+        assert "icon" not in drawn and "logo" not in drawn
         assert "Do not make the simple version before the user picks it" in section
 
     def test_answers_cost_from_rules_without_figures_that_go_stale(self, store):

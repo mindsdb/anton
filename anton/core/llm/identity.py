@@ -187,14 +187,17 @@ _PRODUCT_LINES = [
 #: in terms of tools so it stays true once an image tool or a connected
 #: provider exists. Simple drawings are named as allowed on purpose: a bare
 #: "cannot make images" made the agent refuse a coloring page it can draw.
+#: They are allowed only without an image tool, and icons and logos are left
+#: out, because where ``generate_image`` is offered its prompt sends every
+#: picture except charts and diagrams to it.
 _CANNOT_MAKE_LINE = (
     "- Unless one of your tools or a service the user connected generates them, you "
     "cannot make photos, realistic or detailed illustrations, video or audio. When "
     "asked for one, say so in your first sentence and offer what you can do instead. "
-    "Do not draw a substitute unasked. When the request is itself for a simple "
-    "drawing, such as line art, a coloring page, an icon, a chart or a diagram, make "
-    "it with code: that is real output. Call a drawing what it is, never a photo, an "
-    "illustration or a video."
+    "Do not draw a substitute unasked. Charts and diagrams are drawn with code. "
+    "Without an image tool, a request that is itself for a simple drawing, such as "
+    "line art or a coloring page, is made with code too: that is real output. Call a "
+    "drawing what it is, never a photo, an illustration or a video."
 )
 
 #: Surface → the sentence naming where this conversation is running. A surface
