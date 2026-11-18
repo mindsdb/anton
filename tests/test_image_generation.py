@@ -354,6 +354,25 @@ async def test_failures_come_back_as_messages_to_relay(status, body, headers, co
     assert phrase in str(caught.value)
 
 
+@pytest.mark.parametrize(("code", "link"), [
+    ("wallet_empty", "https://console.mindshub.ai/settings/organization/billing to continue"),
+    ("budget_exceeded", "https://console.mindshub.ai/settings/organization/billing?tab=budgets"),
+])
+async def test_a_billing_refusal_tells_the_model_to_give_the_link(code, link):
+    """An image request never recalls the product skill, so the tool's message
+    is all the model sees. Without these words, replies dropped the link and
+    blamed the image service rather than the user's own account."""
+    gateway = Gateway(status=402, body={"error": {"code": code, "message": "refused"}})
+    with pytest.raises(images.ImageGenerationError) as caught:
+        await _client(gateway).generate_image(prompt="x")
+    message = str(caught.value)
+    assert link in message
+    assert "No image was made" in message
+    assert "their own MindsHub account, not a fault in Cowork" in message
+    assert "image generation uses credits" in message
+    assert "give them the link in this message exactly as written" in message
+
+
 async def test_an_image_call_is_sent_once_even_where_the_sdk_would_retry():
     """A retried 5xx/429/timeout would draw, and bill, the picture again."""
     gateway = Gateway(status=503, body={"error": {"message": "busy"}})

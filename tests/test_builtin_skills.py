@@ -630,6 +630,8 @@ class TestCoworkProductSkill:
         # The gateway bills images to credits only, never the free Air
         # allowance, so a free user told "yes" must also hear where to add them.
         assert "Image generation uses credits; the free Air allowance does not cover it" in section
+        assert ("give the link to add credits: "
+                "https://console.mindshub.ai/settings/organization/billing") in section
         assert "When an image call is refused for credits" in section
         assert "first sentence" in section
         assert "Never describe a drawing made with code as the photo" in section
