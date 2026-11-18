@@ -141,7 +141,8 @@ Events written back on stdout (JSONL):
       lifts adds `"reset_at": "<ISO-8601 instant with a UTC offset>"`; every
       other failure omits the key. A spent-budget stop whose gateway named the
       budget adds `"budget_scope": "<org|workspace|api_key|team|user|all_members|...>"`
-      the same way, and `"budget_period": "<day|month|year>"` when it named one.
+      the same way, `"budget_period": "<day|month|year>"` when it named one, and
+      `"budget_model": "<alias>"` for a budget on one model.
 
 The tool/round step kinds the controller relays unchanged as `turn_step` are
 not spelled out above: `tool_start`, `tool_end`, `tool_result`, `compacted`,

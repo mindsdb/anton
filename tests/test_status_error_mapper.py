@@ -1801,6 +1801,32 @@ def test_an_unknown_budget_period_is_dropped(period):
     assert "a MindsHub spending budget is used up." in str(err.value)
 
 
+@pytest.mark.parametrize("carrier", ["header", "envelope"])
+def test_a_per_model_budget_stop_names_its_model(carrier):
+    error = {"code": "budget_exceeded", "budget_scope": "workspace", "budget_period": "day"}
+    body = {"error": error}
+    if carrier == "envelope":
+        error["budget_model"] = "haiku-4-5"
+    headers = {"X-MindsHub-Budget-Model": "haiku-4-5"} if carrier == "header" else None
+    exc = _sdk_error(402, json_body=body, headers=headers)
+    with pytest.raises(BudgetExceededError) as err:
+        _raise_for_status_error(exc, "haiku")
+    assert err.value.budget_model == "haiku-4-5"
+    assert str(err.value) == (
+        "Server returned 402: this workspace's daily MindsHub spending budget for haiku-4-5 is used up. "
+        f"{_SCOPED_BUDGET_CTA}"
+    )
+
+
+@pytest.mark.parametrize("model", ["bad model", "", 3, "x" * 129])
+def test_a_malformed_budget_model_is_dropped(model):
+    exc = _sdk_error(402, json_body={"error": {"code": "budget_exceeded", "budget_model": model}})
+    with pytest.raises(BudgetExceededError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.budget_model is None
+    assert "a MindsHub spending budget is used up." in str(err.value)
+
+
 def test_an_unnamed_scope_still_names_the_period():
     exc = _sdk_error(402, json_body={"error": {"code": "budget_exceeded"}},
                      headers={"X-MindsHub-Budget-Period": "day"})

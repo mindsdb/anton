@@ -514,6 +514,22 @@ def test_a_budget_stop_carries_its_period_on_the_wire():
     assert "your team's yearly MindsHub spending budget" in events[0]["error"]
 
 
+def test_a_per_model_budget_stop_carries_its_model_on_the_wire():
+    events = _drive(_FakeSession(raise_on_stream=_mapped_denial(
+        status=402,
+        body={"code": "budget_exceeded", "budget_scope": "team", "budget_period": "day", "budget_model": "haiku-4-5"},
+    )))
+    assert events[0]["budget_model"] == "haiku-4-5"
+    assert "your team's daily MindsHub spending budget for haiku-4-5" in events[0]["error"]
+
+
+def test_an_all_models_budget_stop_leaves_the_model_off():
+    events = _drive(_FakeSession(raise_on_stream=_mapped_denial(
+        status=402, body={"code": "budget_exceeded", "budget_scope": "team", "budget_period": "year"},
+    )))
+    assert "budget_model" not in events[0]
+
+
 def test_a_budget_stop_without_a_scope_leaves_the_key_off():
     stop = BudgetExceededError("denied", reason="budget_exceeded", status_code=402)
     events = _drive(_FakeSession(raise_on_stream=stop))

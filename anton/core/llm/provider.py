@@ -881,15 +881,22 @@ class BudgetExceededError(MindsHubBillingStop):
     ``budget_scope`` is whose budget it is (``org``, ``workspace``, ``api_key``,
     ``team``, ``user``, ``all_members`` or a newer one), as the gateway named it,
     or ``None`` when it named none. ``budget_period`` is ``day``, ``month``,
-    ``year`` or ``None``.
+    ``year`` or ``None``. ``budget_model`` is a per-model budget's alias, or ``None``.
     """
 
     def __init__(
-        self, message: str, *, budget_scope: str | None = None, budget_period: str | None = None, **kwargs: Any,
+        self,
+        message: str,
+        *,
+        budget_scope: str | None = None,
+        budget_period: str | None = None,
+        budget_model: str | None = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__(message, **kwargs)
         self.budget_scope = budget_scope
         self.budget_period = budget_period
+        self.budget_model = budget_model
 
 
 class ProviderAuthError(ConnectionError):
@@ -1294,6 +1301,7 @@ class ErrorBodyFields:
     deny_detail: object = None
     budget_scope: object = None
     budget_period: object = None
+    budget_model: object = None
     status: object = None
 
     @classmethod
@@ -1307,6 +1315,7 @@ class ErrorBodyFields:
             deny_detail=fields.get("deny_detail"),
             budget_scope=fields.get("budget_scope"),
             budget_period=fields.get("budget_period"),
+            budget_model=fields.get("budget_model"),
             status=fields.get("status"),
         )
 
@@ -1435,11 +1444,13 @@ def mindshub_billing_stop(
     if kind.error_type is BudgetExceededError:
         scope = _budget_scope(exc, body)
         period = _budget_period(exc, body)
-        what = _budget_what(scope, period)
+        model = _budget_model(exc, body)
+        what = _budget_what(scope, period, model)
         if scope != "org":
             cta = _MINDSHUB_SCOPED_BUDGET_CTA
         extra["budget_scope"] = scope
         extra["budget_period"] = period
+        extra["budget_model"] = model
     if status_code is None:
         lead = what[:1].upper() + what[1:]
     else:
@@ -1474,11 +1485,27 @@ def _budget_period(exc: BaseException, body: Any) -> str | None:
     return None
 
 
-def _budget_what(scope: str | None, period: str | None) -> str:
-    """The stop's lead: whose budget, and its period when known."""
+# A catalog alias as the gateway sends it: header-safe, no spaces.
+_BUDGET_MODEL_PATTERN = re.compile(r"[A-Za-z0-9._:/-]{1,128}")
+
+
+def _budget_model(exc: BaseException, body: Any) -> str | None:
+    """A per-model budget's alias: the ``X-MindsHub-Budget-Model`` header, else the body."""
+    parsed = ProviderErrorBody.parse(body)
+    for value in (_response_header(exc, "x-mindshub-budget-model"), parsed.top.budget_model,
+                  parsed.envelope.budget_model):
+        if isinstance(value, str) and _BUDGET_MODEL_PATTERN.fullmatch(value):
+            return value
+    return None
+
+
+def _budget_what(scope: str | None, period: str | None, model: str | None = None) -> str:
+    """The stop's lead: whose budget, its period and its model when known."""
     owner = _BUDGET_SCOPE_OWNER.get(scope or "", "a")
     adjective = _BUDGET_PERIOD_ADJECTIVE.get(period or "")
     budget = f"{adjective} MindsHub spending budget" if adjective else "MindsHub spending budget"
+    if model:
+        budget = f"{budget} for {model}"
     return f"{owner} {budget} is used up."
 
 
