@@ -1160,11 +1160,15 @@ _BUDGET_CTA = (
     "An organization owner or admin can raise it at "
     "https://console.mindshub.ai/settings/organization/billing?tab=budgets."
 )
+_SCOPED_BUDGET_CTA = (
+    "An administrator can raise it at "
+    "https://console.mindshub.ai/settings/organization/billing?tab=budgets."
+)
 
 
 def _cta(code):
-    """Credits lift every billing stop but a budget, which points at the Budgets tab."""
-    return _BUDGET_CTA if code == "budget_exceeded" else _BILLING_CTA
+    """Credits lift every billing stop but a budget, which points at the Budgets tab (no role without a scope)."""
+    return _SCOPED_BUDGET_CTA if code == "budget_exceeded" else _BILLING_CTA
 
 
 _BILLING_STOPS = [
@@ -1176,7 +1180,7 @@ _BILLING_STOPS = [
                  "free MindsHub Air is paused for everyone until the daily budget resets.",
                  id="fuse"),
     pytest.param("budget_exceeded", 402, BudgetExceededError,
-                 "your organization's MindsHub spending budget is used up.", id="budget"),
+                 "a MindsHub spending budget is used up.", id="budget"),
 ]
 
 
@@ -1725,3 +1729,54 @@ def test_the_budget_stop_sends_the_user_to_budgets_not_to_buy_credits():
     assert "Add credits" not in str(err.value)
     assert "tab=budgets" in str(err.value)
     assert err.value.reset_at is None
+
+
+_BUDGET_SCOPE_WHAT = [
+    ("org", "your organization's MindsHub spending budget is used up.", _BUDGET_CTA),
+    ("workspace", "this workspace's MindsHub spending budget is used up.", _SCOPED_BUDGET_CTA),
+    ("api_key", "this API key's MindsHub spending budget is used up.", _SCOPED_BUDGET_CTA),
+]
+
+
+@pytest.mark.parametrize("scope,what,cta", _BUDGET_SCOPE_WHAT)
+@pytest.mark.parametrize("carrier", ["header", "envelope"])
+def test_a_budget_stop_names_the_scope_the_gateway_sent(scope, what, cta, carrier):
+    """The scope rides the X-MindsHub-Budget-Scope header and `error.budget_scope`; either is enough."""
+    error = {"code": "budget_exceeded"}
+    if carrier == "envelope":
+        error["budget_scope"] = scope
+    headers = {"X-MindsHub-Budget-Scope": scope} if carrier == "header" else None
+    exc = _sdk_error(402, json_body={"error": error}, headers=headers)
+    with pytest.raises(BudgetExceededError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.budget_scope == scope
+    assert str(err.value) == f"Server returned 402: {what} {cta}"
+
+
+def test_a_budget_stop_reads_the_scope_in_the_anthropic_dialect():
+    exc = _anthropic_sdk_error(
+        402, json_body={"type": "error", "error": {"code": "budget_exceeded", "budget_scope": "workspace"}},
+    )
+    with pytest.raises(BudgetExceededError) as err:
+        _raise_anthropic(exc, model="claude-sonnet")
+    assert err.value.budget_scope == "workspace"
+    assert "this workspace's MindsHub spending budget" in str(err.value)
+
+
+@pytest.mark.parametrize("scope", ["team", "all_members"])
+def test_a_newer_budget_scope_is_kept_but_worded_neutrally(scope):
+    exc = _sdk_error(402, json_body={"error": {"code": "budget_exceeded"}},
+                     headers={"X-MindsHub-Budget-Scope": scope})
+    with pytest.raises(BudgetExceededError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.budget_scope == scope
+    assert "a MindsHub spending budget is used up." in str(err.value)
+
+
+@pytest.mark.parametrize("scope", ["Workspace", "x" * 33, "work space", "<b>"])
+def test_a_budget_scope_that_is_not_a_short_identifier_is_dropped(scope):
+    exc = _sdk_error(402, json_body={"error": {"code": "budget_exceeded", "budget_scope": scope}})
+    with pytest.raises(BudgetExceededError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.budget_scope is None
+    assert "a MindsHub spending budget is used up." in str(err.value)

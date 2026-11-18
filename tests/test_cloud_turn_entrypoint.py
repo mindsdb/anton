@@ -18,6 +18,7 @@ from anton.cloud_turn.__main__ import _clip_result_content, stream_turn
 from anton.core.tools.connector_draft import ConnectorDraftBox, parse_connector_draft
 from anton.core.llm.provider import (
     AllowanceExhaustedError,
+    BudgetExceededError,
     FreeServingPausedError,
     LLMResponse,
     StreamComplete,
@@ -491,6 +492,23 @@ def test_a_billing_stop_carries_its_reset_instant_on_the_wire(error_type, reason
         "error": f"{error_type.__name__}: denied",
         "reset_at": _RESET_AT_NORMALIZED,
     }]
+
+
+def test_a_budget_stop_carries_its_scope_on_the_wire():
+    """The host words the card by whose budget is spent, so the scope rides the frame as `budget_scope`."""
+    events = _drive(_FakeSession(raise_on_stream=_mapped_denial(
+        status=402, body={"code": "budget_exceeded", "budget_scope": "workspace"},
+    )))
+    assert len(events) == 1
+    assert events[0]["kind"] == "turn_failed"
+    assert events[0]["budget_scope"] == "workspace"
+    assert events[0]["error"].startswith("BudgetExceededError: Server returned 402: this workspace's")
+
+
+def test_a_budget_stop_without_a_scope_leaves_the_key_off():
+    stop = BudgetExceededError("denied", reason="budget_exceeded", status_code=402)
+    events = _drive(_FakeSession(raise_on_stream=stop))
+    assert events == [{"kind": "turn_failed", "error": "BudgetExceededError: denied"}]
 
 
 class _ResetLookalike(RuntimeError):

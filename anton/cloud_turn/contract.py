@@ -139,7 +139,8 @@ Events written back on stdout (JSONL):
       `error` is "TypeName: message", so a consumer reads the failure's kind
       off the class name. A MindsHub billing stop that knows when its limit
       lifts adds `"reset_at": "<ISO-8601 instant with a UTC offset>"`; every
-      other failure omits the key.
+      other failure omits the key. A spent-budget stop whose gateway named the
+      budget adds `"budget_scope": "<org|workspace|api_key|...>"` the same way.
 
 The tool/round step kinds the controller relays unchanged as `turn_step` are
 not spelled out above: `tool_start`, `tool_end`, `tool_result`, `compacted`,

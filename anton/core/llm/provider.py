@@ -816,10 +816,11 @@ class MindsHubBillingStop(TokenLimitExceeded):
     every existing catch working: the no-retry re-raise in
     ``ChatSession.turn_stream``, the verifier's ``_DENIED_VERDICT_ERRORS`` latch
     (both ``anton/core/session.py``), and cowork-server's
-    ``is_token_limit_error``. Two parts of it survive a hosted turn's
+    ``is_token_limit_error``. Parts of it survive a hosted turn's
     ``turn_failed`` frame (``cloud_turn.__main__.stream_turn``): the subclass
     NAME, as the ``"TypeName: message"`` string ``_scrub`` puts in ``error``,
-    and ``reset_at``, as its own key when the gateway sent one.
+    ``reset_at``, as its own key when the gateway sent one, and a budget stop's
+    ``budget_scope``, likewise.
 
     ``reason`` is the gate's code, ``status_code`` the HTTP status (``None`` for
     a denial inside an open stream, which has no error status), and
@@ -873,11 +874,17 @@ class FreeServingPausedError(MindsHubBillingStop):
 
 
 class BudgetExceededError(MindsHubBillingStop):
-    """402 ``budget_exceeded``: an organization budget with a hard cap is spent.
+    """402 ``budget_exceeded``: a budget with a hard cap is spent.
 
     The gate refuses paid requests until the budget's UTC period resets or an
     admin raises it; credit does not lift it. The gateway sends no ``reset_at``.
+    ``budget_scope`` is whose budget it is (``org``, ``workspace``, ``api_key``
+    or a newer one), as the gateway named it, or ``None`` when it named none.
     """
+
+    def __init__(self, message: str, *, budget_scope: str | None = None, **kwargs: Any) -> None:
+        super().__init__(message, **kwargs)
+        self.budget_scope = budget_scope
 
 
 class ProviderAuthError(ConnectionError):
@@ -1081,10 +1088,10 @@ _MINDSHUB_BILLING_CTA = (
     "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
 )
 # Credits do not lift a budget, so its stop points at the Budgets tab instead.
-_MINDSHUB_BUDGET_CTA = (
-    "An organization owner or admin can raise it at "
-    "https://console.mindshub.ai/settings/organization/billing?tab=budgets."
-)
+_MINDSHUB_BUDGET_URL = "https://console.mindshub.ai/settings/organization/billing?tab=budgets"
+_MINDSHUB_BUDGET_CTA = f"An organization owner or admin can raise it at {_MINDSHUB_BUDGET_URL}."
+# A workspace or key budget may be managed below the org, so its hint names no role.
+_MINDSHUB_SCOPED_BUDGET_CTA = f"An administrator can raise it at {_MINDSHUB_BUDGET_URL}."
 
 
 class _BillingStopKind(NamedTuple):
@@ -1120,9 +1127,16 @@ _MINDSHUB_BILLING_STOPS: dict[str, _BillingStopKind] = {
         "free MindsHub Air is paused for everyone until the daily budget resets."),
     "budget_exceeded": _BillingStopKind(
         BudgetExceededError,
-        "your organization's MindsHub spending budget is used up.",
+        "a MindsHub spending budget is used up.",
         _MINDSHUB_BUDGET_CTA),
 }
+# A spent budget's ``what`` per scope the gateway names; any other scope keeps the neutral one above.
+_BUDGET_SCOPE_WHAT = {
+    "org": "your organization's MindsHub spending budget is used up.",
+    "workspace": "this workspace's MindsHub spending budget is used up.",
+    "api_key": "this API key's MindsHub spending budget is used up.",
+}
+_BUDGET_SCOPE_PATTERN = re.compile(r"[a-z_]{1,32}")
 _WALLET_DENIAL_CODES = frozenset(_MINDSHUB_BILLING_STOPS)
 
 
@@ -1269,6 +1283,7 @@ class ErrorBodyFields:
     param: object = None
     detail: object = None
     deny_detail: object = None
+    budget_scope: object = None
     status: object = None
 
     @classmethod
@@ -1280,6 +1295,7 @@ class ErrorBodyFields:
             param=fields.get("param"),
             detail=fields.get("detail"),
             deny_detail=fields.get("deny_detail"),
+            budget_scope=fields.get("budget_scope"),
             status=fields.get("status"),
         )
 
@@ -1402,16 +1418,37 @@ def mindshub_billing_stop(
     if reason is None:
         return None
     kind = _MINDSHUB_BILLING_STOPS[reason]
+    what = kind.what
+    cta = kind.cta
+    extra: dict[str, Any] = {}
+    if kind.error_type is BudgetExceededError:
+        scope = _budget_scope(exc, body)
+        what = _BUDGET_SCOPE_WHAT.get(scope or "", what)
+        if scope != "org":
+            cta = _MINDSHUB_SCOPED_BUDGET_CTA
+        extra["budget_scope"] = scope
     if status_code is None:
-        lead = kind.what[:1].upper() + kind.what[1:]
+        lead = what[:1].upper() + what[1:]
     else:
-        lead = f"Server returned {status_code}: {kind.what}"
+        lead = f"Server returned {status_code}: {what}"
     return kind.error_type(
-        f"{lead} {kind.cta}",
+        f"{lead} {cta}",
         reason=reason,
         status_code=status_code,
         reset_at=_response_header(exc, "x-mindshub-reset-at"),
+        **extra,
     )
+
+
+def _budget_scope(exc: BaseException, body: Any) -> str | None:
+    """The spent budget's scope: the ``X-MindsHub-Budget-Scope`` header, else ``budget_scope`` in the body."""
+    parsed = ProviderErrorBody.parse(body)
+    for value in (_response_header(exc, "x-mindshub-budget-scope"), parsed.top.budget_scope,
+                  parsed.envelope.budget_scope):
+        # Passed through unjudged, but only as a short identifier.
+        if isinstance(value, str) and _BUDGET_SCOPE_PATTERN.fullmatch(value):
+            return value
+    return None
 
 
 def mindshub_model_restriction(
