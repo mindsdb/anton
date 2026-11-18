@@ -465,6 +465,8 @@ def test_host_tool_names_that_pass(name):
     (_host_tool(description="  "), "invalid_description"),
     (_host_tool(description=None), "invalid_description"),
     (_host_tool(input_schema=[]), "invalid_input_schema"),
+    (_host_tool(input_schema={}), "invalid_input_schema"),
+    (_host_tool(input_schema={"type": "array"}), "invalid_input_schema"),
     (_host_tool(prompt=3), "invalid_prompt"),
     (_host_tool(timeout_s=0), "invalid_timeout"),
     (_host_tool(timeout_s=121), "invalid_timeout"),
@@ -487,7 +489,8 @@ def test_a_repeated_name_keeps_the_first_entry(caplog):
     with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
         specs = parse_host_tools([_host_tool(), _host_tool(description="Second.")], "c")
     assert [s.description for s in specs] == ["Edit a note."]
-    assert len(caplog.records) == 1
+    [record] = caplog.records
+    assert record.reason == "duplicate_name"
 
 
 def test_a_host_tools_block_that_is_not_a_list_is_dropped_and_logged(caplog, monkeypatch):

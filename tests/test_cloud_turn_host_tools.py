@@ -141,6 +141,27 @@ async def test_no_complete_answer_within_the_timeout_is_a_failure():
     assert bridge.pending == 0
 
 
+async def test_a_result_that_landed_as_the_timer_fired_still_wins(monkeypatch):
+    events: list[dict] = []
+    bridge = CloudHostTools(events.append)
+    real_wait_for = asyncio.wait_for
+
+    async def racing_wait_for(awaitable, timeout):
+        awaitable.close()
+        call_id = events[0]["call_id"]
+        bridge.deliver({"kind": PROGRESS_KIND, "call_id": call_id, "text": "step"})
+        bridge.deliver(_part(call_id, 0, "late", last=True))
+        raise TimeoutError
+
+    monkeypatch.setattr(host_tools_mod.asyncio, "wait_for", racing_wait_for)
+    try:
+        items = await _collect(bridge.call("read_note", {}, 60))
+    finally:
+        monkeypatch.setattr(host_tools_mod.asyncio, "wait_for", real_wait_for)
+    assert items == [ToolProgress(text="step"), ToolOutcome(content="late", ok=True)]
+    assert bridge.pending == 0
+
+
 async def test_closing_answers_pending_calls_and_later_calls_send_nothing():
     events: list[dict] = []
     bridge = CloudHostTools(events.append)

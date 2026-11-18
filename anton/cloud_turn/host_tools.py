@@ -113,20 +113,31 @@ class CloudHostTools:
             while True:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
-                    break
-                try:
-                    line = await asyncio.wait_for(queue.get(), remaining)
-                except TimeoutError:
-                    break
-                if line is _CLOSED:
-                    break
-                if line["kind"] == PROGRESS_KIND:
-                    yield ToolProgress(text=line["text"])
+                    lines = self._drain(queue)
+                    timed_out = True
+                else:
+                    try:
+                        lines = [await asyncio.wait_for(queue.get(), remaining)]
+                        timed_out = False
+                    except TimeoutError:
+                        # A line that landed as the timer fired still counts.
+                        lines = self._drain(queue)
+                        timed_out = True
+                for line in lines:
+                    if line is _CLOSED:
+                        break
+                    if line["kind"] == PROGRESS_KIND:
+                        yield ToolProgress(text=line["text"])
+                        continue
+                    outcome = parts.add(line)
+                    if outcome is not None:
+                        yield outcome
+                        return
+                else:
+                    if timed_out:
+                        break
                     continue
-                outcome = parts.add(line)
-                if outcome is not None:
-                    yield outcome
-                    return
+                break
             # The name passed the contract's name rule, so the formatter may keep it.
             logger.info("cloud turn: host tool %s got no complete answer", tool,
                         extra={"event": "host_tool_unanswered", "reason": NO_ANSWER_REASON,
@@ -134,6 +145,15 @@ class CloudHostTools:
             yield _no_answer()
         finally:
             self._pending.pop(call_id, None)
+
+    @staticmethod
+    def _drain(queue: asyncio.Queue) -> list:
+        lines = []
+        while True:
+            try:
+                lines.append(queue.get_nowait())
+            except asyncio.QueueEmpty:
+                return lines
 
     def deliver(self, line: dict) -> None:
         """Hand one parsed host_tool_progress or host_tool_result line to its call. Runs on the event loop thread."""

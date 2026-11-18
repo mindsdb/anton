@@ -561,7 +561,7 @@ def _host_tool_spec(entry: object) -> HostToolSpecV1 | str:
     if not isinstance(description, str) or not description.strip():
         return "invalid_description"
     input_schema = entry.get("input_schema")
-    if not isinstance(input_schema, dict):
+    if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
         return "invalid_input_schema"
     prompt = entry.get("prompt")
     if prompt is not None and not isinstance(prompt, str):
