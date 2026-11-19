@@ -231,3 +231,41 @@ class TestUnknownSlug:
         result = await handle_recall_skill(session, {"label": "anything"})
         assert "NO MATCH" in result
         assert "empty" in result.lower()
+
+
+class TestHiddenSkills:
+    """`reading-files` is hidden where its libraries aren't installed, and a
+    recall must not load it there either: by name, by near miss, or from the
+    NO MATCH list."""
+
+    @pytest.fixture()
+    def store(self, tmp_path: Path) -> SkillStore:
+        from anton.core.memory import skills as skills_mod
+
+        return SkillStore(
+            root=tmp_path / "skills",
+            builtin_root=Path(skills_mod.__file__).parent / "builtin_skills",
+        )
+
+    def _session(self, store: SkillStore, *, offered: bool) -> SimpleNamespace:
+        return SimpleNamespace(_skill_store=store, _reading_files_offered=lambda: offered)
+
+    async def test_recalled_by_name_where_it_is_hidden(self, store):
+        result = await handle_recall_skill(self._session(store, offered=False), {"label": "reading-files"})
+        assert "READING WEB PAGES, DOCUMENTS AND SCANS" not in result
+        assert "NO MATCH" in result
+        assert "reading-files" not in result.split("Available skills:")[-1]
+
+    async def test_a_near_miss_does_not_resolve_to_it(self, store):
+        result = await handle_recall_skill(self._session(store, offered=False), {"label": "read-files"})
+        assert "READING WEB PAGES, DOCUMENTS AND SCANS" not in result
+
+    async def test_loaded_where_its_libraries_are_installed(self, store):
+        result = await handle_recall_skill(self._session(store, offered=True), {"label": "reading-files"})
+        content = result.content if hasattr(result, "content") else result
+        assert "READING WEB PAGES, DOCUMENTS AND SCANS" in content
+
+    async def test_a_session_without_the_gate_is_unaffected(self, store):
+        result = await handle_recall_skill(SimpleNamespace(_skill_store=store), {"label": "reading-files"})
+        content = result.content if hasattr(result, "content") else result
+        assert "READING WEB PAGES, DOCUMENTS AND SCANS" in content
