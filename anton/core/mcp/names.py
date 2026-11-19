@@ -14,6 +14,10 @@ import hashlib
 import re
 from dataclasses import dataclass
 
+#: Engine of every connection to an MCP server a user added by URL. Its
+#: record carries `_server_url`, `_allowed_tools` (a JSON list) and `_label`.
+CUSTOM_MCP_ENGINE = "custom_mcp"
+
 #: Model APIs reject a whole request whose tool name breaks this pattern.
 MAX_TOOL_NAME_LENGTH = 64
 _NAME_PART = re.compile(r"[A-Za-z0-9_-]+")

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import http.server
 import json
 import random
 import socket
+import ssl
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -14,14 +17,21 @@ import httpx2 as httpx
 import pytest
 
 import anton.core.llm.client as llm_client_mod
+import anton.core.mcp.wiring as wiring_mod
 from anton.cloud_turn.contract import TurnRequestV1
-from anton.cloud_turn.custom_mcp import CUT_LINE, DROPPED_LINE, MAX_RESULT_CHARS
+from anton.cloud_turn.custom_mcp import (
+    CUT_LINE,
+    DROPPED_LINE,
+    MAX_RESULT_CHARS,
+    build_custom_mcp_tools,
+)
 from anton.cloud_turn.session import (
     _WORKSPACE_PATH_ENV,
     CLOUD_TOOL_ALLOWLIST,
     build_cloud_chat_session,
 )
-from anton.core.root_cause import _SENTINEL_REASONS
+from anton.core.tools.tool_defs import ToolDef
+from tests.test_cloud_turn_custom_api_helper import _self_signed
 from tests.test_cloud_turn_session import _mock_llm
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -182,6 +192,25 @@ def test_every_definition_at_the_limits_registers_after_the_built_in_tools_sorte
     assert set(names) == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}) | set(custom)
 
 
+def test_custom_tools_come_right_after_the_built_in_mcp_tools(cloud, monkeypatch):
+    """A turn with an oauth block whose discovery finds one built-in MCP tool."""
+    async def built_in_handler(session, tc_input):
+        """Never called: the test only reads the tool list."""
+        return ""
+
+    built_in = ToolDef(
+        name="hubspot__search", description="Searches.", input_schema={"type": "object"}, handler=built_in_handler
+    )
+    monkeypatch.setattr(wiring_mod, "discover_mcp_tools", lambda vault, connections: ([built_in], []))
+    oauth = {"turn_key": "tk_abc", "connections": [{"engine": "hubspot", "name": "acme"}]}
+
+    names = [tool["name"] for tool in cloud(_request(oauth=oauth))._build_tools()]
+
+    custom = [name for name in names if name.startswith("custom_mcp__")]
+    start = names.index(built_in.name) + 1
+    assert custom and names[start:start + len(custom)] == custom
+
+
 def test_the_tool_list_is_the_same_bytes_on_every_build_of_one_turn(cloud):
     session = cloud(_request())
 
@@ -335,8 +364,30 @@ _FIXED = {
         'The custom server "Issues" was not called: the arguments are not a valid JSON object or are too large.'
     ),
     "invalid_connection": 'The custom server "Issues" is not available in this conversation.',
+    "gateway_disabled": 'The custom server "Issues" cannot be called for the rest of this reply, so do not try this tool again.',
+    "unauthorized": 'The custom server "Issues" cannot be called for the rest of this reply, so do not try this tool again.',
 }
 _UNAVAILABLE = 'The custom server "Issues" is temporarily unavailable. Try again shortly.'
+#: The exact reason per gateway code. Codes the desktop MCP path shares keep its reasons.
+_REASON = {
+    "unauthorized": "custom_mcp_turn_key_refused",
+    "gateway_disabled": "custom_mcp_gateway_disabled",
+    "invalid_request": "custom_mcp_invalid_request",
+    "invalid_connection": "custom_mcp_unknown_connection",
+    "authorization_unavailable": "mcp_transient_error",
+    "destination_forbidden": "mcp_egress_blocked",
+    "tool_not_allowed": "custom_mcp_tool_switched_off",
+    "needs_reconnect": "mcp_permanent_error",
+    "rate_limited": "mcp_transient_error",
+    "timed_out": "mcp_transient_error",
+    "response_too_large": "custom_mcp_too_large",
+    "listing_too_large": "mcp_transient_error",
+    "upstream_unavailable": "mcp_transient_error",
+}
+
+
+def test_every_gateway_code_has_an_expected_reason():
+    assert set(_REASON) == {error["code"] for error in _CALL["errors"]}
 
 
 @pytest.mark.parametrize("error", _CALL["errors"], ids=[error["code"] for error in _CALL["errors"]])
@@ -351,8 +402,7 @@ def test_each_gateway_code_gives_its_fixed_message_and_never_the_gateways_text(c
     assert outcome.ok is False
     assert outcome.content == _FIXED.get(error["code"], _UNAVAILABLE)
     assert detail not in outcome.content
-    # An untiered reason would leave the failure out of the root-cause counts.
-    assert outcome.reason in _SENTINEL_REASONS
+    assert outcome.reason == _REASON[error["code"]]
 
 
 @pytest.mark.parametrize(
@@ -380,6 +430,155 @@ def test_a_gateway_that_cannot_be_reached_reads_as_temporarily_unavailable(cloud
     outcome = _call(cloud(_request()), _EXAMPLE["tool"], _EXAMPLE["arguments"])
 
     assert outcome.ok is False
+    assert outcome.content == _UNAVAILABLE
+
+
+def test_a_redirect_is_not_followed_so_the_turn_key_goes_nowhere_else(cloud, gateway):
+    seen, answers = gateway
+    answers.extend(
+        [
+            httpx.Response(302, headers={"Location": "https://elsewhere.example/v1/datasources/custom-mcp/call"}),
+            httpx.Response(200, json=_CALL["call_response"]),
+        ]
+    )
+
+    outcome = _call(cloud(_request()), _EXAMPLE["tool"], _EXAMPLE["arguments"])
+
+    assert [str(request.url) for request in seen] == [_GATEWAY_URL]
+    assert outcome.content == _UNAVAILABLE
+
+
+def _refusal_of_size(size: int) -> bytes:
+    """A ``tool_not_allowed`` refusal body of exactly ``size`` bytes."""
+    empty = json.dumps({"code": "tool_not_allowed", "pad": ""}).encode()
+    return json.dumps({"code": "tool_not_allowed", "pad": "p" * (size - len(empty))}).encode()
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [(65_536, _FIXED["tool_not_allowed"]), (65_537, _UNAVAILABLE)],
+    ids=["at-the-cap", "one-byte-over"],
+)
+def test_a_refusal_body_over_64_kib_is_not_read_for_its_code(cloud, gateway, size, expected):
+    _, answers = gateway
+    body = _refusal_of_size(size)
+    assert len(body) == size
+    answers.append(httpx.Response(403, content=body))
+
+    outcome = _call(cloud(_request()), _EXAMPLE["tool"], _EXAMPLE["arguments"])
+
+    assert outcome.content == expected
+
+
+_CHUNK = b"x" * 65_536
+
+
+@pytest.mark.parametrize(("status", "cap"), [(200, 2_097_152), (403, 65_536)], ids=["answer", "refusal"])
+def test_a_body_past_its_cap_is_not_read_to_the_end(cloud, gateway, status, cap):
+    """A 64 MiB body: reading stops one chunk past the cap, and a long answer reads as too large."""
+    _, answers = gateway
+    pulled: list[int] = []
+
+    async def endless():
+        for _ in range(1024):
+            pulled.append(len(_CHUNK))
+            yield _CHUNK
+
+    answers.append(httpx.Response(status, content=endless()))
+
+    outcome = _call(cloud(_request()), _EXAMPLE["tool"], _EXAMPLE["arguments"])
+
+    assert cap < sum(pulled) <= cap + len(_CHUNK)
+    assert outcome.ok is False
+    assert outcome.content == (_FIXED["response_too_large"] if status == 200 else _UNAVAILABLE)
+    if status == 200:
+        assert outcome.reason == "custom_mcp_too_large"
+
+
+@pytest.fixture
+def tls_gateway(tmp_path):
+    """A local TLS gateway answering the contract's call response; yields (base URL, cert path, requests seen)."""
+    pytest.importorskip("cryptography")
+    cert_path, key_path = _self_signed(tmp_path)
+    seen: list[dict] = []
+
+    class Gateway(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            """Record the call and answer the contract's response."""
+            length = int(self.headers["Content-Length"])
+            seen.append(
+                {"line": self.requestline, "authorization": self.headers["Authorization"],
+                 "body": json.loads(self.rfile.read(length))}
+            )
+            payload = json.dumps(_CALL["call_response"]).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            """Keep the test output quiet."""
+
+    class QuietServer(http.server.HTTPServer):
+        def handle_error(self, request, client_address):
+            """A refused handshake is the expected outcome of one test, not noise."""
+
+    server = QuietServer(("127.0.0.1", 0), Gateway)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_path, key_path)
+    server.socket = context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"https://localhost:{server.server_address[1]}/v1", cert_path, seen
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _call_over_tls(base_url: str):
+    """One call of the contract's example tool, built from the block and sent to ``base_url``."""
+    block = _request().custom_mcp
+    (tool,) = [
+        t for t in build_custom_mcp_tools(
+            block, gateway_base_url=base_url, turn_key=_TURN_KEY, correlation_id=_EXAMPLE["correlation_id"]
+        )
+        if t.name.endswith("__" + _EXAMPLE["tool"])
+    ]
+    return asyncio.run(tool.handler(None, _EXAMPLE["arguments"]))
+
+
+def test_a_call_trusts_the_default_tls_store_and_ignores_proxy_settings(tls_gateway, monkeypatch):
+    """The CA comes from SSL_CERT_FILE, as the custom API helper's default context reads it; the proxy is never used."""
+    base_url, cert_path, seen = tls_gateway
+    monkeypatch.setenv("SSL_CERT_FILE", str(cert_path))
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+
+    outcome = _call_over_tls(base_url)
+
+    assert seen == [
+        {
+            "line": "POST /v1/datasources/custom-mcp/call HTTP/1.1",
+            "authorization": f"Bearer {_TURN_KEY}",
+            "body": _EXAMPLE,
+        }
+    ]
+    assert outcome.ok is True
+
+
+def test_a_gateway_whose_certificate_is_not_trusted_gets_nothing(tls_gateway, monkeypatch):
+    base_url, _cert_path, seen = tls_gateway
+    for name in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+        monkeypatch.delenv(name, raising=False)
+
+    outcome = _call_over_tls(base_url)
+
+    assert seen == []
     assert outcome.content == _UNAVAILABLE
 
 

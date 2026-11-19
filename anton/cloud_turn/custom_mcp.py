@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx2 as httpx
@@ -26,8 +28,7 @@ from anton.cloud_turn.contract import (
     CustomMcpConnectionV1,
     CustomMcpToolV1,
 )
-from anton.core.mcp.names import registrable_tool_name
-from anton.core.mcp.wiring import CUSTOM_MCP_ENGINE
+from anton.core.mcp.names import CUSTOM_MCP_ENGINE, registrable_tool_name
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.tool_defs import ToolDef
 
@@ -45,6 +46,9 @@ CUT_LINE = (
 )
 DROPPED_LINE = "[Part of this answer, such as an image, could not be shown here.]"
 _ERROR_BODY_LIMIT = 65_536
+#: The gateway writes its answer from at most 1 MiB of the server's own JSON, compactly;
+#: twice that is room for its wrapper, and an answer past it is not read further.
+_ANSWER_READ_LIMIT = 2_097_152
 _ANSWER_KEYS = frozenset(
     {"protocol_version", "connection_id", "credential_version", "content", "is_error", "dropped_content_types"}
 )
@@ -61,6 +65,8 @@ _MESSAGES = {
     "destination_forbidden": "{Server} is at an address that is not allowed, so this tool cannot run.",
     "invalid_request": "{Server} was not called: the arguments are not a valid JSON object or are too large.",
     "invalid_connection": "{Server} is not available in this conversation.",
+    "gateway_disabled": "{Server} cannot be called for the rest of this reply, so do not try this tool again.",
+    "unauthorized": "{Server} cannot be called for the rest of this reply, so do not try this tool again.",
 }
 _UNAVAILABLE = "{Server} is temporarily unavailable. Try again shortly."
 _UNREADABLE = "{Server} sent an answer that could not be read."
@@ -74,6 +80,8 @@ _REASONS = {
     "invalid_connection": "custom_mcp_unknown_connection",
     "response_too_large": "custom_mcp_too_large",
     "invalid_request": "custom_mcp_invalid_request",
+    "gateway_disabled": "custom_mcp_gateway_disabled",
+    "unauthorized": "custom_mcp_turn_key_refused",
 }
 
 
@@ -205,7 +213,19 @@ def _error_code(body: bytes) -> str | None:
     return code if isinstance(code, str) else None
 
 
-def _make_handler(*, url: str, turn_key: str, correlation_id: str, connection: CustomMcpConnectionV1, tool: str):
+async def _read_capped(response: httpx.Response, limit: int) -> bytes:
+    """The response body, read until it ends or passes ``limit`` bytes; at most one chunk more is read."""
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        body += chunk
+        if len(body) > limit:
+            break
+    return bytes(body)
+
+
+def _make_handler(
+    *, url: str, turn_key: str, correlation_id: str, connection: CustomMcpConnectionV1, tool: str
+) -> Callable[[Any, dict], Awaitable[ToolOutcome]]:
     """The async handler for one tool: one gateway call per model call, on a client of its own.
 
     Each call opens and closes its own client, so nothing outlives it and no
@@ -213,7 +233,13 @@ def _make_handler(*, url: str, turn_key: str, correlation_id: str, connection: C
     """
     words = _server_words(connection.label)
 
-    async def handle_custom_mcp_call(session, tc_input: dict) -> ToolOutcome:
+    async def handle_custom_mcp_call(session: Any, tc_input: dict) -> ToolOutcome:
+        """Post one call to the gateway and turn its answer into the model's result.
+
+        Input: the chat session (unused) and the model's arguments. Output: the
+        rendered answer, or a fixed message with a tiered reason. Sends the turn
+        key as the bearer and nothing else; never raises on a gateway failure.
+        """
         arguments = {} if tc_input is None else tc_input
         if not isinstance(arguments, dict):
             return ToolOutcome(
@@ -233,17 +259,24 @@ def _make_handler(*, url: str, turn_key: str, correlation_id: str, connection: C
             return ToolOutcome(
                 content=_MESSAGES["invalid_request"].format(**words), ok=False, reason="custom_mcp_invalid_request"
             )
+        headers = {
+            "Authorization": f"Bearer {turn_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
         try:
-            async with httpx.AsyncClient(timeout=CALL_TIMEOUT_SECONDS, follow_redirects=False) as client:
-                response = await client.post(
-                    url,
-                    content=payload,
-                    headers={
-                        "Authorization": f"Bearer {turn_key}",
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
-                    },
-                )
+            # As the custom API helper that sends the same key: no proxy from the
+            # environment, the default TLS context, and no redirects.
+            async with httpx.AsyncClient(
+                timeout=CALL_TIMEOUT_SECONDS,
+                follow_redirects=False,
+                trust_env=False,
+                verify=ssl.create_default_context(),
+            ) as client:
+                async with client.stream("POST", url, content=payload, headers=headers) as response:
+                    status = response.status_code
+                    limit = _ANSWER_READ_LIMIT if status == 200 else _ERROR_BODY_LIMIT
+                    body = await _read_capped(response, limit)
         except httpx.HTTPError as exc:
             logger.warning(
                 "custom MCP call did not reach the gateway: %s",
@@ -251,12 +284,16 @@ def _make_handler(*, url: str, turn_key: str, correlation_id: str, connection: C
                 extra={"event": "custom_mcp_call_failed", "connection_id": connection.connection_id},
             )
             return ToolOutcome(content=_UNAVAILABLE.format(**words), ok=False, reason="mcp_transient_error")
-        if response.status_code != 200:
-            code = _error_code(response.content)
+        if status != 200:
+            code = _error_code(body)
             if code not in _MESSAGES:
                 return ToolOutcome(content=_UNAVAILABLE.format(**words), ok=False, reason="mcp_transient_error")
             return ToolOutcome(content=_MESSAGES[code].format(**words), ok=False, reason=_REASONS[code])
-        answer = _read_answer(response.content, connection)
+        if len(body) > _ANSWER_READ_LIMIT:
+            return ToolOutcome(
+                content=_MESSAGES["response_too_large"].format(**words), ok=False, reason="custom_mcp_too_large"
+            )
+        answer = _read_answer(body, connection)
         if answer is None:
             return ToolOutcome(content=_UNREADABLE.format(**words), ok=False, reason="custom_mcp_invalid_answer")
         text = render_answer(answer["content"], bool(answer["dropped_content_types"]))

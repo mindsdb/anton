@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from anton.config.settings import AntonSettings
     from anton.core.interaction.elicit import Elicitor
     from anton.core.session import ChatSession
+    from anton.core.tools.tool_defs import ToolDef
 
 logger = logging.getLogger(__name__)
 
@@ -276,7 +277,7 @@ def _cloud_turn_workspace_env(request: TurnRequestV1, settings: AntonSettings) -
     return overlay
 
 
-def _custom_mcp_tool_defs(request: TurnRequestV1, settings: AntonSettings) -> list:
+def _custom_mcp_tool_defs(request: TurnRequestV1, settings: AntonSettings) -> list[ToolDef]:
     """Build this turn's custom MCP tools, refusing a turn whose calls could not reach its gateway.
 
     Input: the parsed request and the turn's settings. Output: the tools in their

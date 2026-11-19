@@ -117,6 +117,21 @@ def test_a_text_that_does_not_parse_to_finite_json_drops_the_block_and_raises_no
     _dropped(caplog, _block(_connection([text])))
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"description":"bad \\ud800","input_schema":{"properties":{},"type":"object"},"name":"text"}',
+        '{"description":"","input_schema":{"properties":{"a\\udc00":{}},"type":"object"},"name":"text"}',
+    ],
+    ids=["in-a-string", "in-a-key"],
+)
+def test_an_escaped_lone_surrogate_drops_the_block_as_auths_text_rule_does(caplog, text):
+    """The escape is plain ASCII, so the size step passes it; the parse yields text no request can encode."""
+    assert text.isascii()
+
+    _dropped(caplog, _block(_connection([text])))
+
+
 def _nested(levels: int) -> str:
     return '{"description":"","input_schema":{"default":' + "[" * levels + "]" * levels + ',"type":"object"},"name":"deep"}'
 

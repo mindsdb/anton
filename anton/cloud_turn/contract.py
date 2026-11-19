@@ -469,14 +469,24 @@ def _finite_float(text: str) -> float:
     return value
 
 
-def _holds_nul(value: object) -> bool:
-    """Whether any string or key inside ``value`` holds ``\\u0000``; the parser has bounded the depth."""
+def _holds_unclean_text(value: object) -> bool:
+    """Whether any string or key inside ``value`` holds ``\\u0000`` or does not encode as UTF-8.
+
+    auth's text rule. An escaped lone surrogate passes the size step as ASCII
+    and decodes to text no request can encode. The parser has bounded the depth.
+    """
     if isinstance(value, str):
-        return "\x00" in value
+        if "\x00" in value:
+            return True
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return True
+        return False
     if isinstance(value, dict):
-        return any(_holds_nul(key) or _holds_nul(item) for key, item in value.items())
+        return any(_holds_unclean_text(key) or _holds_unclean_text(item) for key, item in value.items())
     if isinstance(value, list):
-        return any(_holds_nul(item) for item in value)
+        return any(_holds_unclean_text(item) for item in value)
     return False
 
 
@@ -514,7 +524,7 @@ def _custom_mcp_tool(text: object) -> CustomMcpToolV1 | None:
         or schema.get("type") != "object"
         or not isinstance(schema.get("properties", {}), dict)
         or {"anyOf", "oneOf", "allOf"} & set(schema)
-        or _holds_nul(definition)
+        or _holds_unclean_text(definition)
     ):
         return None
     return CustomMcpToolV1(name, description, schema)

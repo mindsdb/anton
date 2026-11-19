@@ -285,6 +285,10 @@ _SENTINEL_REASONS = {
     "custom_mcp_too_large": (TIER_SELF, "invalid_argument"),
     # The gateway's answer did not match the call contract: nothing says which side.
     "custom_mcp_invalid_answer": (TIER_UNCLASSIFIED, "unclassified"),
+    # The gateway is switched off, or refused this turn's key: no call can
+    # work again in this turn, and only the operator or a new turn changes that.
+    "custom_mcp_gateway_disabled": (TIER_WALL, "service_unavailable"),
+    "custom_mcp_turn_key_refused": (TIER_WALL, "auth_missing"),
     # The browser tool. A malformed step, or an element number from
     # a page that has since changed: the agent re-reads the page and fixes it.
     "browser_bad_input": (TIER_SELF, "invalid_argument"),
