@@ -194,26 +194,11 @@ LEAN_TOOL_DESCRIPTIONS = {
         "match returns it; several matches, or a single guess, need the user's confirmation. Files "
         "outside the project cannot be reached: ask the user to attach them."
     ),
-    "ask_user": (
-        "Ask the user to pick from 2-10 concrete options; the answer comes back within this turn. Use "
-        "it instead of a text question when the answers form a short closed set. On cancelled or "
-        "timeout, end your turn and do not act on an assumed answer."
-    ),
     "memorize": (
         "Save a rule (always, never, when), a lesson (a fact) or a profile fact (who the user is) to "
         "long-term memory. Scope is 'project' unless the user says it applies to all their projects."
     ),
-    "create_artifact": (
-        "Register an artifact folder before writing its files by hand: a document, dataset, image or "
-        "mixed output, or a report the user fully specified. For a new web page or app call "
-        "generate_artifact directly instead. Before hand-editing generator-made code, recall "
-        "build-html-dashboard or build-fullstack-backend."
-    ),
     "list_artifacts": "List this workspace's artifacts, newest first; pass match for one artifact's full record and files.",
-    "update_artifact": (
-        "Change an artifact's metadata: its primary file, backend port, or the datasources its backend "
-        "reads (required for a fullstack app whose backend uses DS_ variables)."
-    ),
     "launch_backend": (
         "Start or restart a hand-built artifact backend; it must follow the build-fullstack-backend "
         "skill. Not needed after generate_artifact, which launches the backend itself."
@@ -223,14 +208,6 @@ LEAN_TOOL_DESCRIPTIONS = {
         "or fix a reported bug or a failed browser check. Pass its slug (or exact name) and a task with "
         "every concrete requirement. Use it instead of patching files in the scratchpad, and instead of "
         "generate_artifact for any change short of a rebuild."
-    ),
-    "generate_artifact": (
-        "Build a NEW web artifact (dashboard, report page or fullstack app) end to end: pass name, "
-        "user_request (the user's words verbatim), user_language and agent_understanding, and omit "
-        "slug. It gathers the data itself, asks the user what is still unclear, writes and verifies the "
-        "code, and launches fullstack backends. Do not call create_artifact or fetch its data first. "
-        "Follow the instruction in its result. Pass an existing slug only to rebuild; for changes use "
-        "edit_artifact."
     ),
     "connect_new_datasource": (
         "Save credentials the user pasted in chat to the vault, passing every value as known_variables. "
@@ -248,6 +225,43 @@ LEAN_TOOL_DESCRIPTIONS = {
         "skills/ folder."
     ),
 }
+
+
+def lean_tool_description(tool: dict, tools: dict[str, dict]) -> str | None:
+    """The lean description for `tool`, a dumped tool among the session's `tools` by name; None keeps
+    its full text. The artifact tools' texts follow the variant registered, as their full texts do."""
+    name, props = tool["name"], tool["input_schema"].get("properties", {})
+    fullstack, editor = "launch_backend" in tools, "edit_artifact" in tools
+    single = "name" in tools.get("generate_artifact", {}).get("input_schema", {}).get("properties", {})
+    if name == "generate_artifact":
+        kinds = "dashboard, report page or fullstack app" if fullstack else "dashboard or report page"
+        if single:
+            text = (f"Build a NEW web artifact ({kinds}) end to end: pass name, user_request (the user's "
+                    "words verbatim), user_language and agent_understanding, and omit slug.")
+        else:
+            text = (f"Build a web artifact ({kinds}) registered with create_artifact end to end: pass its "
+                    "slug, user_request (the user's words verbatim), user_language and agent_understanding.")
+        text += (" It gathers the data itself, asks the user what is still unclear, writes and verifies the code"
+                 + (", and launches fullstack backends" if fullstack else "") + ". Do not fetch its data first"
+                 + (" or call create_artifact" if single else "") + ". Follow the instruction in its result.")
+        if editor:
+            text += (" Pass an existing slug only to rebuild; for changes use edit_artifact." if single
+                     else " For changes to an existing artifact use edit_artifact.")
+        return text
+    if name == "create_artifact":
+        direct = "fully specified" in tool["description"]
+        return ("Register an artifact folder before writing its files by hand: a document, dataset, image or "
+                "mixed output" + (", or a report the user fully specified" if direct else "") + "."
+                + (" For a new web page or app call generate_artifact directly instead." if single
+                   else " For a web page or app, register it here, then build it with generate_artifact.")
+                + " Before hand-editing generator-made code, recall build-html-dashboard"
+                + (" or build-fullstack-backend" if fullstack else "") + ".")
+    if name == "update_artifact":
+        if "port" in props:
+            return ("Change an artifact's metadata: its primary file, backend port, or the datasources its "
+                    "backend reads (required for a fullstack app whose backend uses DS_ variables).")
+        return "Change an artifact's metadata: its primary file, or the datasources it reads."
+    return LEAN_TOOL_DESCRIPTIONS.get(name)
 
 
 def lean_scratchpad_description(*, internet_research: bool = True, classify: bool = True) -> str:

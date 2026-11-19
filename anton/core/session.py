@@ -147,8 +147,8 @@ from anton.core.tools.tool_defs import (
     STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
-    LEAN_TOOL_DESCRIPTIONS,
     lean_scratchpad_description,
+    lean_tool_description,
     scratchpad_tool as _scratchpad_tool_def,
     ToolDef,
 )
@@ -3255,8 +3255,7 @@ class ChatSession:
     def _lean_prompt_enabled(self) -> bool:
         """`lean_prompt` from the settings the host passed; False without them, so a
         session built without settings (the connector probe) keeps the full prompt."""
-        settings = getattr(self, "_settings", None)
-        return bool(getattr(settings, "lean_prompt", False)) if settings is not None else False
+        return bool(getattr(getattr(self, "_settings", None), "lean_prompt", False))
 
     def _direct_reports_enabled(self) -> bool:
         """`direct_reports` from the settings the host passed; True without
@@ -3472,10 +3471,11 @@ class ChatSession:
                 )
             for name in built - set(self._tool_allowlist):
                 self.tool_registry.unregister_tool(name)
+        tools = self.tool_registry.dump()
         if self._lean_prompt_enabled():
-            return [dict(t, description=LEAN_TOOL_DESCRIPTIONS.get(t["name"], t["description"]))
-                    for t in self.tool_registry.dump()]
-        return self.tool_registry.dump()
+            by_name = {t["name"]: t for t in tools}
+            return [dict(t, description=lean_tool_description(t, by_name) or t["description"]) for t in tools]
+        return tools
 
     def _register_tool_bundle(self, label: str) -> None:
         """Register the deferred tools a recalled skill unlocks.
