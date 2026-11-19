@@ -1,5 +1,6 @@
 """Built-in packaged skills: shipped content, store integration, hint-label drift."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -606,6 +607,82 @@ class TestCoworkProductSkill:
         assert fallback.index("First give whatever part") < fallback.index(
             "https://docs.mindshub.ai"
         )
+
+    @staticmethod
+    def _section(body: str, start: str, end: str) -> str:
+        return " ".join(body.split(f"\n{start}")[1].split(f"\n{end}")[0].split())
+
+    def test_says_what_it_cannot_make_and_offers_something_real(self, store):
+        """New users asked for a video and got a code-drawn loop reported as
+        created, or asked whether it makes images and were told to check the
+        docs. The section must say no plainly, keep images conditional on a
+        tool (image generation is coming), and offer real alternatives."""
+        body = store.load("cowork-product").declarative_md
+        section = self._section(body, "WHAT COWORK CANNOT MAKE", "PLANS, ALLOWANCE AND MODELS")
+        assert "does not generate video or audio" in section
+        # Image generation exists where the tool is offered; the skill must say
+        # to use it there, not that Cowork cannot make images at all.
+        assert "Cowork generates images when a `generate_image` tool" in section
+        # The fast responder (cowork-server direct_answer) inlines this skill
+        # but has no tools, so without this it told users whose agent can make
+        # images that Cowork cannot.
+        assert "If you are replying without tools, do not say it cannot" in section
+        # The gateway bills images to credits only, never the free Air
+        # allowance, so a free user told "yes" must also hear where to add them.
+        assert ("On MindsHub's image models, image generation uses MindsHub credits; "
+                "the free Air allowance does not cover it") in section
+        assert ("give the link to add credits: "
+                "https://console.mindshub.ai/settings/organization/billing") in section
+        assert "When an image call is refused for MindsHub credits" in section
+        # generate_image is also offered on the user's own OpenAI key, which
+        # MindsHub credits do not pay for: the credits guidance must not be
+        # stated for every image provider.
+        assert "With the user's own OpenAI key in the desktop app, images are billed to" in section
+        assert "MindsHub credits do not pay for them" in section
+        assert "Image generation uses credits" not in section
+        assert "first sentence" in section
+        assert "Never describe a drawing made with code as the photo" in section
+        # Simple drawings are real output, not a substitute; the rule must not
+        # stop them. A bare "cannot make an image" made the agent refuse a
+        # coloring page.
+        assert "simple drawings made with code are real output too" in section
+        assert "a coloring page" in section and "data visualisations" in section
+        # Where generate_image is offered, its prompt sends icons and logos to
+        # it and forbids drawing them with code; this list must not disagree.
+        drawn = section.split("Charts, diagrams and data visualisations")[1].split("\n-")[0]
+        assert "Without an image tool" in drawn
+        assert "icon" not in drawn and "logo" not in drawn
+        assert "Do not make the simple version before the user picks it" in section
+
+    def test_answers_cost_from_rules_without_figures_that_go_stale(self, store):
+        """Asked about the free allowance or price, the agent said it could
+        not see them. Sizes and prices are server-side dials, so the skill
+        states the rules and where to look, never a number."""
+        body = store.load("cowork-product").declarative_md
+        section = self._section(body, "PLANS, ALLOWANCE AND MODELS", "WHAT COWORK CAN REACH")
+        assert "MindsHub Air is free up to a usage allowance that refills" in section
+        assert "credit balance" in section
+        assert "Every other MindsHub model needs credits" in section
+        assert "and so do MindsHub's image models" in section
+        assert "https://console.mindshub.ai/settings/organization/billing" in section
+        assert "Do not state an allowance size, a price or a refill time" in section
+        assert not re.search(r"[$€£]\s?\d|\d+\s?(?:M|million|k)\s+tokens", section)
+
+    def test_says_a_chat_subscription_is_not_an_api_key(self, store):
+        body = store.load("cowork-product").declarative_md
+        section = self._section(body, "PLANS, ALLOWANCE AND MODELS", "WHAT COWORK CAN REACH")
+        assert "chat subscription cannot be used in Cowork" in section
+        assert "Settings → Agent → LLM Providers" in section
+        assert "browser version uses MindsHub's models only" in section
+
+    def test_gives_a_route_to_a_local_folder_instead_of_a_bare_refusal(self, store):
+        """Desktop users asking to work in a folder were refused with no next
+        step, though the new-project dialog takes an existing folder."""
+        body = store.load("cowork-product").declarative_md
+        section = self._section(body, "WHAT COWORK CAN REACH", "SURFACES —")
+        assert "In the browser:" in section and "cannot reach the user's computer" in section
+        assert "In the desktop app:" in section
+        assert '"Use an existing folder"' in section
 
     def test_forbids_answering_from_general_knowledge(self, store):
         body = store.load("cowork-product").declarative_md

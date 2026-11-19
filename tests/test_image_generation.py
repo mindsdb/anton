@@ -354,6 +354,49 @@ async def test_failures_come_back_as_messages_to_relay(status, body, headers, co
     assert phrase in str(caught.value)
 
 
+async def test_a_credits_refusal_tells_the_model_to_give_the_billing_link():
+    """An image request never recalls the product skill, so the tool's message
+    is all the model sees. Without these words, replies dropped the link and
+    blamed the image service rather than the user's own account."""
+    gateway = Gateway(status=402, body={"error": {"code": "wallet_empty", "message": "refused"}})
+    with pytest.raises(images.ImageGenerationError) as caught:
+        await _client(gateway).generate_image(prompt="x")
+    message = str(caught.value)
+    assert "https://console.mindshub.ai/settings/organization/billing to continue" in message
+    assert "No image was made" in message
+    assert "their own MindsHub account, not a fault in Cowork" in message
+    assert "image generation uses credits" in message
+    assert "give them the link in this message exactly as written" in message
+
+
+async def test_a_budget_refusal_points_at_the_budget_not_at_credits():
+    """Credits do not lift a spent budget, so the model must not say they do."""
+    gateway = Gateway(status=402, body={"error": {"code": "budget_exceeded", "message": "refused"}})
+    with pytest.raises(images.ImageGenerationError) as caught:
+        await _client(gateway).generate_image(prompt="x")
+    message = str(caught.value)
+    assert "https://console.mindshub.ai/settings/organization/billing?tab=budgets" in message
+    assert "spending budget, not a fault in Cowork, that an owner or admin can raise it" in message
+    assert "uses credits" not in message
+    assert "give them the link in this message exactly as written" in message
+
+
+async def test_a_refusal_from_the_users_own_openai_key_says_nothing_about_mindshub_billing():
+    """With the user's own OpenAI key, OpenAI bills the image; MindsHub credits
+    do not pay for it, so the message must not send them to MindsHub billing,
+    even when the body carries MindsHub's own billing code."""
+    gateway = Gateway(status=402, body={"error": {"code": "wallet_empty", "message": "Billing hard limit reached"}})
+    client = _client(gateway, base_url="https://api.openai.com/v1", flavor=OpenAIProvider.FLAVOR_OPENAI)
+    with pytest.raises(images.ImageGenerationError) as caught:
+        await client.generate_image(prompt="x")
+    message = str(caught.value)
+    assert caught.value.status_code == 402
+    assert "No image was made" in message or "no image was" in message
+    assert "console.mindshub.ai" not in message
+    assert "MindsHub" not in message
+    assert "credits" not in message
+
+
 async def test_an_image_call_is_sent_once_even_where_the_sdk_would_retry():
     """A retried 5xx/429/timeout would draw, and bill, the picture again."""
     gateway = Gateway(status=503, body={"error": {"message": "busy"}})

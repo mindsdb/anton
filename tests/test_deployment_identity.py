@@ -58,12 +58,26 @@ _DEFAULT_LINES = [
     "- Cowork runs as a desktop app on macOS, Windows and Linux, and in the browser. "
     "Some features exist on only one of those, so never assume a feature you know "
     "about is reachable from where this user is.",
+    "- Unless one of your tools or a service the user connected generates them, you "
+    "cannot make photos, realistic or detailed illustrations, video or audio. When "
+    "asked for one, say so in your first sentence and offer what you can do instead. "
+    "Do not draw a substitute unasked. Charts and diagrams are drawn with code. "
+    "Without an image tool, a request that is itself for a simple drawing, such as "
+    "line art or a coloring page, is made with code too: that is real output. Call a "
+    "drawing what it is, never a photo, an illustration or a video. When a larger piece "
+    "of work, such as slides or a page, asks for pictures, illustrations or photos and "
+    "you have no image tool, draw simple graphics for it with code. Every time your reply "
+    "names them, summary included, call them simple drawn graphics, never illustrations, "
+    "artwork or images, and add one sentence saying that real illustrations or photos "
+    "need image generation, which you do not have here. A request that is itself for a "
+    "simple drawing, or work that asks for no pictures, needs no such sentence.",
 ]
 _DEFAULT_RULE = (
     "- If asked what Cowork is, who makes it, how to install, update or remove it, "
     "which platforms or editions exist, where a setting or feature lives, which models "
-    "it can use (including local models such as Ollama or LM Studio), or what it "
-    "costs, call `recall_skill(\"cowork-product\")` and answer from it. Do not answer "
+    "it can use (including local models such as Ollama or LM Studio), what it costs "
+    "or how much is free, what it can make, or which files and computers it can reach, "
+    "call `recall_skill(\"cowork-product\")` and answer from it. Do not answer "
     "those from general knowledge, and do not guess or web-search for them. If it "
     "does not cover the question, say so plainly and point the user at "
     "https://docs.mindshub.ai — never fill the gap with a guess."
@@ -83,10 +97,10 @@ def test_default_product_lines_are_byte_identical(surface, line):
 
 
 @pytest.mark.parametrize(("surface", "digest"), [
-    (None, "fa8007de74ec3fd6e9a8a0aa68e1c240100a9e5dc07c7ce39606d9d18a48bef0"),
-    ("desktop", "fcc6a8547a22717c5b7beb065122a64e5eb5babb34c824485155c62e9c983ca3"),
-    ("web", "ccb211b6681d9180b05e9373fc6dc7e55cb55b807d4f39277547b8f6e0ce06a1"),
-    ("cli", "12e6805c99223e608142ecf98ac61a358535c8c7c7cf4969b5bc10a43552d4e5"),
+    (None, "8b1eb2d35263532d524fc055121bd64bb41f9613827945a53352c602a18c58c6"),
+    ("desktop", "2dd7c86a208d8c0734ddecbd2a7aa7f0b0c084d41e9b6728d6a7b42753c92eff"),
+    ("web", "0124328152f0c4fb878ef32698ebc88d34b5c80b4636762ae333ed25c4a5326a"),
+    ("cli", "e70d22a03597a853d6844abb293b51189fbc228409139ecbb24133705a7f7276"),
 ])
 def test_complete_default_builder_output_is_byte_identical(surface, digest):
     # Snapshot the current complete default prompt for each surface, including
@@ -246,3 +260,43 @@ async def test_identity_remains_authoritative_in_model_call_after_recall(tmp_pat
         assert any(DEPLOYMENT_PRODUCT_SKILL_PREFACE in content for content in results)
     finally:
         await session.close()
+
+
+# A request for an image or a video is not a question about the product, so the
+# skill is never recalled for it: the rule has to ride in the always-on lines,
+# on every surface and in a self-hosted deployment too.
+@pytest.mark.parametrize("identity", [None, deployment()])
+@pytest.mark.parametrize("surface", ["desktop", "web", "cli", None])
+def test_every_prompt_says_what_cannot_be_made(surface, identity):
+    joined = "\n".join(product_lines(surface, identity))
+    assert "cannot make photos, realistic or detailed illustrations, video or audio" in joined
+    assert "say so in your first sentence" in joined
+    # A bare "cannot make images" made the agent refuse a coloring page it can draw.
+    assert "a coloring page" in joined and "that is real output" in joined
+    # Asked for a realistic picture, it offers a drawing rather than making one.
+    assert "Do not draw a substitute unasked" in joined
+    assert "never a photo, an illustration or a video" in joined
+    # Asked for "a pitch deck with nice illustrations" without an image tool,
+    # the agent drew SVGs and called them illustrations.
+    assert "When a larger piece of work, such as slides or a page, asks for pictures" in joined
+    # A coloring page or a chart deck is not asked to carry the disclaimer.
+    assert "A request that is itself for a simple drawing, or work that asks for no pictures, needs no such sentence" in joined
+    assert "summary included, call them simple drawn graphics, never illustrations" in joined
+    assert "real illustrations or photos need image generation" in joined
+
+
+# Where generate_image is offered, its prompt sends illustrations, icons and
+# logos to it and forbids drawing them with code. The always-on line rides in
+# that same prompt, so its draw-with-code sentence must stay conditional on
+# there being no image tool and must not name an icon or a logo.
+def test_draw_with_code_sentence_does_not_contradict_the_image_tool():
+    from anton.core.llm.identity import _CANNOT_MAKE_LINE
+    from anton.core.tools.tool_defs import _IMAGES_PROMPT_HEAD
+
+    drawn = _CANNOT_MAKE_LINE.split("Charts and diagrams are drawn with code.")[1]
+    drawn = drawn.split("Call a drawing what it is")[0]
+    assert drawn.startswith(" Without an image tool,")
+    for word in ("icon", "logo", "illustration"):
+        assert word not in drawn
+    # The image prompt still draws charts and diagrams with code, as this line does.
+    assert "Charts, plots and diagrams of data are still drawn with code" in _IMAGES_PROMPT_HEAD
