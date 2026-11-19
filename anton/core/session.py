@@ -3363,6 +3363,7 @@ class ChatSession:
             internet_research=getattr(self, "_internet_research_enabled", True),
             classify=getattr(self, "_classify_enabled", True),
             direct_reports=self._direct_reports_enabled(),
+            lean=self._lean_prompt_enabled(),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,

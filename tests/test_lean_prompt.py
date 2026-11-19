@@ -3,6 +3,7 @@
 import pytest
 
 from anton.config.settings import AntonSettings
+from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.tools.tool_defs import lean_scratchpad_description
 
 
@@ -29,6 +30,11 @@ async def test_a_lean_session_keeps_every_tool_and_schema_with_shorter_descripti
     assert sum(len(t["description"]) for t in lean_tools.values()) < sum(
         len(t["description"]) for t in full_tools.values()) / 2
 
+    full_prompt = await full._build_system_prompt("hi")
+    lean_prompt = await lean._build_system_prompt("hi")
+    assert len(lean_prompt) < len(full_prompt)
+    assert "ARTIFACTS (" in lean_prompt
+
 
 @pytest.mark.asyncio
 async def test_a_session_without_settings_keeps_the_full_prompt(make_session):
@@ -44,3 +50,14 @@ def test_the_lean_scratchpad_offers_only_the_helpers_the_session_has(internet_re
     assert ("web_search" in text) is internet_research
     assert ("classify" in text) is classify
 
+
+def test_the_lean_prompt_keeps_the_no_internet_rule():
+    def build(internet_research: bool) -> str:
+        return ChatSystemPromptBuilder().build(
+            conversation_started="Tuesday", system_prompt_context=SystemPromptContext(),
+            proactive_dashboards=True, output_dir="/tmp/out", lean=True,
+            internet_research=internet_research,
+        )
+
+    assert "Internet research is turned off" not in build(True)
+    assert "Internet research is turned off" in build(False)
