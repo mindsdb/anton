@@ -301,12 +301,6 @@ def _clip_stdout(raw: str, total: int, cwd_note: str) -> str:
     return text
 
 
-# ── Namespace-snapshot layout (ENG-1124) ────────────────────────────────────
-# One derivation, shared by the writer (the runtime) and the single-scratchpad
-# guard (which needs to know which pads a conversation has already used, across
-# turns). Keeping it in one place is the point: if these two disagreed, the guard
-# would silently stop firing again.
-
 def _inherited_requirements(requirements: list[str]) -> list[str]:
     """The bare names in `requirements` the pad already has from this interpreter.
 
@@ -321,12 +315,14 @@ def _inherited_requirements(requirements: list[str]) -> list[str]:
     install) is not importable in the pad, because Python does not read `.pth`
     files in a folder a `.pth` added; and one with no file list can't be
     checked. Both still go to the installer.
+
+    Only the requested names are looked up, so the cost does not grow with the
+    number of installed packages.
     """
     import site
     from importlib.metadata import distributions
 
     from packaging.requirements import InvalidRequirement, Requirement
-    from packaging.utils import canonicalize_name
 
     def importable_from_the_folder(dist) -> bool:
         files = dist.files
@@ -334,22 +330,25 @@ def _inherited_requirements(requirements: list[str]) -> list[str]:
             return False
         return not any(f.suffix == ".pth" and len(f.parts) == 1 for f in files)
 
-    installed = {
-        canonicalize_name(dist.metadata["Name"])
-        for dist in distributions(path=site.getsitepackages())
-        if dist.metadata["Name"] and importable_from_the_folder(dist)
-    }
+    path = site.getsitepackages()
     inherited = []
     for spec in requirements:
         try:
             req = Requirement(spec)
         except InvalidRequirement:
             continue
-        bare = not (req.specifier or req.extras or req.url or req.marker)
-        if bare and canonicalize_name(req.name) in installed:
+        if req.specifier or req.extras or req.url or req.marker:
+            continue
+        if any(importable_from_the_folder(d) for d in distributions(name=req.name, path=path)):
             inherited.append(spec)
     return inherited
 
+
+# ── Namespace-snapshot layout (ENG-1124) ────────────────────────────────────
+# One derivation, shared by the writer (the runtime) and the single-scratchpad
+# guard (which needs to know which pads a conversation has already used, across
+# turns). Keeping it in one place is the point: if these two disagreed, the guard
+# would silently stop firing again.
 
 def default_venvs_base(workspace_path: Path | None) -> Path:
     """Where a workspace's scratchpad venvs live."""
