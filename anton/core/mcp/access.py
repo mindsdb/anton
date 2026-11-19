@@ -139,6 +139,39 @@ TOOL_ACCESS: dict[str, dict[str, str]] = {
         "notion-memory-search": "read",
         "notion-get-file-download-urls": "read",
     },
+    # From a live tools/list (2026-11-19, 27 tools).
+    "slack": {
+        # READ
+        "slack_search_public": "read",
+        "slack_search_public_and_private": "read",
+        "slack_search_channels": "read",
+        "slack_search_users": "read",
+        "slack_search_emojis": "read",
+        "slack_read_channel": "read",
+        "slack_read_thread": "read",
+        "slack_list_channel_members": "read",
+        "slack_list_user_channels": "read",
+        "slack_read_user_profile": "read",
+        "slack_get_reactions": "read",
+        "slack_read_canvas": "read",
+        "slack_read_list": "read",
+        "slack_read_file": "read",
+        # WRITE
+        "slack_send_message": "write",
+        "slack_schedule_message": "write",
+        "slack_send_message_draft": "write",
+        "slack_add_reaction": "write",
+        "slack_create_conversation": "write",
+        "slack_create_canvas": "write",
+        "slack_update_canvas": "write",
+        "slack_create_list": "write",
+        "slack_update_list": "write",
+        "slack_add_list_record": "write",
+        "slack_update_list_record": "write",
+        # Reserves an upload slot for a new file; despite the name, a write.
+        "slack_get_file_upload_url": "write",
+        "slack_complete_file_upload": "write",
+    },
 }
 
 
@@ -187,6 +220,24 @@ TOOL_OUTPUT: dict[str, dict[str, ToolOutput]] = {
         "notion-list-favorite-pages": "metadata",  # page titles and ids
         "notion-list-recent-pages": "metadata",  # page titles and ids
         "notion-get-file-download-urls": "metadata",  # signed file links
+    },
+    "slack": {
+        # RECORDS
+        "slack_search_public": "records",  # matching messages and files
+        "slack_search_public_and_private": "records",  # matching messages and files
+        "slack_read_channel": "records",  # a channel's messages
+        "slack_read_thread": "records",  # a thread's messages
+        "slack_get_reactions": "records",  # reactions on a message
+        "slack_read_canvas": "records",  # a canvas's content
+        "slack_read_list": "records",  # a list's items
+        "slack_read_file": "records",  # a file's content
+        # METADATA
+        "slack_search_channels": "metadata",  # channel names and ids
+        "slack_search_users": "metadata",  # workspace members
+        "slack_search_emojis": "metadata",  # custom emoji
+        "slack_list_channel_members": "metadata",  # a channel's members
+        "slack_list_user_channels": "metadata",  # a user's channels
+        "slack_read_user_profile": "metadata",  # a member's profile
     },
 }
 
