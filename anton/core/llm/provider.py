@@ -811,7 +811,7 @@ def parse_reset_at(value: object) -> str | None:
 class MindsHubBillingStop(TokenLimitExceeded):
     """The MindsHub authorization gate refused a request on billing grounds.
 
-    Base of the four billing denials the gate names; only the subclasses are raised,
+    Base of the six billing denials the gate names; only the subclasses are raised,
     by :func:`mindshub_billing_stop`. Subclassing ``TokenLimitExceeded`` keeps
     every existing catch working: the no-retry re-raise in
     ``ChatSession.turn_stream``, the verifier's ``_DENIED_VERDICT_ERRORS`` latch
@@ -819,8 +819,9 @@ class MindsHubBillingStop(TokenLimitExceeded):
     ``is_token_limit_error``. Parts of it survive a hosted turn's
     ``turn_failed`` frame (``cloud_turn.__main__.stream_turn``): the subclass
     NAME, as the ``"TypeName: message"`` string ``_scrub`` puts in ``error``,
-    ``reset_at``, as its own key when the gateway sent one, and a budget stop's
-    ``budget_scope`` and ``budget_period``, likewise.
+    ``reset_at``, as its own key when the gateway sent one, a budget stop's
+    ``budget_scope`` and ``budget_period``, a plan-window stop's ``window`` and
+    a model-tier stop's ``required_tier``, likewise.
 
     ``reason`` is the gate's code, ``status_code`` the HTTP status (``None`` for
     a denial inside an open stream, which has no error status), and
@@ -861,6 +862,38 @@ class AllowanceExhaustedError(MindsHubBillingStop):
     ``reset_at`` for when the allowance refills, when auth supplies one; for an
     org that never had an allowance it sends none.
     """
+
+
+class WindowAllowanceExhaustedError(MindsHubBillingStop):
+    """429 ``window_allowance_exhausted``: a subscription plan's rolling window is spent (ENG-4186).
+
+    The Plus/Pro counterpart of :class:`AllowanceExhaustedError`, shaped like
+    it: the gateway sends ``reset_at`` (when the spent window frees up) on the
+    ``X-MindsHub-Reset-At`` header and ``x-should-retry: false``, and it fires
+    only when the wallet cannot pay either. ``window`` is which window is spent,
+    ``5h`` or ``7d``, from the body's top-level field, or ``None`` when the
+    gateway named none. Adding credit lifts it at once.
+    """
+
+    def __init__(self, message: str, *, window: str | None = None, **kwargs: Any) -> None:
+        super().__init__(message, **kwargs)
+        self.window = window
+
+
+class ModelNotInTierError(MindsHubBillingStop):
+    """403 ``model_not_in_tier``: the plan's allowance does not cover the model (ENG-4186).
+
+    Fires only when the wallet cannot pay for the model either, so upgrading to
+    ``required_tier`` or adding credit lifts it. No administrator refused the
+    model, which is what tells it apart from :class:`ModelRestrictedError`.
+    ``required_tier`` is the tier whose allowance covers the model (``plus`` or
+    ``pro``), from the body's top-level field, or ``None`` when the gateway
+    named none. The gateway sends no ``reset_at``.
+    """
+
+    def __init__(self, message: str, *, required_tier: str | None = None, **kwargs: Any) -> None:
+        super().__init__(message, **kwargs)
+        self.required_tier = required_tier
 
 
 class FreeServingPausedError(MindsHubBillingStop):
@@ -1104,6 +1137,15 @@ _MINDSHUB_BUDGET_URL = "https://console.mindshub.ai/settings/organization/billin
 _MINDSHUB_BUDGET_CTA = f"An organization owner or admin can raise it at {_MINDSHUB_BUDGET_URL}."
 # A workspace or key budget may be managed below the org, so its hint names no role.
 _MINDSHUB_SCOPED_BUDGET_CTA = f"An administrator can raise it at {_MINDSHUB_BUDGET_URL}."
+_MINDSHUB_BILLING_URL = "https://console.mindshub.ai/settings/organization/billing"
+# A spent plan window lifts on its own too, so its hint offers waiting.
+_MINDSHUB_WINDOW_CTA = (
+    f"Add credits at {_MINDSHUB_BILLING_URL} to continue now, or wait for it to reset."
+)
+# A model outside the plan's tier: credit pays for it, and so does a higher tier.
+_MINDSHUB_TIER_CTA = (
+    f"Upgrade your plan or add credits at {_MINDSHUB_BILLING_URL} to continue."
+)
 
 
 class _BillingStopKind(NamedTuple):
@@ -1112,6 +1154,9 @@ class _BillingStopKind(NamedTuple):
     error_type: type[MindsHubBillingStop]
     what: str
     cta: str = _MINDSHUB_BILLING_CTA
+    # The HTTP statuses the gate sends this code on. Any other status carrying
+    # the code is not the gate's denial and maps to no stop.
+    statuses: tuple[int, ...] = (402, 429)
 
 
 # The MindsHub authorization gate's billing deny codes:
@@ -1129,6 +1174,13 @@ class _BillingStopKind(NamedTuple):
 # configuration, and copy that stated it would go stale the day it changed.
 # The allowance copy does not say the allowance was used up either: the gate
 # sends the same code to an org that never had a free allowance at all.
+#
+# ENG-4186 adds the subscription plans' two stops, both sent only when the
+# wallet cannot pay: ``window_allowance_exhausted`` (429, a rolling plan window
+# is spent, ``x-should-retry: false``) and ``model_not_in_tier`` (403, the
+# plan's allowance does not cover the model). Their ``what`` here is the
+# fallback for a body that names no ``window`` / ``required_tier``;
+# :func:`mindshub_billing_stop` words it from those fields when they arrive.
 _MINDSHUB_BILLING_STOPS: dict[str, _BillingStopKind] = {
     "wallet_empty": _BillingStopKind(
         WalletEmptyError, "your MindsHub credits are used up."),
@@ -1141,7 +1193,22 @@ _MINDSHUB_BILLING_STOPS: dict[str, _BillingStopKind] = {
         BudgetExceededError,
         "a MindsHub spending budget is used up.",
         _MINDSHUB_BUDGET_CTA),
+    "window_allowance_exhausted": _BillingStopKind(
+        WindowAllowanceExhaustedError,
+        "your MindsHub plan's allowance is used up until it resets.",
+        _MINDSHUB_WINDOW_CTA),
+    "model_not_in_tier": _BillingStopKind(
+        ModelNotInTierError,
+        "your MindsHub plan does not cover this model.",
+        _MINDSHUB_TIER_CTA,
+        statuses=(403,)),
 }
+# The plan windows a ``window_allowance_exhausted`` body may name, as copy words them.
+_PLAN_WINDOW_WORDS = {"5h": "5-hour", "7d": "weekly"}
+# A tier as a ``model_not_in_tier`` body may name it. A newer tier passes
+# unnamed in the copy; only the ones below get a display name.
+_PLAN_TIER_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,31}")
+_PLAN_TIER_NAMES = {"plus": "Plus", "pro": "Pro"}
 # Whose budget a spent stop names, per scope; any other scope reads "a".
 _BUDGET_SCOPE_OWNER = {
     "org": "your organization's",
@@ -1368,7 +1435,8 @@ def wallet_denial_code(body: Any) -> str | None:
     """The M3 gate's billing code carried in an error body, if any.
 
     One of ``wallet_empty``, ``included_allowance_exhausted``,
-    ``free_air_daily_spend_fuse_exceeded`` or ``budget_exceeded`` (the keys of
+    ``free_air_daily_spend_fuse_exceeded``, ``budget_exceeded``,
+    ``window_allowance_exhausted`` or ``model_not_in_tier`` (the keys of
     ``_MINDSHUB_BILLING_STOPS``). Reads ``code`` from both dialects — the
     SDK-unwrapped top level (OpenAI SDK peels the ``error`` envelope, ENG-747)
     and the wire envelope (Anthropic SDK / proxies that deliver it unmodified).
@@ -1422,13 +1490,18 @@ def mindshub_billing_stop(
     is an isinstance check with no origin gate, so it catches any
     ``TokenLimitExceeded`` anton raises. The origin check has to happen here.
 
-    ``status_code`` is the HTTP error status, which must be the gate's 402 or
-    429; ``None`` means a denial inside an already-open stream, which has no
-    error status to check.
+    ``status_code`` is the HTTP error status, which must be one the gate sends
+    that code on (``_BillingStopKind.statuses``: 402 or 429, and 403 for
+    ``model_not_in_tier``); ``None`` means a denial inside an already-open
+    stream, which has no error status to check.
+
+    A plan-window stop carries the body's ``window`` and a model-tier stop its
+    ``required_tier`` (see :func:`_top_level_body_values`); each is ``None``
+    when the gateway named none that this reads.
     """
     if origin_is_known_third_party(exc):
         return None
-    if status_code is not None and status_code not in (402, 429):
+    if status_code is not None and status_code not in (402, 403, 429):
         return None
     reason = wallet_denial_code(body)
     if reason is None:
@@ -1438,9 +1511,22 @@ def mindshub_billing_stop(
     if reason is None:
         return None
     kind = _MINDSHUB_BILLING_STOPS[reason]
+    if status_code is not None and status_code not in kind.statuses:
+        return None
     what = kind.what
     cta = kind.cta
     extra: dict[str, Any] = {}
+    if kind.error_type is WindowAllowanceExhaustedError:
+        window = _plan_window(exc, body)
+        if window is not None:
+            what = f"your MindsHub plan's {_PLAN_WINDOW_WORDS[window]} allowance is used up until it resets."
+        extra["window"] = window
+    if kind.error_type is ModelNotInTierError:
+        tier = _required_tier(exc, body)
+        name = _PLAN_TIER_NAMES.get(tier or "")
+        if name is not None:
+            what = f"your MindsHub plan does not cover this model; it needs {name}."
+        extra["required_tier"] = tier
     if kind.error_type is BudgetExceededError:
         scope = _budget_scope(exc, body)
         period = _budget_period(exc, body)
@@ -1462,6 +1548,48 @@ def mindshub_billing_stop(
         reset_at=_response_header(exc, "x-mindshub-reset-at"),
         **extra,
     )
+
+
+def _top_level_body_values(exc: BaseException, body: Any, name: str) -> list[object]:
+    """Every copy of the body field ``name`` a gate denial may still carry, in reading order.
+
+    ENG-4186's ``window`` and ``required_tier`` sit at the top level of the
+    wire body, beside ``error``, with no header copy. The OpenAI SDK keeps only
+    the ``error`` envelope as ``exc.body``, which drops them, so the response's
+    own JSON is read as well. ``body`` comes first, in both dialects, then the
+    response. Never raises: an unreadable response adds nothing.
+    """
+    parsed = body if isinstance(body, dict) else {}
+    envelope = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
+    values: list[object] = [parsed.get(name), envelope.get(name)]
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            values.append(payload.get(name))
+            inner = payload.get("error")
+            if isinstance(inner, dict):
+                values.append(inner.get(name))
+    return values
+
+
+def _plan_window(exc: BaseException, body: Any) -> str | None:
+    """The spent plan window (``5h`` or ``7d``) a ``window_allowance_exhausted`` body names, else ``None``."""
+    for value in _top_level_body_values(exc, body, "window"):
+        if isinstance(value, str) and value in _PLAN_WINDOW_WORDS:
+            return value
+    return None
+
+
+def _required_tier(exc: BaseException, body: Any) -> str | None:
+    """The tier a ``model_not_in_tier`` body names, as a short identifier, else ``None``."""
+    for value in _top_level_body_values(exc, body, "required_tier"):
+        if isinstance(value, str) and _PLAN_TIER_PATTERN.fullmatch(value):
+            return value
+    return None
 
 
 def _budget_scope(exc: BaseException, body: Any) -> str | None:
@@ -2386,6 +2514,8 @@ CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
     MindsHubBillingStop,
     WalletEmptyError,
     AllowanceExhaustedError,
+    WindowAllowanceExhaustedError,
+    ModelNotInTierError,
     FreeServingPausedError,
     BudgetExceededError,
     ProviderAuthError,

@@ -142,7 +142,10 @@ Events written back on stdout (JSONL):
       other failure omits the key. A spent-budget stop whose gateway named the
       budget adds `"budget_scope": "<org|workspace|api_key|team|user|all_members|...>"`
       the same way, `"budget_period": "<day|month|year>"` when it named one, and
-      `"budget_model": "<alias>"` for a budget on one model.
+      `"budget_model": "<alias>"` for a budget on one model. A spent plan
+      window (`WindowAllowanceExhaustedError`) adds `"window": "<5h|7d>"` when
+      the gateway named it, and a model outside the plan's tier
+      (`ModelNotInTierError`) adds `"required_tier": "<plus|pro|...>"` likewise.
 
 The tool/round step kinds the controller relays unchanged as `turn_step` are
 not spelled out above: `tool_start`, `tool_end`, `tool_result`, `compacted`,
