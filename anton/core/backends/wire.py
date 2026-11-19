@@ -24,6 +24,9 @@ USAGE_MARKER_ENV = "ANTON_SCRATCHPAD_USAGE"
 # "off" when the session has internet research turned off: the pad's
 # web_search() then raises instead of searching.
 INTERNET_RESEARCH_ENV = "ANTON_SCRATCHPAD_INTERNET_RESEARCH"
+# "off" when the session does not label texts with Jev: the pad's classify()
+# and classify_yes_no() then raise instead of calling it.
+CLASSIFY_ENV = "ANTON_SCRATCHPAD_CLASSIFY"
 # The image model the pad's generate_image() asks for (ENG-4024). Unset: the
 # pad resolves it itself, from ANTON_IMAGE_MODEL or the MindsHub catalogue.
 IMAGE_MODEL_ENV = "ANTON_SCRATCHPAD_IMAGE_MODEL"
@@ -75,7 +78,10 @@ MISSING_MODULE_HINT = (
 # cell runs, by name. The host's write check reads a call to one as a call
 # to a name the pad binds.
 INJECTED_HELPER_NAMES = frozenset(
-    {"get_llm", "agentic_loop", "web_search", "generate_image", "query_minds_data", "call_minds_api", "progress", "sample"}
+    {
+        "get_llm", "agentic_loop", "classify", "classify_yes_no", "web_search",
+        "generate_image", "query_minds_data", "call_minds_api", "progress", "sample",
+    }
 )
 # The list the boot binds in the cell namespace for the data helpers to
 # record their queries in.

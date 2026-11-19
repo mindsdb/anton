@@ -36,6 +36,7 @@ from anton.core.backends.wire import (
     IMAGE_MODEL_ENV,
     INSTALL_END_MARKER,
     INSTALL_START_MARKER,
+    CLASSIFY_ENV,
     INTERNET_RESEARCH_ENV,
     MAX_OUTPUT,
     truncation_note,
@@ -431,6 +432,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         coding_api_key_supplier: ApiKeySupplier | None = None,
         coding_flavor: str | None = None,
         internet_research_enabled: bool = True,
+        classify_enabled: bool = True,
         image_model: str | None = None,
         _venvs_base: Path | None = None,
     ) -> None:
@@ -472,6 +474,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._coding_flavor: str | None = coding_flavor
         # False: the boot script injects a web_search() that only raises.
         self._internet_research_enabled = internet_research_enabled
+        # False: the boot script injects a classify() that only raises.
+        self._classify_enabled = classify_enabled
         # The model the pad's generate_image() asks for; None lets the boot
         # script resolve it (`anton.core.llm.images.resolve_image_model`).
         self._image_model: str | None = image_model
@@ -1179,6 +1183,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env.pop(INTERNET_RESEARCH_ENV, None)
         else:
             env[INTERNET_RESEARCH_ENV] = "off"
+        if self._classify_enabled:
+            env.pop(CLASSIFY_ENV, None)
+        else:
+            env[CLASSIFY_ENV] = "off"
         # Propagate provider credentials from the ANTON_* names into the SDK
         # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
@@ -2200,6 +2208,7 @@ def local_scratchpad_runtime_factory(
     coding_api_key_supplier: ApiKeySupplier | None = None,
     coding_flavor: str | None = None,
     internet_research_enabled: bool = True,
+    classify_enabled: bool = True,
     image_model: str | None = None,
 ) -> ScratchpadRuntime:
     return LocalScratchpadRuntime(
@@ -2218,5 +2227,6 @@ def local_scratchpad_runtime_factory(
         coding_api_key_supplier=coding_api_key_supplier,
         coding_flavor=coding_flavor,
         internet_research_enabled=internet_research_enabled,
+        classify_enabled=classify_enabled,
         image_model=image_model,
     )
