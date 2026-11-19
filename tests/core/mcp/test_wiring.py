@@ -108,6 +108,23 @@ async def test_notion_write_mode_registers_every_tool(patch_mcp_session_to_stub)
     await wiring.close_mcp_sessions(sessions)
 
 
+async def test_slack_connects_to_slacks_mcp_server(monkeypatch, stub_mcp_server):
+    urls = []
+
+    def fake_session_factory(*, url=None, access_token=None, **kwargs):
+        urls.append(url)
+        return McpSession(server=stub_mcp_server)
+
+    monkeypatch.setattr(wiring, "McpSession", fake_session_factory)
+    vault = FakeDataVault({("slack", "acme"): {"_method": "mcp", "_access_mode": "write", "access_token": "tok"}})
+    tool_defs, sessions = await wiring.discover_mcp_tools_async(
+        vault, [{"engine": "slack", "name": "acme"}]
+    )
+    assert urls == ["https://mcp.slack.com/mcp"]
+    assert {d.name for d in tool_defs} == {"slack__add", "slack__boom"}
+    await wiring.close_mcp_sessions(sessions)
+
+
 async def test_two_connections_for_the_same_engine_get_disambiguated_names(patch_mcp_session_to_stub):
     """The vault explicitly supports more than one connection per engine
     (data_vault.py: `name` "disambiguates when an org has more than one
