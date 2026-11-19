@@ -29,7 +29,14 @@ from anton.core.llm.provider import StreamAskUser
 from anton.core.settings import CoreSettings
 from anton.core.tools.registry import ToolOutcome
 from anton.core.utils import write_hold
-from anton.core.utils.write_hold import WriteRelay, approve_held_write, parse_relay_hosts, relayed_host
+from anton.core.utils.write_check import HttpWriteRule
+from anton.core.utils.write_hold import (
+    WriteRelay,
+    approve_held_write,
+    parse_relay_hosts,
+    relayed_host,
+    unchecked_mode,
+)
 
 RELAY_URL = "http://write-relay:8090"
 PENDING = "0123456789abcdef0123456789abcdef"
@@ -574,6 +581,80 @@ def test_relay_hosts_are_lowercased_with_port_80_by_default(caplog):
 ])
 def test_only_a_plain_http_url_names_a_relayed_host(url, host):
     assert relayed_host(url) == host
+
+
+# ── When `own` and `off` apply ────────────────────────────────────────────
+
+HOLD_LOG = "anton.core.utils.write_hold"
+FALLBACK = "write approval: ANTON_WRITE_APPROVAL_UNCHECKED falls back to all: own and off need the write relay"
+# For a rule the relay may not hold every write of: its place among the
+# rules anton read, and why, in a fixed phrase.
+NOT_RELAYED_RULE = "rule {} of the ANTON_WRITE_APPROVAL_HTTP rules anton read (not counting any entry it skipped) {}"
+FORWARDED_METHOD = "names GET, HEAD or * as its method, and the relay passes a GET or HEAD on unheld"
+NOT_HTTP = "has an address that is not http://"
+WILDCARD_OR_USER = "has a wildcard in its host or port, a trailing dot after its host, or a user name before its host"
+BAD_PORT = "has a port other than 1 to 65535 in 1 to 5 digits from 0 to 9"
+BAD_HOST = "has no host, or a host other than letters, digits, dots and dashes"
+NOT_RELAYED_HOST = "has a host and port that ANTON_WRITE_RELAY_HOSTS doesn't name"
+RELAYED_RULE = HttpWriteRule(method="POST", url_glob=f"http://{HOST}/**")
+
+
+def _applied(value, *, relay_url=RELAY_URL, rules=(RELAYED_RULE,)) -> str:
+    return unchecked_mode(value, relay_url=relay_url, relayed_hosts=frozenset({HOST}), http_rules=rules)
+
+
+@pytest.mark.parametrize("value", ["own", "off"])
+def test_own_and_off_apply_while_the_relay_holds_every_listed_write(caplog, value):
+    with caplog.at_level(logging.WARNING, logger=HOLD_LOG):
+        assert _applied(value) == value
+        assert _applied(value, rules=()) == value
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize("relay_url", [None, "", "  \n"], ids=["unset", "empty", "blank"])
+def test_a_blank_relay_url_is_unset(caplog, relay_url):
+    """The session hands on the setting with blanks made None; a caller that
+    hands on the raw setting gets the same answer."""
+    with caplog.at_level(logging.WARNING, logger=HOLD_LOG):
+        assert _applied("own", relay_url=relay_url) == "all"
+    assert caplog.messages == [FALLBACK + ", and ANTON_WRITE_RELAY_URL is unset"]
+
+
+@pytest.mark.parametrize(("method", "url_glob", "why"), [
+    ("GET", f"http://{HOST}/**", FORWARDED_METHOD),
+    ("HEAD", f"http://{HOST}/**", FORWARDED_METHOD),
+    ("*", f"http://{HOST}/**", FORWARDED_METHOD),
+    ("POST", f"https://{HOST}/**", NOT_HTTP),
+    ("POST", "{base}/api/orders", NOT_HTTP),
+    # In a rule's glob `?`, `*` and `[...]` are wildcards.
+    ("POST", f"http://{HOST}?**", WILDCARD_OR_USER),
+    ("POST", "http://gw.example.internal:876?/**", WILDCARD_OR_USER),
+    ("POST", "http://*.example.internal:8765/**", WILDCARD_OR_USER),
+    ("POST", "http://gw.example.internal:876[0-9]/**", WILDCARD_OR_USER),
+    ("POST", f"http://admin:hunter2@{HOST}/**", WILDCARD_OR_USER),
+    ("POST", "http://gw.example.internal.:8765/**", WILDCARD_OR_USER),
+    ("POST", "http://gw.example.internal:008765/**", BAD_PORT),
+    ("POST", "http://gw.example.internal:\uff18\uff17\uff16\uff15/**", BAD_PORT),
+    ("POST", "http://gw.example.internal:0/**", BAD_PORT),
+    ("POST", "http://gw.example.internal:65536/**", BAD_PORT),
+    ("POST", "http://gw.example.internal:/**", BAD_PORT),
+    ("POST", "http://gw_1.example.internal:8765/**", BAD_HOST),
+    ("POST", "http://g%77.example.internal:8765/**", BAD_HOST),
+    ("POST", "http:///**", BAD_HOST),
+    ("POST", "http://other.example.internal:8765/**", NOT_RELAYED_HOST),
+    ("POST", "http://gw.example.internal/**", NOT_RELAYED_HOST),
+])
+def test_the_fallback_names_the_rule_and_why_the_relay_may_not_hold_it(caplog, method, url_glob, why):
+    """One fixed line: the rule's place among the rules anton read and a
+    fixed phrase for why, never the rule's text, which can carry a
+    password."""
+    rules = (RELAYED_RULE, HttpWriteRule(method=method, url_glob=url_glob), HttpWriteRule(method="GET", url_glob="x"))
+    with caplog.at_level(logging.WARNING, logger=HOLD_LOG):
+        assert _applied("off", rules=rules) == "all"
+    [record] = caplog.records
+    assert record.args == (2, why), "the first rule the relay may not hold"
+    assert record.getMessage() == FALLBACK + " to hold the listed writes, and " + NOT_RELAYED_RULE.format(2, why)
+    assert url_glob not in caplog.text and "hunter2" not in caplog.text
 
 
 def test_the_card_text_has_every_character_a_scrubber_or_the_gate_s_card_would_change():

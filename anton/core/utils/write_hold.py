@@ -131,6 +131,44 @@ def held_by_relay(write: HttpWrite, hosts: frozenset[str]) -> bool:
     )
 
 
+def _unheld_why(rule: HttpWriteRule, relayed_hosts: frozenset[str]) -> str | None:
+    """Why the write relay may not hold every write `rule` lists, in a fixed
+    phrase for the fallback WARNING, never the rule's own text, which can
+    carry a user name and password; None when the relay holds them all."""
+    if rule.method == "*" or rule.method in _FORWARDED:
+        return "names GET, HEAD or * as its method, and the relay passes a GET or HEAD on unheld"
+    if _RULE_AUTHORITY.match(rule.url_glob) and relayed_host(rule.url_glob) in relayed_hosts:
+        return None
+    if rule.url_glob[:7].lower() != "http://":
+        return "has an address that is not http://"
+    # Up to the path: in a rule's glob `?` is a wildcard, not a query.
+    authority = rule.url_glob[7:].split("/", 1)[0]
+    host, colon, port = authority.partition(":")
+    if any(c in authority for c in "*?[]@") or host.endswith("."):
+        return "has a wildcard in its host or port, a trailing dot after its host, or a user name before its host"
+    if colon and not (port.isascii() and port.isdigit() and len(port) <= 5 and 0 < int(port) < 65536):
+        return "has a port other than 1 to 65535 in 1 to 5 digits from 0 to 9"
+    if not _RULE_AUTHORITY.match(rule.url_glob):
+        return "has no host, or a host other than letters, digits, dots and dashes"
+    return "has a host and port that ANTON_WRITE_RELAY_HOSTS doesn't name"
+
+
+class _UnheldRule(NamedTuple):
+    """A rule the write relay may not hold every write of: its place among
+    the rules anton read, from 1, and why (`_unheld_why`)."""
+
+    place: int
+    why: str
+
+
+def _first_unheld_rule(rules: Sequence[HttpWriteRule], relayed_hosts: frozenset[str]) -> _UnheldRule | None:
+    for place, rule in enumerate(rules, start=1):
+        why = _unheld_why(rule, relayed_hosts)
+        if why is not None:
+            return _UnheldRule(place, why)
+    return None
+
+
 def unchecked_mode(
     value: UncheckedMode, *, relay_url: str | None, relayed_hosts: frozenset[str],
     http_rules: Sequence[HttpWriteRule],
@@ -138,27 +176,28 @@ def unchecked_mode(
     """The `write_approval_unchecked` value a session applies. Under `own`
     and `off` a write inside code the check can't read may get no card of
     its own, so they apply only while the write relay holds every write the
-    operator lists: `relay_url` is set, the relay holds a host, and each of
-    `http_rules` names one method other than GET or HEAD (not `*`, since
-    the relay forwards a GET or HEAD) and an `http://` address, with no
-    wildcard in its host or port, whose `host:port` is among
-    `relayed_hosts` (`relayed_host`). Otherwise it is
-    `all`, with one WARNING that names what is missing. Any value but `own`
-    or `off` is `all`."""
+    operator lists: `relay_url` is set (not blank), the relay holds a host,
+    and each of `http_rules` names one method other than GET or HEAD (not
+    `*`, since the relay forwards a GET or HEAD) and an `http://` address,
+    with no wildcard in its host or port, whose `host:port` is among
+    `relayed_hosts` (`relayed_host`). Otherwise it is `all`, with one
+    WARNING that names what is missing: for a rule, its place among
+    `http_rules` and why (`_unheld_why`). Any value but `own` or `off` is
+    `all`."""
     if value == "all" or value not in get_args(UncheckedMode):
         return "all"
-    if relay_url is None:
+    if relay_url is None or not relay_url.strip():
         logger.warning("write approval: ANTON_WRITE_APPROVAL_UNCHECKED falls back to all: own and off need "
                        "the write relay, and ANTON_WRITE_RELAY_URL is unset")
     elif not relayed_hosts:
         logger.warning("write approval: ANTON_WRITE_APPROVAL_UNCHECKED falls back to all: own and off need "
                        "the write relay to hold the listed writes, and ANTON_WRITE_RELAY_HOSTS names no host")
-    elif any(rule.method == "*" or rule.method in _FORWARDED or not _RULE_AUTHORITY.match(rule.url_glob)
-             or relayed_host(rule.url_glob) not in relayed_hosts for rule in http_rules):
+    elif (unheld := _first_unheld_rule(http_rules, relayed_hosts)) is not None:
+        # By its place among the rules anton read: an entry skipped with its
+        # own WARNING has no rule, so the count can run behind the operator's.
         logger.warning("write approval: ANTON_WRITE_APPROVAL_UNCHECKED falls back to all: own and off need "
-                       "the write relay to hold the listed writes, and an ANTON_WRITE_APPROVAL_HTTP rule names "
-                       "GET, HEAD or * as its method, or an address that is not an http:// address of a host in "
-                       "ANTON_WRITE_RELAY_HOSTS")
+                       "the write relay to hold the listed writes, and rule %d of the ANTON_WRITE_APPROVAL_HTTP "
+                       "rules anton read (not counting any entry it skipped) %s", unheld.place, unheld.why)
     else:
         return value
     return "all"

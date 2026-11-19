@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict
 
+from anton.core.backends.base import _COMPACTED_CELL_CODE
 from anton.core.backends.sandbox import cell_sandbox_of, validate_pad_name
 from anton.core.settings import UncheckedMode
 from anton.core.tools.registry import ToolOutcome
@@ -25,6 +26,7 @@ from anton.core.utils.write_check import (
     ProjectSnapshot,
     SqlWrite,
     UncheckedCause,
+    UncheckedKind,
     find_cell_writes,
     snapshot_project_files,
 )
@@ -146,10 +148,10 @@ class WriteApprovalDecision(BaseModel):
     kinds: tuple[str, ...]
     count: int
     status: DecisionStatus
-    # For "not_held_unchecked": the setting's value, and the kinds of the
-    # reasons the card would have given.
+    # For "not_held_unchecked": the setting's value, and the kind of every
+    # reason the check found, not only the few the card would have given.
     mode: UncheckedMode | None = None
-    causes: tuple[str, ...] = ()
+    causes: tuple[UncheckedKind, ...] = ()
 
 
 def _inert(text: str) -> str:
@@ -382,9 +384,11 @@ def _card_prompt(writes: CellWrites, code: str = "") -> str:
 _WHOLE_STEP_CAUSES = {
     "restart": "The scratchpad starts again before this step, and an earlier step may have written a file "
                "Python runs as it starts.",
-    "limit": "Its code goes too deep for the check to follow all of it.",
+    "limit": "The check stopped before it read all of this step's code.",
     "failed": "The check failed on this step.",
 }
+# A `limit` stop in code an earlier step holds (`UncheckedCause.in_earlier`).
+_EARLIER_LIMIT = "An earlier step ran code the check stopped reading, and this step may depend on what that code did."
 
 
 def _cause_lines(writes: CellWrites) -> list[str]:
@@ -392,7 +396,7 @@ def _cause_lines(writes: CellWrites) -> list[str]:
     lines: list[str] = []
     for cause in writes.causes:
         if cause.kind in _WHOLE_STEP_CAUSES:
-            lines += [_WHOLE_STEP_CAUSES[cause.kind], ""]
+            lines += [_EARLIER_LIMIT if cause.in_earlier else _WHOLE_STEP_CAUSES[cause.kind], ""]
             if cause.code:
                 lines += ["The check stopped at:", "", _fence(cause.code), ""]
         elif cause.kind == "uses" and cause.name and cause.earlier:
@@ -513,13 +517,14 @@ def _log_decision(*, writes: CellWrites, status: DecisionStatus, mode: Unchecked
     """Log what came of a cell: for one that ran with no card, the changes
     it was let make (appends, and overwrites of the agent's own files),
     and, for one `write_approval_unchecked` let run (`mode`), the setting
-    and the kinds of its reasons; otherwise what its card held."""
+    and the kind of every reason the check found (`CellWrites.cause_kinds`,
+    not only the card's few); otherwise what its card held."""
     if status in ("not_held", "not_held_unchecked"):
         kinds = tuple(sorted({f.action for f in writes.not_held_files}))
         count = len(writes.not_held_files)
     else:
         kinds, count = writes.kinds(), len(writes.sql) + len(writes.calls) + len(writes.held_files) + len(writes.http)
-    causes = tuple(dict.fromkeys(c.kind for c in writes.causes)) if mode is not None else ()
+    causes = writes.cause_kinds if mode is not None else ()
     decision = WriteApprovalDecision(kinds=kinds, count=count, status=status, mode=mode, causes=causes)
     # WARNING: hosts log at WARNING by default, and this line is the record of
     # a held write. `mode` and `causes` show only on a "not_held_unchecked" line.
@@ -561,8 +566,11 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
         # that failed stopped is the line the boot read from the traceback, not
         # from its text, which the cell shapes; None where the runtime doesn't
         # say. A cell whose process ended has the pad start a new one before
-        # the next cell. Built inside the try: a value `EarlierCell` refuses
-        # gets the card too.
+        # the next cell. The summary cell compaction puts in their place is
+        # only a comment, so it is left out. Each cell then keeps its place in
+        # the conversation, under which its own check kept what it found
+        # (`_LEFT_UNREAD`). Built inside the try: a value `EarlierCell`
+        # refuses gets the card too.
         earlier = (
             *(EarlierCell(code=cell.code, errored=cell.errored, stopped_at=cell.stopped_at,
                           ended_process=cell.ended_process)
@@ -570,21 +578,22 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
             *(EarlierCell(code=cell.code, errored=bool(getattr(cell, "error", None)),
                           stopped_at=getattr(cell, "stopped_at", None),
                           ended_process=getattr(cell, "ended_process", False) is True)
-              for cell in getattr(pad, "cells", ()) or ()),
+              for cell in getattr(pad, "cells", ()) or () if cell.code != _COMPACTED_CELL_CODE),
         )
-        if earlier and getattr(pad, "process_running", True) is False:
-            # The pad starts a new process before this cell, as after a death
-            # between cells, which the runtime finds only as this cell runs:
-            # the last cell before it is one whose process ended.
-            earlier = (*earlier[:-1], earlier[-1].model_copy(update={"ended_process": True}))
+        # The pad starts a new process before this cell where its process
+        # isn't running, as after a death between cells, which the runtime
+        # finds only as this cell runs. Each record stays the cell's own: a
+        # cell whose process lived on past it still ran what it ran.
         writes = await asyncio.to_thread(
             find_cell_writes, code=code, earlier=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
+            new_process=getattr(pad, "process_running", True) is False,
         )
     except Exception as exc:
         # The type only, as for a failed question.
         logger.warning("write approval: the check failed (%s)", type(exc).__name__)
         # `stopped`: a check that read nothing can't clear the cell, whatever the setting.
-        writes = CellWrites(unchecked=True, stopped=True, causes=(UncheckedCause(kind="failed"),))
+        writes = CellWrites(unchecked=True, stopped=True, causes=(UncheckedCause(kind="failed"),),
+                            cause_kinds=("failed",))
     if gate.relayed_hosts and writes.http:
         # The write relay holds a request to a host it relays and raises its
         # own card through approve_held_write, so a second card here would

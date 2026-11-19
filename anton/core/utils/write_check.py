@@ -35,9 +35,15 @@ What it finds:
   and ``session.add``/``merge`` and the like with a commit or flush in the
   cell), a non-SQL store's own method (pymongo, boto3 DynamoDB, BigQuery's
   table, dataset, insert and load calls, a Redis client, an Elasticsearch
-  client), or a SQL file past the 1 MB cap, held unchecked. The card quotes
-  the line. A routine bound in an earlier cell is held where it runs or is
-  handed on.
+  client), or a SQL file past the 1 MB cap, read in the cell or an earlier
+  one, held unchecked whatever handle runs it, an in-process one too, run
+  whole or split into statements or lines. Any file past the cap counts,
+  whatever it holds: without reading it the check can't tell its SQL from
+  prose, so a large text handed to a call named as a runner, as pandas'
+  ``query`` or a GraphQL client's ``execute``, waits too, and so does one
+  handed to a program a call runs, as a word of its command, its input or
+  a running program's ``communicate()``. The card quotes the line. A
+  routine bound in an earlier cell is held where it runs or is handed on.
 - **Deletes, renames and moves** of a file or folder that was in the project
   folder (artifacts and the host's own files under ``.anton`` included) or the
   shared folder when the turn began, either folder itself included. The call
@@ -49,7 +55,20 @@ What it finds:
   any name or function it passes the list to, and a relative path counts
   from every folder the pad changes into. A target the code picks when it
   runs, from a root the check can't place, counts as well, because the check
-  can't rule it out.
+  can't rule it out. So does a path or a command's word read through a name
+  code may rebind at module level at a time the check can't order: one a
+  function or class rebinds as a ``global``, one a store into the module's
+  names sets by a key, keyword or attribute written out in it, where the
+  check ties the store to those names, as ``globals()["OUT"] = path`` (a
+  store it can't tie to them, as through a function that returns
+  ``globals()``, isn't counted), and one literal code a function runs
+  binds. The check never places such
+  a path or word on the name's module-level value alone, and a whole
+  command or a program held in such a name, read whole, joined, copied
+  or by its index, whether top-level code binds it too or not, is one it
+  can't read, a delete it picks when it runs, never what a stale value
+  names; a call through the name still reads what each module-level
+  value runs.
 - **Overwrites** of a file that existed when the turn began: ``open`` in a
   ``w``, ``w+`` or ``r+`` mode, ``Path.write_text`` and ``write_bytes``, a
   pandas ``to_csv``, ``to_excel``, ``to_parquet``, ``to_json``,
@@ -63,7 +82,36 @@ What it finds:
   ``.anton/skill_drafts`` or ``.anton/output``, or one an earlier cell in the
   conversation wrote, unless that cell stopped on an error or picked the
   name when it ran, as a dated export does), are reported but not held. ``open`` in an ``x`` mode
-  can't replace a file, so it isn't one.
+  can't replace a file, so it isn't one. An overwrite through such a rebound
+  name, as the whole path or as a part of it, such as a file name joined to
+  a folder, is held as one onto a file the code picks when it runs, since
+  that name may hold a file the turn began with, even where each value the
+  check sees for it is a new file. Any other overwrite onto a path the check
+  can't place counts as a new file, so there a literal key looked up in a
+  dict display reads as that entry, where it builds text or a path nothing
+  changes in place and lands on a file or folder the turn began with: the
+  entry only ever adds a hold. It does so only while no cell may change the
+  dict or hold it under another name, no cell reaches names other than by
+  name, such as through ``globals()``, ``vars()``, ``locals()``, an
+  object's ``__dict__``, ``setattr`` or ``sys.modules``, no cell names a
+  runner such as ``exec()`` or imports a module the check can't read, and
+  no cell, the checked one among them, holds code a limit of the check left
+  unread. A delete or move the check can't place holds whole, and so does
+  an overwrite through a rebound name, so neither reads an entry. A shell
+  delete or move holds whole too, as ``os.remove(cfg["out"])`` does, where
+  its operand holds the text of a dict entry the command reads by its key,
+  or is part of that text. So does one after a ``cd`` to the folder such an
+  entry gives, while each cell only looks up that dict's entries or hands
+  it to a call that can't change it, and no cell reaches names other than
+  by name.
+  A whole command or a program looked up with ``[key]`` or ``.get(key)``
+  in a dict, a display or a ``dict(...)`` call, that a cell may change,
+  hold under another name or hand on, or after a cell reaches names other
+  than by name, is the one the entry holds when it runs, as one a rebound
+  name holds is: a delete it picks when it runs. Another spelling, as
+  ``.pop(key)``, a copy or a loop over the values, doesn't wait that way:
+  ``.pop(key)`` reads the entry as written, and a copy or a loop over the
+  values runs code the check can't read, so it may run with no card.
 - **HTTP writes** through requests, httpx (their module functions, a
   Session's or Client's methods, ``.request(method, ...)``) and urllib: every
   PUT, PATCH and DELETE, a request whose method the code picks when it runs,
@@ -90,8 +138,8 @@ What it finds:
   ``eval`` or ``compile`` reached through the builtins however the code
   names them (a builtin function's ``__self__`` and a frame's
   ``f_builtins`` among them) and handed anything but a literal (a name, a
-  file read, a decode, a join) or a literal too long to read, or passed or stored as a
-  value; code the pad's own process runs through ``runpy``, ``importlib``
+  file read, a decode, a join), or passed or stored as a value; code the
+  pad's own process runs through ``runpy``, ``importlib``
   (``reload``, a spec or a loader from a file, an import by a name the code
   picks when it runs), ``zipimport``, ``site`` (the ``.pth`` files it reads),
   a code object, or one a function is given as its ``__code__``, an
@@ -156,21 +204,86 @@ What it finds:
   error (a swallowing context under any name a cell binds to it, a class
   a cell defines with ``__exit__``, or a context such code made or a
   module a cell wrote gives), where one from the standard library or an
-  installed package lets it through; a with that enters a context such
-  code made, whose enter and exit run it; and a read a depth limit stopped
-  where a write may lie past it. A helper the pad's boot injects, such as
-  ``progress`` or ``sample``, is a name read code binds, and a function
-  nothing calls runs no program its parameters name.
+  installed package lets it through; and a with that enters a context
+  such code made, whose enter and exit run it. A helper the pad's boot
+  injects, such as ``progress`` or ``sample``, is a name read code binds,
+  and a function nothing calls runs no program its parameters name.
+- **A read a limit of the check stopped** where a write may lie past it,
+  which holds the cell unchecked too, under every value of the setting.
+  A limit may leave code unread: more than eight literal code texts in a
+  cell, a literal over 100,000 characters or too deep for the check's
+  parser, a call chain past four calls, a call through more than six
+  nested partials, a shell's script past four nested shells, or the cell
+  itself too deep for the parser. Or it may leave a value unplaced where
+  an overwrite, delete or move lands: a depth limit on a value, a path
+  built through more than eight nested names, calls or operators, or one
+  built on past 256 paths, or the reading of an errored cell past what it
+  keeps for one value. A name rebuilt from itself, as
+  ``out = os.path.join(out, part)`` rebuilds one, holds one value per
+  step: each step reads the one before it, as Python runs it, and any
+  other read gets each of them, as code run before a later step may.
+  Past the depth limit on a path, the read gets the decision
+  its shallow twin gets: an append, a read and a write onto a new file
+  stop nothing, and a write onto a file the turn began with stops, as its
+  twin holds. A delete, or a move from such a path, holds whole, whatever
+  the path names, and a Python write of a startup hook through such a path
+  gets its twin's card. Past the depth limit on the words of a shell
+  command a call takes as one list or one script, the command is code the
+  check stopped reading, unless it is one plain command, with no redirect,
+  pipe, list, substitution, backticks or here-document in it, whose
+  program the check still names past the limit and that only reads,
+  deletes or moves: one that only reads, as ``cat``, ``ls``,
+  ``head`` or ``wc`` does, even of a Python file, stops nothing, as its
+  twin holds nothing, and an ``rm`` or ``mv`` is read on past the limit as
+  a path is, so it stops where its twin holds a file the read within the
+  limit doesn't, and a delete or move through a word the limit cut holds
+  whole. A word past
+  the limit that a call spreads over its arguments, as ``os.execlp`` does,
+  stops nothing: a delete of it, or a move from it, holds whole; as a
+  program, a shell's ``-c`` script, ``python -c`` code, or what ``python``
+  or an installer runs, it is code the check can't read; anywhere else it
+  may hold less than its twin written out, as a ``git clean`` flag does.
+  Where the check stopped at a call, the card quotes it. A stop
+  that left only a value unplaced stops no later cell: a later cell gets
+  what the twin of that value gives it. Once a cell holds code a limit
+  left unread, such a shell command among it, every later cell stops the
+  same way until the pad resets: it may depend on what that code did.
+  That is anywhere in the cell's code, as its own check read it: at its
+  top level, in each function, lambda, class, comprehension, default and
+  decorator it defines, whether that code ran or not, in the literal code
+  it hands on, and in each function an earlier cell defined that it calls
+  or hands on.
+  So does a cell too deep to parse. A cell whose record says it kept
+  nothing, as one whose process died, was killed or was canceled, stops no
+  later cell: the next cell runs in a new process with none of the names
+  it bound, though it may have run some of its code. Nor does a cell
+  Python refused to compile, which ran none of it. One that failed on its
+  first line in a process that lived on past it counts, even where that
+  process died before a later cell, and so does one too deep for the
+  check to read again. After a restart of the check's
+  process, an earlier cell is read as its own check read it, with every
+  path counted as one the project held when it ran: the check can't tell
+  which files were there then.
 
 What it can't find: a statement or path with no literal behind it, a plain
 procedure call the check can't tie to a write it runs, a write through an API
 other than HTTP PUT, PATCH or DELETE or an operator-listed endpoint (aiohttp,
 an SDK such as boto3 outside DynamoDB), a store method on a receiver the check
-can't place, a shell command it can't read at all, a shell redirect or ``cp``
-onto an existing file, an overwrite whose path the code picks from a root the
-check can't place, what a program other than Python does (a shell script
-file, a ``make`` target, ``node``, ``Rscript``), a program launcher stored as
-a value rather than handed to a caller that runs it, a write
+can't place, a shell command it can't read at all, a shell command's write
+of a local file other than a delete or a move from it, as ``sed -i`` makes,
+which holds no overwrite (the check reads some shell spellings of a startup
+hook write, as ``echo x > <hook>`` with a space before the ``>``, and holds
+those as that, but misses others, as ``echo x><hook>``, so don't count on
+the card for a shell write of a hook), a change a command makes elsewhere
+(``curl -X DELETE``, ``kubectl delete``, ``aws s3 rm``, ``git push``), which
+the write relay holds only where it relays the host, an overwrite whose
+path the code picks from a root the check can't place, a copy of a
+folder's files into a folder that holds the same names
+(``shutil.copytree`` with ``dirs_exist_ok``, an archive's
+``extractall``), which counts as new files, what a program other than
+Python does (a shell script file, a ``make`` target, ``node``,
+``Rscript``), a program launcher stored as a value rather than handed to
+a caller that runs it, a write
 through a trusted name that code the check couldn't read rebinds (``print =
 requests.post``), what a ``pickle``, ``dill`` or ``joblib`` load runs, a call
 to what unread code defined through ``.get(key)()`` or a list's element,
@@ -190,6 +303,7 @@ import builtins
 import copy
 import errno
 import fnmatch
+import hashlib
 import importlib.machinery
 import importlib.util
 import itertools
@@ -207,15 +321,15 @@ import threading
 import time
 import types
 import warnings
-from collections import ChainMap, OrderedDict, deque
+from collections import ChainMap, Counter, OrderedDict, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from enum import IntEnum
-from functools import cached_property
+from functools import cache, cached_property
 from pathlib import Path
-from typing import Any, Generic, Literal, NamedTuple, Protocol, TypeVar, overload
+from typing import Any, Generic, Literal, NamedTuple, Protocol, TypeGuard, TypeVar, overload
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
@@ -397,21 +511,30 @@ def parse_http_write_rules(text: str) -> tuple[HttpWriteRule, ...]:
     return tuple(rules)
 
 
+# The kinds of reason a card gives for a step the check couldn't read (`UncheckedCause`).
+UncheckedKind = Literal["runs", "uses", "restart", "limit", "failed"]
+
+
 class UncheckedCause(BaseModel):
     """Why the check couldn't read all of a step, for its card: it runs code
     the check can't read (`runs`, the line in `code`); uses `name`, which
     code an earlier step ran that the check couldn't read may have made
     (`uses`, that step's line in `earlier`); the pad starts again before it
-    once a step may have written a startup hook (`restart`); a depth limit
-    stopped the read (`limit`, the start of the function it stopped at in
-    `code`, where there is one); or the check failed (`failed`)."""
+    once a step may have written a startup hook (`restart`); a limit of the
+    check stopped the read before it read all of the step's code (`limit`,
+    in `code` the start of the function or the call it stopped at, where
+    there is one), or, with `in_earlier`, before it read all of the code
+    an earlier step holds, which this step may depend on (in `code` where
+    the read of that step stopped, where there is one); or the check
+    failed (`failed`)."""
 
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["runs", "uses", "restart", "limit", "failed"]
+    kind: UncheckedKind
     code: str = ""
     name: str = ""
     earlier: str = ""
+    in_earlier: bool = False
 
 
 class CellWrites(BaseModel):
@@ -419,16 +542,19 @@ class CellWrites(BaseModel):
     all the code the cell runs: code it hands ``exec`` or a runner, a module
     or a Python program it runs, what such code may have defined, a startup
     hook a cell wrote that a new Python process runs, the cell's own or the
-    pad's as it starts again before the cell, or a read a depth limit
-    stopped short; or the check itself failed. The card then says the step
-    can't be checked before it runs, beside what it did read. `stopped` says
-    the check stopped before it read all of the cell: a depth limit, a cell
-    too deep to parse, or the check failing. `unread_here` says the cell, or
-    an earlier function it calls, runs code the check can't read, as
-    against a hold carried from code an earlier cell ran or from a restart.
-    `writes_startup_hook` says that code includes a write of a startup hook
-    a later Python process runs. The `write_approval_unchecked` setting
-    reads all three (`hold_unapproved_write`)."""
+    pad's as it starts again before the cell, or a read a limit of the
+    check stopped short; or the check itself failed. The card then says the
+    step can't be checked before it runs, beside what it did read.
+    `stopped` says the check stopped before it read all of the cell, or
+    all of the code an earlier cell holds that the cell may depend on
+    (`_earlier_stop`): a limit of the check, a cell too deep to parse, or
+    the check failing.
+    `unread_here` says the cell, or an earlier function it calls, runs code
+    the check can't read, as against a hold carried from code an earlier
+    cell ran or from a restart. `writes_startup_hook` says that code
+    includes a write of a startup hook a later Python process runs. The
+    `write_approval_unchecked` setting reads all three
+    (`hold_unapproved_write`)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -442,6 +568,9 @@ class CellWrites(BaseModel):
     writes_startup_hook: bool = False
     # Why it is `unchecked`, where the check can say: at most `_CAUSES_SHOWN`.
     causes: tuple[UncheckedCause, ...] = ()
+    # The kind of each reason the check found, every one, in the order the
+    # card gives them, for the log: `causes` keeps the card's few.
+    cause_kinds: tuple[UncheckedKind, ...] = ()
 
     @property
     def held_files(self) -> tuple[FileChange, ...]:
@@ -472,10 +601,10 @@ class EarlierCell(BaseModel):
     did, the line of its own code it stopped at, as the pad's boot read it
     from the traceback (`cell_stopped_at`); None where the runtime doesn't
     say. `ended_process` says its process died, was killed, was canceled
-    or never ran it, or that the pad's process wasn't running as the next
-    cell came (`hold_unapproved_write`), so the pad starts a new process
-    before the next cell, and that start runs the startup hooks a cell
-    wrote."""
+    or never ran it, so the pad starts a new process before the next cell,
+    and that start runs the startup hooks a cell wrote. A pad whose
+    process wasn't running as the next cell came starts one too, which
+    `find_cell_writes` takes apart from the record (`new_process`)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -1753,6 +1882,10 @@ _PASS_THROUGH = frozenset({
 _CARRIERS = frozenset({
     "items", "values", "tolist", "to_csv", "to_excel", "to_string", "to_markdown", "to_html", "to_json",
 })
+# Methods that split a text into the statements or lines a loop runs one at
+# a time: read past for a SQL file's text (`_reaches_a_runner`'s
+# `any_handle`), where each part may be a statement the file holds.
+_SPLITS = frozenset({"split", "rsplit", "splitlines"})
 # Calls that build a new object, so no other name holds what they return.
 _FRESH_CALLS = frozenset({
     "dict", "list", "set", "collections.defaultdict", "collections.OrderedDict", "copy.copy", "copy.deepcopy",
@@ -1771,7 +1904,7 @@ _ADDERS = frozenset({"append", "extend", "insert", "add"})
 _EXEC_CALLS = frozenset({"exec", "eval", "compile"})
 _EXEC_LIMIT = 8
 # Characters of one literal source the check reads as one more cell; past
-# this, a cell that runs it is unchecked.
+# this, the check stops at the call that runs it (`_ExecRead.capped`).
 _LITERAL_CODE_LIMIT = 100_000
 # The methods of a test loader that import the test modules they find or
 # are named: `unittest.defaultTestLoader`'s, and a `unittest.TestLoader`'s
@@ -1934,6 +2067,19 @@ _RUNNER_TYPES = frozenset({"types.FunctionType", "types.CodeType"})
 _NAMESPACE_RUNNERS = frozenset({"runpy.run_path", "runpy.run_module"})
 # The calls that hand out the cell's own namespace to fill or read by key.
 _GLOBALS_CALLS = frozenset({"globals", "vars", "locals"})
+# What reaches a namespace's names other than by name (`_Cell.reaches_namespace`):
+# the names, the members and the modules. Among them: a frame, whose globals
+# hold the names; a module the code picks (`inspect.getmodule`); an
+# attribute read by its name as text (`operator.attrgetter`); every live
+# object (`gc.get_objects`); and what an object refers to, a function's
+# globals among them (`gc.get_referents`).
+_NAMESPACE_FINDERS = frozenset({"_getframe", "currentframe", "getmodule", "attrgetter", "methodcaller", "get_objects",
+                                "get_referrers", "get_referents"})
+_NAMESPACE_REACHERS = frozenset({*_GLOBALS_CALLS, *_NAMESPACE_FINDERS, "setattr", "delattr", "__builtins__",
+                                 "__import__"})
+_NAMESPACE_MEMBERS = frozenset({*_NAMESPACE_FINDERS, "__dict__", "__globals__", "__builtins__", "f_globals",
+                                "f_locals", "modules", "import_module"})
+_NAMESPACE_MODULES = frozenset({"__main__", "builtins"})
 # What an import binds to reach `sys.modules`, which holds every module by name.
 _SYS_MODULE_NAMES = frozenset({"sys", "sys.modules"})
 _FLOW_DEPTH = 12
@@ -2273,8 +2419,9 @@ _POWERSHELL_VALUE_FLAGS = frozenset({
 _PY_LAUNCHER_FLAG = re.compile(r"-(?:\d[\w.-]*|V:\S+)")
 _PY_LAUNCHER_LISTS = frozenset({"-0", "-0p", "--list", "--list-paths"})
 # Words that change the working folder, how many shells deep a script is read
-# before its commands count as unreadable, and the `find` flags that run a
-# command on each match: read the same way by the delete, move and launch walks.
+# before the check stops reading it (`_Launch.past_depth`), and the `find` flags
+# that run a command on each match: read the same way by the delete, move and
+# launch walks.
 _CD_WORDS = ("cd", "pushd")
 _SHELL_DEPTH = 4
 _FIND_EXEC_FLAGS = ("-exec", "-execdir", "-ok", "-okdir")
@@ -2360,6 +2507,16 @@ class _Unknown:
 
 
 _UNKNOWN = _Unknown()
+# What a reading gives a value it gave up on (`_Reader.past_limit`,
+# `_FileFinder.paths`): one it can't place, which an overwrite, delete or
+# move stops on, and an append doesn't (`_FileFinder.unplaced`).
+_GAVE_UP = _Unknown()
+# What `_FileFinder.paths` gives a value it can't place, or places only with
+# a part the code picks when it runs, because it reads a name code may rebind
+# at module level (`_Reader.rebound_globally`): one that may be a file the
+# turn began with, so an overwrite onto it is held whole, as a delete is, not
+# counted as a new file (`_FileFinder.unplaced`).
+_REBOUND = _Unknown()
 _TEMP_PATH = "\x00temp"
 # Stands in for a part of a path the code picks when it runs from a value the
 # check can't read, as in f"orders_{date.today()}.csv". `_locate` reads it as
@@ -2383,10 +2540,12 @@ _PARAM_DEPTH = 5
 # How far a read that stopped at its depth limit is read on, each node once,
 # to tell whether it stopped short of what it looks for (`_Reader.read_past`).
 _PAST_DEPTH = 64
+# How many levels deep `_Reader.paths` reads a path before it stops.
+_PATHS_DEPTH = 8
 # Paths one value may hold that the check keeps; past this many, unknown.
 _PATH_LIMIT = 256
-# Bindings the reading of errored cells as maybe stopped anywhere reads in one
-# check before it gives up, which keeps only the run-to-end reading's findings.
+# Bindings the reading of errored cells as maybe stopped anywhere reads for one
+# value before it gives up on that value (`_Reader.past_limit`).
 _WIDE_BINDINGS = 16 * _PATH_LIMIT
 
 
@@ -2519,11 +2678,15 @@ class _ParamValues(NamedTuple):
 
 @dataclass(frozen=True, eq=False)
 class _Remembered(Generic[_T]):
-    """What one read gave (`_Reader.recalled`), and how many times a depth
-    limit stopped it (`_Reader.cuts`)."""
+    """What one read gave (`_Reader.recalled`), how many times a depth limit
+    stopped it (`_Reader.cuts`), and the path depth limit among them
+    (`_Reader.path_cuts`), and the texts it read from dict entries for a
+    command (`_Reader.entry_texts`)."""
 
     value: _T
     cuts: int
+    path_cuts: int = 0
+    entry_texts: tuple[str, ...] = ()
 
 
 class _FillReads(NamedTuple):
@@ -3204,6 +3367,63 @@ class _Cell:
             *(d.name for d in self.definitions if self.scope_of(d) is None),
             *(name for stmt in self.signs.imports if self.scope_of(stmt) is None for name in _import_names(stmt)),
         })
+
+    @cached_property
+    def binding_sites(self) -> Counter[str]:
+        """How many places in the cell bind or declare each name, at any
+        scope: each `_bound_in` counts, and a global or nonlocal."""
+        out = _bound_in(self.walked)
+        out.update(name for node in self.walked if isinstance(node, (ast.Global, ast.Nonlocal)) for name in node.names)
+        return out
+
+    @cached_property
+    def file_reads(self) -> tuple[ast.Call, ...]:
+        """The calls of the cell that read a file's text whole, as
+        `open(...).read()` or `Path(...).read_text()` do (`_FILE_READERS`)."""
+        return tuple(c for c in self.calls if isinstance(c.func, ast.Attribute) and c.func.attr in _FILE_READERS)
+
+    @cached_property
+    def reaches_namespace(self) -> bool:
+        """Whether the cell may reach a namespace's names other than by
+        name (`_reaches_a_namespace`)."""
+        return _reaches_a_namespace(self.walked)
+
+    @cached_property
+    def rebinds_globally(self) -> frozenset[str]:
+        """The names the cell's code may rebind at module level at a time
+        the check can't order against a read of them
+        (`_Reader.rebound_globally`): one a function or class body declares
+        `global` and binds there (`_bound_in`), one a store into the
+        module's names sets (`_namespace_stores`), and one literal code a
+        function runs binds (`function_execs`, `_literal_binds`). Read once
+        per cell, kept with it (`_EarlierCells`)."""
+        out: set[str] = set()
+        for declared in self.signs.globals_declared:
+            scope = self.scope_of(declared)
+            if scope is not None:
+                bound = _bound_in(ast.walk(scope))
+                out.update(name for name in declared.names if bound[name])
+        out.update(_namespace_stores(self))
+        for call in self.function_execs:
+            for text in _texts_of((*call.args, *(k.value for k in call.keywords))):
+                out.update(_literal_binds(text))
+        return frozenset(out)
+
+    @cached_property
+    def scoped_reads(self) -> frozenset[str]:
+        """The names code in a function, lambda, class or comprehension of
+        the cell reads where no scope around it binds them: such a read
+        gets the latest module-level value of any cell the reader holds
+        (`_Reader.bindings_of`), not the latest before it (`_read_apart`)."""
+        out: set[str] = set()
+        for name, loads in self.loads.items():
+            local = {b.scope for b in self.bindings.get(name, ())}
+            for load in loads:
+                scopes = self.scopes_around(load)
+                if scopes and local.isdisjoint(scopes):
+                    out.add(name)
+                    break
+        return frozenset(out)
 
     @cached_property
     def compiles(self) -> bool:
@@ -4181,6 +4401,14 @@ def _inside(node: ast.AST, ancestor: ast.AST, cell: _Cell) -> bool:
     return False
 
 
+def _and_ancestors(node: ast.AST, cell: _Cell) -> Iterator[ast.AST]:
+    """`node`, code of `cell`, and each node it sits in, up to the cell's."""
+    current: ast.AST | None = node
+    while current is not None:
+        yield current
+        current = cell.parents.get(current)
+
+
 def _never_runs(*, parent: ast.AST, child: ast.AST) -> bool:
     """Whether `child` sits in a branch of `parent` that never runs: the body
     of an if or while whose test is a constant false (`if False:`, `if 0:`,
@@ -4261,13 +4489,22 @@ def _reads_another(found: list[_Binding], given: set[int]) -> bool:
     return bool(found) and not any(id(b) in given for b in found)
 
 
-def _latest(found: list[_Binding]) -> list[_Binding]:
+def _latest(found: list[_Binding], *, stopped: AbstractSet[int] = frozenset()) -> list[_Binding]:
     """`found`, what a read gets (`_Reader.bindings_of`), from each cell's
     last module-level value that surely ran: one built on the value before
     it, as `cmd = cmd + " -y"` is, reads that value itself, so a reader that
-    follows a name through its values needs no other."""
-    last = {id(b.cell): b.line for b in found if b.scope is None and b.how == "value" and not b.conditional}
+    follows a name through its values needs no other. A cell in `stopped`
+    may have stopped before any of its bindings, so each of its own counts."""
+    last = {id(b.cell): b.line for b in found
+            if b.scope is None and b.how == "value" and not b.conditional and b.cell.index not in stopped}
     return [b for b in found if not (b.scope is None and b.line < last.get(id(b.cell), 0))]
+
+
+def _rebuilds(node: ast.Name, *, cell: _Cell) -> bool:
+    """Whether `node`, code of `cell`, reads its name in the value a
+    module-level binding gives that same name, as the right side of `out =
+    out + ".bak"` does (`_in_value`)."""
+    return any(b.scope is None and b.how == "value" and _in_value(node, b) for b in cell.bindings.get(node.id, ()))
 
 
 def _module_alias(binding: _Binding) -> bool:
@@ -4367,18 +4604,78 @@ class _Reader:
         # The "any" reading gives a name every value each errored cell gives
         # it, so a path built from several names grows fast: past
         # `_PATH_LIMIT` paths for one value, or past `_WIDE_BINDINGS`
-        # bindings read, it gives up (`past_limit`). It reads each name once
-        # per read site (`_wide_names`).
+        # bindings read for it, it gives up on that value (`past_limit`,
+        # which `_FileFinder.paths` sets back for each value it reads). It
+        # reads each name once per read site (`_wide_names`). Any reader
+        # gives up on a value whose path it builds on past `_PATH_LIMIT`
+        # paths (`_grown_paths`), within a read of the paths a write lands on
+        # (`one_value`), so no other read is left given up on.
         self.wide = bool(errored) and errored_paths == "any"
         self.past_limit = False
+        self._one_value = False
         # How many times a depth limit stopped a read (`stops`), and whether
         # such a stop may have hidden a write (`stopped`), which leaves the
         # cell unchecked. While a read goes on past its limits (`read_past`),
         # the nodes each read reached, by the read and the node's id.
         self.cuts = 0
         self.stopped = False
+        # The code a read of the checked cell's file changes stopped at, for
+        # the card, None where none did or the stop came from elsewhere
+        # (`_FileFinder.stopped_at`).
+        self.stop_quote: str | None = None
         self._past: set[tuple[str, int]] | None = None
+        # Each call through partials past `_PARAM_DEPTH` a read stopped at,
+        # which leaves the code it runs unread (`_CellRead.read_stops`);
+        # and how deep a read of each function for those stops alone goes
+        # where it can find none, by its id (`_stop_free_depth`).
+        self.unread_partials: list[ast.AST] = []
+        self.stop_free: dict[int, int | None] = {}
+        # The command of each call a read found running a shell command past
+        # the depth limit on its words that does something (`_shell_commands`):
+        # code the check stopped reading (`_CellRead.read_stops`).
+        self.deep_commands: list[ast.AST] = []
+        # How many times the path depth limit stopped a read (`paths`), which
+        # `_FileFinder.decided` reads on past, apart from `cuts`; and, past
+        # the limits, the paths each node holds, by the node, `call_key` and
+        # whether it reads dict entries (`reading_dicts`), None while it is
+        # still being read.
+        self.path_cuts = 0
+        self._past_paths: dict[tuple[ast.AST, tuple[tuple[int, str, int], ...], bool], list[str] | _Unknown | None] = {}
+        # How many times a read met a name code may have rebound where it
+        # holds only module-level values (`bindings_of`), which
+        # `_FileFinder.paths` counts for each value it reads. The main read
+        # keeps no read of a path to recall, so it counts each afresh; the
+        # readings that keep one (`_wide_names`, `reading_past`) only add to
+        # what it holds. Such a name holds, beside its module-level values,
+        # one the check can't place (`_rebound`): a name no code binds.
+        self.rebound_reads = 0
+        # The texts the command reading read from dict entries by their key
+        # (`_keyed_entry`): a shell delete or move whose operand, or the
+        # folder a `cd` takes it to, takes text from one holds whole
+        # (`_FileFinder.shell`); a read recalled adds them again.
+        self.entry_texts: list[str] = []
+        # Whether a dict display's entries may hold other texts, by the
+        # dict's name and the bindings a read meets (`_entry_refused`).
+        self.entries_refused: dict[tuple[str, tuple[int, ...]], bool] = {}
+        unplaced = _Cell(ast.Module(body=[], type_ignores=[]), "", current.index)
+        self._rebound = _Binding(line=0, value=ast.Name(id="", ctx=ast.Load()), how="value", scope=None,
+                                 conditional=True, cell=unplaced)
         self.bindings_read = 0
+        # Whether a path may read a dict display's entry by a literal key
+        # (`_dict_entry`), which `find_cell_writes` allows only while no
+        # cell names a runner such as exec(), even of a literal, or imports
+        # a module the check can't read (`may_run_unread`), no earlier cell
+        # holds code a limit left unread or, too deep to parse, may have run
+        # (`earlier_stop`), and the checked cell itself leaves no code
+        # unread at a limit. Even then, only the second read
+        # `_FileFinder.paths` makes (`reading_dicts`) reads an entry. It
+        # makes that read only when the first read met a lookup
+        # (`dict_lookups`). `_dict_displays` keeps the dict display each name
+        # gives, read once per name (`_dict_display`).
+        self.dict_entries = False
+        self._dict_reads = False
+        self.dict_lookups = 0
+        self._dict_displays: dict[str, ast.Dict | None] = {}
         # What each read `recalled` gave, by the read, the node, the depth
         # and `call_key`. While a read reads a name rebuilt from itself ahead
         # of its own read (`reading_ahead`), what it read at each load of the
@@ -4387,7 +4684,7 @@ class _Reader:
         self._remembered: dict[tuple[str, int, int, tuple[tuple[int, str, int], ...]], _Remembered[Any]] = {}
         self._read_ahead: dict[tuple[str, int, int], Any] = {}
         self._reading_ahead: set[tuple[str, str]] = set()
-        self._wide_names: dict[tuple[int, int, tuple[tuple[int, str, int], ...]], list[str] | _Unknown] = {}
+        self._wide_names: dict[tuple[int, int, tuple[tuple[int, str, int], ...], bool, bool], list[str] | _Unknown] = {}
         self._cells_by_node: dict[ast.AST, _Cell] = {}
         self.imports: dict[str, str] = {}
         self.functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
@@ -4408,6 +4705,11 @@ class _Reader:
         # the call's id (`looked_up_member`).
         self._looked_up: dict[int, str | None] = {}
         self._setters: dict[str, frozenset[int]] = {}
+        # Whether each literal path names a file past the 1 MB cap
+        # (`oversized_sql_file`); and the nodes that hold a read of one, by
+        # the id of the cell that reads it (`reads_an_oversized_sql_file`).
+        self._oversized_paths: dict[str, bool] = {}
+        self._oversized_reads: dict[int, frozenset[int]] = {}
         for cell in self.in_order:
             for name in cell.module_bound:
                 self._binders.setdefault(name, []).append(cell)
@@ -4590,10 +4892,23 @@ class _Reader:
     def statements_held(self, name: str, binding: _Binding, *, prose: bool) -> tuple[str, ...]:
         """Every statement of each text `binding` gives `name` that holds a
         write, read as `write_statements` reads it with `prose`, once per
-        check and set of call arguments."""
+        check and set of call arguments: with what another cell adds to it
+        (`growth`), each addition read on its own, and where the binding
+        adds to the name's own value, as `script = script + more` does,
+        what it adds read on its own, as `+=` adds it."""
         key = (id(binding), name, prose, self.call_key())
         if key not in self._held:
             texts = _held_texts(name, binding, self, depth=0)
+            if binding.how == "value":
+                added = (_sql_text(grown.value, self) for grown, home in self.growth(name, binding)
+                         if home is not binding.cell and grown.how == "add")
+                texts = [*texts, *(t for t in added if t is not None)]
+
+            def own(m: re.Match[str]) -> str:
+                node = self.hole_node(m.group())
+                return "\n" if isinstance(node, ast.Name) and node.id == name else m.group()
+
+            texts = [_NUMBERED_HOLE.sub(own, t) for t in texts]
             self._held[key] = tuple(
                 s for t in texts if write_statements(t, prose=prose) for s in _quoted_statements(t)
             )
@@ -4822,14 +5137,25 @@ class _Reader:
             return str(value)
         return None
 
-    def callees(self, *, node: ast.expr, call: ast.Call | None, use: ast.expr, depth: int = 0) -> list[_Callee]:
+    def callees(
+        self, *, node: ast.expr, call: ast.Call | None, use: ast.expr, depth: int = 0,
+        seen: dict[tuple[int, int, int], tuple[ast.AST, ast.AST | None, _Remembered[list[_Callee]]]] | None = None,
+    ) -> list[_Callee]:
         """The functions and lambdas an earlier cell defined that calling
         `node` with `call` runs: one a name, an alias, a list or dict, a
         `functools.partial` or a function's return value holds, and a method
         of an earlier cell's class, called on the class, an instance, `self`
         or the call that makes one (`__init__`, `__call__`). A method called
         on something the check can't place counts in every earlier class
-        that defines it. It stops at the depth limit (`stops`)."""
+        that defines it. It stops at the depth limit (`stops`).
+
+        A name rebound from itself line after line, as `spec = spec` is,
+        holds every binding before it, so a read reaches each of them by many
+        paths: where a name holds more than one binding, one read (`seen`)
+        reads each such binding's value that is a name once per call and
+        depth, with the cuts it made counted again (`remember`), and keeps
+        the nodes so no other takes their ids. Past the limits
+        (`read_past`), where a read visits each node once, it reads afresh."""
         if self.stops("callees", node, depth=depth, limit=6):
             return []
         if isinstance(node, ast.Lambda):
@@ -4849,11 +5175,27 @@ class _Reader:
                         for c in self._methods(cls=k, name="__init__", bound=call or node, call=call, use=use)]
             if node.id not in self.bound_names:
                 return []
-            return [c for b in self.bindings_of(node.id, node=node) if b.how == "value"
-                    for c in self.callees(node=b.value, call=call, use=use, depth=depth + 1)]
+            values = [b.value for b in self.bindings_of(node.id, node=node) if b.how == "value"]
+            if len(values) < 2 or self._past is not None:
+                return [c for v in values for c in self.callees(node=v, call=call, use=use, depth=depth + 1, seen=seen)]
+            seen = {} if seen is None else seen
+            out: list[_Callee] = []
+            for v in values:
+                if not isinstance(v, ast.Name):
+                    out += self.callees(node=v, call=call, use=use, depth=depth + 1, seen=seen)
+                    continue
+                key = (id(v), id(call), depth + 1)
+                kept = seen.get(key)
+                if kept is None:
+                    kept = seen[key] = (v, call, self.remember(
+                        lambda v=v: self.callees(node=v, call=call, use=use, depth=depth + 1, seen=seen)))
+                else:
+                    self.counted(kept[2])
+                out += kept[2].value
+            return out
         if isinstance(node, ast.Subscript):
             items = self.items_of(node=node.value, key=node.slice, depth=depth + 1) or []
-            return [c for item in items for c in self.callees(node=item, call=call, use=use, depth=depth + 1)]
+            return [c for item in items for c in self.callees(node=item, call=call, use=use, depth=depth + 1, seen=seen)]
         if isinstance(node, ast.Attribute) and node.attr in self.method_names:
             receiver = node.value
             if isinstance(receiver, ast.Name) and self.import_of(receiver) is not None:
@@ -4869,15 +5211,15 @@ class _Reader:
         if isinstance(node, ast.Call):
             if self.dotted(node.func) == "functools.partial" and node.args:
                 made = None if call is None else _partial_call(partial=node, call=call)
-                return self.callees(node=node.args[0], call=made, use=use, depth=depth + 1)
+                return self.callees(node=node.args[0], call=made, use=use, depth=depth + 1, seen=seen)
             cls = self._earlier_class(node=node.func)
             if cls is not None:
                 # An instance called: its __call__.
                 return self._methods(cls=cls, name="__call__", bound=node, call=call, use=use)
             # What a function returns, called.
-            return [c for made in self.callees(node=node.func, call=node, use=use, depth=depth + 1)
+            return [c for made in self.callees(node=node.func, call=node, use=use, depth=depth + 1, seen=seen)
                     for ret in self.returns(func=made.func)
-                    for c in self.callees(node=ret, call=call, use=use, depth=depth + 1)]
+                    for c in self.callees(node=ret, call=call, use=use, depth=depth + 1, seen=seen)]
         return []
 
     def _alias_start(self, node: ast.Name) -> ast.Name:
@@ -5075,18 +5417,20 @@ class _Reader:
         each of those with its own arguments after theirs, as
         `partial(base, cmd)` after `base = partial(subprocess.run,
         check=True)` reads as `partial(subprocess.run, cmd, check=True)`, up
-        to `_PARAM_DEPTH` partials deep."""
+        to `_PARAM_DEPTH` partials deep, past which the read stops (`stops`)."""
         if isinstance(node, ast.Name):
             if node.id not in self.bound_names:
                 return []
             values = [b.value for b in self.bindings_of(node.id, node=node) if b.how == "value"]
         else:
             values = [node]
+        partials = [v for v in values
+                    if isinstance(v, ast.Call) and v.args and self.dotted(v.func) == "functools.partial"]
+        if not partials or self.stops("partials", node, depth=depth, limit=_PARAM_DEPTH):
+            return []
         out: list[ast.Call] = []
-        for v in values:
-            if not (isinstance(v, ast.Call) and v.args and self.dotted(v.func) == "functools.partial"):
-                continue
-            inner = self.partials_of(node=v.args[0], depth=depth + 1) if depth < _PARAM_DEPTH else []
+        for v in partials:
+            inner = self.partials_of(node=v.args[0], depth=depth + 1)
             out += [ast.copy_location(ast.Call(func=v.func, args=[*i.args, *v.args[1:]],
                                                keywords=[*i.keywords, *v.keywords]), v) for i in inner] or [v]
         return out
@@ -5129,12 +5473,22 @@ class _Reader:
         `errored` may have stopped before any of its bindings, or after any:
         each of them counts, and so do the older ones. Read once per check:
         a loop that reads a name many earlier loops bind asks it again and
-        again.
+        again. Where they are all module-level, for a name code may have
+        rebound at a time the check can't order against the read
+        (`rebound_globally`), one more the check can't place, which
+        `rebound_reads` counts: so a path or a command's word read through
+        it is one the check can't place, never a module-level value, while
+        a call through it still reads what each of those values runs.
         """
-        key = (name, id(node), partly_run)
+        # With no errored cell, a partly run cell's bindings are its whole run's.
+        key = (name, id(node), partly_run and bool(self.errored))
         found = self._bindings_read.get(key)
         if found is None:
             found = self._bindings_read[key] = tuple(self._bindings_afresh(name, node=node, partly_run=partly_run))
+        if name in self.rebound_globally and all(b.scope is None for b in found):
+            # Code may have rebound it since any module-level value (`rebound_globally`).
+            self.rebound_reads += 1
+            return [*found, self._rebound] if found else []
         return list(found)
 
     def _bindings_afresh(self, name: str, *, node: ast.AST, partly_run: bool) -> list[_Binding]:
@@ -5390,6 +5744,15 @@ class _Reader:
         body raises (`_swallowing_withs`): each, read by `_may_swallow`,
         vouches for nothing its body binds. Read once per check."""
         return _swallowing_withs(self)
+
+    @cached_property
+    def rebound_globally(self) -> frozenset[str]:
+        """The names code may rebind at module level at a time the check
+        can't order against a read of them, in any of the cells
+        (`_Cell.rebinds_globally`). Where such a name holds only
+        module-level values, it holds one the check can't place beside them
+        (`bindings_of`). Read once per check, since `bindings_of` asks it."""
+        return frozenset().union(*(cell.rebinds_globally for cell in self.cells))
 
     def global_setters(self, name: str) -> frozenset[int]:
         """The calls, by id, that bind `name` at module level: a call as a
@@ -6018,6 +6381,16 @@ class _Reader:
         self._past.add(key)
         return False
 
+    def partials_cut(self, call: ast.Call) -> bool:
+        """Whether partials of partials past `_PARAM_DEPTH` may hide the
+        call `call` makes: read again with no limit (`read_on`), its
+        partials go on."""
+        if not isinstance(call.func, (ast.Name, ast.Call)):
+            return False
+        mark = self.cuts
+        self.partials_of(node=call.func)
+        return bool(self.read_on(mark, lambda: self.partials_of(node=call.func)))
+
     def read_past(self, mark: int, read: Callable[[], object]) -> None:
         """After a read that came back short: when a depth limit stopped it
         (`cuts` past `mark`), `read` reads again with no limit (`read_on`)
@@ -6035,11 +6408,18 @@ class _Reader:
         read on."""
         if self.cuts == mark or self._past is not None or self.wide:
             return None
-        self._past = set()
-        try:
+        with self.reading_past():
             return read()
+
+    @contextmanager
+    def reading_past(self) -> Iterator[None]:
+        """While it runs, reads go on past their depth limits, each node
+        once (`stops`, `paths`)."""
+        self._past, self._past_paths = set(), {}
+        try:
+            yield
         finally:
-            self._past = None
+            self._past, self._past_paths = None, {}
 
     @overload
     def remembered(self, read: str, node: ast.AST, *, depth: int, compute: Callable[[], list[_T]]) -> list[_T]: ...
@@ -6069,21 +6449,36 @@ class _Reader:
         at every later one. A recalled read counts its stops again, so a read
         that stopped short still says so. What a read read ahead of a name
         rebuilt from itself (`reading_ahead`) it takes as read. While a read
-        goes on past its limits (`read_past`), it reads afresh."""
+        goes on past its limits (`read_past`), or reads dict entries
+        (`reading_dicts`), it reads afresh."""
         ahead = self._read_ahead.get((read, id(node), depth))
         if ahead is not None:
-            self.cuts += ahead.cuts
+            self.counted(ahead)
             return ahead.value
-        if self._past is not None:
+        if self._past is not None or self._dict_reads:
             return compute()
         key = (read, id(node), depth, self.call_key())
         hit = self._remembered.get(key)
         if hit is None:
-            mark = self.cuts
-            hit = self._remembered[key] = _Remembered(value=compute(), cuts=self.cuts - mark)
+            hit = self._remembered[key] = self.remember(compute)
         else:
-            self.cuts += hit.cuts
+            self.counted(hit)
         return hit.value
+
+    def remember(self, compute: Callable[[], _T]) -> _Remembered[_T]:
+        """What `compute` gives, with the cuts it made (`cuts`, `path_cuts`)
+        and the dict entries' texts it read (`entry_texts`)."""
+        mark, path_mark, entry_mark = self.cuts, self.path_cuts, len(self.entry_texts)
+        value = compute()
+        return _Remembered(value=value, cuts=self.cuts - mark, path_cuts=self.path_cuts - path_mark,
+                           entry_texts=tuple(self.entry_texts[entry_mark:]))
+
+    def counted(self, hit: _Remembered[Any]) -> None:
+        """The cuts and dict entries' texts a read `hit` remembers counted
+        again (`remember`)."""
+        self.cuts += hit.cuts
+        self.path_cuts += hit.path_cuts
+        self.entry_texts += hit.entry_texts
 
     def read_bindings(
         self, read: str, node: ast.Name, *, depth: int, compute: Callable[[_Binding, int], _T],
@@ -6127,14 +6522,14 @@ class _Reader:
         added: list[tuple[str, int, int]] = []
 
         def known(load: ast.Name) -> bool:
-            return self._past is None and (read, id(load), depth, self.call_key()) in self._remembered
+            return self._past is None and not self._dict_reads and (
+                read, id(load), depth, self.call_key()) in self._remembered
 
         try:
             for load in self.rebuilt_loads(node, known=known):
-                mark = self.cuts
-                value = compute(load)
+                done = self.remember(lambda load=load: compute(load))
                 added.append((read, id(load), depth))
-                self._read_ahead[added[-1]] = _Remembered(value=value, cuts=self.cuts - mark)
+                self._read_ahead[added[-1]] = done
             yield
         finally:
             self._reading_ahead.discard(key)
@@ -6175,9 +6570,55 @@ class _Reader:
 
     def paths(self, node: ast.AST, *, cell: _Cell, depth: int = 0) -> list[str] | _Unknown:
         """The glob-style path patterns `node` can hold, `*` for a part picked at
-        run time, or unknown when the check can't place its root."""
-        if depth > 8 or self.past_limit:
+        run time, or unknown when the check can't place its root, or past
+        `_PATHS_DEPTH` levels, which `path_cuts` counts. A lookup of a
+        literal key in a dict display may read that entry (`_dict_entry`).
+
+        Past the limits (`reading_past`), each node is read once and what it
+        holds kept: one read again while it is still being read is a loop,
+        as `df = df.dropna()` reads its own name, and holds what the check
+        can't place; one read already holds what it held, as two paths
+        built on one folder share it. Past `_PAST_DEPTH` levels even then
+        it gives up, which stops the check."""
+        if self.past_limit:
             return _UNKNOWN
+        if self._past is None:
+            if depth > _PATHS_DEPTH:
+                self.path_cuts += 1
+                return _UNKNOWN
+            return self._paths_read(node, cell=cell, depth=depth)
+        key = (node, self.call_key(), self._dict_reads)
+        if key in self._past_paths:
+            kept = self._past_paths[key]
+            return list(kept) if isinstance(kept, list) else _UNKNOWN
+        if depth > _PAST_DEPTH:
+            self.stopped = True
+            return _UNKNOWN
+        self._past_paths[key] = None
+        got = self._past_paths[key] = self._paths_read(node, cell=cell, depth=depth)
+        return list(got) if isinstance(got, list) else got
+
+    def paths_on(self, node: ast.AST, *, cell: _Cell) -> list[str] | _Unknown:
+        """The paths `node` can hold (`paths`), read again on past the depth
+        limit (`reading_past`) where it cut them short (`path_cuts`), as the
+        path written out reads; not while a read already goes on past its
+        limits, nor in the wide reading (`read_on`). Read on, it has the
+        budget of one value (`one_value`) and `_PAST_DEPTH` levels: past
+        either, the read gives up, and the path is one the check can't
+        place, as within the limit, and stops nothing."""
+        mark = self.path_cuts
+        got = self.paths(node, cell=cell)
+        if self.path_cuts == mark or self._past is not None or self.wide or self._one_value:
+            return got
+        stopped = self.stopped
+        with self.reading_past(), self.one_value():
+            on = self.paths(node, cell=cell)
+            gave_up = self.past_limit or self.stopped and not stopped
+            self.stopped = stopped
+            return got if gave_up else on
+
+    def _paths_read(self, node: ast.AST, *, cell: _Cell, depth: int) -> list[str] | _Unknown:
+        """What `paths` reads `node` to hold."""
         if isinstance(node, ast.Constant):
             return [node.value] if isinstance(node.value, str) else _UNKNOWN
         if isinstance(node, ast.JoinedStr):
@@ -6238,30 +6679,153 @@ class _Reader:
         if isinstance(node, ast.Subscript):
             if self._is_workspace_env(node):
                 return ["."]
+            entry = self._dict_entry(node)
+            if entry is not None:
+                return self.paths(entry, cell=self.cell_of(entry), depth=depth + 1)
             return self.paths(node.value, cell=cell, depth=depth + 1)
         if isinstance(node, ast.Call):
             return self._call_paths(node, cell=cell, depth=depth)
         return _UNKNOWN
 
+    def _dict_entry(self, node: ast.Subscript) -> ast.expr | None:
+        """The value `node`, a lookup of a literal key in a name, reads while
+        `reading_dicts`, where `dict_entries` allows such a read and the
+        name's binding there is the dict display it holds everywhere
+        (`_dict_display`): the last entry under that key, where nothing can
+        change it in place (`_unchanging_entry`). A list, set or dict entry,
+        or a name that may hold one, may hold what a cell changed through a
+        reference the dict hands out, as `lst = cfg["outs"]` then
+        `lst.append(...)` does. None otherwise, as for a key it lacks;
+        outside such a read, such a lookup counts in `dict_lookups`."""
+        if not (self.dict_entries and isinstance(node.value, ast.Name) and isinstance(node.slice, ast.Constant)):
+            return None
+        if not self._dict_reads:
+            self.dict_lookups += 1
+            return None
+        name = node.value.id
+        shown = self._dict_display(name)
+        found = self.bindings_of(name, node=node.value, partly_run=True)
+        if shown is None or len(found) != 1 or found[0].value is not shown:
+            return None
+        key = node.slice.value
+        hits = [v for k, v in zip(shown.keys, shown.values) if isinstance(k, ast.Constant) and k.value == key]
+        return hits[-1] if hits and self._unchanging_entry(hits[-1], depth=0) else None
+
+    def _unchanging_entry(self, node: ast.AST, *, depth: int) -> bool:
+        """Whether `node`, a dict display's entry, builds a value nothing can
+        change in place: a literal, or a tuple or f-string of literals
+        (`_unchanging`); text or a path, as an f-string, `%` or `/` gives,
+        or a call that makes one from what it is handed (`_PATH_JOINS`,
+        `_SAME_PATH_CALLS`, `_PATH_FOLDERS`, `_NEW_PATH_METHODS`); `+` of two such
+        values; or a name whose every binding it may read gives it such a
+        value, as `OUT = "stock.csv"` does. Within `_PARAM_DEPTH` names."""
+        if _unchanging(node) or isinstance(node, ast.JoinedStr):
+            return True
+        if isinstance(node, ast.BinOp):
+            if isinstance(node.op, (ast.Div, ast.Mod)):
+                return True
+            return isinstance(node.op, ast.Add) and all(
+                self._unchanging_entry(side, depth=depth) for side in (node.left, node.right))
+        if isinstance(node, ast.Call):
+            name = self.dotted(node.func)
+            if name in _PATH_JOINS or name in _SAME_PATH_CALLS or name in _PATH_FOLDERS:
+                return True
+            return (isinstance(node.func, ast.Attribute) and node.func.attr in _NEW_PATH_METHODS
+                    and self._unchanging_entry(node.func.value, depth=depth))
+        if isinstance(node, ast.Name) and depth < _PARAM_DEPTH:
+            found = self.bindings_of(node.id, node=node, partly_run=True)
+            return bool(found) and all(self._unchanging_entry(b.value, depth=depth + 1) for b in found)
+        return False
+
+    def _dict_display(self, name: str) -> ast.Dict | None:
+        """The dict display `name` holds wherever a cell reads it, read once
+        per name: its one binding or declaration in the cells, at any scope
+        (`_Cell.binding_sites`), gives it a dict display with only literal
+        keys, as the one target of an assignment, so no other name holds the
+        same dict, as `cfg = alias = {...}` or `alias = (cfg := {...})`
+        would; which no cell changes (`_changed_in_place`) or uses but to
+        read an entry or look at it whole (`_only_looked_up`), and no cell
+        reaches a namespace's names another way (`_Cell.reaches_namespace`).
+        None otherwise."""
+        if name in self._dict_displays:
+            return self._dict_displays[name]
+        self._dict_displays[name] = None
+        found = [b for cell in self.cells for b in cell.bindings.get(name, ())]
+        sites = sum(cell.binding_sites[name] + cell.binding_sites["*"] for cell in self.cells)
+        if len(found) != 1 or sites != 1 or any(cell.reaches_namespace for cell in self.cells):
+            return None
+        shown = found[0].value
+        # A loop or with over a dict display binds its keys or what it enters.
+        if found[0].how != "value" or not isinstance(shown, ast.Dict):
+            return None
+        held_by = found[0].cell.parents.get(shown)
+        if not (isinstance(held_by, ast.Assign) and len(held_by.targets) == 1 or isinstance(held_by, ast.AnnAssign)):
+            return None
+        if (not all(isinstance(k, ast.Constant) for k in shown.keys) or _changed_in_place(name, found, self)
+                or not _only_looked_up(name, self)):
+            return None
+        self._dict_displays[name] = shown
+        return shown
+
+    @contextmanager
+    def one_value(self) -> Iterator[None]:
+        """While it runs, a read is of the paths one value a write lands on
+        holds (`_FileFinder.paths`), with a budget of its own: past its
+        limits it gives up on the value (`past_limit`). Given up on or not,
+        the reader reads on afresh after it."""
+        self.past_limit, self.bindings_read, self._one_value = False, 0, True
+        try:
+            yield
+        finally:
+            self.past_limit, self.bindings_read, self._one_value = False, 0, False
+
+    @contextmanager
+    def reading_dicts(self) -> Iterator[None]:
+        """While it runs, a lookup of a literal key in a dict display reads
+        that entry (`_dict_entry`), and each read reads afresh (`recalled`,
+        `_wide_names`), so nothing it reads is kept for a read outside it."""
+        self._dict_reads = True
+        try:
+            yield
+        finally:
+            self._dict_reads = False
+
     def _too_many(self, *, count: int) -> bool:
         """Whether `count` paths for one value pass `_PATH_LIMIT` on the wide
-        reading, which then gives up whole (`past_limit`). Always False on
-        any other reader."""
-        if self.wide and count > _PATH_LIMIT:
+        reading, or on the read of one value a write lands on past the depth
+        limits (`one_value`, `reading_past`), which then gives up on the
+        value (`past_limit`): a path built through many steps may hold more
+        variants at each, so read on past the limit it may hold too many to
+        read. On any other reader, whether it gave up on the value already."""
+        if (self.wide or self._past is not None and self._one_value) and count > _PATH_LIMIT:
             self.past_limit = True
         return self.past_limit
 
     def _name_paths(self, node: ast.Name, *, cell: _Cell, depth: int) -> list[str] | _Unknown:
         if not self.wide:
             return self._name_paths_read(node, cell=cell, depth=depth)
-        key = (id(node), depth, self.call_key())
+        # A read past the limits (`reading_past`) reads afresh what a read
+        # within them cut short, and a read of dict entries (`reading_dicts`)
+        # what one with no such read gave.
+        key = (id(node), depth, self.call_key(), self._past is not None, self._dict_reads)
         if key not in self._wide_names:
-            self._wide_names[key] = self._name_paths_read(node, cell=cell, depth=depth)
+            got = self._name_paths_read(node, cell=cell, depth=depth)
+            # A name it gave up on gives up again on each value that reads it.
+            self._wide_names[key] = _GAVE_UP if self.past_limit else got
         got = self._wide_names[key]
+        if got is _GAVE_UP:
+            self.past_limit = True
         return got if isinstance(got, _Unknown) else list(got)
 
     def _name_paths_read(self, node: ast.Name, *, cell: _Cell, depth: int) -> list[str] | _Unknown:
         found = self.bindings_of(node.id, node=node, partly_run=True)
+        if _rebuilds(node, cell=cell):
+            # The right side of `out = os.path.join(out, part)` gets the
+            # value before it, as Python runs it (`_latest`), so a path
+            # rebuilt many times holds one value per step, not one per
+            # subset of its steps. Any other read gets every value, since
+            # code that runs before a later step may read an earlier one.
+            found = _latest(found, stopped=self.errored)
         if not found or (self.errored_paths == "unknown" and any(b.cell.index in self.errored for b in found)):
             return _UNKNOWN
         if self.wide:
@@ -6485,6 +7049,10 @@ class _Reader:
             sure = ran and in_order and not stopped and not cell._under_branch(grown.site, scope=binding.scope)
             out = built if sure else out + built
             if self._too_many(count=len(out)) or len(out) > _PATH_LIMIT:
+                # Past the limit a read of the value a write lands on gives
+                # up on it, as the wide reading does: an overwrite, delete or
+                # move it lands on stops the check (`_FileFinder.unplaced`).
+                self.past_limit = self.past_limit or self._one_value
                 return _UNKNOWN
         return list(dict.fromkeys(out))
 
@@ -6513,11 +7081,11 @@ class _Reader:
             if id(node) in seen or self.stops("sequence", node, depth=depth, limit=6):
                 continue
             seen.add(id(node))
-            hit = None if node is start or self._past is not None else self._remembered.get(
+            hit = None if node is start or self._past is not None or self._dict_reads else self._remembered.get(
                 ("sequence", id(node), depth, self.call_key()),
             )
             if hit is not None:
-                self.cuts += hit.cuts
+                self.counted(hit)
                 if hit.value:
                     return True
                 continue
@@ -6746,7 +7314,13 @@ class _Reader:
             return None
 
     def oversized_sql_file(self, path: str) -> bool:
-        """Whether a literal path names a file past the 1 MB cap."""
+        """Whether a literal path names a file past the 1 MB cap, read from
+        disk once per check."""
+        if path not in self._oversized_paths:
+            self._oversized_paths[path] = self._past_the_cap(path)
+        return self._oversized_paths[path]
+
+    def _past_the_cap(self, path: str) -> bool:
         if self.project_root is None and not os.path.isabs(path):
             return False
         full = Path(path) if os.path.isabs(path) else self.project_root / path
@@ -6754,6 +7328,32 @@ class _Reader:
             return full.is_file() and full.stat().st_size > _SQL_FILE_CAP
         except OSError:
             return False
+
+    def reads_an_oversized_sql_file(self, value: ast.AST, cell: _Cell) -> bool:
+        """Whether `value`, code of `cell`, reads a file past the 1 MB cap
+        by a literal path (`_sql_file_path`), whose statements the check
+        doesn't read: one of the cell's file reads (`_Cell.file_reads`) is
+        it or sits in it. Each node that holds such a read is found once
+        per cell, so a value of any size is read in one look."""
+        return id(value) in self._oversized_nodes(cell)
+
+    def _oversized_nodes(self, cell: _Cell) -> frozenset[int]:
+        """The id of each node of `cell` that holds a read of a file past
+        the 1 MB cap by a literal path (`reads_an_oversized_sql_file`)."""
+        found = self._oversized_reads.get(id(cell))
+        if found is None:
+            found = self._oversized_reads[id(cell)] = frozenset(
+                id(node) for call in cell.file_reads
+                if (path := _sql_file_path(call, self)) is not None and self.oversized_sql_file(path)
+                for node in _and_ancestors(call, cell)
+            )
+        return found
+
+    @cached_property
+    def reads_oversized_sql_files(self) -> bool:
+        """Whether a cell reads a file past the 1 MB cap by a literal path
+        (`_oversized_nodes`): only then can a name hold such a file's text."""
+        return any(self._oversized_nodes(cell) for cell in self.cells)
 
 
 def _is_motherduck(database: str) -> bool:
@@ -7382,6 +7982,25 @@ def _own_calls(func: Function, cell: _Cell, reader: _Reader) -> list[ast.Call] |
     return calls
 
 
+def _feeds_a_program(call: ast.Call, given: ast.AST, reader: _Reader) -> bool:
+    """Whether `call` hands `given`, one of its arguments or keywords, to a
+    program it runs: a call that runs one (`_LAUNCHERS`) given it as a word
+    of the command or its text, positional or as `args=`, or as the
+    program's input (`input=`); or a running program's `communicate()` or
+    `stdin.write()` given it as that input. Any program counts, as in the
+    cell that reads a file (`_call_findings`): the check can't tell a
+    database's command line client, as `psql -c` or `sqlite3 app.db`, from
+    another program."""
+    func = call.func
+    if isinstance(given, ast.keyword) and given.arg not in ("args", "input"):
+        return False
+    if (reader.module_member(func) or reader.dotted(func)) in _LAUNCHERS:
+        return True
+    return isinstance(func, ast.Attribute) and (func.attr == "communicate" or func.attr == "write" and (
+        isinstance(func.value, ast.Attribute) and func.value.attr == "stdin" and reader.dotted(func.value.value) != "sys"
+    ))
+
+
 class _Reach(IntEnum):
     """Where a statement's value can go, ordered so that the furthest of a
     value's uses is the largest."""
@@ -7397,6 +8016,7 @@ class _Reach(IntEnum):
 
 def _reaches_a_runner(
     node: ast.AST, reader: _Reader, *, depth: int = 0, followed: set[int] | None = None, any_handle: bool = False,
+    launchers: bool = False,
 ) -> _Reach:
     """Where a statement's value can go: the furthest of its uses.
 
@@ -7407,7 +8027,8 @@ def _reaches_a_runner(
     or .query() call runs (`_runs_sql`), what text() or sql.SQL() wraps,
     or a parameter a pad function runs so. ELSEWHERE for anything else,
     because the check can't follow it. With `any_handle`, an execute on a
-    local handle is a runner too.
+    local handle is a runner too; with `launchers`, so is a program a call
+    runs that it hands the value to (`_feeds_a_program`).
     """
     if depth > _FLOW_DEPTH:
         return _Reach.ELSEWHERE
@@ -7416,7 +8037,8 @@ def _reaches_a_runner(
     parent = cell.parents.get(node)
 
     def on(target: ast.AST) -> _Reach:
-        return _reaches_a_runner(target, reader, depth=depth + 1, followed=followed, any_handle=any_handle)
+        return _reaches_a_runner(target, reader, depth=depth + 1, followed=followed, any_handle=any_handle,
+                                 launchers=launchers)
 
     def via(uses: Sequence[ast.AST]) -> _Reach:
         fresh = [u for u in uses if id(u) not in followed]
@@ -7463,6 +8085,9 @@ def _reaches_a_runner(
             if reader.dotted(call.func) == "filter":
                 reach = max(reach, on(call))
             return reach
+        if isinstance(func, ast.Constant) and func.value is None and reader.dotted(call.func) == "filter":
+            # `filter(None, items)` hands on each item that is true.
+            return on(call)
         name = reader.dotted(func)
         if name in _SQL_WRAPPERS or name in _PASS_THROUGH:
             return wrapped(name, call)
@@ -7522,7 +8147,9 @@ def _reaches_a_runner(
         called = isinstance(call, ast.Call) and call.func is parent
         if parent.attr in _MAPPER_METHODS and called:
             return into(call.args[0], call) if call.args else _Reach.ELSEWHERE
-        if parent.attr in _STR_METHODS or parent.attr == "join" or parent.attr in _CARRIERS:
+        if parent.attr in _STR_METHODS or parent.attr == "join" or parent.attr in _CARRIERS or (
+            any_handle and parent.attr in _SPLITS
+        ):
             return on(call if called else parent)
         if called:
             return _Reach.ELSEWHERE  # any other method may run it
@@ -7533,6 +8160,8 @@ def _reaches_a_runner(
     if isinstance(parent, ast.Call):
         if parent.func is node:
             return _Reach.ELSEWHERE
+        if launchers and _feeds_a_program(parent, node, reader):
+            return _Reach.RUNNER
         builtin = reader.exec_builtin(parent.func)
         whole = _literal_source(value) is not None or isinstance(value, (ast.Name, ast.Attribute, ast.Subscript))
         if builtin is not None and whole and _exec_source(parent, builtin) is value:
@@ -7575,9 +8204,25 @@ def _reaches_a_runner(
                 return _Reach.ELSEWHERE
             names.add(stored)
         return via_names(names, at=parent)
+    if isinstance(parent, ast.arguments):
+        # A parameter's default goes where the function reads the parameter.
+        func = cell.parents.get(parent)
+        param = _defaulted_param(parent, node)
+        if param is None or not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return _Reach.ELSEWHERE
+        return via(_loads_in(func.body if isinstance(func.body, list) else [func.body], param))
     if isinstance(parent, (ast.Compare, ast.UnaryOp, ast.If, ast.While, ast.Assert)):
         return _Reach.NOWHERE
     return _Reach.ELSEWHERE
+
+
+def _defaulted_param(args: ast.arguments, default: ast.AST) -> str | None:
+    """The parameter `default`, one of `args`' defaults, is the default of;
+    None for any other node."""
+    positional = [*args.posonlyargs, *args.args]
+    pairs = [*zip(positional[len(positional) - len(args.defaults):], args.defaults),
+             *zip(args.kwonlyargs, args.kw_defaults)]
+    return next((param.arg for param, value in pairs if value is default), None)
 
 
 # The keywords that pass a statement's parameters: psycopg2's vars, psycopg's
@@ -8001,6 +8646,8 @@ class _Routine:
 
 # How many bindings, displays and wrappers `_routine_of` follows.
 _ROUTINE_DEPTH = 8
+# How many earlier bindings of a big SQL file's text a card quotes (`_call_findings`).
+_BINDINGS_SHOWN = 3
 # Methods that read what a dict or list holds: `ops.get("purge")`,
 # `steps.pop()` and `for f in ops.values():`.
 _ENTRY_READS = frozenset({"get", "pop", "popitem", "setdefault", "values", "items", "copy"})
@@ -8167,8 +8814,9 @@ def _call_findings(
 ) -> list[CallWrite]:
     """The data changes a cell makes with no SQL text to quote: a stored
     procedure, a SQLAlchemy construct, a non-SQL store's own method, or SQL
-    read from a file too big to check. With `root`, the ones a function of the
-    cell makes, reported at `report`, the call in the checked cell."""
+    read from a file too big to check, here or into a name other code
+    binds. With `root`, the ones a function of the cell makes, reported at
+    `report`, the call in the checked cell."""
     top = cell.tree if root is None else root
     commits = any(
         isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("commit", "flush")
@@ -8229,7 +8877,11 @@ def _call_findings(
             add(via, node)
         elif isinstance(node.func, ast.Attribute) and node.func.attr in _FILE_READERS:
             path = _sql_file_path(node, reader)
-            if path is not None and reader.oversized_sql_file(path) and _reaches_a_runner(node, reader):
+            # An execute on a local handle runs it too: the check reads none
+            # of its statements, so it holds no change to the database file.
+            if path is not None and reader.oversized_sql_file(path) and _reaches_a_runner(
+                node, reader, any_handle=True, launchers=True,
+            ):
                 add("sql_file", node)
     here = {id(n) for n in ast.walk(top)}
     for node, found in handed:
@@ -8237,6 +8889,35 @@ def _call_findings(
         # not follow it. One bound here already has its own finding.
         if found.unfollowed or id(found.source) not in here:
             add("procedure", node, bindings=found.bindings)
+    # A name bound outside this code, as in an earlier cell or in literal
+    # code, to such a file's text, or added to with it (`_Reader.growth`),
+    # where it reaches a runner as the statement it runs: the card quotes
+    # the statement that runs it, and each such binding, scrubbed and cut
+    # as the card's other quotes of code are (`_cut`). A use the check can't
+    # follow, as a regex over a big text file is, holds nothing.
+    run: dict[int, tuple[ast.AST, list[str]]] = {}
+    quotes: dict[int, str] = {}
+
+    def quote(value: ast.AST, home: _Cell) -> str:
+        if id(value) not in quotes:
+            quotes[id(value)] = _cut(scrub_output(home.source(home.statement_of(value))))
+        return quotes[id(value)]
+
+    uses = (u for loads in cell.loads.values() for u in loads) if root is None else cell.loads_in(root)
+    for use in uses if reader.reads_oversized_sql_files else ():
+        bindings = []
+        for b in reader.bindings_of(use.id, node=use):
+            given = [(b.value, b.cell), *((grown.value, home) for grown, home in reader.growth(use.id, b))]
+            bindings += [quote(value, home) for value, home in given
+                         if id(value) not in here and reader.reads_an_oversized_sql_file(value, home)]
+        if bindings and _reaches_a_runner(use, reader, any_handle=True, launchers=True) is _Reach.RUNNER:
+            statement = cell.statement_of(use)
+            run.setdefault(id(statement), (statement, []))[1].extend(bindings)
+    for statement, bindings in run.values():
+        # A few of them, and how many more: one cell may add many reads to a name.
+        kept = list(dict.fromkeys(bindings))
+        more = [f"# ... and {len(kept) - _BINDINGS_SHOWN} more like these"] if len(kept) > _BINDINGS_SHOWN else []
+        add("sql_file", statement, bindings=(*kept[:_BINDINGS_SHOWN], *more))
 
     def only_called(source: ast.AST) -> bool:
         """Whether every use of the routine `source` here is a call this
@@ -8831,6 +9512,23 @@ class _OwnedFiles:
         self._written: frozenset[str] | None = None
         self._written_unerrored: frozenset[str] | None = None
         self._written_surely: frozenset[str] | None = None
+        # Whether the cells are read on past the path depth limit, and this
+        # reading's twin that is (`past`).
+        self._reads_past = False
+        self._past: _OwnedFiles | None = None
+
+    def past(self) -> _OwnedFiles:
+        """The files the agent owns, with each earlier cell read on past the
+        path depth limit (`_Reader.reading_past`), for a run of the checked
+        cell's finder past it (`_FileFinder.decided`): so a rewrite of a file
+        an earlier cell overwrote through the same deep path is the agent's,
+        as its shallow twin is. Read once."""
+        if self._reads_past:
+            return self
+        if self._past is None:
+            self._past = _OwnedFiles(self._earlier, self._snapshots, errored=self._errored)
+            self._past._reads_past = True
+        return self._past
 
     def owns(self, path: str) -> bool:
         """Whether the agent owns `path`, a snapshot path as a card names it.
@@ -8879,6 +9577,13 @@ class _OwnedFiles:
         exec_read = _exec_cells(reader, unerrored, ran_only=True)
         if exec_read.cells:
             reader = _Reader([*cells, *exec_read.cells], current=after, errored=errored, errored_paths="unknown")
+        with reader.reading_past() if self._reads_past else nullcontext():
+            return self._writes_of(reader, unerrored, exec_read)
+
+    def _writes_of(self, reader: _Reader, unerrored: list[_Cell], exec_read: _ExecRead) -> frozenset[str]:
+        """The files `unerrored`, the earlier cells that ran to their end,
+        overwrite as `reader` reads them, with the literal code `exec_read`
+        read (`_writes_read_from`)."""
         changes: list[FileChange] = []
 
         def read_function(callee: _Callee, *, cell: _Cell, at: ast.AST, chain: tuple[int, ...]) -> None:
@@ -8953,14 +9658,112 @@ class _FileFinder:
         # that follows it name a file once. A database write keeps its own
         # changes (`overwrite`), so it never hides another overwrite.
         self.overwritten: set[str] = set()
+        # The card's code of each node a change was reported at (`quote`).
+        self.quotes: dict[int, str] = {}
 
-    def paths(self, node: ast.AST) -> list[str] | _Unknown:
-        return self.reader.paths(node, cell=self.cell)
+    def paths(self, node: ast.AST, *, entries: bool = False) -> list[str] | _Unknown:
+        """The paths `node` can hold (`_Reader.paths`), `_GAVE_UP` where the
+        reader gave up on the value (`_Reader.past_limit`), within a budget
+        of its own for each value (`_Reader.one_value`). With `entries`, for
+        where an overwrite lands, which counts as a new file where the check
+        can't place it: where a lookup of a literal key in a dict display
+        left them unknown, they are read again with its entry
+        (`_Reader.reading_dicts`), kept only where that places them on a file
+        or folder the turn began with and neither read met a name code may
+        have rebound. So an entry only ever adds a hold: a delete, a move or
+        any other change holds whole where it can't be placed, so it never
+        reads one. A read again that gives up gives `_GAVE_UP` too. Paths
+        either read met a name code may have rebound in
+        (`_Reader.rebound_reads`) give `_REBOUND` where that left them
+        unknown or left a part the code picks when it runs
+        (`_RUN_TIME_PART`), as a file name joined to a folder does: such a
+        name may hold a file the turn began with, and an overwrite would
+        otherwise drop such a part as a new file's (`overwrite`)."""
+        reader = self.reader
+        with reader.one_value():
+            lookups, rebound = reader.dict_lookups, reader.rebound_reads
+            got = reader.paths(node, cell=self.cell)
+            if reader.past_limit:
+                return _GAVE_UP
+            if entries and isinstance(got, _Unknown) and reader.dict_lookups > lookups:
+                with reader.reading_dicts():
+                    entry = reader.paths(node, cell=self.cell)
+                if reader.past_limit:
+                    # The entry may place the write on a file the turn began with.
+                    return _GAVE_UP
+                if reader.rebound_reads == rebound and not isinstance(entry, _Unknown) and self.locate(entry).found():
+                    return entry
+            if reader.rebound_reads > rebound and (
+                isinstance(got, _Unknown) or any(_RUN_TIME_PART in p for p in got)
+            ):
+                return _REBOUND
+            return got
+
+    def decided(self, decide: Callable[[_FileFinder], _T]) -> _T:
+        """What `decide` gives, run on this finder for one node of the walk.
+        A path it read past the path depth limit (`_Reader.path_cuts`) is
+        one the check can't place, so the run may hold less than the path
+        would: it runs again on a copy of this finder, reading on past the
+        limit (`_Reader.reading_past`), and when that holds a file this run
+        doesn't (`_covers`), the check stops (`_Reader.stopped`), the wide
+        reading of errored cells included (`_Reader.wide`). So a deep path
+        gets the decision its shallow twin gets for a write: an append, a
+        copy's source, a rewrite of a file the agent owns, a new file and a
+        command that changes nothing stop nothing, and a write onto a path
+        the twin holds whole, as through a rebound name, stops (`_covers`).
+        A delete or a move from it holds whole, and a shell `rm` or `mv` the
+        depth limit cut short is read on past it the same way
+        (`_FileFinder.shell`). What the copy finds stays off the
+        card. Where it takes a whole root the files this run names don't
+        cover, those files are only part of what the change may reach, so
+        the card names none of them, as for a path picked when it runs. An
+        earlier cell read for what it overwrote (no `owned`) holds nothing,
+        so it isn't run again."""
+        reader = self.reader
+        mark, before, overwritten = reader.path_cuts, len(self.out), set(self.overwritten)
+        got = decide(self)
+        if reader.path_cuts == mark or self.owned is None or reader._past is not None:
+            return got
+        past = _FileFinder(reader, self.snapshots, cell=self.cell, report=self.report, owned=self.owned.past())
+        past.out, past.overwritten = list(self.out[:before]), overwritten
+        with reader.reading_past():
+            decide(past)
+        held = [c for c in self.out[before:] if c.held]
+        uncovered = [c for c in past.out[before:] if c.held and not _covers(held, c)]
+        if uncovered:
+            reader.stopped = True
+        rooted = {c.action for c in uncovered if c.whole_project or c.whole_shared}
+        if rooted:
+            self.out[before:] = [c.model_copy(update={"paths": ()}) if c.held and c.action in rooted else c
+                                 for c in self.out[before:]]
+        return got
+
+    def unplaced(self, got: list[str] | _Unknown, call: ast.Call, *, append: bool = False) -> TypeGuard[_Unknown]:
+        """Whether `got`, the paths the overwrite `call` makes lands on, is
+        one the check can't place, which counts as a new file. One a reading
+        gave up on (`_GAVE_UP`) may be a file the turn began with that a
+        reading within its limits would hold, so the check stops
+        (`_Reader.stopped`); and one read through a name code may rebind at
+        module level (`_REBOUND`) may be one too, so the overwrite is held as
+        one onto a file the code picks when it runs; unless the write only
+        adds to it (`append`), which is never held."""
+        if got is _GAVE_UP and not append:
+            self.reader.stopped = True
+        if got is _REBOUND and not append:
+            self.add("overwrite", _Targets(unknown=True), call)
+        return isinstance(got, _Unknown)
 
     def locate(
         self, got: list[str] | _Unknown, *, cwds: Sequence[str] | _Unknown | None = None, files_only: bool = False,
         existing_files: bool = False,
     ) -> _Targets:
+        """Where the paths `got` land (`_locate`). Paths a reading gave up
+        on (`_GAVE_UP`) land nowhere it can name, and may be a file the turn
+        began with that a reading within its limits would hold, so the check
+        stops (`_Reader.stopped`), as for an overwrite (`unplaced`)."""
+        if got is _GAVE_UP:
+            self.reader.stopped = True
+            return _Targets()
         return _locate(got, self.snapshots, cwds=self.reader.cwds if cwds is None else cwds, files_only=files_only,
                        existing_files=existing_files, made=self.reader.made, disk=self.reader.disk)
 
@@ -8974,46 +9777,75 @@ class _FileFinder:
     ) -> None:
         if not targets.found():
             return
-        call = self.report.call if self.report is not None else scrub_output(self.cell.source(node))
+        call = self.report.call if self.report is not None else self.quote(node)
         self.out.append(FileChange(
             action=action, paths=targets.paths, whole_project=targets.whole_project,
             whole_shared=targets.whole_shared, call=call, line=self.line(node), held=held, statements=statements,
         ))
 
+    def quote(self, node: ast.AST) -> str:
+        """The code of `node` a change it makes names on the card, scrubbed
+        once per node: a long script's many deletes share it."""
+        if id(node) not in self.quotes:
+            self.quotes[id(node)] = scrub_output(self.cell.source(node))
+        return self.quotes[id(node)]
+
     def walk(self, root: ast.AST) -> None:
-        reader, cell = self.reader, self.cell
         # The walk goes breadth first, so a database write is read after it,
         # in source order: the card quotes a file's statements as they run.
+        # A copy `decided` runs reads its SQL writes into a list of its own,
+        # and drops them: this finder reads each once.
         database_writes: list[ast.Call] = []
         for node in ast.walk(root) if self.owned is not None else _nodes_that_run(root):
-            if isinstance(node, ast.Attribute) and reader.dotted(node) in (*_DELETE_FUNCS, *_MOVE_FUNCS):
-                parent = cell.parents.get(node)
-                if not (isinstance(parent, ast.Call) and parent.func is node):
-                    # Passed as a value, as in map(os.remove, ...): the target is
-                    # picked when it runs.
-                    name = reader.dotted(node)
-                    self.add("delete" if name in _DELETE_FUNCS else _MOVE_FUNCS[name], _Targets(unknown=True), node)
-                continue
-            if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load) and (
-                _last_name(node) in _LAUNCH_NAMES and reader.module_member(node) in _LAUNCHERS
-                or _partial_launcher(node, reader)
-            ):
-                # A launcher, or a partial of one, handed to a caller that
-                # runs it later, read as each call the caller makes of it
-                # (`_passed_calls`).
-                passed = _passed_calls(node, cell, reader)
-                for call in () if isinstance(passed, _Unknown) else passed:
-                    self.shell(call)
-            if self.lookup(node=node):
-                continue
-            if not isinstance(node, ast.Call):
-                continue
-            partials = reader.partials_of(node=node.func) if isinstance(node.func, (ast.Name, ast.Call)) else []
-            # A call through functools.partial, read as each call it makes.
-            for made in [_partial_call(partial=partial, call=node) for partial in partials] or [node]:
-                self.call_change(made, database_writes)
+            stopped = self.reader.stopped
+            self.decided(lambda finder, node=node: finder.node_change(
+                node, database_writes if finder is self else [],
+            ))
+            self.stopped_at(node, stopped=stopped)
         for call in sorted(database_writes, key=lambda c: (c.lineno, c.col_offset)):
-            self.database_write(call)
+            stopped = self.reader.stopped
+            self.decided(lambda finder, call=call: finder.database_write(call))
+            self.stopped_at(call, stopped=stopped)
+
+    def stopped_at(self, node: ast.AST, *, stopped: bool) -> None:
+        """Where the read of `node` stopped the check, when it did and
+        `stopped` says it hadn't before, kept for the card
+        (`_Reader.stop_quote`): the call in the checked cell that reaches
+        it, as a change is reported at. The first such place wins."""
+        reader = self.reader
+        if reader.stopped and not stopped and reader.stop_quote is None:
+            reader.stop_quote = _cut(self.report.call) if self.report is not None else _stopped_at(node, reader)
+
+    def node_change(self, node: ast.AST, database_writes: list[ast.Call]) -> None:
+        """The change `node`, a node `walk` reaches, makes to a file: a
+        delete or move passed as a value, what a launcher handed to a caller
+        runs, a lookup `lookup` reads, or a call's change (`call_change`),
+        each call a partial of it makes among them."""
+        reader, cell = self.reader, self.cell
+        if isinstance(node, ast.Attribute) and reader.dotted(node) in (*_DELETE_FUNCS, *_MOVE_FUNCS):
+            parent = cell.parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node):
+                # Passed as a value, as in map(os.remove, ...): the target is
+                # picked when it runs.
+                name = reader.dotted(node)
+                self.add("delete" if name in _DELETE_FUNCS else _MOVE_FUNCS[name], _Targets(unknown=True), node)
+            return
+        if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load) and (
+            _last_name(node) in _LAUNCH_NAMES and reader.module_member(node) in _LAUNCHERS
+            or _partial_launcher(node, reader)
+        ):
+            # A launcher, or a partial of one, handed to a caller that
+            # runs it later, read as each call the caller makes of it
+            # (`_passed_calls`).
+            passed = _passed_calls(node, cell, reader)
+            for call in () if isinstance(passed, _Unknown) else passed:
+                self.shell(call)
+        if self.lookup(node=node) or not isinstance(node, ast.Call):
+            return
+        partials = reader.partials_of(node=node.func) if isinstance(node.func, (ast.Name, ast.Call)) else []
+        # A call through functools.partial, read as each call it makes.
+        for made in [_partial_call(partial=partial, call=node) for partial in partials] or [node]:
+            self.call_change(made, database_writes)
 
     def call_change(self, node: ast.Call, database_writes: list[ast.Call]) -> None:
         """The change `node`, a call `walk` reaches, makes to a file: a
@@ -9047,13 +9879,13 @@ class _FileFinder:
                 (k.value for k in node.keywords if k.arg == "target"), None
             )
             if dest is not None:
-                self.overwrite(self.paths(dest), node)
+                self.overwrite(self.paths(dest, entries=True), node)
         elif method in _EXECUTE or method in _READ_SQL or method == "to_sql":
             database_writes.append(node)
         else:
             write = _file_write(node, reader)
             if write is not None and write.kind != "create":
-                self.overwrite(self.paths(write.target), node, append=write.kind == "append")
+                self.overwrite(self.paths(write.target, entries=True), node, append=write.kind == "append")
 
     def lookup(self, *, node: ast.AST) -> bool:
         """Whether `node` is a lookup `_plain_lookup` can't read, on a module,
@@ -9103,7 +9935,7 @@ class _FileFinder:
                 # What it lands on is overwritten, as `walk` reads the plain call.
                 dest = _target_arg(call, keywords=("target",)) if on_path else None
                 if dest is not None:
-                    self.overwrite(self.paths(dest), call)
+                    self.overwrite(self.paths(dest, entries=True), call)
                 elif not on_path:
                     self.note_overwrite(call)
             elif full in _COPY_FUNCS:
@@ -9139,7 +9971,7 @@ class _FileFinder:
         another overwrite already named the file, and a file an earlier one
         in the cell changes takes the new statements on that change
         (`run_too`), so the card names it once with all of them."""
-        if isinstance(got, _Unknown):
+        if self.unplaced(got, call, append=append):
             return
         got = [p for p in got if _RUN_TIME_PART not in p]
         located = self.locate(got, existing_files=True).paths
@@ -9236,8 +10068,8 @@ class _FileFinder:
         dest = _move_destination(call)
         if dest is None:
             return
-        got = self.paths(dest)
-        if isinstance(got, _Unknown):
+        got = self.paths(dest, entries=True)
+        if self.unplaced(got, call):
             return
         source = call.args[0] if call.args else None
         names = self.paths(source) if source is not None else _UNKNOWN
@@ -9255,14 +10087,47 @@ class _FileFinder:
     def shell(self, call: ast.Call) -> None:
         """Each rm, mv and the like a shell command runs. One whose operand
         the check can't read, or that reads them from its input, is held as
-        picked when it runs."""
-        cwds = _run_folders(call, self.reader, self.cell)
-        for step in _shell_steps(call, self.reader, cwds=cwds):
-            if _NOT_LITERAL in step.operands:
+        picked when it runs, and so is one whose operand, or a folder a `cd`
+        before it takes it to, holds a text the reading read from a dict
+        entry by its key, or is part of one (`_Reader.entry_texts`): a cell
+        may change the entry, and a delete or a move never narrows to one.
+        Where the depth limit cut a word of the command short, the command
+        is read again on past the limit, as a path is (`decided`), so an
+        `rm` or `mv` there gets the decision its shallow twin gets
+        (`_does_something`)."""
+        reader = self.reader
+        cwds = _run_folders(call, reader, self.cell)
+        mark, entry_mark = reader.cuts, len(reader.entry_texts)
+        steps = _shell_steps(call, reader, cwds=cwds)
+        entries = [text for text in reader.entry_texts[entry_mark:] if text]
+        for step in steps:
+            # The folders the command's `cd`s added, where it runs.
+            moved = [] if isinstance(step.cwds, _Unknown) or isinstance(cwds, _Unknown) else [
+                c for c in step.cwds if c not in cwds]
+            if _NOT_LITERAL in step.operands or any(
+                entry in word or word in entry for entry in entries for word in [*step.operands, *moved]
+            ):
                 self.add(step.action, _Targets(unknown=True), call)
             else:
                 self.add(step.action, self.locate(list(step.operands), cwds=step.cwds,
                                                   files_only=step.files_only), call)
+        if reader.cuts > mark:
+            # A word the depth limit cut short is read on past it as a path is (`decided`).
+            reader.path_cuts += 1
+
+
+def _covers(held: Sequence[FileChange], change: FileChange) -> bool:
+    """Whether the changes `held` hold every file `change` names: one holds
+    a path the check can't place, or they name each of its files and each
+    root it changes whole. A change onto a path the check can't place
+    names no file, and only such a hold covers it."""
+    if any(not (c.paths or c.whole_project or c.whole_shared) for c in held):
+        return True
+    if not (change.paths or change.whole_project or change.whole_shared):
+        return False
+    named = {p for c in held for p in c.paths}
+    return (set(change.paths) <= named and (not change.whole_project or any(c.whole_project for c in held))
+            and (not change.whole_shared or any(c.whole_shared for c in held)))
 
 
 def _file_findings(
@@ -9297,7 +10162,7 @@ def _shell_steps(call: ast.Call, reader: _Reader, *, cwds: Sequence[str] | _Unkn
     """The deletes and moves the command `call` runs: a list of words or a
     script, written in the call, held in a name, or built with an f-string,
     `+`, `%` or `.format`, each part picked at run time a placeholder."""
-    commands = _shell_commands(call, reader.dotted(call.func), reader)
+    commands = _shell_commands(call, reader.dotted(call.func), reader, finder=True)
     given = next((k.value for k in call.keywords if k.arg == "input"), None)
     stdin = None if given is None else _sql_text(given, reader)
     out: list[_ShellStep] = []
@@ -9321,24 +10186,75 @@ def _run_folders(call: ast.Call, reader: _Reader, cell: _Cell) -> Sequence[str] 
     return _UNKNOWN if isinstance(got, _Unknown) else [posixpath.normpath(_join(c, p)) for c in cwds for p in got]
 
 
-def _shell_commands(call: ast.Call, name: str, reader: _Reader) -> list[str | list[str]]:
+def _shell_commands(call: ast.Call, name: str, reader: _Reader, *, finder: bool = False) -> list[str | list[str]]:
     """Each command `call`, a call to `name` that runs a program, can run:
     its words, spread over the arguments or as one list, or a script's text.
-    A command a stop at the depth limit left unread stops the check
-    (`_Reader.read_past`)."""
+    Where a stop at the depth limit left a command one list or a script
+    gives unread, it is read again on past the limit (`_Reader.read_on`),
+    and where that reading gives a command the read within the limit
+    missed, or one with a part neither read places, as a name code may
+    rebind gives, the call's command is code the check stopped reading
+    (`_Reader.deep_commands`, `_CellRead.read_stops`), unless each such
+    command is one plain command that only reads, deletes or moves
+    (`_does_something`). Each walk, the launch walk, the startup hook walk
+    and the module walk among them, gets what its shallow twin gets; the
+    file finder (`finder`) gets the commands read within the limit, and
+    reads a delete or move on past it as a path (`_FileFinder.shell`)."""
     if name in _SPREAD_ARGV_FUNCS:
         words = call.args[_SPREAD_ARGV_FUNCS[name]:]
         # The e forms end with the environment, not a word.
         words = words[:-1] if name.endswith("e") else words
-        return [[_command_word(w, reader) for w in words]]
+        # A word whose value the check can't place is the one it holds when it runs (`_unplaced_word`).
+        return [[_unplaced_word(w, reader) or _command_word(w, reader) for w in words]]
     arg = _command_arg(call, name)
     if arg is None:
         return []
     mark = reader.cuts
     commands = _commands(arg, reader)
-    # A command the depth limit stopped short of.
-    reader.read_past(mark, lambda: any(c not in commands for c in _commands(arg, reader)))
-    return commands
+    # A command the depth limit stopped short of, read on past the limit.
+    deep = reader.read_on(mark, lambda: _commands(arg, reader))
+    # A command the read within the limit missed, or one with a part neither
+    # read places, as a name code may rebind gives: the cut may hide its value.
+    missed = [c for c in deep or () if c not in commands or any(
+        _HOLE in w or _NOT_LITERAL in w for w in ([c] if isinstance(c, str) else c))]
+    if any(_does_something(c) for c in missed):
+        # The command, not the call: a call through a partial or one a
+        # caller makes of a launcher it is handed is no cell's code.
+        reader.deep_commands.append(arg)
+    return deep if deep and not finder else commands
+
+
+# Programs that only read files and show what they find, as `cat` and `ls`
+# do (`_does_something`).
+_READ_ONLY_PROGRAMS = frozenset({
+    "cat", "head", "tail", "wc", "ls", "grep", "stat", "du", "df", "diff", "cmp", "md5sum", "sha256sum", "pwd",
+    "echo",
+})
+# What makes a shell script more than one plain command: a redirect or a
+# here-document, a pipe, a list of commands, a substitution, backticks or a
+# subshell (`_does_something`).
+_SHELL_SYNTAX = re.compile(r"[<>|&;()`\n]")
+
+
+def _does_something(command: str | list[str]) -> bool:
+    """Whether `command`, a list of words or a script's text that a stop at
+    the depth limit left unread, read on past the limit, is code the check
+    stopped reading (`_shell_commands`): each command is, as the read
+    within the limit may have missed what it changes, but one plain
+    command, with no redirect, pipe, list, substitution, backticks or
+    here-document in its script (`_SHELL_SYNTAX`), whose program the check
+    can name (`_unreadable_word`) and only reads (`_READ_ONLY_PROGRAMS`),
+    as `cat job.py` or `ls` does, which holds nothing, as its shallow twin
+    holds nothing; or deletes or moves (`_SHELL_DELETE`, `mv`), which the
+    file finder reads on past the limit as a path (`_FileFinder.shell`),
+    so it gets its shallow twin's decision."""
+    if isinstance(command, str):
+        # With no separator in it, a script holds one command at most.
+        command = [] if _SHELL_SYNTAX.search(command) else next((w for w in _script_commands(command) if w), [])
+    if not command or _unreadable_word(command[0]):
+        return True
+    program = _program_name(command[0])
+    return program not in _READ_ONLY_PROGRAMS and program not in _SHELL_DELETE and program != "mv"
 
 
 def _command_arg(call: ast.Call, name: str) -> ast.AST | None:
@@ -9367,7 +10283,9 @@ def _node_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str | 
     if words_made is not None:
         return list(words_made)
     if isinstance(node, ast.Call) and len(node.args) == 1 and reader.dotted(node.func) == "shlex.join":
-        return [shlex.join(c) for c in _commands(node.args[0], reader, depth=depth + 1) if isinstance(c, list)]
+        joined = [shlex.join(c) for c in _commands(node.args[0], reader, depth=depth + 1) if isinstance(c, list)]
+        if joined:
+            return joined
     made = reader.pad_callables(node=node.func) if isinstance(node, ast.Call) else []
     if made:
         # What a pad function that builds the command returns.
@@ -9377,6 +10295,12 @@ def _node_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str | 
         arg = reader.argument_of(node)
         if arg is not None:
             return _commands(arg.node, reader, depth=depth + 1)
+        if _rebound_name(node, reader):
+            # A command it can't place: the one the name holds when it
+            # runs, as `$CMD` is in a shell, never a stale value; a script,
+            # so a shell's `-c`, `split()` and `str()` read it as they read
+            # one a literal gives.
+            return ["$" + node.id]
         out: list[str | list[str]] = []
         # Whether a binding of the name gives a value the check reads no
         # command from, as `cmd = todo.pop()` does.
@@ -9420,8 +10344,14 @@ def _node_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str | 
                 elif walked:
                     # Each command a loop walks.
                     out += [c for item in walked for c in _commands(item, reader, depth=depth + 1)]
+                elif b.how == "value" and _unplaced_in(b.value, reader) is not None:
+                    # A value that reads one the check can't place, read as a
+                    # command is (`_unplaced_in`), never by that name's
+                    # top-level value or a dict display's stale entry.
+                    out += _commands(b.value, reader, depth=here)
                 else:
-                    held = [f for t in _held_texts(node.id, b, reader, depth=0) for f in _program_filled(t, reader)]
+                    held = [f for t in _held_texts(node.id, b, reader, depth=0)
+                            for f in _program_filled(t, reader, depth=depth + 1)]
                     if not held and b.how == "value":
                         held = _derived_commands(b.value, reader, depth=here) or []
                     unread = unread or not held and not isinstance(b.value, ast.Constant)
@@ -9433,9 +10363,55 @@ def _node_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str | 
             out.append([_NOT_LITERAL])
         return _capped(out)
     text = _command_text(node, reader)
-    if text is None:
-        return _derived_commands(node, reader, depth=depth) or []
-    return list(_program_filled(text, reader))
+    if text is not None:
+        return list(_program_filled(text, reader, depth=depth))
+    derived = _derived_commands(node, reader, depth=depth)
+    if not derived:
+        # Code the check reads no command from, around a whole command a
+        # name code may have rebound holds, as `CMD.replace(a, b)` or
+        # `" ".join(CMD)` is, or a dict entry a cell may change out of
+        # sight: the one it holds when it runs (`_unplaced_in`).
+        unplaced = _unplaced_in(node, reader)
+        if unplaced is not None:
+            return ["$" + unplaced]
+    return derived or []
+
+
+def _rebound_name(node: ast.AST, reader: _Reader) -> bool:
+    """Whether `node` is a name code may have rebound at module level where
+    the check can't order it against the read (`_Reader.rebound_globally`),
+    as a function's `global`, a counted store or literal code a function
+    runs binds it, with no value of its own scope there: a command or a
+    program it holds is the one it holds when it runs, whether top-level
+    code binds it too or not."""
+    return (isinstance(node, ast.Name) and node.id in reader.rebound_globally
+            and all(b.scope is None for b in reader.bindings_of(node.id, node=node)))
+
+
+def _unplaced_in(node: ast.AST, reader: _Reader) -> str | None:
+    """The first name in `node` whose value the check can't place, if any:
+    one code may have rebound (`_rebound_name`), or a dict a cell may
+    change out of sight whose entry `node` reads (`_entry_refused`)."""
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name) and _rebound_name(n, reader):
+            return n.id
+        held = _entry_dict(n)
+        if held is not None and _entry_refused(n, reader):
+            return held.id
+    return None
+
+
+def _unplaced_word(node: ast.AST, reader: _Reader) -> str | None:
+    """`$NAME` for a command's word or part `node` that reads a name whose
+    value the check can't place (`_unplaced_in`), and is that name itself,
+    as `CMD` is, whatever literal value it also has, or gives no literal
+    text the check reads (`_literal_texts`), as `CMD[0]`, `" ".join(CMD)`
+    or a changed dict's `cfg["tool"]` does: the word that name holds when
+    it runs, as `$CMD` is in a shell. None otherwise."""
+    name = _unplaced_in(node, reader)
+    if name is None or not isinstance(node, ast.Name) and _literal_texts(node, reader) is not None:
+        return None
+    return "$" + name
 
 
 # Methods of a text that give back a command read from it: the same words,
@@ -9449,19 +10425,27 @@ def _derived_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str
     those (`_commands`): an entry of a list or dict of them
     (`_Reader.items_of`), by `[k]`, `.get(k)` with its default, or a
     list's `.pop()`; each arm of an if-else; a text's `strip` and its kin,
-    or its `lower`, `upper` or `casefold` in that case; `str` of a text and
-    `list` or `tuple` of a list; a full slice, the same command; and any
+    or its `lower`, `upper` or `casefold` in that case; `str` of a text, or
+    `"%s" %` it, and `list` or `tuple` of a list; a full slice, the same
+    command; and any
     other slice of a list, or a comprehension that keeps some of its
     words, as each of the list's tails, since either may drop the words
     before any of them. Empty where a part holds no command the check
-    reads; None for any other value."""
+    reads, an entry of a dict a cell may change out of sight
+    (`_entry_refused`) or a list code may have rebound (`_rebound_name`)
+    among them; None for any other value."""
     parts: list[ast.AST]
+    # Whether the commands are a dict entry's, read by its key (`_keyed_entry`).
+    entry = False
+    if _entry_refused(node, reader):
+        return []
     if isinstance(node, ast.IfExp):
         parts = [node.body, node.orelse]
     elif isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
         items = reader.items_of(node=node.value, key=node.slice, depth=depth + 1)
         if items is None:
             return []
+        entry = _keyed_entry(node, reader)
         parts = items
     elif isinstance(node, ast.Subscript):
         whole = node.slice.lower is None and node.slice.upper is None and node.slice.step is None
@@ -9473,6 +10457,8 @@ def _derived_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str
           and isinstance(node.elt, ast.Name) and isinstance(node.generators[0].target, ast.Name)
           and node.elt.id == node.generators[0].target.id):
         walked = node.generators[0].iter
+        if _rebound_name(walked, reader):
+            return []
         # The first iterable runs where the comprehension does, so a name
         # there reads what it holds before the comprehension.
         found = _latest(reader.bindings_of(walked.id, node=node)) if isinstance(walked, ast.Name) else None
@@ -9488,6 +10474,7 @@ def _derived_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str
         items = reader.items_of(node=node.func.value, key=key, depth=depth + 1)
         if items is None:
             return []
+        entry = node.func.attr == "get"
         parts = [*items, *node.args[1:]] if node.func.attr == "get" else items
     elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and not node.args
           and not node.keywords and node.func.attr in (*_SAME_COMMAND_METHODS, *_CASE_METHODS)):
@@ -9499,6 +10486,10 @@ def _derived_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str
     ):
         kind = str if reader.dotted(node.func) == "str" else list
         return [c for c in _commands(node.args[0], reader, depth=depth + 1) if isinstance(c, kind)]
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod) and (
+        isinstance(node.left, ast.Constant) and node.left.value == "%s"
+    ):
+        return [c for c in _commands(node.right, reader, depth=depth + 1) if isinstance(c, str)]
     else:
         return None
     out: list[str | list[str]] = []
@@ -9507,6 +10498,8 @@ def _derived_commands(node: ast.AST, reader: _Reader, *, depth: int) -> list[str
         if not got:
             return []
         out += got
+    if entry:
+        reader.entry_texts += [text for command in out for text in ([command] if isinstance(command, str) else command)]
     return out
 
 
@@ -9547,9 +10540,21 @@ def _listed_commands(node: ast.List | ast.Tuple, reader: _Reader, *, depth: int)
     then up to `_COMMAND_LIMIT` commands; so none when the program's word
     holds none, or a word or a spread reads a parameter of a function
     nothing calls (`_never_given`). Code handed to a `-c` stays a word the
-    check can't read: code through a name isn't read as a literal."""
+    check can't read: code through a name isn't read as a literal; but a
+    shell's script after its `-c` is also read as the text `os.system` is
+    handed (`_commands`), each part picked at run time a placeholder, so
+    its deletes and moves hold, beside the word, which keeps any other
+    write it makes a run of code the check can't read. A name whose value
+    the check can't place (`_unplaced_word`) that gives a word, the program
+    after `sudo` among them, or is spread into the words, holds the words
+    it holds when it runs, as `$RM` and `$CMD` are in a shell."""
     commands: list[list[str]] = [[]]
     for at, e in enumerate(node.elts):
+        unplaced = _unplaced_in(e.value, reader) if isinstance(e, ast.Starred) else None
+        if unplaced is not None:
+            # Words it can't place, as `[*CMD.split()]` spreads (`_unplaced_in`).
+            commands = [[*c, "$" + unplaced] for c in commands]
+            continue
         if isinstance(e, ast.Starred):
             items = reader.items_of(node=e.value, key=None, depth=depth + 1)
             words = [_command_word(i, reader) for i in items] if items is not None else None
@@ -9564,9 +10569,21 @@ def _listed_commands(node: ast.List | ast.Tuple, reader: _Reader, *, depth: int)
                 words = texts if texts is not None else words or [*_UNREAD_WORDS]
             commands = [[*c, *words] for c in commands]
             continue
-        word = _command_word(e, reader)
         code = at > 0 and bool(_CODE_FLAG.fullmatch(commands[0][-1] if commands[0] else ""))
-        texts = _literal_texts(e, reader) if _unreadable_word(word) and not code else None
+        unplaced = None if code else _unplaced_word(e, reader)
+        if unplaced is not None:
+            # A word it can't place, as `$RM` is in a shell: a program after `sudo` too.
+            commands = [[*c, unplaced] for c in commands]
+            continue
+        word = _command_word(e, reader)
+        if code and _unreadable_word(word) and all(
+            _program_name((_command_words(c)[0] or [""])[0]) in _SHELLS for c in commands if c
+        ):
+            # Each script it can hold, read for its deletes and moves, beside
+            # the word itself, code the check can't read as a whole.
+            texts = [*(script for script in _commands(e, reader, depth=depth + 1) if isinstance(script, str)), word]
+        else:
+            texts = _literal_texts(e, reader) if _unreadable_word(word) and not code else None
         if texts == [] and _never_given(e, reader):
             # A word a function nothing calls takes from its parameters: the
             # command never runs.
@@ -9629,9 +10646,12 @@ def _word_lists(*, node: ast.AST, reader: _Reader, depth: int) -> list[list[str]
                 return []
             if not lists:
                 # A sequence of literal texts, as a comprehension of the
-                # missing packages or `sorted(names)` gives.
+                # missing packages or `sorted(names)` gives; else words a
+                # name whose value the check can't place holds, as a starred
+                # one is (`_listed_commands`).
                 texts = _sequence_texts(side, reader, depth=depth + 1)
-                lists = [[*_UNREAD_WORDS] if texts is None else texts]
+                unplaced = None if texts is not None else _unplaced_in(side, reader)
+                lists = [texts if texts is not None else [*_UNREAD_WORDS] if unplaced is None else ["$" + unplaced]]
             if len(words) > 1 and len(lists) > 1:
                 # Many lists on both sides: a side past the limit, as a loop
                 # over a long literal list gives, joins the other as one list.
@@ -9675,10 +10695,14 @@ def _node_texts(node: ast.AST, reader: _Reader, *, depth: int) -> list[str] | No
           and reader.dotted(node.func) in _SAME_TEXT_CALLS):
         parts = node.args
     elif isinstance(node, ast.Subscript):
-        items = reader.items_of(node=node.value, key=node.slice, depth=depth + 1)
+        items = None if _entry_refused(node, reader) else reader.items_of(node=node.value, key=node.slice,
+                                                                         depth=depth + 1)
         if items is None:
             return None
-        parts = items
+        texts = _all_texts(items, reader, depth=depth + 1)
+        if texts and _keyed_entry(node, reader):
+            reader.entry_texts += texts
+        return texts
     elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         # The sides of a `+` chain, flattened with a stack so a long chain
         # can't exhaust recursion: their code is part of this tree, so
@@ -9701,6 +10725,57 @@ def _node_texts(node: ast.AST, reader: _Reader, *, depth: int) -> list[str] | No
             return None
         return got
     return _all_texts(parts, reader, depth=depth + 1)
+
+
+def _keyed_entry(node: ast.Subscript, reader: _Reader) -> bool:
+    """Whether `node` reads an entry by its key, as `cfg["out"]` does, not
+    an item of a list or tuple by its index: its key is no whole number
+    written out, and what it looks up is no list or tuple display, nor a
+    name only such displays bind."""
+    if _whole_number(node.slice) is not None:
+        return False
+    sequences = (ast.List, ast.Tuple, ast.ListComp)
+    if isinstance(node.value, ast.Name):
+        found = reader.bindings_of(node.value.id, node=node.value)
+        return not found or not all(b.how == "value" and isinstance(b.value, sequences) for b in found)
+    return not isinstance(node.value, sequences)
+
+
+def _entry_dict(node: ast.AST) -> ast.Name | None:
+    """The name whose entry `node` looks up by `[k]` or `.get(k)`, if any."""
+    if isinstance(node, ast.Subscript):
+        held = node.value
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+        held = node.func.value
+    else:
+        return None
+    return held if isinstance(held, ast.Name) else None
+
+
+def _entry_refused(node: ast.AST, reader: _Reader) -> bool:
+    """Whether `node` looks up an entry (`_entry_dict`) of a dict a name
+    holds, a display or a `dict(...)` call, as `_Reader.items_of` reads
+    each, that a cell may change where the check doesn't follow it, as the
+    reading of a path refuses (`_Reader._dict_display`): a cell may reach
+    a namespace's names other than by name, change the dict in place, or
+    hand it on. Such an entry may hold another text than the one written.
+    Read once per dict and bindings (`_Reader.entries_refused`): each of a
+    cell's lookups asks it of every cell's reads of the dict."""
+    held = _entry_dict(node)
+    if held is None:
+        return False
+    found = reader.bindings_of(held.id, node=held)
+    key = (held.id, tuple(id(b) for b in found))
+    refused = reader.entries_refused.get(key)
+    if refused is None:
+        refused = reader.entries_refused[key] = any(
+            isinstance(b.value, ast.Dict) or isinstance(b.value, ast.Call) and reader.dotted(b.value.func) == "dict"
+            for b in found
+        ) and (
+            any(cell.reaches_namespace for cell in reader.cells) or _changed_in_place(held.id, found, reader)
+            or not _only_looked_up(held.id, reader)
+        )
+    return refused
 
 
 def _key_values(key: ast.AST, reader: _Reader, *, depth: int) -> list[str | int] | None:
@@ -10020,6 +11095,59 @@ def _changed_in_place(name: str, found: Sequence[_Binding], reader: _Reader) -> 
     return False
 
 
+def _bound_in(nodes: Iterable[ast.AST]) -> Counter[str]:
+    """How many of `nodes` bind each name: a store or del, a parameter, a
+    def or class, an import, an except's name, and a match capture. A star
+    import counts under "*", since it may bind any name."""
+    out: Counter[str] = Counter()
+    for node in nodes:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            out[node.id] += 1
+        elif isinstance(node, ast.arg):
+            out[node.arg] += 1
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out[node.name] += 1
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            out.update("*" if a.name == "*" else a.asname or a.name.partition(".")[0] for a in node.names)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            out[node.name] += 1
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            out[node.rest] += 1
+    return out
+
+
+def _only_looked_up(name: str, reader: _Reader) -> bool:
+    """Whether each load of `name` in the cells reads an entry of what it
+    holds or looks at it whole, as `cfg["out"]`, `cfg.get("out")`, `"out"
+    in cfg` and `print(cfg)` do, and none stores or deletes an entry or
+    hands it on, as `c = cfg`, `[cfg]`, `fix = cfg.update` or `*cfg` do,
+    which may change an entry where the check doesn't follow it. A call
+    handed it counts as one that looks at it whole: `_changed_in_place`,
+    which `_Reader._dict_display` asks first, refuses each call that may
+    fill it, as `fill(cfg)` may."""
+    for cell in reader.cells:
+        for load in cell.loads.get(name, ()):
+            parent = cell.parents.get(load)
+            if isinstance(parent, ast.Subscript) and parent.value is load and isinstance(parent.ctx, ast.Load):
+                continue
+            if isinstance(parent, ast.Attribute) and parent.attr in _DICT_READS or isinstance(parent, ast.Compare):
+                continue
+            if isinstance(parent, ast.Call) and load in parent.args:
+                continue
+            return False
+    return True
+
+
+def _unchanging(node: ast.expr) -> bool:
+    """Whether `node` builds a value nothing can change in place: a literal,
+    or a tuple or f-string of literals."""
+    if isinstance(node, ast.Tuple):
+        return all(_unchanging(elt) for elt in node.elts)
+    if isinstance(node, ast.JoinedStr):
+        return all(isinstance(value, ast.Constant) for value in node.values)
+    return isinstance(node, ast.Constant)
+
+
 def _param_texts(name: str, binding: _Binding, reader: _Reader, *, depth: int) -> list[str] | None:
     """The literal texts a parameter can hold (`_name_texts`), read from what
     `_Reader.param_values` gives: none for a function nothing calls."""
@@ -10054,26 +11182,49 @@ def _command_text(node: ast.AST, reader: _Reader) -> str | None:
     """The text a command, or one of its words, is (`_sql_text`), with
     `sys.executable`, whole or as a part, read as `python`, the program it
     names, and a path built from it as the program that path names
-    (`_interpreter_text`, `_executable_filled`)."""
+    (`_interpreter_text`, `_executable_filled`). None where a join reads a
+    list code may have rebound (`_join_text`, `_rebound_name`): a command
+    never takes its top-level value (`_unplaced_in`)."""
     built = _interpreter_text(node, reader)
     if built is not None:
         return built
-    text = _sql_text(node, reader)
-    return None if text is None else _executable_filled(text, reader)
+    parts: list[ast.AST] = []
+    text = _sql_text(node, reader, parts=parts)
+    if text is None or any(isinstance(p, ast.Name) and _rebound_name(p, reader) for p in parts):
+        return None
+    return _executable_filled(text, reader)
 
 
-def _program_filled(text: str, reader: _Reader) -> list[str]:
+def _program_filled(text: str, reader: _Reader, *, depth: int = 0) -> list[str]:
     """`text`, a command's text, with `sys.executable` read as `python`
     (`_executable_filled`), and each placeholder whose code holds only
     literal texts read as each of them (`_literal_texts`), up to
-    `_COMMAND_LIMIT` texts. Code handed to a `-c` stays unread."""
+    `_COMMAND_LIMIT` texts; one where a command starts, as in `f"{cmd}"`
+    or `"set -e; " + cmd`, read as each script the name holds where the
+    command reading reads one, as `os.system(cmd)` reads it (`_commands`),
+    and as itself too, a program the check can't name: a file's text read
+    into it may change before the command runs. Code handed to a `-c`
+    stays unread. A placeholder that reads a name whose value the check
+    can't place (`_unplaced_word`) is the words it holds when it runs
+    wherever it stands, as `$CMD` is in a shell."""
     texts = [_executable_filled(text, reader).lstrip()]
-    for m in _NUMBERED_HOLE.finditer(texts[0]):
+    given = texts[0]
+    for m in _NUMBERED_HOLE.finditer(given):
+        node = reader.hole_node(m.group())
+        unplaced = None if node is None else _unplaced_word(node, reader)
+        if unplaced is not None:
+            # Words it can't place, as `$CMD` is in a shell, wherever it
+            # stands: a program after `sudo`, or a shell's `-c` code.
+            texts = [t.replace(m.group(), unplaced, 1) for t in texts]
+            continue
         if _CODE_FLAG_BEFORE.search(texts[0][: m.start()]):
             # Code handed to a `-c` through a name isn't read as a literal.
             continue
-        node = reader.hole_node(m.group())
         options = None if node is None else _literal_texts(node, reader)
+        if options is None and isinstance(node, ast.Name) and _PROGRAM_PLACE.search(given[: m.start()]):
+            # A whole command the name holds, as a file's text read into it,
+            # beside the placeholder: the file may change before it runs.
+            options = [*(c for c in _commands(node, reader, depth=depth + 1) if isinstance(c, str)), m.group()]
         if options == [] and node is not None and _never_given(node, reader):
             # A part a function nothing calls takes from its parameters: the
             # command never runs.
@@ -10081,6 +11232,11 @@ def _program_filled(text: str, reader: _Reader) -> list[str]:
         if options and len(texts) * len(options) <= _COMMAND_LIMIT:
             texts = [t.replace(m.group(), option, 1) for t in texts for option in dict.fromkeys(options)]
     return texts
+
+
+# Where a script's program starts: its start, or past a separator
+# (`_program_filled`).
+_PROGRAM_PLACE = re.compile(r"(?:^|[;&|()\n`])\s*$")
 
 
 def _executable_filled(text: str, reader: _Reader) -> str:
@@ -10110,6 +11266,8 @@ _SAME_PATH_CALLS = frozenset({
     "os.path.expanduser",
 })
 _SAME_PATH_METHODS = frozenset({"resolve", "absolute", "expanduser", "as_posix", "__fspath__"})
+# The methods of a path that make a new path, which nothing changes in place.
+_NEW_PATH_METHODS = frozenset({*_SAME_PATH_METHODS, "joinpath", "with_suffix", "with_name", "with_stem"})
 _PATH_JOINS = frozenset({
     "os.path.join", "posixpath.join", "ntpath.join", "pathlib.Path", "pathlib.PurePath", "pathlib.PosixPath",
     "pathlib.WindowsPath",
@@ -10205,7 +11363,9 @@ def _script_commands(text: str, *, escapes: bool = True) -> list[list[str]]:
     break, ends one, so a command `$(...)` or backticks substitute is one of
     them. A quoted line break stays in its word, and a word that starts with
     `#` starts a comment to the end of its line. A backslash escapes the
-    character after it, as in sh, unless not `escapes`, as in cmd."""
+    character after it, as in sh, unless not `escapes`, as in cmd. Where a
+    quote never closes, the words split at spaces, each pair of quotes
+    taken off."""
     try:
         lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()\n`")
         lexer.whitespace = " \t\r"
@@ -10215,7 +11375,8 @@ def _script_commands(text: str, *, escapes: bool = True) -> list[list[str]]:
             lexer.escape = ""
         tokens = list(lexer)
     except ValueError:
-        tokens = re.findall(r"\n|`|[^ \t\r\n`]+", text)
+        # Each pair of quotes taken off a word, where a quote never closes.
+        tokens = [_PAIRED_QUOTES.sub(r"\2", token) for token in re.findall(r"\n|`|[^ \t\r\n`]+", text)]
     commands: list[list[str]] = [[]]
     comment = False
     for token in tokens:
@@ -10229,6 +11390,10 @@ def _script_commands(text: str, *, escapes: bool = True) -> list[list[str]]:
         else:
             commands[-1].append(token)
     return commands
+
+
+# A pair of quotes around part of a word (`_script_commands`).
+_PAIRED_QUOTES = re.compile(r"""(['"])(.*?)\1""")
 
 
 class _ScriptCommand(NamedTuple):
@@ -10488,14 +11653,17 @@ class _Launch:
     whether it installs packages by name, from an index a setting in its
     environment may point elsewhere (`_INSTALLER_SOURCE_SETTING`); the
     literal code it hands `python -c`, each read as one more cell
-    (`_exec_cells`); and whether it starts a Python interpreter, which runs
-    the startup hooks a cell wrote (`_Modules.hooks_written`)."""
+    (`_exec_cells`); whether it starts a Python interpreter, which runs
+    the startup hooks a cell wrote (`_Modules.hooks_written`); and whether
+    it runs a shell's script past `_SHELL_DEPTH` shells deep, which the
+    check stops reading (`past_depth`, unread too)."""
 
     unread: bool = False
     sources: tuple[str, ...] = ()
     syncs: bool = False
     installs: bool = False
     starts_python: bool = False
+    past_depth: bool = False
 
     @classmethod
     def joined(cls, launches: Sequence[_Launch]) -> _Launch:
@@ -10506,6 +11674,7 @@ class _Launch:
             syncs=any(launch.syncs for launch in launches),
             installs=any(launch.installs for launch in launches),
             starts_python=any(launch.starts_python for launch in launches),
+            past_depth=any(launch.past_depth for launch in launches),
         )
 
     def pointed(self, points: bool) -> _Launch:
@@ -10645,7 +11814,7 @@ def _script_launch(text: str, *, depth: int, stdin: str | None, moved: bool) -> 
     launch = _commands_launch(_script_walk(text), depth=depth, stdin=stdin, moved=moved)
     if "\\" in text and not launch.unread:
         kept = _commands_launch(_script_walk(text, escapes=False), depth=depth, stdin=stdin, moved=moved)
-        return replace(launch, unread=kept.unread)
+        return replace(launch, unread=kept.unread, past_depth=launch.past_depth or kept.past_depth)
     return launch
 
 
@@ -10694,8 +11863,10 @@ def _command_launch(words: list[str], *, depth: int, stdin: str | None, moved: b
         if script is None:
             # A shell script file: not Python.
             return _Launch()
-        if isinstance(script, _Unknown) or depth >= _SHELL_DEPTH:
+        if isinstance(script, _Unknown):
             return _Launch(unread=True)
+        if depth >= _SHELL_DEPTH:
+            return _Launch(unread=True, past_depth=True)
         return _script_launch(script, depth=depth + 1, stdin=None, moved=moved)
     if verb == "find":
         return _Launch.joined([
@@ -11106,8 +12277,9 @@ def _pip_source_operand(word: str) -> bool:
 
 
 def _split_flags(args: list[str], *, takes_target: bool) -> tuple[list[str], list[str], str | None]:
-    """A command's flags, its operands, and, for mv (`takes_target`), the
-    folder `-t` or `--target-directory` names. Words after `--` are all
+    """A command's flags, its operands, and, for a program that takes a
+    target folder (`takes_target`), as `cp`, `mv`, `install` and `ln` do,
+    the folder `-t` or `--target-directory` names. Words after `--` are all
     operands."""
     flags: list[str] = []
     operands: list[str] = []
@@ -11404,8 +12576,12 @@ def _http_findings(
         request = _http_call(node, reader)
         if request is None:
             if _may_send_held(node, rules):
-                # A client the depth limit stopped short of.
+                # A client the depth limit stopped short of; the card quotes
+                # the call it stopped at (`_Reader.stop_quote`).
+                stopped = reader.stopped
                 reader.read_past(mark, lambda: _http_call(node, reader))
+                if reader.stopped and not stopped and reader.stop_quote is None:
+                    reader.stop_quote = _cut(report.call) if report is not None else _stopped_at(node, reader)
             continue
         url = reader.hole(None) if request.url is None else _url_text(request.url, reader)
         if request.base is not None and not (_URL_SCHEME.match(url) or _HOLE_MARK.match(url)):
@@ -11603,19 +12779,31 @@ def _parse(code: str) -> ast.Module:
     return ast.parse(heal_surrogate_source(code), filename=_CHECK_FILENAME)
 
 
-def _read_cell(*, code: str, index: int) -> _Cell | None:
-    """`code` read as the cell at `index` among the parsed cells; None when it doesn't parse."""
+class _TooDeep:
+    """Code too deep for the check's parser (`_read_cell`, `_parse_ran`),
+    which a pad may still run: a pad on another Python may compile deeper
+    than this one parses."""
+
+
+_TOO_DEEP = _TooDeep()
+
+
+def _read_cell(*, code: str, index: int) -> _Cell | _TooDeep | None:
+    """`code` read as the cell at `index` among the parsed cells; None when
+    it doesn't parse; `_TOO_DEEP` when it is too deep for the check's parser."""
     try:
         return _Cell(_parse(code), code, index)
     except (SyntaxError, ValueError):
         return None
+    except (RecursionError, MemoryError):
+        return _TOO_DEEP
 
 
 @dataclass(eq=False)
 class _CachedCell:
     """One earlier cell `_EarlierCells` keeps, and when a check last read it."""
 
-    cell: _Cell | None
+    cell: _Cell | _TooDeep | None
     read_at: float
 
 
@@ -11640,7 +12828,7 @@ class _EarlierCells:
         self._cells: OrderedDict[tuple[str, int], _CachedCell] = OrderedDict()
         self._lock = threading.Lock()
 
-    def get(self, *, code: str, index: int) -> _Cell | None:
+    def get(self, *, code: str, index: int) -> _Cell | _TooDeep | None:
         key = (code, index)
         with self._lock:
             cached = self._cells.get(key)
@@ -11670,6 +12858,82 @@ class _EarlierCells:
 _EARLIER_CELLS = _EarlierCells(budget=1_000_000)
 
 
+class _Kept(Generic[_T]):
+    """What a check read from code, by a hash of it, for the `limit` keys
+    read most recently, apart from the parsed cells, which a busy process
+    may not keep (`_EarlierCells`). Checks run in worker threads, so a lock
+    guards the table."""
+
+    def __init__(self, *, limit: int) -> None:
+        self._limit = limit
+        self._kept: OrderedDict[bytes, _T] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def read(self, key: bytes, compute: Callable[[], _T]) -> _T:
+        """What the table keeps for `key`, else what `compute` gives, kept."""
+        with self._lock:
+            if key in self._kept:
+                self._kept.move_to_end(key)
+                return self._kept[key]
+        value = compute()
+        self.keep(key, value)
+        return value
+
+    def keep(self, key: bytes, value: _T) -> None:
+        """Keeps `value` for `key` (`_kept_over`)."""
+        with self._lock:
+            self._kept[key] = self._kept_over(key, value)
+            self._kept.move_to_end(key)
+            while len(self._kept) > self._limit:
+                self._kept.popitem(last=False)
+
+    def _kept_over(self, key: bytes, value: _T) -> _T:
+        """What the table keeps for `key` when a check found `value`."""
+        return value
+
+
+class _LeftUnread(_Kept[str | None]):
+    """Whether each earlier cell holds code a limit of the check left
+    unread, by its place in the conversation (`find_cell_writes`): where the
+    read of it stopped, or None where it holds none. The gate checks each
+    cell before it runs, and that check keeps what it found here, so no
+    later check reads the cell again for it (`_earlier_stop`). A stop once
+    kept for a place stays (`_kept_over`)."""
+
+    def _kept_over(self, key: bytes, value: str | None) -> str | None:
+        """`value`, unless the table keeps a stop for the place `key`
+        already: one check found it, and another of the same place may read
+        it against another project, whose files leave a function past
+        `_CALL_DEPTH` nothing to hold (`_CellRead.past_the_limit`)."""
+        return value if value is not None else self._kept.get(key)
+
+
+# A place with no stop takes about 150 bytes, so this holds about 15 MB, more
+# where places keep a quote: some 70 long conversations of 1,400 cells.
+_LEFT_UNREAD = _LeftUnread(limit=100_000)
+# The names each literal code text a function runs binds (`_literal_binds`),
+# by a hash of the text: a few hundred bytes each, so this holds a few MB.
+_LITERAL_BINDS: _Kept[frozenset[str]] = _Kept(limit=10_000)
+
+
+def _literal_binds(text: str) -> frozenset[str]:
+    """The names literal code `text` binds anywhere in it (`_bound_in`), read
+    once per text (`_LITERAL_BINDS`), so a cell the parse cache doesn't keep
+    (`_EarlierCells`) parses none of its literal code again at each check
+    (`_Cell.rebinds_globally`). A literal past `_LITERAL_CODE_LIMIT`
+    characters is left unparsed: the check stops at the call that runs it
+    anyway (`_ExecRead.capped`)."""
+    if len(text) > _LITERAL_CODE_LIMIT:
+        return frozenset()
+
+    def parsed() -> frozenset[str]:
+        tree = _parse_ran(text)
+        return frozenset(_bound_in(ast.walk(tree))) if isinstance(tree, ast.Module) else frozenset()
+
+    key = hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
+    return _LITERAL_BINDS.read(key, parsed)
+
+
 class _ExecCellKey(NamedTuple):
     """A cell of literal code by its source and the place it takes among the
     cells (`_Cell.order`), which a conversation fixes as it grows: the exec
@@ -11696,8 +12960,8 @@ class _ExecCells:
     process, not once per check, saves that work. A cell is keyed by its
     source and the place it takes among the cells (`_ExecCellKey`), which a
     given conversation fixes as it grows; a source that doesn't parse is
-    kept as None, so it isn't parsed again. Budgeted and locked like
-    `_EarlierCells`.
+    kept as None, and one too deep for the parser as `_TOO_DEEP`, so it
+    isn't parsed again. Budgeted and locked like `_EarlierCells`.
     """
 
     def __init__(self, *, budget: int, idle: float = 600.0) -> None:
@@ -11707,7 +12971,7 @@ class _ExecCells:
         self._cells: OrderedDict[_ExecCellKey, _CachedCell] = OrderedDict()
         self._lock = threading.Lock()
 
-    def get(self, key: _ExecCellKey, make: Callable[[], _Cell | None]) -> _Cell | None:
+    def get(self, key: _ExecCellKey, make: Callable[[], _Cell | _TooDeep | None]) -> _Cell | _TooDeep | None:
         with self._lock:
             cached = self._cells.get(key)
             if cached is not None:
@@ -11819,17 +13083,22 @@ class _ExecRead:
     where they run. `ran` holds them by the id of the code whose calls run
     them, a cell's tree or a function an earlier cell defined, with the
     cells their own sources make in turn. `tried` holds the id of each call
-    whose literal sources were read, whether they parsed or not; a call
-    past `_EXEC_LIMIT` isn't in it."""
+    whose literal sources were read, whether they parsed or not. `capped`
+    holds the id of each call whose literal code the read left unread at a
+    limit of the check: past `_EXEC_LIMIT` texts, a text past
+    `_LITERAL_CODE_LIMIT` characters, or one too deep for the check's
+    parser (`_TOO_DEEP`). Such a call isn't in `tried`, and the check stops
+    there (`_left_at_limit`)."""
 
     cells: list[_Cell]
     ran: dict[int, list[_Cell]]
     tried: set[int]
+    capped: set[int]
 
     @classmethod
     def empty(cls) -> _ExecRead:
         """A read that read nothing."""
-        return cls(cells=[], ran={}, tried=set())
+        return cls(cells=[], ran={}, tried=set(), capped=set())
 
     @classmethod
     def joined(cls, reads: Sequence[_ExecRead]) -> _ExecRead:
@@ -11838,6 +13107,7 @@ class _ExecRead:
             cells=[c for read in reads for c in read.cells],
             ran={key: ran for read in reads for key, ran in read.ran.items()},
             tried={key for read in reads for key in read.tried},
+            capped={key for read in reads for key in read.capped},
         )
 
     def of(self, root: ast.AST) -> list[_Cell]:
@@ -11875,8 +13145,9 @@ class _ExecReading:
     """One read of the literal code a set of cells runs (`_exec_cells`),
     with `reader`: what it read so far (`read`), how many cells each start's
     literal code made, by the start's host (`made`), past `_EXEC_LIMIT` of
-    which it stops, and the shortest chain of calls each function was
-    followed at (`followed`)."""
+    which it reads no more literal code and only notes each call that hands
+    some (`_ExecRead.capped`), and the shortest chain of calls each function
+    was followed at (`followed`)."""
 
     def __init__(self, reader: _Reader, *, ran_only: bool) -> None:
         self.reader = reader
@@ -11917,11 +13188,15 @@ class _ExecReading:
         call does (`at_sure`) and so does the exec() in the function
         (`_Cell.surely_run`). Literal code a def or lambda in a whole cell
         runs is placed where the cell first runs that function
-        (`_first_run_at`)."""
+        (`_first_run_at`). Past a limit, a call's literal code is left
+        unread, and the call goes in `_ExecRead.capped`; once a call would
+        take the start past `_EXEC_LIMIT` texts, so does each call after it
+        that hands literal code, in this code and the code it runs."""
         reader, read, made = self.reader, self.read, self.made
         into = read.ran.setdefault(id(root), [])
         pending = [_Code(cell=cell, root=root)]
-        while pending and made.get(host, 0) < _EXEC_LIMIT:
+        full = False
+        while pending:
             code = pending.pop()
             called = at_call is not None and code.root is root
             place_at = (*at_call, *code.cell.order) if at_call is not None and called else code.cell.order
@@ -11945,11 +13220,15 @@ class _ExecReading:
                 elif not builtin and len(texts) > 1:
                     # A runner's setup and statement run in one namespace.
                     texts = ["\n".join(texts)]
-                if not texts or any(len(text) > _LITERAL_CODE_LIMIT for text in texts):
-                    # Past the limit, literal code is left unread.
+                if not texts:
                     continue
-                if made.get(host, 0) + len(texts) > _EXEC_LIMIT:
-                    return
+                if full or any(len(text) > _LITERAL_CODE_LIMIT for text in texts) or (
+                    made.get(host, 0) + len(texts) > _EXEC_LIMIT
+                ):
+                    # Past a limit, literal code is left unread.
+                    full = full or made.get(host, 0) + len(texts) > _EXEC_LIMIT
+                    read.capped.add(id(node))
+                    continue
                 made[host] = made.get(host, 0) + len(texts)
                 read.tried.add(id(node))
                 place = _exec_place(node, code.cell, reader) if builtin else _ExecPlace(shared=False)
@@ -11974,6 +13253,11 @@ class _ExecReading:
                         ran = _EXEC_CELLS.get(key, lambda k=key: _exec_cell(k))
                     else:
                         ran = _exec_cell(key)
+                    if isinstance(ran, _TooDeep):
+                        # Left unread at the parser's limit, as a cell too deep to parse is.
+                        read.tried.discard(id(node))
+                        read.capped.add(id(node))
+                        continue
                     if ran is None:
                         continue
                     reader.read_too(ran)
@@ -12079,13 +13363,37 @@ def _exec_place(call: ast.Call, cell: _Cell, reader: _Reader) -> _ExecPlace:
     return _ExecPlace(shared=False, namespace=_namespace_root(own[-1]))
 
 
-def _parse_ran(text: str) -> ast.Module | None:
+def _reaches_a_namespace(nodes: Iterable[ast.AST]) -> bool:
+    """Whether any of `nodes` may reach a namespace's names other than by
+    name: through `globals()`, `vars()` or `locals()`, `setattr` or
+    `delattr`, a `__dict__`, a frame or its globals or locals, the
+    `__main__` module, `sys.modules` or the builtins, or another way
+    `_NAMESPACE_FINDERS` names. The `__main__` module counts as a name too,
+    which a literal `__import__("__main__")` or `importlib.import_module`
+    reads as (`_read_lookups_plainly`)."""
+    for node in nodes:
+        if isinstance(node, ast.Name) and (node.id in _NAMESPACE_REACHERS or node.id in _NAMESPACE_MODULES):
+            return True
+        if isinstance(node, ast.Attribute) and node.attr in _NAMESPACE_MEMBERS:
+            return True
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and (
+            any(a.name.partition(".")[0] in _NAMESPACE_MODULES or a.name in _NAMESPACE_MEMBERS for a in node.names)
+            or isinstance(node, ast.ImportFrom) and (node.module or "") in _NAMESPACE_MODULES
+        ):
+            return True
+    return False
+
+
+def _parse_ran(text: str) -> ast.Module | _TooDeep | None:
     """`text`, literal code a cell runs, parsed; None when it doesn't parse,
-    or is too deep or long for the parser, so it fails when it runs too."""
+    so it fails when it runs too; `_TOO_DEEP` when it is too deep for the
+    check's parser, which a pad may still run (`_TooDeep`)."""
     try:
         return _parse(text)
-    except (SyntaxError, ValueError, RecursionError, MemoryError):
+    except (SyntaxError, ValueError):
         return None
+    except (RecursionError, MemoryError):
+        return _TOO_DEEP
 
 
 # Indexes for cells of literal code, past any conversation's own: each such
@@ -12094,12 +13402,13 @@ def _parse_ran(text: str) -> ast.Module | None:
 _EXEC_INDEXES = itertools.count(1 << 40)
 
 
-def _exec_cell(key: _ExecCellKey) -> _Cell | None:
+def _exec_cell(key: _ExecCellKey) -> _Cell | _TooDeep | None:
     """The parsed cell of literal code a cell runs, placed by `key`; None
-    when the code doesn't parse."""
+    when the code doesn't parse; `_TOO_DEEP` when it is too deep for the
+    check's parser."""
     tree = _parse_ran(key.text)
-    if tree is None:
-        return None
+    if not isinstance(tree, ast.Module):
+        return tree
     return _Cell(tree, key.text, next(_EXEC_INDEXES), host_line=key.host_line, launched=key.launched,
                  host=key.host, shared=key.shared, namespace=key.namespace, order=key.order, inherits=key.inherits,
                  surely_run=key.surely_run, parent_order=key.parent_order)
@@ -12110,11 +13419,12 @@ def _unread_exec_at(node: ast.AST, reader: _Reader, cell: _Cell, *, read: _ExecR
     compile() that the check can't read (`_unread_code`): the call when the
     builtin (`_Reader.exec_builtin`) is handed a source that is neither a
     literal (`_literal_source`) nor a compile() of one, or a literal `read`
-    left unread at `_EXEC_LIMIT`; `node` when it loads the builtin as a
-    value, as in `run = exec` or `map(exec, parts)`, loads the builtins
-    module as a value (`_Reader.loads_builtins_value`), or looks the builtins
-    module up by a name the check can't read (`_Reader.builtins_lookup`).
-    A literal that doesn't parse runs nothing: it fails when it runs too.
+    left unread at a limit (`_ExecRead.capped`); `node` when it loads the
+    builtin as a value, as in `run = exec` or `map(exec, parts)`, loads
+    the builtins module as a value (`_Reader.loads_builtins_value`), or
+    looks the builtins module up by a name the check can't read
+    (`_Reader.builtins_lookup`). A literal that doesn't parse runs nothing:
+    it fails when it runs too.
     None anywhere else."""
     if not isinstance(node, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)):
         return None
@@ -12500,7 +13810,9 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
             if target is None and last in _FILE_MAKER_NAMES:
                 target = _WRITESTR.given(call) if last == "writestr" else _made_file(call, reader)
             if target is not None:
-                got = reader.paths(target, cell=cell)
+                # A path past the depth limit is read on past it, so the
+                # write lands the module its shallow twin does.
+                got = reader.paths_on(target, cell=cell)
                 if isinstance(got, _Unknown) or _TEMP_PATH in got:
                     unplaced = True
                     hooks_anywhere = hooks_anywhere or _unplaced_hook(call, target, reader, cell)
@@ -13782,7 +15094,7 @@ def _names_read_code_afresh(node: ast.Name, reader: _Reader, *, depth: int) -> b
 def _launches_unread(call: ast.Call, reader: _Reader, *, read: _ExecRead, modules: _Modules) -> bool:
     """Whether `call` launches Python that runs code the check can't read
     (`_python_launch`), installs a project that builds (`_Launch.syncs`),
-    hands `python -c` literal code `read` left unread at `_EXEC_LIMIT`, or
+    hands `python -c` literal code `read` left unread at a limit, or
     starts a Python interpreter once a cell wrote a startup hook it runs
     (`_Modules.hooks_written`)."""
     launch = _python_launch(call, reader)
@@ -14058,7 +15370,7 @@ def _unread_run_at(node: ast.AST, reader: _Reader, cell: _Cell, *, read: _ExecRe
     a console, debugger or test runner gets (`_CODE_RUNNERS`,
     `_PYAPI_FUNCS`, `_INSTANCE_RUNNERS`, and any `.exec_module()` or
     `.load_module()`); a runner of text (`_STRING_RUNNERS`) handed code that
-    isn't a literal, or a literal `read` left unread at `_EXEC_LIMIT`; an
+    isn't a literal, or a literal `read` left unread at a limit; an
     import by a name that isn't a literal; an import of a module `modules`
     can't read, whether by an import statement or a literal
     `importlib.import_module` or `__import__` (`_Cell.looked_up`); a runner,
@@ -14354,7 +15666,7 @@ def _command_hook_write(words: list[str], *, cwds: Sequence[str] | _Unknown, dep
         for command in _find_exec_commands(bare[1:]):
             folders = _UNKNOWN if command.flag.endswith("dir") else cwds
             out = out.joined(_command_hook_write(command.words, cwds=folders, depth=depth))
-    targets = (_copy_landings(bare[1:]) if verb in _COPYING_PROGRAMS
+    targets = (_copy_landings(verb, bare[1:]) if verb in _COPYING_PROGRAMS
                else _download_landings(verb, bare[1:]) if verb in _DOWNLOAD_FOLDER_FLAGS
                else bare[1:] if verb in _FILE_WRITING_PROGRAMS else [])
     for at, word in enumerate(words):
@@ -14366,24 +15678,16 @@ def _command_hook_write(words: list[str], *, cwds: Sequence[str] | _Unknown, dep
     return out.joined(_placed_hooks([target for target in targets if _is_startup_hook(target)], cwds))
 
 
-def _copy_landings(args: list[str]) -> list[str]:
+def _copy_landings(verb: str, args: list[str]) -> list[str]:
     """Where a copy, move or link command (`_COPYING_PROGRAMS`), by its
-    words past the program, may land a file: its destination, the folder
-    its `-t` or `--target-directory` names or else its last operand; and,
-    as that may be a folder, each source under it by its own name, unless
-    the destination names a startup hook (`_is_startup_hook`), as a file
-    does. A source the check can't read stays as it is, since it may land
-    under any name."""
-    operands: list[str] = []
-    into: str | None = None
-    rest = iter(args)
-    for word in rest:
-        if word in ("-t", "--target-directory"):
-            into = next(rest, "")
-        elif word.startswith("--target-directory="):
-            into = word.partition("=")[2]
-        elif not word.startswith("-"):
-            operands.append(word)
+    program `verb` and its words past it, may land a file: its
+    destination, the folder its `-t` or `--target-directory` names, alone
+    or in a cluster as `-vt` (`_split_flags`; for rsync `-t` keeps times),
+    or else its last operand; and, as that may be a folder, each source
+    under it by its own name, unless the destination names a startup hook
+    (`_is_startup_hook`), as a file does. A source the check can't read
+    stays as it is, since it may land under any name."""
+    _, operands, into = _split_flags(args, takes_target=verb != "rsync")
     if into is None:
         if len(operands) < 2:
             return operands
@@ -14643,6 +15947,27 @@ def _unread_code(
         if site is not None:
             out.append(site)
     return out
+
+
+def _left_at_limit(site: ast.AST, reader: _Reader, *, read: _ExecRead) -> bool:
+    """Whether `site`, a place `_unread_code` found, runs code the check
+    left unread at a limit of its own, not code it can't read by nature.
+    That is literal code `read` left unread (`_ExecRead.capped`), or a
+    shell's script past `_SHELL_DEPTH` shells (`_Launch.past_depth`), run by
+    a program `site` launches or by a launcher `site` hands a caller
+    (`_passed_calls`). The check stops there, as at the depth limit."""
+    if id(site) in read.capped:
+        return True
+    if isinstance(site, ast.Call):
+        calls: Sequence[ast.Call] = [site]
+    elif isinstance(site, (ast.Name, ast.Attribute)) and (
+        reader.module_member(site) in _LAUNCHERS or _partial_launcher(site, reader)
+    ):
+        passed = _passed_calls(site, reader.cell_of(site), reader)
+        calls = [] if isinstance(passed, _Unknown) else passed
+    else:
+        return False
+    return any((launch := _python_launch(call, reader)) is not None and launch.past_depth for call in calls)
 
 
 @dataclass(frozen=True)
@@ -15856,6 +17181,133 @@ def _first_unread(reader: _Reader, cells: Sequence[_Cell], modules: _Modules, re
     return None
 
 
+# The members that hand out a module's names as a dict: a function's
+# globals, and a frame's globals or locals (`_namespace_stores`).
+_NAMESPACE_DICTS = frozenset({"__globals__", "f_globals", "f_locals"})
+# The calls that give a module by what they are handed (`_namespace_stores`).
+_MODULE_GETTERS = frozenset({"import_module", "__import__", "getmodule"})
+# The methods of a dict that set or delete the entry their first argument names.
+_KEYED_STORES = frozenset({"__setitem__", "__delitem__", "setdefault", "pop"})
+
+
+def _namespace_stores(cell: _Cell) -> Iterator[str]:
+    """Each name a store into the module's names sets, read from the code
+    alone (`_Cell.rebinds_globally`). One into the dict `globals()`,
+    `vars()` or `locals()` gives, a function's `__globals__`, a frame's
+    `f_globals` or `f_locals`, or `vars()` or `__dict__` of a module, or
+    into a name the cell binds to one of them: by a literal key, as
+    `globals()["OUT"] = ...` or `.__setitem__("OUT", ...)`, or by a
+    keyword, a dict display's literal key, `dict()`'s keyword or a literal
+    pair handed to `.update()`, or to `dict.update()`, `dict.__setitem__()`,
+    `operator.setitem()` and their kin handed the dict first, or merged
+    into a name for it with `|=`. And one into a module's attribute, as
+    `__main__.OUT = ...` or `setattr(sys.modules[__name__], "OUT", ...)`.
+    The dict may be reached in place through a walrus, as
+    `(g := globals())["OUT"] = ...`, through `or` or a conditional
+    expression, through `builtins.globals()` and its kin, or through a
+    name the cell binds to `globals`, `vars` or `locals` itself. A module
+    is `__main__`, an entry of `sys.modules`,
+    what `importlib.import_module()`, `__import__()` or
+    `inspect.getmodule()` gives, or a name the cell binds to one. `vars()`
+    of anything else, as an instance, holds no module name."""
+    spaces: set[str] = set()
+    modules: set[str] = set()
+    getters: set[str] = set(_GLOBALS_CALLS)
+
+    def module(node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id == "__main__" or node.id in modules
+        if isinstance(node, ast.Subscript):
+            return _last_name(node.value) == "modules"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+            return _last_name(node.func.value) == "modules"
+        return isinstance(node, ast.Call) and _last_name(node.func) in _MODULE_GETTERS
+
+    def space(node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in spaces
+        if isinstance(node, ast.NamedExpr):
+            return space(node.value)
+        if isinstance(node, ast.BoolOp):
+            return any(space(v) for v in node.values)
+        if isinstance(node, ast.IfExp):
+            return space(node.body) or space(node.orelse)
+        if isinstance(node, ast.Call) and (
+            isinstance(node.func, ast.Name) and node.func.id in getters
+            or isinstance(node.func, ast.Attribute) and _last_name(node.func.value) == "builtins"
+            and node.func.attr in _GLOBALS_CALLS
+        ):
+            return not node.args or _last_name(node.func) == "vars" and module(node.args[0])
+        return isinstance(node, ast.Attribute) and (
+            node.attr in _NAMESPACE_DICTS or node.attr == "__dict__" and module(node.value))
+
+    def keyed(func: ast.AST) -> str:
+        # The store `func` makes on the dict handed to it first:
+        # `dict.update`, `dict.__setitem__` and their kin, or
+        # `operator.setitem`; "" for any other call.
+        if isinstance(func, ast.Attribute) and _last_name(func.value) == "dict":
+            return func.attr if func.attr in _KEYED_STORES | {"update"} else ""
+        return "__setitem__" if _last_name(func) in ("setitem", "delitem") else ""
+
+    for node in cell.walked:
+        if isinstance(node, ast.Import):
+            modules.update(a.asname for a in node.names if a.name == "__main__" and a.asname)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = [t.id for t in targets if isinstance(t, ast.Name)]
+            if space(node.value):
+                spaces.update(names)
+            elif module(node.value):
+                modules.update(names)
+            elif isinstance(node.value, ast.Name) and node.value.id in _GLOBALS_CALLS:
+                getters.update(names)
+    for node in cell.walked:
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)) and space(node.value):
+            yield from _texts_of([node.slice])
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)) and module(node.value):
+            yield node.attr
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and space(node.func.value):
+            if node.func.attr in _KEYED_STORES:
+                yield from _texts_of(node.args[:1])
+            elif node.func.attr == "update":
+                yield from _update_keys(node)
+        elif isinstance(node, ast.AugAssign) and isinstance(node.op, ast.BitOr) and space(node.target):
+            yield from _update_keys(ast.Call(func=node.target, args=[node.value], keywords=[]))
+        elif isinstance(node, ast.Call) and _last_name(node.func) in ("setattr", "delattr") and node.args:
+            if module(node.args[0]):
+                yield from _texts_of(node.args[1:2])
+        elif isinstance(node, ast.Call) and node.args and keyed(node.func) and space(node.args[0]):
+            if keyed(node.func) == "update":
+                yield from _update_keys(ast.Call(func=node.func, args=node.args[1:], keywords=node.keywords))
+            else:
+                yield from _texts_of(node.args[1:2])
+
+
+def _texts_of(nodes: Iterable[ast.AST]) -> Iterator[str]:
+    """The text of each of `nodes` that is a literal (`_literal_source`)."""
+    for node in nodes:
+        text = _literal_source(node)
+        if text is not None:
+            yield text
+
+
+def _update_keys(call: ast.Call) -> Iterator[str]:
+    """The keys a `.update()` or `dict()` call `call` names: each keyword,
+    each literal key of a dict display, of `dict()` handed it, and the
+    first of each literal pair in a list, tuple or set handed it. A dict
+    display or `dict()` spread as keywords, as `**{"OUT": ...}`, counts as
+    one handed it."""
+    yield from (k.arg for k in call.keywords if k.arg)
+    for given in (*call.args, *(k.value for k in call.keywords if not k.arg)):
+        if isinstance(given, ast.Dict):
+            yield from _texts_of(k for k in given.keys if k is not None)
+        elif isinstance(given, ast.Call) and _last_name(given.func) == "dict":
+            yield from _update_keys(given)
+        elif isinstance(given, (ast.List, ast.Tuple, ast.Set)):
+            yield from _texts_of(pair.elts[0] for pair in given.elts if isinstance(pair, (ast.Tuple, ast.List))
+                                 and pair.elts)
+
+
 def _namespace_poisoned(cell: _Cell, reader: _Reader) -> bool:
     """Whether a node of `cell` fills the cell's own namespace with what the
     check can't trace (`_poisons_namespace`). Each such fill holds a call
@@ -15974,24 +17426,36 @@ class _CellRead:
     """One read of the checked cell, and of each earlier function it calls,
     with `reader` (`find_cell_writes`): what it would change, into `files`,
     and, unless `files_only`, `sql`, `calls` and `http`; where it runs code
-    the check can't read (`unread`); where it reaches what such code may
-    have defined (`reaches_defined`), which holds it only when such code
-    ran; and, with `files_only`, each function past a limit in which it
-    finds a held file change (`past_cap`)."""
+    the check can't read (`unread`), and those of them that run code it left
+    unread at a limit of its own (`at_limit`, `_left_at_limit`); each shell
+    command past the depth limit that does something (`deep_commands`,
+    `_shell_commands`); where it
+    reaches what such code may have defined (`reaches_defined`), which holds
+    it only when such code ran; and, with `files_only`, each function past
+    a limit in which it finds a held file change (`past_cap`). With
+    `stops_only`, the cell and each function are read only for those stops
+    and the calls they make on (`read_stops`), as `_left_unread` reads an
+    earlier cell, and a function whose read can find none isn't read at a
+    call the cell makes, though it counts as read there
+    (`_stop_free_depth`)."""
 
-    def __init__(self, reader: _Reader, *, inputs: _ReadInputs, files_only: bool) -> None:
+    def __init__(self, reader: _Reader, *, inputs: _ReadInputs, files_only: bool, stops_only: bool = False) -> None:
         self.reader = reader
         self.inputs = inputs
         self.files_only = files_only
+        self.stops_only = stops_only
         self.files: list[FileChange] = []
         self.sql: list[SqlWrite] = []
         self.calls: list[CallWrite] = []
         self.http: list[HttpWrite] = []
         self.unread: list[ast.AST] = []
+        self.at_limit: list[ast.AST] = []
         self.reaches_defined: list[ast.AST] = []
         self.past_cap: list[ast.AST] = []
         # The functions in `unread` only because a depth limit stopped the read there.
         self.past_depth: list[ast.AST] = []
+        # Each shell command past the depth limit in the code it read (`read_stops`).
+        self.deep_commands: list[ast.AST] = []
         # The shortest chain each function was read at for one set of
         # arguments, so a self-recursive function is read once per set, not
         # once per call that reaches it (`_Visit`); and how many times each
@@ -16015,18 +17479,44 @@ class _CellRead:
         reader, inputs = self.reader, self.inputs
         for cell in (inputs.current, *inputs.ran):
             uses = _defined_uses(reader, cell.tree, cell, inputs.defined, inputs.modules)
-            self.files.extend(_file_findings(reader, cell, inputs.snapshots, owned=inputs.owned))
-            if not self.files_only:
+            if not self.stops_only:
+                self.files.extend(_file_findings(reader, cell, inputs.snapshots, owned=inputs.owned))
+            if not (self.files_only or self.stops_only):
                 self.sql.extend(_sql_findings(reader, cell))
                 self.calls.extend(_call_findings(reader, cell))
                 self.http.extend(_http_findings(reader, cell, rules=inputs.http_rules))
-                self.unread.extend(_unread_code(reader, cell.tree, cell, read=inputs.literal_code,
-                                                modules=inputs.modules))
                 self.reaches_defined.extend(uses.sites)
+            self.read_stops(_Code(cell=cell, root=cell.tree))
             for callee in (*_earlier_function_uses(reader, cell.tree, cell), *uses.callees):
                 use = callee.use
                 report = _Report(line=cell.host_line or use.lineno, call=scrub_output(cell.source(use)))
                 self.read_function(callee, report=report, chain=())
+
+    def add_unread(self, sites: list[ast.AST]) -> None:
+        """`sites`, where the read runs code the check can't read, with those
+        that run code it left unread at a limit of its own noted apart
+        (`_left_at_limit`), read where the read reaches them, so a launch
+        built from a call's arguments is read with them."""
+        self.unread.extend(sites)
+        self.at_limit += [site for site in sites if _left_at_limit(site, self.reader, read=self.inputs.literal_code)]
+
+    def read_stops(self, code: _Code) -> None:
+        """Reads all of `code`, unless `files_only`, for where it runs code
+        the check can't read, code it left unread at a limit among them
+        (`add_unread`), for each shell command past the depth limit on its
+        words that does something (`_shell_commands`), as the walks that
+        read reaches find them, the walk of every cell's modules among
+        them, and for each call through partials past `_PARAM_DEPTH`
+        (`_Reader.partials_cut`), whatever the snapshots hold, so a
+        project that was empty as the turn began stops there too."""
+        reader, inputs = self.reader, self.inputs
+        if self.files_only:
+            return
+        mark = len(reader.deep_commands)
+        self.add_unread(_unread_code(reader, code.root, code.cell, read=inputs.literal_code, modules=inputs.modules))
+        self.deep_commands += reader.deep_commands[mark:]
+        reader.unread_partials += [node for node in ast.walk(code.root)
+                                   if isinstance(node, ast.Call) and reader.partials_cut(node)]
 
     def skips(self, visit: _Visit, chain: tuple[_Visit, ...], *, guessed: bool = False) -> bool:
         """Whether `read_function` leaves `visit` unread at `chain`: the
@@ -16052,12 +17542,19 @@ class _CellRead:
         already."""
         func = callee.func
         reader, inputs = self.reader, self.inputs
+        if not self.follows(func):
+            return
         visit = _Visit.of(callee, reader)
         guessed = guessed or callee.guessed
         again = any(v.func == visit.func for v in chain)
         if self.skips(visit, chain, guessed=guessed) or callee.past and again:
             return
         (self._guessed_at if guessed else self._read_at)[visit] = len(chain)
+        if self.stops_only and not chain and not callee.past and _stop_free_depth(reader, inputs, func) is not None:
+            # A read of it for its stops alone can find none. It counts as
+            # read at this call all the same, as a read would, so a longer
+            # chain that reaches it skips it as the cell's own check did.
+            return
         if len(chain) >= _CALL_DEPTH or callee.past or self.reread_out(visit, chain):
             if self.files_only:
                 if self.past_the_limit(callee, report=report, chain=chain, guessed=guessed):
@@ -16077,15 +17574,15 @@ class _CellRead:
             for code in inputs.literal_code.with_ran(home, func):
                 cell, root = code.cell, func if code.cell is home else None
                 uses = _defined_uses(reader, code.root, cell, inputs.defined, inputs.modules)
-                self.files.extend(_file_findings(reader, cell, inputs.snapshots, root=root, report=report,
-                                                 owned=inputs.owned))
-                if not self.files_only:
+                if not self.stops_only:
+                    self.files.extend(_file_findings(reader, cell, inputs.snapshots, root=root, report=report,
+                                                     owned=inputs.owned))
+                if not (self.files_only or self.stops_only):
                     self.sql.extend(_sql_findings(reader, cell, root=root, report=report))
                     self.calls.extend(_call_findings(reader, cell, root=root, report=report))
                     self.http.extend(_http_findings(reader, cell, rules=inputs.http_rules, root=root, report=report))
-                    self.unread.extend(_unread_code(reader, code.root, cell, read=inputs.literal_code,
-                                                    modules=inputs.modules))
                     self.reaches_defined.extend(uses.sites)
+                self.read_stops(code)
                 for inner in (*_earlier_function_uses(reader, code.root, cell), *uses.callees):
                     self.read_function(inner, report=report, chain=(*chain, visit), guessed=guessed)
 
@@ -16117,7 +17614,8 @@ class _CellRead:
             if scan.writes:
                 return True
             return not guessed and any(
-                c.func is not func and not self.skips(inner := _Visit.of(c, reader), inner_chain)
+                c.func is not func and self.follows(c.func)
+                and not self.skips(inner := _Visit.of(c, reader), inner_chain)
                 and not self.reread_out(inner, inner_chain) for c in scan.calls
             )
 
@@ -16147,6 +17645,13 @@ class _CellRead:
             calls += [*_earlier_function_uses(reader, code.root, cell), *uses.callees]
         return _Scan(writes=False, calls=tuple(calls))
 
+    def follows(self, func: Function) -> bool:
+        """Whether the read follows a call to `func`: an earlier cell's read
+        (`_left_unread`) follows only the functions cells before it defined,
+        as that cell's own check did, at a call and past a limit alike."""
+        reader, current = self.reader, self.inputs.current
+        return current is reader.current or reader.cell_of(func).host < current.index
+
     def reread_out(self, visit: _Visit, chain: tuple[_Visit, ...]) -> bool:
         """Whether the chain reads `visit`'s function already and has read
         it again for other literals `_REREAD_LIMIT` times, as one of a pair
@@ -16162,6 +17667,7 @@ def find_cell_writes(
     earlier: Sequence[EarlierCell],
     snapshots: Sequence[ProjectSnapshot],
     http_rules: Sequence[HttpWriteRule] = (),
+    new_process: bool = False,
 ) -> CellWrites:
     """What `code` would change, read against the conversation's `earlier` cells.
 
@@ -16186,51 +17692,111 @@ def find_cell_writes(
     a name, namespace or module that such code may have filled and such
     code ran in this cell or an earlier one (`_defined_uses`,
     `_first_unread`); when the last of `earlier` ended its process
-    (`EarlierCell.ended_process`), so the pad starts a new one before this
-    cell, once a cell wrote a startup hook a new process runs
-    (`_Modules.hooks_may_run`); or when a depth limit stopped a read where a
-    write may lie past it, a function past `_CALL_DEPTH` calls among them
-    (`_Reader.stopped`). Whatever else it read stays on the card. A reset
-    of the pad clears its cells, so a hook a cell wrote before one is
-    outside what this reads. A depth limit, or a cell too deep to parse,
-    also sets `stopped`; code the check can't read that the cell itself
-    runs, or an earlier function it calls runs, sets `unread_here`, and a
-    write of a startup hook among that code sets `writes_startup_hook`.
-    `hold_unapproved_write` reads all three for `write_approval_unchecked`:
+    (`EarlierCell.ended_process`), or the pad's process wasn't running as
+    this cell came (`new_process`, `hold_unapproved_write`), so the pad
+    starts a new one before this cell, once a cell wrote a startup hook a
+    new process runs
+    (`_Modules.hooks_may_run`); or when a limit of the check stopped a read
+    where a write may lie past it (`stopped`). A limit may leave code
+    unread: a function past `_CALL_DEPTH` calls (`_CellRead.past_depth`), a
+    call through partials past `_PARAM_DEPTH` (`_Reader.unread_partials`),
+    literal code past `_EXEC_LIMIT` texts or `_LITERAL_CODE_LIMIT`
+    characters or too deep for its parser, a shell's script past
+    `_SHELL_DEPTH` shells (`_left_at_limit`), or a shell command past the
+    depth limit on its words that does something (`_CellRead.deep_commands`).
+    Or it may leave a value unplaced: a depth limit on a value
+    (`_Reader.stopped`), or the paths a reading gave up on, past
+    `_PATH_LIMIT` paths, the bindings the reading of errored cells reads for
+    one, or the path depth limit, where an overwrite, delete or move lands
+    (`_FileFinder.unplaced`, `_FileFinder.locate`, `_FileFinder.decided`).
+    Once an earlier cell holds code a limit left unread anywhere, whether it
+    ran or not, or an earlier cell too deep for the parser may have run,
+    every later cell is a stop too, until the pad resets: it may depend on
+    what that code did (`_earlier_stop`). A cell whose record says it kept nothing, or that
+    Python refused to compile, stops no later cell. Each check keeps what
+    it found of that by the cell's place in the conversation
+    (`_LEFT_UNREAD`), and a later check reads a cell it finds nothing kept
+    for, as after a restart of the process, as that cell's own check read
+    it, with every path counted as one the project held when it ran
+    (`_left_unread`). Whatever else it read stays on the card. A
+    reset of the pad clears its cells, so a hook a cell wrote before one
+    is outside what this reads. Code the check can't read that the cell
+    itself runs, or an earlier function it calls runs, sets `unread_here`,
+    and a write of a startup hook among that code sets
+    `writes_startup_hook`. `hold_unapproved_write` reads all three for
+    `write_approval_unchecked`:
     under `own` or `off`, a cell held only because the check can't read all
     of it may run with no card, so a write inside code the check can't read
     may get none.
 
     A cell that doesn't parse returns nothing to hold: the runner compiles it
-    the same way and refuses it before any of it runs. After a cell that
-    ended its process, the pad starts a new one before it compiles the
+    the same way and refuses it before any of it runs. Where the pad starts
+    a new process before this cell, it does so before it compiles the
     cell, so it is read as a cell that runs no code of its own.
     """
+    # The pad starts a new process before this cell, which runs the startup hooks a cell wrote.
+    restarted = bool(earlier) and (new_process or earlier[-1].ended_process)
     try:
         tree = _parse(code)
     except (SyntaxError, ValueError):
-        if earlier and earlier[-1].ended_process:
-            return find_cell_writes(code="", earlier=earlier, snapshots=snapshots, http_rules=http_rules)
+        if restarted:
+            return find_cell_writes(code="", earlier=earlier, snapshots=snapshots, http_rules=http_rules,
+                                    new_process=new_process)
         return CellWrites()
     except (RecursionError, MemoryError):
-        # Too deep for this Python's parser, and the pad may run another Python (remote backend): hold it.
-        return CellWrites(unchecked=True, stopped=True, causes=(UncheckedCause(kind="limit"),))
+        # Too deep for this Python's parser, and the pad may run another Python
+        # (remote backend): hold it, after the stop an earlier cell gives
+        # every later one (`_earlier_stop`), read as for a cell with no code.
+        before = find_cell_writes(code="", earlier=earlier, snapshots=snapshots, http_rules=http_rules,
+                                  new_process=new_process)
+        causes = (*(c for c in before.causes if c.in_earlier), UncheckedCause(kind="limit"))
+        return CellWrites(unchecked=True, stopped=True, causes=causes, cause_kinds=("limit",))
     cells: list[_Cell] = []
     errored: set[int] = set()
     stopped_at: dict[int, int] = {}
+    # The earlier cells whose record says they kept nothing, or that Python
+    # refused to compile, which stop no later cell (`_earlier_stop`); where
+    # the first earlier cell too deep for the check's parser sits among the
+    # cells read, None when no cell is; and each parsed cell's place in the
+    # conversation: its code after the code and record of every cell before
+    # it (`_LEFT_UNREAD`).
+    nothing_kept: set[int] = set()
+    deep: int | None = None
+    places: dict[int, bytes] = {}
+    place = hashlib.blake2b(digest_size=16)
     for given in earlier:
+        place.update(f"{len(given.code)}:".encode() + given.code.encode("utf-8", "surrogatepass"))
+        here = place.digest()
+        place.update(f"{given.errored}:{given.stopped_at};".encode())
+        # A record that says the cell kept nothing: its process died, was
+        # killed or was canceled, or never got to run it (`NOTHING_KEPT`,
+        # beside `ended_process`). A cell that failed on its first line in a
+        # process that lives on gives the same line, but ran that line, even
+        # where the process is gone by this check (`new_process`).
+        kept_nothing = given.errored and given.stopped_at == NOTHING_KEPT and given.ended_process
         parsed = _EARLIER_CELLS.get(code=given.code, index=len(cells))
+        if isinstance(parsed, _TooDeep):
+            # It stops each later cell, unless its record says it kept nothing.
+            if deep is None and not kept_nothing:
+                deep = len(cells)
+            continue
         if parsed is None:
             continue
+        places[parsed.index] = here
         if given.errored:
             errored.add(parsed.index)
             line = given.stopped_at
             if line is None and not parsed.compiles:
                 # Python refused it before any of it ran: it bound nothing.
-                line = NOTHING_KEPT
+                line, kept_nothing = NOTHING_KEPT, True
             if line is not None:
                 stopped_at[parsed.index] = line
+        if kept_nothing:
+            nothing_kept.add(parsed.index)
         cells.append(parsed)
+    # This cell's place, where its own check keeps what it found (`_LEFT_UNREAD`).
+    place.update(f"{len(code)}:".encode() + code.encode("utf-8", "surrogatepass"))
+    own_place = place.digest()
     current = _Cell(tree, code, len(cells))
     cells.append(current)
     project = next((s for s in snapshots if s.label == "project"), None)
@@ -16244,11 +17810,15 @@ def find_cell_writes(
     # call. The reader then reads them with the rest.
     earlier_cells = cells[: current.index]
     with_code = [c for c in earlier_cells if _runs_code(c, reader)]
+    coded = {id(c) for c in with_code}
     # Only a cell that hands a runner literal code at its top level, or calls
-    # what an earlier one defined, gives that read anything.
+    # what an earlier one defined, gives that read anything. Once an earlier
+    # cell's function may hand literal code on, a cell that only calls one
+    # does too, where it runs that function: its literal code is read there
+    # and counts against the same limits (`_ExecRead.capped`).
     follows = any(c.function_execs or c.function_launches for c in earlier_cells)
-    with_literal = [c for c in with_code if follows or c.hands_literal_code
-                    or any(_last_name(call.func) in reader.runner_aliases for call in c.calls)]
+    with_literal = [c for c in earlier_cells if follows and (id(c) in coded or c.calls) or id(c) in coded and (
+        c.hands_literal_code or any(_last_name(call.func) in reader.runner_aliases for call in c.calls))]
     earlier_exec = (
         _exec_cells(reader, with_literal, ran_only=True) if with_literal else _ExecRead.empty()
     )
@@ -16315,58 +17885,165 @@ def find_cell_writes(
         current=current, ran=tuple(ran), literal_code=literal_code, defined=defined, modules=modules,
         snapshots=tuple(snapshots), owned=owned, http_rules=tuple(http_rules),
     )
+    # Once an earlier cell holds code a limit of the check left unread, or is
+    # too deep to parse, this cell may depend on what that code did, so the
+    # check stops here too. The earlier cells are read with the earlier
+    # cells alone, not this one: it may redefine a function they call.
+    def readers_of(known: Sequence[_Cell], *, own: _Cell | None = None) -> tuple[_Reader, _Reader | None]:
+        """A reader of `known`, earlier cells and the literal code they run,
+        and its reading of errored cells as maybe stopped anywhere, where
+        that may name another path. With `own`, the last of the earlier
+        cells among them, that cell is read with no record, as its own
+        check read it before it ran: a definition it holds replaced the one
+        before it (`_Reader.replaced`). Neither reads what the pad's cells
+        made (`_Reader.made`): read after a restart, a file on disk counts
+        as one the project held when the cell ran (`_left_unread`)."""
+        blank = _Cell(ast.Module(body=[], type_ignores=[]), "", current.index)
+        known = [*known, blank]
+        unrecorded = set() if own is None else {c.index for c in known if c.host == own.index}
+        failed = frozenset(errored - unrecorded)
+        alone = _Reader(known, current=blank, project_root=project_root, stopped_early=failed,
+                        stopped_at={i: n for i, n in stopped_at.items() if i not in unrecorded},
+                        tainted_contexts=reader.tainted_contexts)
+        if not _errored_names_read(known, errored=failed):
+            return alone, None
+        wide = _Reader(known, current=blank, project_root=project_root, errored=failed,
+                       tainted_contexts=reader.tainted_contexts)
+        return alone, wide
+
+    @cache
+    def every_earlier() -> tuple[_Reader, _Reader | None]:
+        return readers_of([*earlier_cells, *earlier_exec.cells])
+
+    @cache
+    def apart() -> frozenset[int]:
+        return _read_apart([*earlier_cells, *earlier_exec.cells])
+
+    # After a restart the check can't tell what the project held when an
+    # earlier cell ran: its read counts every path as one that was there
+    # (`ProjectSnapshot.failed`).
+    unknown_start = tuple(s.model_copy(update={"failed": True}) for s in snapshots)
+
+    def left_unread(cell: _Cell) -> str | None:
+        """Where a limit of the check leaves code unread in `cell`, an
+        earlier cell no check in this process kept that for, read as its
+        own check read it (`_left_unread`): with one reader of every earlier
+        cell, built once, unless a later one may change that read
+        (`_read_apart`), or the cell's record says it failed and so leaves
+        a definition before one of its own in place (`_Reader.replaced`),
+        which its own check, before it ran, didn't read; then with one of
+        the cells up to it alone, the cell read with no record. A stop the
+        one reader finds holds only where the cells up to it alone give it
+        too: a later cell's call may hand a function the cell defines what
+        its own check never saw, as a command's word past the depth limit
+        (`_Reader.call_sites`). The files the agent owns are those the cells
+        before it overwrote."""
+        shared = every_earlier()
+        alone = [*earlier_cells[: cell.index + 1], *(c for c in earlier_exec.cells if c.host <= cell.index)]
+        owned_before = _OwnedFiles(earlier_cells[: cell.index], snapshots, errored=frozenset(errored))
+        own = replace(inputs, snapshots=unknown_start, owned=owned_before)
+        if cell.index in apart() or any(id(d) in shared[0].replaced for d in (*cell.functions.values(),
+                                                                                *cell.classes.values())):
+            return _left_unread(*readers_of(alone, own=cell), own, cell)
+        found = _left_unread(*shared, own, cell)
+        return found if found is None else _left_unread(*readers_of(alone, own=cell), own, cell)
+
+    earlier_stop = _earlier_stop(earlier_cells[:deep], places=places, nothing_kept=nothing_kept, read=left_unread)
+    if earlier_stop is None and deep is not None:
+        earlier_stop = UncheckedCause(kind="limit", in_earlier=True)
+    # A dict display's entry may place a path only while no cell names a
+    # runner such as exec(), even of a literal, imports a module the check
+    # can't read, or holds code a limit left unread (`may_run_unread`,
+    # `earlier_stop`): such code may change the dict.
+    reader.dict_entries = not may_run_unread and earlier_stop is None
+    partials = len(reader.unread_partials)
     read = _CellRead(reader, inputs=inputs, files_only=False)
     read.run()
+    # A function the read stopped at for depth, code the check left unread
+    # at another of its limits (`_left_at_limit`), and a call through
+    # partials past `_PARAM_DEPTH` are stops, not code the check can't read.
+    # The card quotes the first, by kind in that order, not by line.
+    stops = [*read.past_depth, *read.at_limit, *reader.unread_partials[partials:]]
+    if stops and reader.dict_entries and reader.dict_lookups:
+        # Code the cell itself left unread may change the dict too: read
+        # again with no entry placing a path.
+        reader.dict_entries = False
+        del reader.unread_partials[partials:]
+        read = _CellRead(reader, inputs=inputs, files_only=False)
+        read.run()
+        stops = [*read.past_depth, *read.at_limit, *reader.unread_partials[partials:]]
+    # A shell command past the depth limit that does something is code the
+    # check stopped reading too, though it changes no dict: in this cell's
+    # code, or in an earlier function this cell runs, such as one it hands
+    # a parameter that holds the command, unless an earlier cell stops this
+    # one already (`_earlier_stop`), as one that holds the command does.
+    stops += [node for node in read.deep_commands if earlier_stop is None or not reader.earlier(node)]
     files = read.files
     # Where the cell runs code the check can't read (`_unread_code`).
     unread = read.unread
-    # A function the read stopped at for depth is its own reason, not code the check can't read.
-    runs = [node for node in read.unread if node not in read.past_depth]
-    stops = list(read.past_depth)
+    runs = [node for node in read.unread if node not in stops]
+    wide_gave_up = False
     if _errored_names_read(reader.cells, errored=frozenset(errored)):
         # Read again with each errored cell as maybe stopped anywhere, for
         # the files only that reading holds. Nothing else is taken from it:
         # a wider set of paths may hold less somewhere, never more. Past
-        # `_PATH_LIMIT` paths for one value it gives up, and the first read
-        # stands alone.
+        # `_PATH_LIMIT` paths for one value, or `_WIDE_BINDINGS` bindings
+        # read for it, it gives up on that value: where that is the paths
+        # a write lands on, a file it would have held may go unheld, so the
+        # check stops.
         wide = _Reader(reader.cells, current=current, project_root=project_root, errored=frozenset(errored),
                        tainted_contexts=reader.tainted_contexts)
         wide.made = reader.made
         maybe = _CellRead(wide, inputs=inputs, files_only=True)
         maybe.run()
-        if not wide.past_limit:
-            files += _added_holds(found=files, maybe=maybe.files)
-            unread += maybe.past_cap
-            stops += maybe.past_cap
+        # Where it gave up on the paths a write lands on (`_FileFinder.locate`,
+        # `_FileFinder.unplaced`), or read past the path depth limit to a file
+        # it would hold (`_FileFinder.decided`).
+        wide_gave_up = wide.stopped
+        reader.stop_quote = reader.stop_quote or wide.stop_quote
+        files += _added_holds(found=files, maybe=maybe.files)
+        unread += maybe.past_cap
+        stops += maybe.past_cap
     # A call that reaches what code the check couldn't read may have defined
     # holds the cell only when such code ran.
-    if first_unread is not None:
+    uses = first_unread is not None and bool(read.reaches_defined)
+    if uses:
         unread += read.reaches_defined
-    restarts = bool(earlier) and earlier[-1].ended_process and modules.hooks_may_run
+    restarts = restarted and modules.hooks_may_run
     if restarts:
         # The pad starts a new process before this cell runs, and that start
         # runs the startup hooks a cell wrote, which the check doesn't read.
         unread.append(current.tree)
+    stopped_here = bool(stops) or reader.stopped or wide_gave_up
+    stopped = stopped_here or earlier_stop is not None
     writes = CellWrites(
         sql=tuple(sorted(read.sql, key=lambda w: w.line)),
         calls=tuple(sorted(read.calls, key=lambda c: c.line)),
         files=tuple(files),
         http=tuple(sorted(read.http, key=lambda w: w.line)),
-        # A depth limit that may have stopped a read short of a write
-        # (`_Reader.stopped`) leaves the cell unchecked too.
-        unchecked=bool(unread) or reader.stopped,
+        # A limit that may have stopped a read short of a write
+        # (`_Reader.stopped`, the wide reading's) leaves the cell unchecked too.
+        unchecked=bool(unread) or stopped,
         # Set here, not with the reasons below, so an error building those can't lose them.
-        stopped=bool(stops) or reader.stopped,
+        stopped=stopped,
         unread_here=bool(runs),
         writes_startup_hook=any(
             isinstance(node, ast.Call) and _hook_write(node, reader, reader.cell_of(node)).runs_at_start
             for node in runs
         ),
+        cause_kinds=tuple(kind for kind, found in (
+            ("restart", restarts), ("limit", stopped), ("runs", bool(runs)), ("uses", uses),
+        ) if found),
     )
     # The reasons only explain the card, so an error building them loses them, not what the check found.
     try:
+        stopped_quote = _stopped_at(stops[0], reader) if stops else ""
+        # Whether this cell holds code a limit of the check left unread, and
+        # where the read stopped, kept for each later check (`_earlier_stop`),
+        # which reads the cell again where this failed.
+        _LEFT_UNREAD.keep(own_place, stopped_quote if stops else None)
         causes = [UncheckedCause(kind="runs", code=_quoted(node, reader)) for node in runs]
-        if first_unread is not None and read.reaches_defined:
+        if uses and first_unread is not None:
             earlier_sites = _unread_code(reader, first_unread.tree, first_unread, read=literal_code,
                                          modules=modules, spelled_only=True)
             earlier_line = _quoted(earlier_sites[0], reader) if earlier_sites else ""
@@ -16374,8 +18051,11 @@ def find_cell_writes(
                                       earlier=earlier_line) for site in read.reaches_defined]
         # Reasons about the whole step go first, so the cap on reasons never drops them.
         whole = [UncheckedCause(kind="restart")] if restarts else []
-        if writes.stopped:
-            whole.append(UncheckedCause(kind="limit", code=_stopped_at(stops[0], reader) if stops else ""))
+        if earlier_stop is not None:
+            whole.append(earlier_stop)
+        if stopped_here:
+            # Where a limit left code unread, else where one left a value unplaced.
+            whole.append(UncheckedCause(kind="limit", code=stopped_quote or reader.stop_quote or ""))
         reasons = (*whole, *dict.fromkeys(c for c in causes if c.code or c.name))[:_CAUSES_SHOWN]
     except Exception as exc:
         logger.warning("write approval: the card's reasons failed (%s)", type(exc).__name__)
@@ -16383,34 +18063,199 @@ def find_cell_writes(
     return writes.model_copy(update={"causes": reasons})
 
 
+def _earlier_stop(
+    cells: Sequence[_Cell], *, places: Mapping[int, bytes], nothing_kept: AbstractSet[int],
+    read: Callable[[_Cell], str | None],
+) -> UncheckedCause | None:
+    """The stop for the checked cell where the first of `cells`, the earlier
+    cells, holds code a limit of the check left unread anywhere in its code,
+    whether that code ran or not. A cell in `nothing_kept`, whose record
+    says it kept nothing or that Python refused to compile, stops no later
+    cell. What each cell holds is kept for its place in the conversation
+    (`places`, `_LEFT_UNREAD`): the gate checks each cell before it runs,
+    and that check keeps its own stops (`find_cell_writes`). A cell no
+    check in this process kept that for, as after a restart of the
+    process, is read here for its stops alone, as `read` reads it
+    (`_left_unread`); one too deep for that read to finish stops every
+    later cell, as one too deep for the parser does. The card quotes where
+    the read of that cell stopped. None where no cell holds such code."""
+
+    def stop_of(cell: _Cell) -> str | None:
+        try:
+            return read(cell)
+        except (RecursionError, MemoryError):
+            return ""
+
+    for cell in cells:
+        if cell.index in nothing_kept:
+            continue
+        quote = _LEFT_UNREAD.read(places[cell.index], lambda cell=cell: stop_of(cell))
+        if quote is not None:
+            return UncheckedCause(kind="limit", code=quote, in_earlier=True)
+    return None
+
+
+def _left_unread(reader: _Reader, wide: _Reader | None, inputs: _ReadInputs, cell: _Cell) -> str | None:
+    """Where a limit of the check leaves code unread in `cell`, an earlier
+    cell, read whole with `reader` as its own check reads it
+    (`find_cell_writes`): the code of each function, lambda, class and
+    decorator it defines too, the literal code it hands on (`_exec_cells`),
+    and each function a cell before it defined that it calls or hands on,
+    read for those stops alone (`_CellRead.stops_only`), and on `wide` too,
+    where there is one. `reader` holds no cell whose code changes that
+    read (`_read_apart`), and a function a cell at or after `cell` defined
+    isn't followed (`_CellRead.follows`). `inputs` gives the files the
+    agent owned before it, and a project in which every path counts as one
+    the turn began with (`ProjectSnapshot.failed`): the files the project
+    held when the cell ran may be gone since, so a delete or move that a
+    function past a limit makes stops the read whatever it names, as the
+    cell's own check stopped where the file was there. The quote of the
+    first stop by kind, as that cell's own card gives it
+    (`find_cell_writes`, `_stopped_at`); None where the read finds none."""
+    literal = _exec_cells(reader, [cell])
+    own = replace(inputs, current=cell, ran=tuple(literal.of(cell.tree)), literal_code=literal)
+    read = _CellRead(reader, inputs=own, files_only=False, stops_only=True)
+    read.run()
+    stops = [*read.past_depth, *read.at_limit, *reader.unread_partials, *read.deep_commands]
+    if not stops and wide is not None:
+        for made in literal.cells:
+            wide.read_too(made)
+        maybe = _CellRead(wide, inputs=own, files_only=True, stops_only=True)
+        maybe.run()
+        stops = maybe.past_cap
+    return _stopped_at(stops[0], reader) if stops else None
+
+
+def _read_apart(cells: Sequence[_Cell]) -> frozenset[int]:
+    """The index of each earlier cell among `cells`, the earlier cells and
+    the literal code they run, whose read for its stops a later one of them
+    may change (`_earlier_stop`), so it is read with the cells up to it
+    alone. That is one where code at or before it in a function, lambda,
+    class or comprehension reads a name a later cell binds at its top level
+    (`_Cell.scoped_reads`), since such a read gets a name's latest value;
+    or where code at or before it names a function, class or module a later
+    cell defines or imports, or a name a later cell rebinds where the check
+    can't order it (`_Cell.rebinds_globally`), since the reader looks those
+    up by their latest. Any other is read alike with one reader of all of
+    them, which costs far less than one reader for each. Literal code that
+    runs in a namespace of its own (`_Cell.shared`) binds and defines no
+    name of the cells'. A name every cell binds only by an import of one
+    module, as `import pandas as pd` again in each cell, holds that module
+    from the first such import on, so only the first counts."""
+    modules: dict[str, set[str]] = {}
+    otherwise: set[str] = set()
+    for cell in cells:
+        for name, module in cell.imports.items():
+            modules.setdefault(name, set()).add(module)
+        otherwise.update(cell.bindings, (d.name for d in cell.definitions), cell.rebinds_globally)
+    first = {name: min(c.host for c in cells if name in c.imports)
+             for name, found in modules.items() if len(found) == 1 and name not in otherwise}
+
+    def imported(cell: _Cell) -> Iterator[str]:
+        return (name for name in cell.imports if first.get(name, cell.host) == cell.host)
+
+    def made(cell: _Cell) -> Iterator[str]:
+        if cell.shared:
+            yield from (*cell.functions, *cell.classes)
+        yield from imported(cell)
+
+    last_bound: dict[str, int] = {}
+    last_made: dict[str, int] = {}
+    for cell in cells:
+        for name in cell.module_bound if cell.shared else ():
+            if first.get(name, cell.host) == cell.host:
+                last_bound[name] = max(last_bound.get(name, -1), cell.host)
+        for name in (*made(cell), *cell.rebinds_globally):
+            last_made[name] = max(last_made.get(name, -1), cell.host)
+    out: set[int] = set()
+    # The latest cell that binds or makes a name code read so far reads so.
+    reach = -1
+    for host, group in itertools.groupby(sorted(cells, key=lambda c: c.host), key=lambda c: c.host):
+        for cell in group:
+            reach = max([reach, *(last_bound.get(name, -1) for name in cell.scoped_reads),
+                         *(last_made.get(name, -1) for name in (*cell.loads, *made(cell)))])
+        if reach > host:
+            out.add(host)
+    return frozenset(out)
+
+
+def _stop_free_depth(reader: _Reader, inputs: _ReadInputs, func: Function) -> int | None:
+    """How many functions deep a read of `func` for its stops alone goes
+    (`_CellRead.stops_only`), itself included, where that read can find
+    none; None where it may. It may where `func` holds a place that may run
+    code the check can't read or leaves unread at a limit (`_unread_code`
+    with no literal code read, so each literal counts, as one that takes
+    the calling cell past `_EXEC_LIMIT` texts does) or a shell command past
+    the depth limit (`_Reader.deep_commands`); where a function it
+    calls or hands on (`_earlier_function_uses`, `_defined_uses`) may, was
+    found past a depth limit (`_Callee.past`), or calls back into one the
+    read is in; where the read goes past `_CALL_DEPTH` calls; and where it
+    calls through partials past `_PARAM_DEPTH`, as partials a later cell
+    built may make it. Each function is read once per reader
+    (`_Reader.stop_free`), for any call to it from any cell: such a
+    function runs no literal code, and a parameter holds what any call
+    passes (`_Reader.call_sites`)."""
+    known = reader.stop_free
+    if id(func) in known:
+        return known[id(func)]
+    # A call back into a function still being read reads as one that may stop.
+    known[id(func)] = None
+    cell = reader.cell_of(func)
+    mark = len(reader.deep_commands)
+    unread = _unread_code(reader, func, cell, read=_ExecRead.empty(), modules=inputs.modules)
+    if unread or len(reader.deep_commands) > mark or any(
+        isinstance(node, ast.Call) and reader.partials_cut(node) for node in ast.walk(func)
+    ):
+        return None
+    depth = 1
+    for callee in (*_earlier_function_uses(reader, func, cell),
+                   *_defined_uses(reader, func, cell, inputs.defined, inputs.modules).callees):
+        below = None if callee.past else _stop_free_depth(reader, inputs, callee.func)
+        if below is None:
+            return None
+        depth = max(depth, below + 1)
+    if depth > _CALL_DEPTH:
+        return None
+    known[id(func)] = depth
+    return depth
+
+
 # How many reasons a card gives for a step the check couldn't read.
 _CAUSES_SHOWN = 3
-# How much of the function a depth limit stopped the read at a card quotes.
-_STOPPED_LINES = 6
-_STOPPED_CHARS = 400
+# How much code a card quotes for one reason (`_cut`).
+_QUOTED_LINES = 6
+_QUOTED_CHARS = 400
+
+
+def _cut(text: str, *, lines: int = _QUOTED_LINES) -> str:
+    """`text` cut to at most `lines` lines and `_QUOTED_CHARS` characters,
+    ending in "..." when cut."""
+    kept = "\n".join(text.split("\n")[:lines])[:_QUOTED_CHARS]
+    return kept if kept == text else kept[:_QUOTED_CHARS - 3] + "..."
 
 
 def _quoted(node: ast.AST, reader: _Reader) -> str:
     """The line of a step `node` sits on, for the card, credentials
-    scrubbed: for code a step hands exec(), the step's own line that runs
-    it. Empty for a whole cell."""
+    scrubbed and cut (`_cut`): for code a step hands exec(), the step's own
+    line that runs it. Empty for a whole cell."""
     cell = reader.cell_of(node)
     if isinstance(node, ast.Module):
         return ""
     if cell.index != cell.host and cell.host_line is not None:
         host = next((c for c in reader.cells if c.index == cell.host), None)
         if host is not None and 0 < cell.host_line <= len(host.lines):
-            return scrub_output(host.lines[cell.host_line - 1].strip())
-    return scrub_output(cell.source(node).strip())
+            return _cut(scrub_output(host.lines[cell.host_line - 1].strip()))
+    return _cut(scrub_output(cell.source(node).strip()))
 
 
 def _stopped_at(node: ast.AST, reader: _Reader) -> str:
-    """The start of the function `node` a depth limit stopped the read at,
-    for the card, credentials scrubbed: at most `_STOPPED_LINES` lines and
-    `_STOPPED_CHARS` characters, ending in "..." when cut."""
+    """The code `node` a limit stopped the read at, for the card,
+    credentials scrubbed and cut (`_cut`): the start of a function past the
+    depth limit, or a call that runs code past another limit. A call that
+    hands a literal past `_LITERAL_CODE_LIMIT` characters keeps only its
+    first line: the literal's own first lines say nothing of what it does."""
     text = scrub_output(reader.cell_of(node).source(node).strip())
-    kept = "\n".join(text.split("\n")[:_STOPPED_LINES])[:_STOPPED_CHARS]
-    return kept if kept == text else kept[:_STOPPED_CHARS - 3] + "..."
+    return _cut(text, lines=1 if len(text) > _LITERAL_CODE_LIMIT else _QUOTED_LINES)
 
 
 def _used_name(site: ast.AST) -> str:

@@ -96,23 +96,28 @@ class CoreSettings(BaseSettings):
     # (ANTON_WRITE_APPROVAL_UNCHECKED). "all": the cell that runs it, a later
     # cell that may call what it defined, and the first cell after a restart
     # once a cell may have written a startup hook. "own": only the cell that
-    # runs it. "off": none. Under both, a cell the check stopped short on (a
-    # depth limit, a cell too deep to parse, a check that failed) or that
-    # writes a startup hook still waits, and a cell held for a write the
-    # check reads shows its whole card. Literal code past the check's exec limits
-    # (`write_check._EXEC_LIMIT`, `_LITERAL_CODE_LIMIT`) counts as code it
-    # can't read, not as a stop. So a write inside code the check can't
-    # read gets no card of its own: under "own", one a later cell makes
-    # through what such code defined, or a startup hook makes as the pad
-    # starts again; under "off", any. The write relay holds such a write
-    # only when it sends a method other than GET or HEAD to a host the
-    # relay holds, and nothing holds any other, such as a file change or a
-    # request to an https:// host. So "own" and "off" apply only while the
-    # relay holds every listed write:
+    # runs it. "off": none. Under "own" and "off", a cell the check stopped
+    # short on still waits: one of its limits left code unread or a value
+    # unplaced, the cell is too deep to parse, or the check failed. So does
+    # every later cell, until the pad resets, once an earlier cell holds code
+    # a limit left unread, whether that code ran or not, or was too deep to
+    # parse, and its record doesn't say it kept nothing, and Python didn't
+    # refuse to compile it: it may depend on what that code did. So does a
+    # cell that writes a startup hook. A cell held for a write the check reads
+    # shows its whole card. But a write inside code the check can't read gets
+    # no card of its own: under "own", one a later cell makes through what
+    # such code defined, or a startup hook makes as the pad starts again;
+    # under "off", any. The write relay holds such a write only when it sends
+    # a method other than GET or HEAD to a host the relay holds, and nothing
+    # holds any other, such as a file change or a request to an https:// host.
+    # So "own" and "off" apply only while the relay holds every listed write:
     # `write_relay_url` set, `write_relay_hosts` naming a host, and each
-    # `write_approval_http` rule an http:// rule to one of those hosts for
-    # one method other than GET or HEAD (not *, which takes in GET and HEAD).
-    # Otherwise anton uses "all" and logs a WARNING (`write_hold.unchecked_mode`).
+    # `write_approval_http` rule an http:// rule, with no wildcard in its host
+    # or port, to one of those hosts for one method other than GET or HEAD
+    # (not *, which takes in GET and HEAD). Otherwise anton uses "all" and
+    # logs a WARNING (`write_hold.unchecked_mode`). "off" also needs every
+    # other destination the pad reaches to be read-only: anton checks only the
+    # relay part, and the deployment declares the read-only part.
     write_approval_unchecked: UncheckedMode = "all"
     # The write relay's control address, where anton reads and cancels the
     # requests it holds (ANTON_WRITE_RELAY_URL, as in

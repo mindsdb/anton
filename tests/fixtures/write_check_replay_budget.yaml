@@ -69,6 +69,11 @@ real_writes_carded:
   - T14.0  # T14 config url post to the listed host
   - T17.2  # T17 subprocess read-only cli
   - T18.2  # T18 plotly html export and to_sql through helper
+  - E04.3  # E04 large seed sql file
+  - P10.1  # P10 big .sql file run on a project database
+  - T10.0  # T10 big sql read and run in one cell
+  - T11.1  # T11 big sql read in a cell, run on postgres next cell, literal path
+  - V1.0  # V1 relative big sql executescript same cell
   - V2.0  # V2 big sql on postgres same cell relative
   - V3.0  # V3 big sql 900KB
   - V4.1  # V4 big text posted to listed host
@@ -89,18 +94,13 @@ real_writes_carded_only_unchecked:
   - X1.1  # X1 unread builder save over a project file
 
 real_writes_missed:
-  - E04.3  # E04 large seed sql file
   - F05.5  # F05 sqlite project db
   - S01.4  # S01 weekly ops report, two scheduled runs
   - W03.7  # W03 snowflake connector cursor
   - K02.7  # K02 duckdb project database
-  - P10.1  # P10 big .sql file run on a project database
   - T01.3  # T01 orm session
   - T05.5  # T05 writes in a thread pool and callbacks
   - T08.2  # T08 exec of a script that shadows a builtin, then print
-  - T10.0  # T10 big sql read and run in one cell
-  - T11.1  # T11 big sql read in a cell, run on postgres next cell, literal path
-  - V1.0  # V1 relative big sql executescript same cell
 
 no_write_carded:
   - C01.1  # C01 exec_module dbx helpers
@@ -151,9 +151,7 @@ no_write_carded:
   - D04.7  # D04 page path from artifact metadata
   - D05.2  # D05 document build with skill helper
   - D05.3  # D05 document build with skill helper
-  - E01.0  # E01 pdf guide text export
   - E02.4  # E02 planner log
-  - E04.0  # E04 large seed sql file
   - G01.3  # G01 ddl string then function
   - G01.6  # G01 ddl string then function
   - G05.1  # G05 p rebound after module
@@ -220,7 +218,6 @@ no_write_carded:
   - P02.1  # P02 helper module: walk the folder after it
   - P05.2  # P05 DDL text printed
   - P07.2  # P07 page written through a path, read after a restart
-  - P09.0  # P09 big text file read and counted
   - T15.2  # T15 restart free re-derives the path
   - T18.1  # T18 plotly html export and to_sql through helper
 
@@ -229,4 +226,3 @@ broken_pairs:
   - c2-helper
   - c5-ddl
   - c7-restart
-  - c8-big

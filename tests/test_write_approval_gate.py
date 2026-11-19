@@ -48,6 +48,16 @@ from anton.core.settings import CoreSettings
 from anton.core.tools.generate_artifact.discovery.engine import _exec_ran
 from anton.core.tools.registry import ToolOutcome
 from tests.conftest import make_mock_llm
+from tests.test_write_hold import (
+    BAD_PORT,
+    FALLBACK,
+    FORWARDED_METHOD,
+    HOLD_LOG,
+    NOT_HTTP,
+    NOT_RELAYED_HOST,
+    NOT_RELAYED_RULE,
+    WILDCARD_OR_USER,
+)
 
 UPDATE_CELL = (
     "import os, psycopg2\n"
@@ -758,38 +768,42 @@ async def test_the_unchecked_setting_reads_its_environment_variable(project, mon
         await session.close()
 
 
-HOLD_LOG = "anton.core.utils.write_hold"
-NOT_RELAYED_RULE = ("an ANTON_WRITE_APPROVAL_HTTP rule names GET, HEAD or * as its method, or an address that "
-                    "is not an http:// address of a host in ANTON_WRITE_RELAY_HOSTS")
-
-
 @pytest.mark.parametrize(("unchecked", "settings", "missing"), [
     ("own", {}, "ANTON_WRITE_RELAY_URL is unset"),
     ("off", {}, "ANTON_WRITE_RELAY_URL is unset"),
     ("own", {"write_relay_url": RELAY_URL}, "ANTON_WRITE_RELAY_HOSTS names no host"),
     ("off", {"write_relay_url": RELAY_URL, "write_relay_hosts": RELAYED, "write_approval_http": PLANNER_RULE},
-     NOT_RELAYED_RULE),
+     (1, NOT_HTTP)),
     ("own", {"write_relay_url": RELAY_URL, "write_relay_hosts": RELAYED,
              "write_approval_http": f"{RELAY_RULE}\nPOST http://other.example.internal:8765/**"},
-     NOT_RELAYED_RULE),
+     (2, NOT_RELAYED_HOST)),
     # The relay forwards a GET or HEAD without holding it.
     ("own", {"write_relay_url": RELAY_URL, "write_relay_hosts": RELAYED,
              "write_approval_http": f"{RELAY_RULE}\nGET http://{RELAYED}/api/trigger/**"},
-     NOT_RELAYED_RULE),
+     (2, FORWARDED_METHOD)),
     ("off", {"write_relay_url": RELAY_URL, "write_relay_hosts": RELAYED, "write_approval_http": f"* http://{RELAYED}/**"},
-     NOT_RELAYED_RULE),
+     (1, FORWARDED_METHOD)),
     # In a rule's glob `?` matches any character, so this rule lists writes to other hosts too.
     ("own", {"write_relay_url": RELAY_URL, "write_relay_hosts": RELAYED, "write_approval_http": f"POST http://{RELAYED}?**"},
-     NOT_RELAYED_RULE),
+     (1, WILDCARD_OR_USER)),
+    # The line never carries a rule's text, which can hold a password.
+    ("off", {"write_relay_url": RELAY_URL, "write_relay_hosts": RELAYED,
+             "write_approval_http": f"{RELAY_RULE}\nPOST http://admin:hunter2@{RELAYED}/**"},
+     (2, WILDCARD_OR_USER)),
+    # An entry skipped with its own WARNING has no rule, so it isn't counted.
+    ("own", {"write_relay_url": RELAY_URL, "write_relay_hosts": RELAYED,
+             "write_approval_http": f"POST\n{RELAY_RULE}\nPOST http://gw.example.internal:99999/**"},
+     (2, BAD_PORT)),
 ], ids=["own-no-relay", "off-no-relay", "no-relayed-hosts", "https-rule", "rule-to-another-host", "get-rule",
-        "any-method-rule", "wildcard-after-host"])
+        "any-method-rule", "wildcard-after-host", "user-name-and-password", "bad-port-after-a-skipped-entry"])
 async def test_own_and_off_without_the_relay_holding_every_listed_write_fall_back_to_all(
     project, caplog, unchecked, settings, missing,
 ):
     """Under `own` and `off` a write inside code the check can't read gets
     no card, so they apply only while the write relay holds every listed
     write. Otherwise the session uses `all` and says why once, in a fixed
-    line that carries no URL or rule."""
+    line that carries no URL or rule: for a rule, its place and a fixed
+    phrase for why."""
     workspace = MagicMock(base=project)
     workspace.artifacts_dir = project / "artifacts"
     with caplog.at_level(logging.WARNING, logger=HOLD_LOG):
@@ -802,11 +816,13 @@ async def test_own_and_off_without_the_relay_holding_every_listed_write_fall_bac
     finally:
         await session.close()
     warned = [r for r in caplog.records if r.name == HOLD_LOG and r.levelno == logging.WARNING]
-    assert [r.getMessage() for r in warned] == [
-        "write approval: ANTON_WRITE_APPROVAL_UNCHECKED falls back to all: own and off need the write relay"
-        + (", and " if "URL" in missing else " to hold the listed writes, and ") + missing,
-    ]
-    assert warned[0].args == (), "a fixed line, with no setting's text in it"
+    if isinstance(missing, tuple):
+        tail, args = " to hold the listed writes, and " + NOT_RELAYED_RULE.format(*missing), missing
+    else:
+        tail, args = (", and " if "URL" in missing else " to hold the listed writes, and ") + missing, ()
+    assert [r.getMessage() for r in warned] == [FALLBACK + tail]
+    assert warned[0].args == args, "a fixed line: a rule's place and a fixed phrase, no setting's text"
+    assert "hunter2" not in caplog.text and "admin" not in caplog.text
 
 
 @pytest.mark.parametrize("unchecked", ["all", "own", "off"])
@@ -886,6 +902,8 @@ async def test_own_lets_a_call_into_what_unread_code_defined_run_beside_a_post_t
     assert harness.pad.ran == [SCRIPT_CELL, EXEC_SCRIPT_CELL, cell]
 
 
+# The card's line for a cell a limit of the check stopped the read of.
+LIMIT_LINE = "The check stopped before it read all of this step's code."
 # A call chain five calls deep from the cell: the read stops at `_CALL_DEPTH`
 # on f4, the function that sends the DELETE.
 CHAIN_CELL = "\n".join(f"def f{i}():\n    return f{i + 1}()" for i in range(4)) + (
@@ -914,7 +932,7 @@ async def test_a_call_chain_past_the_depth_limit_keeps_its_card_and_says_where_t
     assert elicitor.asked == 1, "the read stopped short of the DELETE, so the cell waits"
     assert outcome is not None and outcome.reason == "write_not_approved"
     prompt = elicitor.prompts[0]
-    assert "Its code goes too deep for the check to follow all of it.\n\nThe check stopped at:\n\n```\ndef f4():" in prompt
+    assert f"{LIMIT_LINE}\n\nThe check stopped at:\n\n```\ndef f4():" in prompt
     assert "DELETE FROM orders" in prompt
 
 
@@ -927,7 +945,84 @@ async def test_off_keeps_the_card_on_a_chain_past_the_depth_limit_in_a_cell_that
     session._write_gate.unchecked = "off"
     outcome = await _hold()(session, pad=_pad_after(SCRIPT_CELL, CHAIN_CELL), code=EXEC_SCRIPT_CELL + "f0()\n")
     assert elicitor.asked == 1 and outcome is not None
-    assert "Its code goes too deep for the check to follow all of it." in elicitor.prompts[0]
+    assert LIMIT_LINE in elicitor.prompts[0]
+
+
+# Nine literal execs: the check reads eight, and leaves unread the ninth,
+# which defines push().
+NINTH_EXEC_CELL = "\n".join(["exec('y = 2')"] * 8) + (
+    "\nexec(\"def push():\\n    import os\\n    os.rename('report.pdf', 'old.pdf')\")"
+)
+
+
+# The card's line for a step after an earlier one ran code the check stopped reading.
+EARLIER_LIMIT_LINE = "An earlier step ran code the check stopped reading, and this step may depend on what that code did."
+
+
+@pytest.mark.parametrize("unchecked", ["own", "off"])
+async def test_a_step_after_code_a_limit_left_unread_keeps_its_card_and_says_so(project, unchecked):
+    """The check stopped reading the earlier step's ninth exec, so a later
+    step that only reads waits under every setting, and the card says an
+    earlier step ran code the check stopped reading, quoting where."""
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    outcome = await _hold()(session, pad=_pad_after(NINTH_EXEC_CELL), code="print(1)")
+    assert elicitor.asked == 1 and outcome is not None
+    assert (f"{EARLIER_LIMIT_LINE}\n\nThe check stopped at:\n\n```\nexec(\"def push():"
+            in elicitor.prompts[0])
+    assert LIMIT_LINE not in elicitor.prompts[0]
+
+
+@pytest.mark.parametrize("unchecked", ["all", "own", "off"])
+@pytest.mark.parametrize("earlier, code", [
+    (["def set_out(v):\n    global OUT\n    OUT = v\nOUT = 'stock.csv'"],
+     "import pandas as pd\npd.DataFrame().to_csv(OUT)"),
+    (["import os\ndef go():\n" + "".join("    exec('y = 2')\n" for _ in range(8))
+      + "    exec(\"OUT = 'stock.csv'\", globals())\ngo()"], "import pandas as pd\npd.DataFrame().to_csv(OUT)"),
+    (["import os\nOUT_DIR = '.'\nNAME = 'stock.csv'", "def configure(name):\n    global NAME\n    NAME = name",
+      "configure('q3.csv')"], "import pandas as pd\npd.DataFrame({'a': [1]}).to_csv(os.path.join(OUT_DIR, NAME))"),
+    (["NAME = 'stock.csv'\ndef configure(name):\n    global NAME\n    NAME = name"],
+     "import os\nopen(os.path.join('.', NAME), 'w').write('x')"),
+], ids=["a-name-a-function-rebinds-as-a-global", "after-a-function-the-step-ran-past-a-limit",
+        "a-file-name-a-function-rebinds-as-a-global-joined-to-a-folder",
+        "a-file-name-a-function-that-never-ran-rebinds-joined-to-a-folder"])
+async def test_an_overwrite_of_a_file_the_turn_began_with_keeps_its_card(project, unchecked, earlier, code):
+    """An overwrite through a name a function rebinds as a global is held
+    whole, as the file part of a path too, and one after an earlier step's
+    own function ran code the check stopped reading is a stop, so none of
+    them runs with no card under any value."""
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    outcome = await _hold()(session, pad=_pad_after(*earlier), code=code)
+    assert elicitor.asked == 1 and outcome is not None
+
+
+async def test_a_step_after_a_cell_too_deep_to_parse_keeps_its_card_and_says_so(project):
+    """The check has no place in that cell to quote."""
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = "off"
+    outcome = await _hold()(session, pad=_pad_after("x = " + "-" * 200_000 + "1"), code="print(1)")
+    assert elicitor.asked == 1 and outcome is not None
+    assert f"{EARLIER_LIMIT_LINE}\n\n" in elicitor.prompts[0]
+    assert "The check stopped at:" not in elicitor.prompts[0]
+
+
+@pytest.mark.parametrize("unchecked", ["all", "own", "off"])
+async def test_a_step_too_deep_to_parse_after_code_a_limit_left_unread_says_both(project, unchecked):
+    """A step the check's parser gives up on still says, first, that an
+    earlier step ran code the check stopped reading, quoting where, and
+    then that it stopped before it read all of this step's code."""
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    outcome = await _hold()(session, pad=_pad_after(NINTH_EXEC_CELL), code="x = " + "-" * 200_000 + "1")
+    assert elicitor.asked == 1 and outcome is not None
+    prompt = elicitor.prompts[0]
+    assert f"{EARLIER_LIMIT_LINE}\n\nThe check stopped at:\n\n```\nexec(\"def push():" in prompt
+    assert prompt.index(EARLIER_LIMIT_LINE) < prompt.index(LIMIT_LINE)
 
 
 PTH_CELL = (
@@ -952,6 +1047,23 @@ async def test_a_startup_hook_write_keeps_its_card(project, unchecked, code):
     assert "This step can't be checked before it runs." in elicitor.prompts[0]
 
 
+@pytest.mark.parametrize("unchecked", ["all", "own", "off"])
+async def test_a_startup_hook_write_after_code_a_limit_left_unread_gives_both_reasons(project, unchecked):
+    """A later step stops on the code an earlier step left unread at a limit
+    of the check, and its own write of a startup hook is code the check
+    can't read: the card says the first, quoting where the read stopped,
+    then the second, quoting the write."""
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    outcome = await _hold()(session, pad=_pad_after(NINTH_EXEC_CELL), code=PTH_CELL)
+    assert elicitor.asked == 1 and outcome is not None
+    prompt = elicitor.prompts[0]
+    assert f"{EARLIER_LIMIT_LINE}\n\nThe check stopped at:" in prompt
+    runs = prompt.index("It runs code the check can't read:")
+    assert prompt.index(EARLIER_LIMIT_LINE) < runs < prompt.index("zz_boot.pth")
+
+
 @pytest.mark.parametrize("unchecked", ["own", "off"])
 async def test_a_cell_too_deep_to_parse_keeps_its_card(project, unchecked):
     """The check's parser gives up on the cell, which may still run (the pad
@@ -962,7 +1074,7 @@ async def test_a_cell_too_deep_to_parse_keeps_its_card(project, unchecked):
     code = RENAME_CELL + "x = " + "-" * 200_000 + "1\n"
     outcome = await _hold()(session, pad=_Pad(), code=code)
     assert elicitor.asked == 1 and outcome is not None
-    assert "Its code goes too deep for the check to follow all of it." in elicitor.prompts[0]
+    assert LIMIT_LINE in elicitor.prompts[0]
     assert (project / "report.pdf").exists()
 
 
@@ -981,6 +1093,34 @@ async def test_a_hold_the_setting_drops_is_logged_without_the_code(project, capl
         '{"kinds":[],"count":0,"status":"not_held_unchecked","mode":"' + unchecked + '","causes":' + causes + "}",
     ]
     assert "job_main" not in caplog.text and "SCRIPT" not in caplog.text
+
+
+@pytest.mark.parametrize("reasons_fail", [False, True], ids=["reasons-built", "reasons-failed"])
+async def test_a_hold_the_setting_drops_logs_every_kind_of_reason_the_card_had_no_room_for(
+    project, caplog, monkeypatch, reasons_fail,
+):
+    """The card gives at most three reasons, here a restart and two runs,
+    so its `uses` reason, past the cap, would drop out of the record. The
+    line logs every kind the check found, and keeps them when building the
+    card's reasons fails."""
+    if reasons_fail:
+        from anton.core.utils import write_check
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("quoting failed")
+
+        monkeypatch.setattr(write_check, "_quoted", fail)
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = "off"
+    pad = _pad_after(HOOK_CELL, SCRIPT_CELL, EXEC_SCRIPT_CELL)
+    pad.cells[-1].ended_process = True
+    with caplog.at_level(logging.WARNING, logger=GATE_LOG):
+        outcome = await _hold()(session, pad=pad, code="exec(SCRIPT)\nexec(SCRIPT.upper())\njob_main()\n")
+    assert outcome is None and elicitor.asked == 0
+    assert _decisions(caplog) == [
+        '{"kinds":[],"count":0,"status":"not_held_unchecked","mode":"off","causes":["restart","runs","uses"]}',
+    ]
 
 
 # ── One unanswered card ───────────────────────────────────────────────────
@@ -1159,14 +1299,20 @@ async def test_a_check_that_fails_asks_instead_of_clearing_the_cell(project, mon
         raise RecursionError("too deep")
 
     from anton.core.utils import scratchpad as scratchpad_mod
+    from anton.core.utils.write_check import CellWrites
 
     monkeypatch.setattr(scratchpad_mod, "find_cell_writes", boom)
+    shown: list[CellWrites] = []
+    card = scratchpad_mod._card_prompt
+    monkeypatch.setattr(scratchpad_mod, "_card_prompt", lambda writes, *args: shown.append(writes) or card(writes, *args))
     elicitor = _AnswersAtOnce(answer=TIMEOUT)
     session = await _gated_session(project, elicitor=elicitor)
     with caplog.at_level(logging.WARNING, logger=GATE_LOG):
         outcome = await _hold()(session, pad=_Pad(), code="print('hello')")
     assert elicitor.asked == 1
     assert "The check failed on this step." in elicitor.prompts[0]
+    # Every kind of reason the card gives is one `cause_kinds` names, for the log line.
+    assert [w.cause_kinds for w in shown] == [("failed",)]
     assert outcome is not None and "the check couldn't read" in outcome.content
     failed = [r for r in caplog.records if r.name == GATE_LOG and "the check failed" in r.getMessage()]
     assert [r.getMessage() for r in failed] == ["write approval: the check failed (RecursionError)"]
@@ -1400,6 +1546,54 @@ async def test_compaction_leaves_the_check_every_earlier_cell(project, earlier, 
     assert (outcome is not None, elicitor.asked) == (held, int(held))
 
 
+# Functions f0 to f5, each calling the one before it, f0 renaming report.pdf.
+CHAIN_TO_RENAME = "import os\ndef f0():\n    os.rename('report.pdf', 'old.pdf')\n" + "".join(
+    f"def f{i}():\n    f{i - 1}()\n" for i in range(1, 6))
+# Partials of partials of a delete of stock.csv, seven deep.
+PARTIALS_TO_DELETE = ["import subprocess\nfrom functools import partial\np0 = partial(subprocess.run, ['rm', 'stock.csv'])",
+                      *(f"p{i} = partial(p{i - 1})" for i in range(1, 7))]
+
+
+@pytest.mark.parametrize("unchecked", ["all", "own", "off"])
+@pytest.mark.parametrize("cells", [
+    [CHAIN_TO_RENAME, *_FILLERS[:4], "f5()", "def f4():\n    pass"],
+    ["def go():\n    p6()", *PARTIALS_TO_DELETE, "go()"],
+], ids=["call-chain-then-a-link-redefined", "partials-built-after-the-function-that-calls-them"])
+async def test_compaction_keeps_each_cell_where_its_own_check_kept_a_stop(project, monkeypatch, unchecked, cells):
+    """The gate checks each cell before it runs, and keeps whether it holds
+    code a limit of the check left unread by its place in the conversation
+    (`_LEFT_UNREAD`). Compaction folds the earlier cells and puts a summary
+    cell first, which the gate leaves out of the earlier cells, so each cell
+    keeps its place, however many times the pad compacts: a later step waits
+    under every value, and no check reads an earlier cell again for it
+    (`_left_unread`)."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    reread: list[str] = []
+    left_unread = write_check._left_unread
+    monkeypatch.setattr(write_check, "_left_unread", lambda *args: reread.append(args[-1].code) or left_unread(*args))
+    session = await _gated_session(project, elicitor=_AnswersAtOnce(answer=APPROVE))
+    pad = _runtime(project)
+
+    async def run(codes) -> None:
+        for code in codes:
+            await _hold()(session, pad=pad, code=code)
+            pad.cells.append(Cell(code=code, stdout="", stderr="", error=None))
+
+    await run(cells)
+    assert pad._compact_cells()
+    await run(_FILLERS[:3])
+    assert pad._compact_cells(), "a second compaction folds the first one's summary in too"
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session.elicitor = elicitor
+    session._write_gate.unchecked = unchecked
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert elicitor.asked == 1 and outcome is not None
+    assert EARLIER_LIMIT_LINE in elicitor.prompts[0]
+    assert reread == []
+
+
 @pytest.mark.parametrize("error", [None, "ValueError: stopped", "TimeoutError: cell timed out"])
 async def test_compaction_preserves_the_outcome_that_controls_file_ownership(project, error):
     code = "maybe_fail()\nopen('stock.csv', 'w').write('first draft')"
@@ -1498,31 +1692,96 @@ async def test_a_remote_reset_forgets_compacted_ownership(project):
 HOOK_CELL = "import site\nopen(site.getsitepackages()[0] + '/hook.pth', 'w').write('import job')"
 
 
+@pytest.mark.parametrize("code", ["print(1)", "print("], ids=["a-cell", "a-cell-that-doesnt-parse"])
 @pytest.mark.parametrize("earlier, returncode, held", [
     (HOOK_CELL, -9, True),
     ("total = 1", -9, False),
     (HOOK_CELL, None, False),
 ], ids=["a-hook-and-a-dead-process", "no-hook", "a-hook-and-a-live-process"])
 async def test_a_cell_after_the_process_died_between_cells_is_held_once_a_hook_was_written(
-    project, earlier, returncode, held,
+    project, earlier, returncode, held, code,
 ):
     """The pad's process died after the last cell ended, so the pad starts a
     new one before the next cell, and that start runs the startup hooks a
     cell wrote. The runtime finds such a death only as the cell runs, after
     the gate, so the gate asks whether the process is running
-    (`process_running`) and reads the last cell as one whose process ended.
-    With no hook written, or with the process alive, the cell runs in a
-    process that runs nothing the check didn't read."""
+    (`process_running`) and tells the check the pad starts a new one
+    before this cell (`new_process`). With no hook written, or with the
+    process alive, the cell runs in a process that runs nothing the check
+    didn't read. A cell that doesn't parse is held alike: the new process
+    starts, and runs the hooks, before Python refuses the cell."""
     pad = _runtime(project, earlier)
     pad._proc = MagicMock(returncode=returncode)
     assert pad.process_running is (returncode is None)
     elicitor = _AnswersAtOnce(answer=CANCEL)
     session = await _gated_session(project, elicitor=elicitor)
-    outcome = await _hold()(session, pad=pad, code="print(1)")
+    outcome = await _hold()(session, pad=pad, code=code)
     assert (outcome is not None) is held
     assert elicitor.asked == int(held)
     if held:
         assert "This step can't be checked before it runs." in elicitor.prompts[0]
+
+
+@pytest.mark.parametrize("unchecked", ["all", "own", "off"])
+@pytest.mark.parametrize("stopped_at, ended, held", [(1, False, True), (NOTHING_KEPT, True, False)],
+                         ids=["failed-on-its-first-line-in-a-process-that-lived-on", "kept-nothing"])
+async def test_a_death_between_cells_leaves_each_earlier_cells_record_its_own(
+    project, unchecked, stopped_at, ended, held,
+):
+    """The pad's process died after the last cell ended, so the pad starts a
+    new one before the next cell (`process_running`), but the last cell's
+    record stays its own. `f0()` ran the chain past the depth limit and
+    failed on its first line in a process that lived on past it, so every
+    later step keeps the card for code the check stopped reading, under
+    every value. A cell whose own record says it kept nothing stops no
+    later step."""
+    pad = _pad_after(CHAIN_CELL)
+    pad.cells.append(Cell(code="f0()", stdout="", stderr="", error="ValueError", stopped_at=stopped_at,
+                          ended_process=ended))
+    pad.process_running = False
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    outcome = await _hold()(session, pad=pad, code="print(1)")
+    assert (outcome is not None) is held
+    assert elicitor.asked == int(held)
+    if held:
+        assert EARLIER_LIMIT_LINE in elicitor.prompts[0]
+
+
+@pytest.mark.parametrize("unchecked", ["all", "own", "off"])
+@pytest.mark.parametrize("padding", [100_000, 0], ids=["past-the-cap", "under-the-cap"])
+async def test_a_sql_file_run_on_a_local_handle_keeps_its_card_past_the_cap(project, unchecked, padding):
+    """Past the 1 MB cap the check reads none of the file's statements, so
+    the step waits on a SQL file too big to check, under every value, as its
+    twin under the cap waits on the DELETE's change to app.db."""
+    (project / "app.db").write_text("")
+    (project / "db.sql").write_text("-- padding\n" * padding + "DELETE FROM orders;\n")
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    code = "import sqlite3\nc = sqlite3.connect('app.db')\nc.executescript(open('db.sql').read())"
+    outcome = await _hold()(session, pad=_pad_after(), code=code)
+    assert elicitor.asked == 1 and outcome is not None
+
+
+@pytest.mark.parametrize("unchecked", ["all", "own", "off"])
+@pytest.mark.parametrize("padding", [100_000, 0], ids=["past-the-cap", "under-the-cap"])
+@pytest.mark.parametrize("run", [
+    "import sqlite3\nsqlite3.connect('app.db').executescript(sql)",
+    "import os, psycopg2\ncur = psycopg2.connect(host=os.environ['DS_POSTGRES_QA__HOST']).cursor()\ncur.execute(sql)",
+], ids=["sqlite", "postgres"])
+async def test_a_sql_file_an_earlier_step_reads_keeps_its_card_past_the_cap(project, unchecked, padding, run):
+    """An earlier step reads the file into a name and this step runs it:
+    past the 1 MB cap the step waits on a SQL file too big to check, under
+    every value, as its twin under the cap waits on the DELETE."""
+    (project / "app.db").write_text("")
+    (project / "db.sql").write_text("-- padding\n" * padding + "DELETE FROM orders;\n")
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    session._write_gate.unchecked = unchecked
+    outcome = await _hold()(session, pad=_pad_after("sql = open('db.sql').read()"), code=run)
+    assert elicitor.asked == 1 and outcome is not None
 
 
 @pytest.mark.parametrize("earlier, held", [(HOOK_CELL, True), ("total = 1", False)],

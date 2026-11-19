@@ -890,6 +890,37 @@ class TestScrubOutput:
         """Printed headers and token_type/token pairs are output, not source code."""
         assert scrub_output(text) == expected
 
+    @pytest.mark.parametrize("token", TOKEN_SAMPLES)
+    @pytest.mark.parametrize("text", [
+        'curl -H "X-Api-Key: {t}" https://api.example.com/x',
+        "os.system('curl -s -H \"X-Api-Key: {t}\" ' + p9)",
+        'headers = {{"X-Api-Key": "{t}", "Accept": "json"}}',
+        "{{'api-key': '{t}'}}",
+        "X-Auth-Token:{t}",
+        "Private-Token: {t}\nnext line",
+        "curl -H 'apikey: {t}' https://api.example.com/x",
+        "ApiKey: {t}",
+        "{{'apikey': '{t}'}}",
+    ], ids=["curl-header", "curl-header-in-code", "quoted-header", "quoted-api-key", "auth-token", "private-token",
+            "apikey-header", "printed-apikey", "quoted-apikey"])
+    def test_a_token_after_a_header_name_is_redacted_and_the_rest_kept(self, text, token):
+        """A header that carries a token, as `X-Api-Key:` does, loses only the
+        token: the quote, the URL and the code after it stay."""
+        assert scrub_output(text.format(t=token)) == text.format(t="[REDACTED_TOKEN]")
+
+    @pytest.mark.parametrize("text", [
+        "X-Api-Key: $API_KEY", "X-Api-Key: ${API_KEY}", "X-Api-Key: {api_key}", "X-Api-Key: <your-key>",
+        "X-Api-Key: YOUR_API_KEY_HERE", "X-Api-Key: ********", "X-Api-Key: [REDACTED_TOKEN]",
+        "headers = {'X-Api-Key': API_KEY}", "headers = {'X-Api-Key': os.environ['SERVICE_API_KEY']}",
+        "X-Api-Key: get_key_from_the_vault(name)", "X-Api-Key: settings.service_api_key_value",
+        "headers = {'X-Api-Key': f'{prefix}{suffix}'}", "print('api_key loaded from the environment variable')",
+    ], ids=["shell-variable", "braced-variable", "format-field", "angle-placeholder", "constant-placeholder", "mask",
+            "marker", "a-name", "an-environment-lookup", "a-call", "a-dotted-name", "an-f-string", "prose"])
+    def test_a_header_name_that_a_placeholder_or_code_follows_stays(self, text):
+        """After a header name, a placeholder, a mask, a marker or code is no
+        token, so the line reads as written."""
+        assert scrub_output(text) == text
+
     def test_bare_jwt_is_redacted(self):
         """A JWT is caught by its shape with no key or word in front of it."""
         result = scrub_output(f"token is {FAKE_JWT} now")

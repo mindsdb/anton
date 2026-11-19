@@ -12,6 +12,8 @@ import errno
 import logging
 import os
 import re
+import shlex
+import textwrap
 import time
 import warnings
 from collections.abc import Iterable, Sequence
@@ -21,9 +23,10 @@ from typing import Literal
 
 import pytest
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from anton.core.backends.base import Cell, CompactedCell
+from anton.core.backends.wire import NOTHING_KEPT
 from anton.core.utils import scratchpad
 from anton.core.utils.scratchpad import _card_prompt, _code_span, _fence, _refusal
 from anton.core.utils.write_check import (
@@ -34,6 +37,7 @@ from anton.core.utils.write_check import (
     HttpWrite,
     HttpWriteRule,
     ProjectSnapshot,
+    UncheckedCause,
     find_cell_writes,
     glob_match,
     parse_http_write_rules,
@@ -63,15 +67,18 @@ def snap(tmp_path: Path, monkeypatch):
 
 def _earlier(
     codes: Iterable[str], *, errored: Sequence[bool] = (), stopped_at: Sequence[int | None] = (),
+    ended: Sequence[bool] = (),
 ) -> list[EarlierCell]:
     """The earlier cells `codes` give, oldest first: each that `errored`
-    marks stopped on an error, at the line `stopped_at` gives beside it.
-    A list left empty says each cell ran to its end."""
+    marks stopped on an error, at the line `stopped_at` gives beside it,
+    and each that `ended` marks one whose process ended. A list left empty
+    says each cell ran to its end in a process that lives on."""
     codes = list(codes)
     errored = list(errored) or [False] * len(codes)
     stopped_at = list(stopped_at) or [None] * len(codes)
-    return [EarlierCell(code=code, errored=failed, stopped_at=line)
-            for code, failed, line in zip(codes, errored, stopped_at, strict=True)]
+    ended = list(ended) or [False] * len(codes)
+    return [EarlierCell(code=code, errored=failed, stopped_at=line, ended_process=gone)
+            for code, failed, line, gone in zip(codes, errored, stopped_at, ended, strict=True)]
 
 
 def _held(code: str, snap, *, earlier=()) -> bool:
@@ -563,11 +570,12 @@ def test_a_step_too_deep_to_parse_says_so():
     assert writes.unchecked and [c.kind for c in writes.causes] == ["limit"]
 
 
-def test_a_call_chain_past_the_depth_limit_says_so_instead_of_quoting_a_def():
+def test_a_call_chain_past_the_depth_limit_quotes_the_function_it_stopped_at():
     defs = "\n".join(f"def f{i}():\n    return f{i + 1}()" for i in range(10))
     defs += "\ndef f10():\n    import os\n    os.remove('a.csv')"
     writes = find_cell_writes(code="f0()", earlier=_earlier([defs]), snapshots=())
     assert writes.unchecked and [c.kind for c in writes.causes] == ["limit"]
+    assert writes.causes[0].code == "def f4():\n    return f5()"
 
 
 def _chain(body: str) -> str:
@@ -582,7 +590,8 @@ def test_a_call_chain_past_the_depth_limit_quotes_where_the_read_stopped():
                               http_rules=parse_http_write_rules("POST https://erp.example.com/**"))
     assert writes.stopped and not writes.unread_here
     card = _card_prompt(writes, "f0()")
-    assert ("Its code goes too deep for the check to follow all of it.\n\nThe check stopped at:\n\n"
+    # The limit's own line is the gate's (`test_write_approval_gate.py`).
+    assert (f"{scratchpad._WHOLE_STEP_CAUSES['limit']}\n\nThe check stopped at:\n\n"
             "```\ndef f4():\n    import requests\n    requests.post(") in card
 
 
@@ -595,6 +604,20 @@ def test_where_the_read_stopped_is_quoted_scrubbed_and_cut():
     assert writes.causes[0].kind == "limit" and quoted.startswith("def f4():\n    token = ")
     assert "sk-ant-api03" not in quoted
     assert len(quoted.split("\n")) <= 6 and len(quoted) <= 400 and quoted.endswith("...")
+
+
+def test_a_quoted_line_that_runs_literal_code_is_cut():
+    """A reason inside literal code quotes the line of the cell that runs
+    it, cut like any quote (`_cut`)."""
+    host = f"exec({'exec(SRC)  # ' + 'x' * 600!r})"
+    writes = find_cell_writes(code=f"SRC = open('job.txt').read()\n{host}", earlier=(), snapshots=())
+    quoted = [c.code for c in writes.causes if c.kind == "runs"]
+    assert quoted and all(len(q) <= 400 and q.endswith("...") for q in quoted)
+
+
+def test_a_reason_of_a_kind_the_card_has_no_line_for_is_refused():
+    with pytest.raises(ValidationError):
+        UncheckedCause(kind="other")
 
 
 def test_where_the_read_stopped_is_cut_to_400_characters_in_a_short_function():
@@ -620,6 +643,1793 @@ def test_an_error_building_the_reasons_keeps_that_the_read_stopped(monkeypatch):
 def test_a_cell_too_deep_to_parse_is_a_stopped_read():
     writes = find_cell_writes(code="-" * 200_000 + "1", earlier=(), snapshots=())
     assert writes.unchecked and writes.stopped
+    assert [c.kind for c in writes.causes] == list(writes.cause_kinds) == ["limit"]
+
+
+# A rename the check reads in literal code, eight literal code texts, a def
+# that renames, and a command nested `n` shells deep (`sh -c` inside `sh -c`).
+_RENAME = "import os\nos.rename('report.pdf', 'old.pdf')"
+_EIGHT_EXECS = "\n".join(["exec('y = 2')"] * 8)
+_DEFINES_PUSH = "import os\ndef push():\n    os.rename('report.pdf', 'old.pdf')"
+# Literal code too deep for the check's parser: the parser runs out of stack
+# on each, and a pad on another Python may still run it.
+_TOO_DEEP = "1" + "+1" * 20_000
+_TOO_NESTED = "-" * 20_000 + "1"
+# Literal code longer than the check reads as one more cell.
+_TOO_LONG = "\n".join(f"x{n} = {n}" for n in range(12_000))
+
+
+def _chain_to_push(n: int) -> str:
+    """Functions f0 to f`n`, each calling the next, the last running
+    `_DEFINES_PUSH` in the cell namespace: a call of f0 reaches it `n`
+    calls down."""
+    calls = "\n".join(f"def f{i}():\n    return f{i + 1}()" for i in range(n))
+    return f"{calls}\ndef f{n}():\n    exec({_DEFINES_PUSH!r}, globals())"
+
+
+def _in_shells(command: str, n: int) -> str:
+    for _ in range(n):
+        command = "sh -c " + shlex.quote(command)
+    return command
+
+
+@pytest.mark.parametrize("earlier, code, quoted", [
+    ([], f"{_EIGHT_EXECS}\nexec({_RENAME!r})", f"exec({_RENAME!r})"),
+    ([], "\n".join(["exec('y = 2')"] * 7) + f"\nexec({f'exec({_RENAME!r})'!r})", f"exec({_RENAME!r})"),
+    ([], "\n".join(["eval('1 + 1')"] * 8) + f"\nexec({_RENAME!r})", f"exec({_RENAME!r})"),
+    ([], "import timeit\n" + "\n".join(["timeit.timeit('y = 2', number=1)"] * 8)
+     + f"\ntimeit.timeit({_RENAME!r}, number=1)", f"timeit.timeit({_RENAME!r}, number=1)"),
+    ([], f"import subprocess, sys\n{_EIGHT_EXECS}\nsubprocess.run([sys.executable, '-c', {_RENAME!r}])",
+     "subprocess.run([sys.executable, '-c', "),
+    ([], f"exec({'#' * 100_001 + chr(10) + _RENAME!r})", 'exec("###'),
+    (["def job():\n    " + f"{_EIGHT_EXECS}\nexec({_RENAME!r})".replace("\n", "\n    ")], "job()",
+     f"exec({_RENAME!r})"),
+    ([], f"import os\nos.system({_in_shells('mv report.pdf old.pdf', 5)!r})", "os.system('sh -c "),
+    ([], f"import subprocess\nsubprocess.run({['sh', '-c', _in_shells('mv report.pdf old.pdf', 4)]!r})",
+     "subprocess.run(['sh', '-c', "),
+    (["import os\ndef run(cmd):\n    os.system(cmd)"], f"run({_in_shells('mv report.pdf old.pdf', 5)!r})",
+     "os.system(cmd)"),
+    ([], "import os, threading\nthreading.Thread(target=os.system, args="
+         f"({_in_shells('mv report.pdf old.pdf', 5)!r},)).start()", "threading.Thread(target=os.system"),
+    ([], f"import os\nlist(map(os.system, [{_in_shells('mv report.pdf old.pdf', 5)!r}]))", "list(map(os.system"),
+    ([], f"import os\nos.system({'echo a ' + chr(92) + chr(10) + _in_shells('mv report.pdf old.pdf', 5)!r})",
+     "os.system("),
+], ids=["ninth-exec", "eighth-exec-hands-on-a-ninth", "eight-evals-then-exec", "ninth-timeit", "python-c-after-eight",
+        "literal-past-100000-characters", "ninth-exec-in-an-earlier-function", "five-shells-deep",
+        "five-shells-deep-as-a-list", "five-shells-deep-through-a-parameter", "five-shells-deep-as-a-thread-target",
+        "five-shells-deep-through-map", "five-shells-deep-after-a-backslash-newline"])
+def test_code_left_unread_at_a_limit_of_the_check_is_a_stopped_read(earlier, code, quoted, snap):
+    """Literal code past `_EXEC_LIMIT` texts or `_LITERAL_CODE_LIMIT`
+    characters, and a script past `_SHELL_DEPTH` shells, are left unread at a
+    limit of the check, not code it can't read: the read stops there
+    (`stopped`), so no value of the setting runs the cell with no card, and
+    the card quotes the call it stopped at. An earlier cell that holds such
+    code stops this one too, which says so first."""
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert writes.unchecked and writes.stopped and not writes.unread_here
+    own = [c for c in writes.causes if not c.in_earlier]
+    assert [c.kind for c in own] == ["limit"] and own[0].code.startswith(quoted)
+    assert writes.cause_kinds == ("limit",)
+
+
+@pytest.mark.parametrize("earlier, code", [
+    ([], "\n".join(["exec('y = 2')"] * 7) + f"\nexec({_RENAME!r})"),
+    ([], f"exec({_RENAME + chr(10) + '#' * (100_000 - len(_RENAME) - 1)!r})"),
+    ([], f"import os\nos.system({_in_shells('rm report.pdf', 4)!r})"),
+    (["\n".join(["exec('y = 2')"] * 7) + f"\nexec({_DEFINES_PUSH!r})"], "push()"),
+    ([_chain_to_push(3), "f0()"], "push()"),
+], ids=["eighth-exec", "literal-of-100000-characters", "four-shells-deep", "call-into-the-eighth-exec",
+        "call-into-what-a-call-chain-within-the-depth-limit-ran"])
+def test_code_within_the_limits_of_the_check_is_read(earlier, code, snap):
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert [f.paths for f in writes.held_files] == [("report.pdf",)]
+    assert not writes.unchecked
+
+
+def test_a_call_with_a_literal_past_the_length_the_check_reads_quotes_its_first_line(snap):
+    """The literal's own first lines say nothing of what it does: the card
+    quotes the call's first line alone."""
+    filler = "".join(f"# row {n} kept for the audit trail\n" for n in range(4_000))
+    writes = find_cell_writes(code=f'exec("""\n{filler}{_RENAME}\n""")', earlier=(), snapshots=(snap,))
+    assert writes.stopped and [(c.kind, c.code) for c in writes.causes] == [("limit", 'exec("""...')]
+
+
+# Functions f0 to f5, each calling the one before it, f0 renaming
+# report.pdf: a call of f5 reaches the rename five calls down.
+_CHAIN_TO_RENAME = "import os\ndef f0():\n    os.rename('report.pdf', 'old.pdf')\n" + "".join(
+    f"def f{i}():\n    f{i - 1}()\n" for i in range(1, 6))
+# Eight literal execs and a ninth the check leaves unread, as a function body too.
+_NINTH = f"{_EIGHT_EXECS}\nexec({_RENAME!r})"
+_INDENTED_NINTH = textwrap.indent(_NINTH, "    ")
+# Four literal execs, and a function body of four more and a fifth that
+# renames: a cell that runs both runs nine.
+_FOUR_EXECS = "\n".join(["exec('y = 2')"] * 4)
+_FIVE_EXECS_BODY = textwrap.indent(f"{_FOUR_EXECS}\nexec({_RENAME!r})", "    ")
+# Names a0 to a11, each the one before it, a0 a function that deletes stock.csv.
+_ALIASES_OF_F = "a0 = f\n" + "".join(f"a{i} = a{i - 1}\n" for i in range(1, 12))
+# Nine names, each another name for the one before, the first a URL: more
+# than the command reading follows, so a command built on p9 is read past
+# the depth limit (`_shell_commands`).
+_NINE_TO_A_URL = "p0 = 'https://api.example.com/items/1'\n" + "".join(f"p{i} = p{i - 1}\n" for i in range(1, 10))
+_DEEP_DELETE = "os.system('curl -X DELETE ' + p9)"
+# Partials of partials of a delete of stock.csv, seven deep.
+_PARTIALS_TO_DELETE = ["import subprocess\nfrom functools import partial\np0 = partial(subprocess.run, ['rm', 'stock.csv'])",
+                       *(f"p{i} = partial(p{i - 1})" for i in range(1, 7))]
+# The earlier cells that hold code a limit of the check leaves unread, and
+# the code the card quotes where the read of them stopped, if any.
+_LEFT_UNREAD = {
+    "ninth-exec": ([f"{_EIGHT_EXECS}\nexec({_RENAME!r})"], f"exec({_RENAME!r})"),
+    "literal-past-100000-characters": ([f"exec({'#' * 100_001 + chr(10) + _RENAME!r})"], 'exec("###'),
+    "literal-too-deep-to-parse": ([f"exec({_TOO_DEEP!r})"], "exec('1+1+1"),
+    "five-shells-deep": ([f"import os\nos.system({_in_shells('mv report.pdf old.pdf', 5)!r})"], "os.system('sh -c "),
+    "call-chain-past-the-depth-limit": ([_CHAIN_TO_RENAME, "f5()"], "def f1():\n    f0()"),
+    "partials-past-the-depth-limit": ([*_PARTIALS_TO_DELETE, "p6()"], "p6()"),
+    "partials-past-the-depth-limit-in-a-function": ([*_PARTIALS_TO_DELETE, "def go():\n    p6()", "go()"], "p6()"),
+    "cell-too-deep-to-parse": ([_TOO_DEEP], ""),
+    # A shell command past the depth limit on its words that does more than
+    # one plain read, delete or move (`_does_something`).
+    "a-shell-command-past-the-depth-limit": ([f"{_NINE_TO_A_URL}import os\n{_DEEP_DELETE}"], _DEEP_DELETE),
+    "a-shell-command-past-the-depth-limit-in-a-function-nothing-calls": (
+        [f"{_NINE_TO_A_URL}import os\ndef later():\n    {_DEEP_DELETE}"], _DEEP_DELETE),
+    "a-shell-command-past-the-depth-limit-in-a-property": (
+        [f"{_NINE_TO_A_URL}import subprocess\nclass Job:\n    @property\n    def done(self):\n"
+         "        subprocess.run(['kubectl', 'delete', 'pod', p9])"], "subprocess.run(['kubectl', 'delete', 'pod', p9])"),
+    "a-shell-command-past-the-depth-limit-in-a-function-an-earlier-cell-defined": (
+        [f"import os\ndef go():\n    {_DEEP_DELETE}", f"{_NINE_TO_A_URL}go()"], _DEEP_DELETE),
+    "a-shell-command-past-the-depth-limit-through-a-parameter": (
+        ["import os\ndef go(url):\n    os.system('curl -X DELETE ' + url)", f"{_NINE_TO_A_URL}go(p9)"],
+        "os.system('curl -X DELETE ' + url)"),
+    # Anywhere in the cell's code, whether that code runs or not: in a
+    # function, method, lambda, decorator or default it defines, or one
+    # nothing calls.
+    "ninth-exec-in-a-function-nothing-calls": ([f"def later():\n{_INDENTED_NINTH}"], f"exec({_RENAME!r})"),
+    "five-shells-deep-in-a-function-nothing-calls": (
+        [f"import os\ndef later():\n    os.system({_in_shells('mv report.pdf old.pdf', 5)!r})"], "os.system('sh -c "),
+    "ninth-exec-in-a-function-the-cell-calls": ([f"def go():\n{_INDENTED_NINTH}\ngo()"], f"exec({_RENAME!r})"),
+    "ninth-exec-in-a-function-an-earlier-cell-defined": ([f"def go():\n{_INDENTED_NINTH}", "go()"], f"exec({_RENAME!r})"),
+    "ninth-exec-in-a-method-the-cell-calls": (
+        [f"class Job:\n    def run(self):\n{textwrap.indent(_NINTH, ' ' * 8)}\nJob().run()"], f"exec({_RENAME!r})"),
+    "ninth-exec-in-a-thread-target": (
+        [f"import threading\ndef go():\n{_INDENTED_NINTH}\nthreading.Thread(target=go).start()"], f"exec({_RENAME!r})"),
+    "ninth-exec-in-a-function-handed-to-map": ([f"def go(_):\n{_INDENTED_NINTH}\nlist(map(go, [1]))"],
+                                               f"exec({_RENAME!r})"),
+    "ninth-exec-in-a-decorator": ([f"def deco(f):\n{_INDENTED_NINTH}\n    return f\n@deco\ndef g():\n    pass"],
+                                  f"exec({_RENAME!r})"),
+    "ninth-exec-in-a-decorator-an-earlier-cell-defined": (
+        [f"def deco(f):\n{_INDENTED_NINTH}\n    return f", "@deco\ndef g():\n    pass"], f"exec({_RENAME!r})"),
+    "ninth-exec-in-a-default": (["def f(x=exec('y = 2')):\n    pass\n" + _EIGHT_EXECS], "def f(x=exec('y = 2')):"),
+    "ninth-exec-in-a-lambda-called-at-once": ([f"{_EIGHT_EXECS}\n(lambda: exec({_RENAME!r}))()"], "(lambda: exec("),
+    "five-shells-deep-in-a-function-the-cell-calls": (
+        [f"import os\ndef go():\n    os.system({_in_shells('mv report.pdf old.pdf', 5)!r})\ngo()"], "os.system('sh -c "),
+    "five-shells-deep-in-a-function-an-earlier-cell-defined": (
+        [f"import os\ndef g():\n    os.system({_in_shells('mv report.pdf old.pdf', 5)!r})", "g()"], "os.system('sh -c "),
+    "call-chain-from-a-function-the-cell-calls": ([_CHAIN_TO_RENAME, "def run_all():\n    f5()\nrun_all()"],
+                                                  "def f1():\n    f0()"),
+    "call-chain-under-a-main-guard": (
+        [_CHAIN_TO_RENAME, "def main():\n    f5()\nif __name__ == '__main__':\n    main()"], "def f1():\n    f0()"),
+    "call-chain-in-a-function-nothing-calls": ([_CHAIN_TO_RENAME, "def go():\n    f5()"], "def f1():\n    f0()"),
+    "call-chain-in-a-function-an-older-cells-function-calls-back": (
+        [_CHAIN_TO_RENAME + "def run():\n    helper()", "def helper():\n    f5()\nrun()"], "def f1():\n    f0()"),
+    "ninth-exec-in-a-function-an-older-cells-function-calls-back": (
+        ["def run():\n    helper()", f"{_EIGHT_EXECS}\ndef helper():\n    exec({_RENAME!r})\nrun()"], f"exec({_RENAME!r})"),
+    "call-chain-in-a-method-an-older-cells-function-calls-back": (
+        [_CHAIN_TO_RENAME + "def run(job):\n    job.go()", "class Job:\n    def go(self):\n        f5()\nrun(Job())"],
+        "def f1():\n    f0()"),
+    # Functions reached other ways than by a plain call of a def.
+    "call-chain-in-a-function-literal-code-defines": (
+        [_CHAIN_TO_RENAME, "import types\nm = types.ModuleType('m')\nm.f4 = f4\nexec('def g():\\n    f4()', m.__dict__)"],
+        "def f0():"),
+    "recursion-past-the-limit-of-reads-again": (
+        ["import os\ndef r(n):\n    if n == 3:\n        r(2)\n    if n == 2:\n        r(1)\n    if n == 1:\n"
+         "        os.remove('stock.csv')", "r(3)"], "def r(n):"),
+    "a-function-found-past-the-depth-limit-of-its-names": (
+        ["import os\ndef f():\n    os.remove('stock.csv')", _ALIASES_OF_F, "a11()"], "def f():"),
+    "a-function-found-past-the-depth-limit-of-its-names-in-a-function": (
+        ["import os\ndef f():\n    os.remove('stock.csv')", _ALIASES_OF_F, "def h():\n    a11()", "h()"], "def f():"),
+    # Stops only the calling cell's code reaches, in functions earlier cells
+    # defined: a function defined before what it calls counts at the call.
+    "a-function-found-past-the-depth-limit-of-its-names-after-the-function-that-calls-it": (
+        ["def h():\n    a11()", "import os\ndef f():\n    os.remove('stock.csv')", _ALIASES_OF_F, "h()"], "def f():"),
+    "call-chain-past-the-depth-limit-after-the-function-that-calls-it": (
+        ["def run():\n    f5()", _CHAIN_TO_RENAME, "run()"], "def f2():\n    f1()"),
+    "ninth-exec-across-a-function-an-earlier-cell-defined": (
+        [f"def go():\n{_FIVE_EXECS_BODY}", f"{_FOUR_EXECS}\ngo()"], f"exec({_RENAME!r})"),
+    "ninth-exec-across-two-functions-earlier-cells-defined": (
+        [f"def inner():\n{_FIVE_EXECS_BODY}", "def go():\n    inner()", f"{_FOUR_EXECS}\ngo()"], f"exec({_RENAME!r})"),
+    # Literal code a cell runs.
+    "call-chain-past-the-depth-limit-in-literal-code": ([_CHAIN_TO_RENAME, "exec('f5()')"], "def f1():\n    f0()"),
+    "partials-past-the-depth-limit-in-literal-code": ([*_PARTIALS_TO_DELETE, "exec('p6()')"], "p6()"),
+    "ninth-exec-inside-literal-code": ([f"exec({_NINTH!r})"], "exec('y = 2')"),
+}
+
+
+@pytest.mark.parametrize("later", ["print(1)", "import json", "import os\nos.remove('summary.md')"],
+                         ids=["read-only", "import", "write"])
+@pytest.mark.parametrize("left", list(_LEFT_UNREAD), ids=list(_LEFT_UNREAD))
+def test_a_later_cell_after_code_a_limit_left_unread_is_a_stopped_read(left, later, snap):
+    """Once an earlier cell holds code a limit of the check left unread
+    anywhere in its code, whether that code ran or not, a later cell may
+    depend on what that code did, whatever it does itself: the read stops
+    there too, under every value of the setting, with the card quoting
+    where the read of that earlier cell stopped. What the cell itself does
+    stays on the card."""
+    earlier, quoted = _LEFT_UNREAD[left]
+    writes = find_cell_writes(code=later, earlier=_earlier(earlier), snapshots=(snap,))
+    assert writes.unchecked and writes.stopped and not writes.unread_here
+    assert writes.cause_kinds == ("limit",)
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+    assert writes.causes[0].code.startswith(quoted) and bool(writes.causes[0].code) is bool(quoted)
+    assert [(f.action, f.paths) for f in writes.held_files] == ([("delete", ("summary.md",))] if "remove" in later else [])
+
+
+def test_a_call_into_what_code_the_check_cant_read_defined_is_still_a_carried_hold():
+    """Code the check can't read by nature, as exec() of a file's text, isn't
+    a limit of the check: a call into what it defined stays a `uses` hold,
+    which `own` may drop, and later cells don't stop."""
+    writes = find_cell_writes(code="push()", snapshots=(),
+                              earlier=_earlier(["SRC = open('job.txt').read()", "exec(SRC)"]))
+    assert writes.unchecked and not writes.stopped and not writes.unread_here
+    assert writes.cause_kinds == ("uses",)
+
+
+@pytest.mark.parametrize("left", list(_LEFT_UNREAD), ids=list(_LEFT_UNREAD))
+def test_a_reset_of_the_pad_clears_code_a_limit_left_unread(left, snap):
+    """A reset clears the cells the check reads: a cell after it reads only
+    the cells after the reset."""
+    earlier, _ = _LEFT_UNREAD[left]
+    assert find_cell_writes(code="print(1)", earlier=_earlier([*earlier, "x = 1"]), snapshots=(snap,)).stopped
+    assert not find_cell_writes(code="print(1)", earlier=_earlier(["x = 1"]), snapshots=(snap,)).unchecked
+
+
+@pytest.mark.parametrize("earlier", [
+    [_CHAIN_TO_RENAME + "f5()"],
+    [_CHAIN_TO_RENAME + "def run():\n    helper()", "def helper():\n    print('kept')", "run()",
+     "def helper():\n    print('kept again')"],
+    [_CHAIN_TO_RENAME + "def run():\n    helper()", "run()", "def helper():\n    f3()"],
+    [_CHAIN_TO_RENAME + "def run():\n    helper()", "def helper():\n    f3()\nrun()"],
+    [f"def go():\n{_FIVE_EXECS_BODY}"],
+    ["def h():\n    a11()", "import os\ndef f():\n    os.remove('stock.csv')", _ALIASES_OF_F],
+], ids=["call-chain-of-the-cells-own-functions", "a-harmless-helper-redefined-by-a-later-cell",
+        "a-helper-only-a-later-cell-defines", "a-helper-of-its-own-an-older-function-calls-back",
+        "five-execs-in-a-function-nothing-runs-beside-more", "a-function-past-the-depth-limit-of-its-names-nothing-calls"])
+def test_an_earlier_cell_that_holds_no_code_a_limit_left_unread_stops_no_later_cell(earlier, snap):
+    """A chain of a cell's own functions is no chain of earlier ones, so the
+    cell's own read follows none of it, and nor does a helper that an
+    older cell's function calls back into, as the cell's own check reads
+    it: the helper's own code is read where the cell defines it, within
+    the depth limit. An earlier cell's read follows no function a cell
+    after it defines, so a function that names one before it exists holds
+    no stop until a cell calls it. Five literal execs in a function are
+    within the limit of the cell that defines them."""
+    writes = find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,))
+    assert not writes.unchecked
+
+
+@pytest.mark.parametrize("parsed_kept", [True, False], ids=["parsed-cells-kept", "parsed-cells-not-kept"])
+@pytest.mark.parametrize("ended", [False, True], ids=["ran", "its-process-ended-as-the-next-cell-came"])
+def test_a_conversation_checked_cell_by_cell_reads_no_earlier_cell_again_for_a_stop(ended, parsed_kept, snap,
+                                                                                     monkeypatch):
+    """The gate checks each cell before it runs, and that check keeps
+    whether the cell holds code a limit of the check left unread, by its
+    place in the conversation (`_LEFT_UNREAD`), so no later check reads an
+    earlier cell again for that (`_left_unread`), even where a busy process
+    keeps no parsed cell (`_EarlierCells`). The gate may mark the cell
+    before as one whose process ended as the next one comes, which no later
+    check's cells say: that changes nothing the check keeps."""
+    from anton.core.utils import write_check
+
+    if not parsed_kept:
+        monkeypatch.setattr(write_check, "_EARLIER_CELLS", write_check._EarlierCells(budget=0))
+    reread: list[str] = []
+    left_unread = write_check._left_unread
+    monkeypatch.setattr(write_check, "_left_unread",
+                        lambda *args: reread.append(args[-1].code) or left_unread(*args))
+    cells = [f"x = 1  # kept {ended} {parsed_kept}", _CHAIN_TO_RENAME, "f5()", "def f4():\n    pass", "print(2)"]
+    for i, code in enumerate(cells):
+        before = _earlier(cells[:i])
+        if ended and before:
+            before = [*before[:-1], before[-1].model_copy(update={"ended_process": True})]
+        find_cell_writes(code=code, earlier=before, snapshots=(snap,))
+    writes = find_cell_writes(code="print(1)", earlier=_earlier(cells), snapshots=(snap,))
+    assert reread == []
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+    assert writes.causes[0].code.startswith("def f1():")
+
+
+def test_the_cell_after_one_that_ran_a_chain_reads_it_without_its_own_redefinition(snap):
+    """An earlier cell read here (`_left_unread`) is read with the earlier
+    cells alone: this cell redefining a link of the chain it ran changes
+    nothing in what it ran."""
+    writes = find_cell_writes(code="def f4():\n    pass", earlier=_earlier([_CHAIN_TO_RENAME, "f5()  # read here"]),
+                              snapshots=(snap,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+
+
+# A command five shells deep that moves report.pdf.
+_FIVE_SHELLS = _in_shells("mv report.pdf old.pdf", 5)
+# Earlier cells a check reads where no check in this process kept what they
+# hold, as after a restart of the process, and the code the card quotes. In
+# most, a cell after the one that holds the stop rebinds a name its read
+# reads, which that cell's own check didn't see.
+_READ_AS_ITS_OWN_CHECK = {
+    "a-link-of-the-chain-redefined-later": ([_CHAIN_TO_RENAME, "f5()", "def f4():\n    pass"], "def f1():\n    f0()"),
+    "the-link-past-the-limit-redefined-later": ([_CHAIN_TO_RENAME, "f5()", "def f1():\n    pass"], "def f1():\n    f0()"),
+    "a-link-under-a-wrapper-redefined-later": (
+        ["import os\ndef f5():\n    os.remove('stock.csv')\n" + "".join(f"def f{i}():\n    f{i + 1}()\n" for i in range(4, 0, -1))
+         + "def go():\n    f1()", "go()", "def f3():\n    pass"], "def f4():\n    f5()"),
+    "a-command-a-later-cell-rebinds": (
+        ["import os\ndef run():\n    os.system(CMD)", f"CMD = {_FIVE_SHELLS!r}", "run()", "CMD = 'ls'"], "os.system(CMD)"),
+    "a-command-past-the-depth-limit-on-names-a-later-cell-binds": (
+        [f"import os\ndef go():\n    {_DEEP_DELETE}", _NINE_TO_A_URL, "go()"], _DEEP_DELETE),
+    "a-class-a-later-cell-defines-again": (
+        ["class Job:\n    def go(self):\n        f5()", _CHAIN_TO_RENAME, "Job().go()", "class Job:\n    def go(self):\n        pass"],
+        "def f2():\n    f1()"),
+    "partials-built-after-the-function-that-calls-them": (["def go():\n    p6()", *_PARTIALS_TO_DELETE, "go()"], "p6()"),
+    "call-chain-through-a-namespace-literal-code-filled": (
+        [_CHAIN_TO_RENAME, "import types\nm = types.ModuleType('m')\nm.f2 = f2\nexec('def h():\\n    f2()', m.__dict__)",
+         "def g():\n    m.h()", "g()"], "def f0():"),
+    "an-import-alias-a-later-cell-imports-again": (
+        [f"import os as o\no.system({_FIVE_SHELLS!r})", "import json as o"], "o.system("),
+    "a-module-alias-a-later-cell-imports-under-its-name": (
+        ["import os", "o = os", f"o.system({_FIVE_SHELLS!r})", "import json as o"], "o.system("),
+    "a-command-literal-code-binds-that-a-later-cell-rebinds": (
+        ["import os\ndef run():\n    os.system(CMD)", f"exec({'CMD = ' + repr(_FIVE_SHELLS)!r})", "run()", "CMD = 'ls'"],
+        "os.system(CMD)"),
+    "a-chain-literal-code-defines-then-a-link-redefined": (
+        [f"exec({_CHAIN_TO_RENAME!r})", "f5()", "def f4():\n    pass"], "def f1():"),
+    "a-link-later-literal-code-redefines": ([_CHAIN_TO_RENAME, "f5()", "exec('def f4():\\n    pass')"], "def f1():"),
+    "partials-a-cell-builds-and-calls-then-a-link-redefined": (
+        [_CHAIN_TO_RENAME, *_PARTIALS_TO_DELETE[:6], "p6 = partial(p5)\np6()", "def f4():\n    pass"], "p6()"),
+    "partials-literal-code-builds-in-the-cell-that-calls-them-then-a-link-redefined": (
+        [*_PARTIALS_TO_DELETE[:6], "exec('p6 = partial(p5)')\np6()", "def p5():\n    pass"], "p6()"),
+}
+
+
+@pytest.mark.parametrize("left", list(_READ_AS_ITS_OWN_CHECK), ids=list(_READ_AS_ITS_OWN_CHECK))
+@pytest.mark.parametrize("kept", [True, False], ids=["checked-cell-by-cell", "read-after-a-restart"])
+def test_an_earlier_cell_no_check_kept_a_stop_for_is_read_as_its_own_check_read_it(left, kept, snap, monkeypatch):
+    """The gate checks each cell before it runs and keeps what it found
+    (`_LEFT_UNREAD`). A cell no check in this process kept that for, as
+    after a restart of the process, is read as its own check read it
+    (`_earlier_stop`): with the cells up to it alone where a later cell
+    rebinds a name its read reads (`_read_apart`), so a later
+    redefinition, rebinding or new class hides no stop, and every later
+    cell stops all the same."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    cells, quoted = _READ_AS_ITS_OWN_CHECK[left]
+    if kept:
+        for i, code in enumerate(cells):
+            find_cell_writes(code=code, earlier=_earlier(cells[:i]), snapshots=(snap,))
+    writes = find_cell_writes(code="print(1)", earlier=_earlier(cells), snapshots=(snap,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+    assert writes.causes[0].code.startswith(quoted)
+
+
+def test_an_earlier_cell_read_after_a_restart_takes_no_stop_from_a_later_cells_call(snap, monkeypatch):
+    """After a restart, an earlier cell that only defines a function is read
+    as its own check read it: a later cell's call that hands the function a
+    command's word past the depth limit stops that later cell, not the one
+    that defines the function, so a conversation that starts with the same
+    cell stops nothing on its account."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    define = "import os\ndef go(url):\n    os.system('curl -X DELETE ' + url)"
+    writes = find_cell_writes(code="print(1)", earlier=_earlier([define, f"{_NINE_TO_A_URL}go(p9)"]), snapshots=(snap,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+    assert not find_cell_writes(code="print(1)", earlier=_earlier([define]), snapshots=(snap,)).stopped
+
+
+@pytest.mark.parametrize("stopped_at", [2, None], ids=["failed-before-the-redefinition", "failed-where-the-record-cant-tell"])
+def test_an_earlier_cell_read_after_a_restart_reads_a_redefinition_that_may_not_have_run_as_its_check_did(stopped_at, snap,
+                                                                                                          monkeypatch):
+    """A cell that failed before it redefined a link of the chain, or where
+    its record can't tell, may have left the old link in place: the read
+    of the cell that calls the chain, after a restart, follows it, as that
+    cell's own check did (`_Reader.replaced`)."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    earlier = _earlier([_CHAIN_TO_RENAME, "x = 1\nraise ValueError\ndef f4():\n    pass", "f5()"],
+                       errored=(False, True, False), stopped_at=(None, stopped_at, None))
+    writes = find_cell_writes(code="print(1)", earlier=earlier, snapshots=(snap,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+    assert writes.causes[0].code.startswith("def f1():")
+
+
+def test_conversations_that_share_earlier_cells_keep_each_its_own_verdict(snap, monkeypatch):
+    """A server process checks many conversations, and what each check
+    found is kept by its place (`_LEFT_UNREAD`): the cell's code after the
+    code and record of every cell before it. A conversation whose earlier
+    cell failed keeps its own verdict beside one where the same code ran;
+    one cell's code beside another's at the same index keeps its own; and
+    a read after a restart of one conversation, with a later redefinition,
+    keeps what another conversation's first cells hold."""
+    from anton.core.utils import write_check
+
+    def checked(cells: list[EarlierCell]) -> list[EarlierCell]:
+        for i in range(len(cells)):
+            find_cell_writes(code=cells[i].code, earlier=cells[:i], snapshots=(snap,))
+        return cells
+
+    def stops(cells: list[EarlierCell]) -> bool:
+        return find_cell_writes(code="print(1)", earlier=cells, snapshots=(snap,)).stopped
+
+    # The same code: in A the pandas cell failed, so only the reading of
+    # errored cells holds the chain's delete (`_added_holds`); in B it ran.
+    codes = ["P = 'stock.csv'",
+             "import pandas as pd\nfresh = pd.read_csv('missing.csv')\nP = 'scratch.tmp'\nfresh.to_csv(P, index=False)",
+             "import os\ndef f0():\n    os.remove(P)\n" + "".join(f"def f{i}():\n    f{i - 1}()\n" for i in range(1, 5)),
+             "f4()"]
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    a = checked(_earlier(codes, errored=(False, True, False, False), stopped_at=(None, 2, None, None)))
+    b = checked(_earlier(codes))
+    assert (stops(a), stops(b)) == (True, False)
+    # The same index, another code, in either order.
+    for first, second in (([_CHAIN_TO_RENAME, "x = 1"], [_CHAIN_TO_RENAME, "f5()"]),
+                          ([_CHAIN_TO_RENAME, "f5()"], [_CHAIN_TO_RENAME, "x = 1"])):
+        monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+        done = [checked(_earlier(first)), checked(_earlier(second))]
+        assert [stops(cells) for cells in done] == ["f5()" in first, "f5()" in second]
+    # Two reads after a restart: the one with the redefinition comes first.
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    redefined = _earlier([_CHAIN_TO_RENAME, "f5()", "def f4():\n    pass", "y = 1"])
+    kept = _earlier([_CHAIN_TO_RENAME, "f5()", "w = 3", "y = 1"])
+    assert (stops(redefined), stops(kept)) == (True, True)
+
+
+# Five functions, each calling the one before it, the first deleting
+# report.pdf: a call of f4() reaches the delete only past `_CALL_DEPTH`,
+# where the check holds it only on a file the turn began with.
+_CHAIN4_TO_DELETE = "import os\ndef f0():\n    os.remove('report.pdf')\n" + "".join(
+    f"def f{i}():\n    f{i - 1}()\n" for i in range(1, 5))
+
+
+def _project(root: Path, *files: str):
+    """A snapshot of `root`, made to hold `files`."""
+    for rel in files:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("x")
+    return snapshot_project_files(root=root, label="project", taken_at=time.time() + 60)
+
+
+def test_a_stop_one_conversation_kept_stays_where_another_reads_the_same_cells_against_another_project(
+        tmp_path, monkeypatch):
+    """Two conversations with the same cells keep their verdicts by the same
+    place (`_LEFT_UNREAD`). One whose project held report.pdf stops at the
+    chain's delete; one whose project didn't keeps nothing for it, and a
+    stop once kept stays (`_LeftUnread.keep`): the first conversation's
+    later cells still stop, in either order."""
+    from anton.core.utils import write_check
+
+    with_file = _project(tmp_path / "a", "report.pdf")
+    without = _project(tmp_path / "b", "stock.csv")
+    cells = _earlier([_CHAIN4_TO_DELETE, "f4()"])
+    for order in ((with_file, without), (without, with_file)):
+        monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+        for project in order:
+            monkeypatch.chdir(project.root)
+            for i in range(len(cells)):
+                find_cell_writes(code=cells[i].code, earlier=cells[:i], snapshots=(project,))
+        monkeypatch.chdir(with_file.root)
+        writes = find_cell_writes(code="print(1)", earlier=cells, snapshots=(with_file,))
+        assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+
+
+@pytest.mark.parametrize("never_there", [False, True], ids=["the-file-it-deleted", "a-file-the-project-never-held"])
+def test_a_cell_read_after_a_restart_counts_every_path_as_one_the_project_held(never_there, tmp_path, monkeypatch):
+    """After a restart the check can't tell what the project held when an
+    earlier cell ran: the chain's delete of report.pdf ran, so a later
+    turn's project lacks it. The read of that cell counts every path as one
+    the turn began with (`ProjectSnapshot.failed`), so its stop past the
+    depth limit holds every later cell still, as it did before the
+    restart. So does a delete of a file no turn held, which the cell's own
+    check would not have held: after a restart the check can't tell the
+    two apart."""
+    from anton.core.utils import write_check
+
+    turn_one = _project(tmp_path, "report.pdf", "stock.csv")
+    cells = _earlier([_CHAIN4_TO_DELETE.replace("report.pdf", "scratch.tmp") if never_there else _CHAIN4_TO_DELETE,
+                      "f4()"])
+    monkeypatch.chdir(tmp_path)
+    for i in range(len(cells)):
+        find_cell_writes(code=cells[i].code, earlier=cells[:i], snapshots=(turn_one,))
+    (tmp_path / "report.pdf").unlink()
+    turn_two = _project(tmp_path)
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    writes = find_cell_writes(code="print(1)", earlier=cells, snapshots=(turn_two,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+    assert writes.causes[0].code.startswith("def f0():")
+
+
+_CHAIN4_OVERWRITES_STOCK = "def f0():\n    open('stock.csv', 'w').write('y')\n" + "".join(
+    f"def f{i}():\n    f{i - 1}()\n" for i in range(1, 5))
+
+
+@pytest.mark.parametrize("later", ["open('stock.csv', 'w').write('x')",
+                                   "import pandas as pd\npd.DataFrame().to_csv('stock.csv')"],
+                         ids=["open", "to-csv"])
+def test_an_earlier_cell_read_after_a_restart_reads_the_files_the_agent_owned_before_it(later, snap, monkeypatch):
+    """A cell read after a restart is read as its own check read it
+    (`_left_unread`): a file a cell after it rewrote was not yet the agent's
+    when it ran, so an overwrite of it past the call depth still stops it,
+    and every later cell."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    writes = find_cell_writes(code="print(1)", earlier=_earlier([_CHAIN4_OVERWRITES_STOCK, "f4()", later]),
+                              snapshots=(snap,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+
+
+def test_a_cell_read_after_a_restart_past_the_snapshots_cap_counts_a_file_the_turn_changed_as_one_held(
+        tmp_path, monkeypatch):
+    """Past its cap a snapshot doesn't name stock.csv, so the check reads
+    the file on disk: unchanged since the turn began when the chain's cell
+    was checked, so its overwrite past the depth limit stopped there. Once
+    that overwrite ran, the file changed this turn, and what the pad's
+    cells write would call it new (`_Reader.made`). The read of that cell
+    after a restart reads no such record: every file on disk counts as one
+    the project held when the cell ran, so every later cell still stops."""
+    from anton.core.utils import write_check
+
+    (tmp_path / "stock.csv").write_text("x")
+    os.utime(tmp_path / "stock.csv", (time.time() - 120, time.time() - 120))
+    monkeypatch.chdir(tmp_path)
+    capped = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() - 60).model_copy(
+        update={"files": frozenset(), "spellings": {}, "complete": False})
+    earlier = _earlier([_CHAIN4_OVERWRITES_STOCK, "f4()"])
+    assert find_cell_writes(code="f4()", earlier=earlier[:1], snapshots=(capped,)).stopped
+    (tmp_path / "stock.csv").write_text("y")
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    writes = find_cell_writes(code="print(1)", earlier=earlier, snapshots=(capped,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+
+
+@pytest.mark.parametrize("cells", [
+    [_CHAIN4_OVERWRITES_STOCK, "open('stock.csv', 'w').write('x')\nf4()"],
+    [_CHAIN4_OVERWRITES_STOCK, "f4()\nopen('stock.csv', 'w').write('x')"],
+    [_CHAIN4_OVERWRITES_STOCK, "open('stock.csv', 'w').write('x')\nraise ValueError", "f4()"],
+], ids=["a-rewrite-in-the-cell-before-the-call", "a-rewrite-in-the-cell-after-the-call", "a-rewrite-in-a-cell-that-failed"])
+def test_a_cell_read_after_a_restart_owns_no_file_it_or_a_failed_cell_wrote(cells, snap, monkeypatch):
+    """Read after a restart, a cell owns only the files the cells before it
+    rewrote and ran (`_OwnedFiles` of the cells before it, errored ones
+    making none the agent's), as its own check did before it ran, so the
+    overwrite of stock.csv past `_CALL_DEPTH` still stops it."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    errored = tuple(code.endswith("raise ValueError") for code in cells)
+    stopped_at = tuple(2 if failed else None for failed in errored)
+    writes = find_cell_writes(code="print(1)", earlier=_earlier(cells, errored=errored, stopped_at=stopped_at),
+                              snapshots=(snap,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+
+
+# Six helpers, each calling the next, the last renaming report.pdf, as defs
+# and as lambdas.
+_PIPELINE = ("import os\ndef archive():\n    os.rename('report.pdf', 'old.pdf')\ndef publish():\n    archive()\n"
+             "def render():\n    publish()\ndef build():\n    render()\ndef load():\n    build()\ndef main():\n    load()")
+_PIPELINE_OF_LAMBDAS = ("import os\narchive = lambda: os.rename('report.pdf', 'old.pdf')\npublish = lambda: archive()\n"
+                        "render = lambda: publish()\nbuild = lambda: render()\nload = lambda: build()\nmain = lambda: load()")
+# Six functions, each calling the one before it, the first doing nothing.
+_HARMLESS_CHAIN = "def f0():\n    pass\n" + "".join(f"def f{i}():\n    f{i - 1}()\n" for i in range(1, 6))
+
+
+@pytest.mark.parametrize("earlier", [
+    _earlier([_PIPELINE, f"import missing_module\n{_PIPELINE}"], errored=(False, True), stopped_at=(None, 1)),
+    _earlier([_CHAIN_TO_RENAME, "import missing_module\ndef f5():\n    pass\ndef go():\n    f5()"],
+             errored=(False, True), stopped_at=(None, 1)),
+    _earlier([_PIPELINE_OF_LAMBDAS, _PIPELINE]),
+    _earlier([_HARMLESS_CHAIN, "import os\ndef f0():\n    os.rename('report.pdf', 'old.pdf')\nf5()"]),
+], ids=["helpers-defined-again-in-a-cell-that-failed-on-its-first-line",
+        "the-top-of-a-chain-defined-again-in-a-cell-that-failed-on-its-first-line", "lambdas-defined-again-as-defs",
+        "a-function-a-chain-past-the-depth-limit-reaches-defined-again-in-the-calling-cell"])
+@pytest.mark.parametrize("kept", [True, False], ids=["checked-cell-by-cell", "read-after-a-restart"])
+def test_an_earlier_cell_that_defines_again_what_an_older_one_defined_is_read_as_its_own_check_read_it(
+        earlier, kept, snap, monkeypatch):
+    """A cell's own check read it before it ran, with no record of its own,
+    so a definition in it replaced the one before it (`_Reader.replaced`);
+    it read each function an earlier cell defined at the first call it
+    met, so a longer chain to it was read no further
+    (`_CellRead.read_function`); and it followed no function the cell
+    itself defined, past the depth limit too (`_CellRead.follows`). Read
+    after a restart, the cell finds the same: none of these holds a stop."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    if kept:
+        for i in range(len(earlier)):
+            find_cell_writes(code=earlier[i].code, earlier=earlier[:i], snapshots=(snap,))
+    assert not find_cell_writes(code="print(1)", earlier=earlier, snapshots=(snap,)).stopped
+
+
+def test_the_card_quotes_the_first_earlier_cell_that_holds_code_a_limit_left_unread(snap):
+    earlier = _earlier([*_LEFT_UNREAD["ninth-exec"][0], *_LEFT_UNREAD["five-shells-deep"][0]])
+    writes = find_cell_writes(code="print(1)", earlier=earlier, snapshots=(snap,))
+    assert [(c.kind, c.code, c.in_earlier) for c in writes.causes] == [("limit", f"exec({_RENAME!r})", True)]
+    # An earlier cell too deep to parse that came first has nothing to quote.
+    writes = find_cell_writes(code="print(1)", earlier=_earlier([_TOO_DEEP, *_LEFT_UNREAD["ninth-exec"][0]]),
+                              snapshots=(snap,))
+    assert [(c.kind, c.code, c.in_earlier) for c in writes.causes] == [("limit", "", True)]
+
+
+def test_a_cell_that_stops_itself_after_code_a_limit_left_unread_gives_both_stops(snap):
+    writes = find_cell_writes(code=f"{_EIGHT_EXECS}\nexec({_RENAME!r})", earlier=_earlier(_LEFT_UNREAD["ninth-exec"][0]),
+                              snapshots=(snap,))
+    assert [(c.kind, c.code, c.in_earlier) for c in writes.causes] == [
+        ("limit", f"exec({_RENAME!r})", True), ("limit", f"exec({_RENAME!r})", False)]
+    assert writes.cause_kinds == ("limit",)
+
+
+def test_a_cell_too_deep_to_parse_after_code_a_limit_left_unread_gives_both_stops(snap):
+    """The check's parser gives up on the cell itself, and an earlier
+    cell's stop still comes first on its card (`_earlier_stop`)."""
+    writes = find_cell_writes(code="-" * 200_000 + "1", earlier=_earlier(_LEFT_UNREAD["ninth-exec"][0]),
+                              snapshots=(snap,))
+    assert [(c.kind, c.code, c.in_earlier) for c in writes.causes] == [
+        ("limit", f"exec({_RENAME!r})", True), ("limit", "", False)]
+    assert writes.stopped and writes.cause_kinds == ("limit",)
+
+
+# Cells that reach the chain past the depth limit other than by a plain call
+# of a def at their top level.
+_REACHED_OTHERWISE = {
+    "a-lambda-handed-to-apply": "import pandas as pd\npd.DataFrame({'a': [1]}).apply(lambda r: f5(), axis=1)",
+    "a-lambda-handed-to-an-executor": "from concurrent.futures import ThreadPoolExecutor\n"
+                                      "with ThreadPoolExecutor() as ex:\n    list(ex.map(lambda x: f5(), [1]))",
+    "a-bound-method-as-a-thread-target": "import threading\nclass W:\n    def run(self):\n        f5()\n"
+                                         "threading.Thread(target=W().run).start()",
+    "a-loop-over-functions": "for step in (f5,):\n    step()",
+    "a-list-of-steps": "cbs = [f5]\nfor cb in cbs:\n    cb()",
+    "a-dict-of-steps": "steps = {'a': f5}\nfor name, step in steps.items():\n    step()",
+    "a-comprehension": "[step() for step in [f5]]",
+    "a-with-whose-enter-calls-it": "class K:\n    def __enter__(self):\n        f5()\n    def __exit__(self, *a):\n"
+                                   "        pass\nwith K():\n    pass",
+    "a-property": "class P:\n    @property\n    def x(self):\n        return f5()\nP().x",
+    "dunder-call": "f5.__call__()",
+    "a-sort-key": "sorted([1, 2], key=lambda x: f5())",
+    "a-reduce": "import functools\nfunctools.reduce(lambda a, b: f5(), [1, 2, 3])",
+    "a-default-argument": "def f(a=f5()):\n    pass",
+    "a-callback-into-a-lambda": "def run(cb):\n    cb()\nrun(lambda: f5())",
+    "an-override-a-base-method-calls": "class Base:\n    def go(self):\n        self.step()\nclass Mine(Base):\n"
+                                       "    def step(self):\n        f5()\nMine().go()",
+}
+
+
+@pytest.mark.parametrize("cell", list(_REACHED_OTHERWISE.values()), ids=list(_REACHED_OTHERWISE))
+def test_a_chain_past_the_depth_limit_anywhere_in_an_earlier_cell_stops_a_later_cell(cell, snap):
+    """The check reads all of an earlier cell's code for a stop, as that
+    cell's own check read it, so however the cell reaches the chain, every
+    later cell stops."""
+    writes = find_cell_writes(code="print(1)", earlier=_earlier([_CHAIN_TO_RENAME, cell]), snapshots=(snap,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+    assert writes.causes[0].code.startswith("def f1():")
+
+
+_NINTH_THEN_FAILS = f"{_EIGHT_EXECS}\nexec({_RENAME!r})\nx = 1\ny = 2\nraise ValueError"
+_LONG_THEN_FAILS = f"exec({'#' * 100_001 + chr(10) + _RENAME!r})\nraise ValueError"
+
+
+@pytest.mark.parametrize("before, cell, stopped_at, ended, stops", [
+    ([], _NINTH_THEN_FAILS, 9, False, True), ([], _NINTH_THEN_FAILS, 12, False, True),
+    ([], _NINTH_THEN_FAILS, None, False, True), ([], _NINTH_THEN_FAILS, 8, False, True),
+    ([], _NINTH_THEN_FAILS, NOTHING_KEPT, True, False), ([], _NINTH_THEN_FAILS, NOTHING_KEPT, False, True),
+    ([], _LONG_THEN_FAILS, NOTHING_KEPT, True, False), ([], _LONG_THEN_FAILS, NOTHING_KEPT, False, True),
+    ([], _LONG_THEN_FAILS, 2, False, True),
+    ([_CHAIN_TO_RENAME], "f5()\nraise ValueError", 2, False, True),
+    ([_CHAIN_TO_RENAME], "f5(); raise ValueError('late')", NOTHING_KEPT, False, True),
+    ([_CHAIN_TO_RENAME], "x = 1\nraise ValueError\nf5()", 2, False, True),
+    ([_CHAIN_TO_RENAME], "raise ValueError\nf5()", NOTHING_KEPT, True, False),
+    ([_CHAIN_TO_RENAME], "raise ValueError\nf5()", NOTHING_KEPT, False, True),
+    ([], f"def go():\n{_INDENTED_NINTH}\nx = 1\nraise ValueError\ngo()", 12, False, True),
+    ([*_PARTIALS_TO_DELETE, "def go():\n    p6()"], "x = 1\nraise ValueError\ngo()", 2, False, True),
+    ([], _TOO_DEEP, 5, False, True), ([], _TOO_DEEP, None, False, True), ([], _TOO_DEEP, NOTHING_KEPT, False, True),
+    ([], _TOO_DEEP, NOTHING_KEPT, True, False),
+    ([], _NINTH_THEN_FAILS, 12, True, True), ([], f"{_NINTH}\nreturn", None, False, False),
+], ids=["failed-at-the-call", "failed-after-the-call", "failed-where-the-record-cant-tell", "failed-before-the-call",
+        "kept-nothing", "failed-on-its-first-line", "kept-nothing-by-a-long-literal",
+        "failed-in-the-call-of-a-long-literal-on-its-first-line", "failed-after-a-call-of-a-long-literal",
+        "call-chain-then-failed", "call-chain-then-failed-on-its-first-line", "call-chain-after-the-failure",
+        "call-chain-after-a-failure-that-kept-nothing", "call-chain-after-a-failure-on-its-first-line",
+        "ninth-exec-in-a-function-the-cell-calls-after-the-failure", "partials-after-the-failure",
+        "too-deep-failed-past-its-first-line", "too-deep-failed-with-no-line", "too-deep-failed-on-its-first-line",
+        "too-deep-kept-nothing", "failed-past-its-first-line-then-its-process-ended", "python-refused-to-compile-it"])
+def test_an_earlier_cell_that_failed_stops_a_later_cell_unless_it_kept_nothing(before, cell, stopped_at, ended, stops,
+                                                                                snap):
+    """Whether an earlier cell's code ran doesn't matter: a cell that failed
+    holds the code a limit left unread wherever it failed, before or after
+    it. Only a record that says the cell kept nothing (`NOTHING_KEPT`, its
+    process gone: `ended_process`) stops no later cell, though such a cell
+    may have run some of its code; and so does a cell Python refused to
+    compile, which ran none of it. A cell that failed on its first line in
+    a process that lives on gives the same line, but ran that line, as a
+    one-line call that does its work and then raises does; and a process
+    that ended after a cell failed past its first line ran that far."""
+    earlier = _earlier([*before, cell], errored=(*[False] * len(before), True),
+                       stopped_at=(*[None] * len(before), stopped_at), ended=(*[False] * len(before), ended))
+    assert find_cell_writes(code="print(1)", earlier=earlier, snapshots=(snap,)).stopped is stops
+
+
+def test_an_earlier_cell_that_didnt_fail_ran_its_code_whatever_line_its_record_gives(snap):
+    """`stopped_at` counts only for a cell that failed: a record that didn't
+    fail ran its code, even one that gives `NOTHING_KEPT` with its process
+    gone, so its literal code past the limit stops a later cell."""
+    earlier = _earlier([_NINTH], stopped_at=[NOTHING_KEPT], ended=[True])
+    assert find_cell_writes(code="print(1)", earlier=earlier, snapshots=(snap,)).stopped
+
+
+@pytest.mark.parametrize("last, stops", [
+    (("f4()", False, None, False), True),
+    (("f4()\nraise ValueError", True, 2, False), True),
+    (("x = 1\nraise ValueError\nf4()", True, 2, False), True),
+    (("raise ValueError\nf4()", True, NOTHING_KEPT, True), False),
+    (("raise ValueError\nf4()", True, NOTHING_KEPT, False), True),
+], ids=["ran-to-its-end", "failed-after-the-call", "failed-before-the-call", "kept-nothing", "failed-on-its-first-line"])
+def test_a_stop_only_the_reading_of_errored_cells_finds_stops_a_later_cell(last, stops, snap):
+    """A function past `_CALL_DEPTH` that deletes a file only the reading of
+    errored cells as maybe stopped anywhere places, as P before the cell
+    that failed rebinds it, stops the cell that calls it, and so every later
+    cell (`_earlier_stop`), unless that cell's record says it kept nothing."""
+    code, errored, stopped_at, ended = last
+    earlier = _earlier([
+        "P = 'stock.csv'",
+        "import pandas as pd\nfresh = pd.read_csv('missing.csv')\nP = 'scratch.tmp'\nfresh.to_csv(P, index=False)",
+        "import os\ndef f0():\n    os.remove(P)\n" + "".join(f"def f{i}():\n    f{i - 1}()\n" for i in range(1, 5)),
+        code,
+    ], errored=(False, True, False, errored), stopped_at=(None, 2, None, stopped_at), ended=(False, False, False, ended))
+    writes = find_cell_writes(code="print(1)", earlier=earlier, snapshots=(snap,))
+    assert writes.stopped is stops
+    if stops:
+        assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+        assert writes.causes[0].code.startswith("def f0():")
+
+
+@pytest.mark.parametrize("write", ["os.remove(P)", "open(P, 'w').write('y')"], ids=["delete", "overwrite"])
+def test_a_stop_only_the_reading_of_errored_cells_finds_stops_a_later_cell_after_a_restart(write, snap, monkeypatch):
+    """Read after a restart, the cell that calls the chain finds its stop
+    past `_CALL_DEPTH` only on the reading of errored cells as maybe stopped
+    anywhere, which places P on stock.csv (`_left_unread`'s `wide`), for an
+    overwrite as for a delete."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    earlier = _earlier([
+        "P = 'stock.csv'",
+        "import pandas as pd\nfresh = pd.read_csv('missing.csv')\nP = 'scratch.tmp'\nfresh.to_csv(P, index=False)",
+        f"import os\ndef f0():\n    {write}\n" + "".join(f"def f{i}():\n    f{i - 1}()\n" for i in range(1, 5)),
+        "f4()",
+    ], errored=(False, True, False, False), stopped_at=(None, 2, None, None))
+    writes = find_cell_writes(code="print(1)", earlier=earlier, snapshots=(snap,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+
+
+def test_a_call_through_partials_of_partials_past_the_depth_limit_is_a_stopped_read(snap):
+    """`partials_of` reads a partial of a partial `_PARAM_DEPTH` deep: past
+    that, the delete it hides stops the read."""
+    partials = ["import subprocess\nfrom functools import partial\np0 = partial(subprocess.run, ['rm', 'stock.csv'])",
+                *(f"p{i} = partial(p{i - 1})" for i in range(1, 7))]
+    within = find_cell_writes(code="p5()", earlier=_earlier(partials[:6]), snapshots=(snap,))
+    assert [(f.action, f.paths) for f in within.held_files] == [("delete", ("stock.csv",))]
+    assert not within.unchecked
+    past = find_cell_writes(code="p6()", earlier=_earlier(partials), snapshots=(snap,))
+    assert past.unchecked and past.stopped and not past.unread_here
+    assert [(c.kind, c.code) for c in past.causes] == [("limit", "p6()")]
+    through = find_cell_writes(code="def go():\n    p6()\ngo()", earlier=_earlier(partials), snapshots=(snap,))
+    assert [(c.kind, c.code) for c in through.causes] == [("limit", "p6()")]
+
+
+@pytest.mark.parametrize("empty", [True, False], ids=["a-project-empty-as-the-turn-began", "no-snapshot"])
+def test_a_call_through_partials_past_the_depth_limit_stops_whatever_the_snapshots_hold(empty, tmp_path):
+    """The check stops at such a call wherever it reads code, not only
+    where it reads the files a write may change (`_CellRead.read_stops`):
+    a project that was empty as the turn began stops it too, and what its
+    check keeps for its place stops each later cell, in this turn and in a
+    later one that began with files."""
+    (tmp_path / "empty").mkdir()
+    snapshots = (snapshot_project_files(root=tmp_path / "empty", label="project", taken_at=time.time() + 60),) if empty else ()
+    own = find_cell_writes(code="p6()", earlier=_earlier(_PARTIALS_TO_DELETE), snapshots=snapshots)
+    assert own.stopped and [(c.kind, c.code) for c in own.causes] == [("limit", "p6()")]
+    (tmp_path / "stock.csv").write_text("x")
+    files = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    for later in (snapshots, (files,)):
+        writes = find_cell_writes(code="print(1)", earlier=_earlier([*_PARTIALS_TO_DELETE, "p6()"]), snapshots=later)
+        assert [(c.kind, c.code, c.in_earlier) for c in writes.causes] == [("limit", "p6()", True)]
+
+
+def test_literal_code_past_the_length_the_check_reads_is_never_parsed(snap, monkeypatch):
+    """The check parses no literal code past `_LITERAL_CODE_LIMIT`
+    characters, whether a cell or a function runs it: it stops at the call
+    that runs it instead (`_ExecRead.capped`, `_Cell.rebinds_globally`)."""
+    from anton.core.utils import write_check
+
+    lengths: list[int] = []
+    parse_ran = write_check._parse_ran
+    monkeypatch.setattr(write_check, "_parse_ran", lambda text: lengths.append(len(text)) or parse_ran(text))
+    long = "\n".join(f"TARGET = 'r{n}.csv'" for n in range(8_000))
+    earlier = _earlier(["TARGET = 'stock.csv'", f"def load():\n    exec({long!r})\n# {len(long)} never parsed"])
+    writes = find_cell_writes(code="import os\nos.remove(TARGET)", earlier=earlier, snapshots=(snap,))
+    assert len(long) > 100_000 and max(lengths, default=0) <= 100_000
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+
+
+# A path four levels deep, built one level a cell, and its shallow twin.
+_DAILY = ["from pathlib import Path\nimport pandas as pd\nPROJECT = Path('.')", "DATA = PROJECT / 'data'",
+          "OUT = DATA / 'out'", "DAILY = OUT / 'daily'"]
+_FLAT = "Path('data/out/daily') / "
+
+
+@pytest.fixture
+def daily(tmp_path: Path, monkeypatch):
+    """A project with data/out/daily/stock.csv and data/out/daily/v1/stock.csv."""
+    (tmp_path / "data" / "out" / "daily" / "v1").mkdir(parents=True)
+    (tmp_path / "data" / "out" / "daily" / "stock.csv").write_text("x")
+    (tmp_path / "data" / "out" / "daily" / "v1" / "stock.csv").write_text("x")
+    (tmp_path / "stock.csv").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    return snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+
+
+@pytest.mark.parametrize("earlier, code", [
+    (_DAILY, "pd.DataFrame().to_csv(DAILY / 'stock.csv')"),
+    (["import os\nimport pandas as pd\nDATA = os.path.join('.', 'data')", "OUT = os.path.join(DATA, 'out')",
+      "DAILY = os.path.join(OUT, 'daily')", "V1 = os.path.join(DAILY, 'v1')"],
+     "pd.DataFrame().to_csv(os.path.join(V1, 'stock.csv'))"),
+    (["p0 = 'data/out/daily/stock.csv'", *(f"p{i} = p{i - 1}" for i in range(1, 9))], "open(p8, 'w').write('x')"),
+    (_DAILY, "for t in [DAILY / 'a.csv', DAILY / 'stock.csv']:\n    pd.DataFrame().to_csv(t)"),
+    (_DAILY, "for t in (DAILY / 'a.csv', DAILY / 'stock.csv'):\n    open(t, 'w').write('x')"),
+    (_DAILY, "for t in {DAILY / 'a.csv', DAILY / 'stock.csv'}:\n    pd.DataFrame().to_csv(t)"),
+    (_DAILY, "A = DAILY / 'a.csv'\nB = DAILY / 'stock.csv'\nfor t in (A, B):\n    pd.DataFrame().to_csv(t)"),
+    ([*_DAILY, "outs = [DAILY / 'a.csv', DAILY / 'stock.csv']"], "for t in outs:\n    pd.DataFrame().to_csv(t)"),
+    (_DAILY, "import shutil\nshutil.copy('stock.csv', DAILY / 'v1')"),
+], ids=["path-four-levels-deep", "join-four-levels-deep", "nine-names", "a-list", "a-tuple", "a-set",
+        "names-in-a-loop", "a-list-an-earlier-cell-built", "copy-into-the-folder"])
+def test_an_overwrite_through_a_path_past_the_depth_limit_is_a_stopped_read(earlier, code, daily):
+    """A path `_Reader.paths` builds past its depth limit is one it can't
+    place, so the overwrite through it would get no card in any mode: the
+    file finder reads on past the limit, each node once, a folder two paths
+    share among them, and when that holds a file the turn began with, the
+    read stops."""
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(daily,))
+    assert writes.unchecked and writes.stopped and not writes.unread_here
+    # A path past the limit to a new file changes nothing the card holds.
+    new = find_cell_writes(code=code.replace("stock.csv", "new.csv"),
+                           earlier=_earlier(e.replace("stock.csv", "new.csv") for e in earlier), snapshots=(daily,))
+    assert not new.needs_approval()
+
+
+@pytest.mark.parametrize("earlier", [
+    ["p0 = 'stock.csv'\n" + "".join(f"p{i} = p{i - 1}\n" for i in range(1, 71))],
+    ["p0 = 'stock.csv'", *(f"p{i} = p{i - 1}" for i in range(1, 71))],
+], ids=["seventy-names-in-a-cell", "seventy-names-a-cell"])
+def test_an_overwrite_through_a_path_past_even_the_read_on_depth_is_a_stopped_read(earlier, daily):
+    """Read on past the limits, a path is still read only `_PAST_DEPTH`
+    levels deep: past that the read stops (`_Reader.paths`), and so does
+    the check."""
+    writes = find_cell_writes(code="open(p70, 'w').write('x')", earlier=_earlier(earlier), snapshots=(daily,))
+    assert writes.unchecked and writes.stopped
+
+
+@pytest.mark.parametrize("earlier, code", [
+    ([], "pd.DataFrame().to_csv({p}'stock.csv')"),
+    ([], "for t in [{p}'a.csv', {p}'stock.csv']:\n    pd.DataFrame().to_csv(t)"),
+    ([], "pd.DataFrame().to_csv({p}'new.csv')"),
+    ([], "open({p}'stock.csv', 'a').write('x')"),
+    ([], "import shutil\nshutil.copy({p}'stock.csv', 'backup.csv')"),
+    (["pd.DataFrame().to_csv({p}'stock.csv')"], "pd.DataFrame().to_csv({p}'stock.csv')"),
+    ([], "import subprocess\nsubprocess.run(['cat', str({p}'stock.csv')])"),
+    ([], "import subprocess\nprint(subprocess.check_output(['wc', '-l', str({p}'stock.csv')]))"),
+    ([], "import subprocess\nsubprocess.run(['rm', str({p}'stock.csv')])"),
+    ([], "print(pd.read_csv({p}'stock.csv'))"),
+], ids=["overwrite", "overwrite-in-a-loop", "new-file", "append", "copy-source", "rewrite-of-a-file-the-agent-owns",
+        "read-only-command", "read-only-command-output", "delete-command", "read"])
+def test_a_path_past_the_depth_limit_gets_the_card_its_shallow_twin_gets(earlier, code, daily):
+    """Past the depth limit a path gets the decision the same path built
+    shallow gets: an append, a copy's source, a rewrite of a file the agent
+    owns, a read and a command that changes nothing get no card, and a
+    write the twin holds gets one."""
+    deep = find_cell_writes(code=code.format(p="DAILY / "), snapshots=(daily,),
+                            earlier=_earlier([*_DAILY, *(e.format(p="DAILY / ") for e in earlier)]))
+    flat = find_cell_writes(code=code.format(p=_FLAT), snapshots=(daily,),
+                            earlier=_earlier([*_DAILY, *(e.format(p=_FLAT) for e in earlier)]))
+    assert deep.needs_approval() is flat.needs_approval()
+
+
+# A path built on past `_PATH_LIMIT` paths: 512 variants, one per choice of
+# nine branches.
+_VARIANTS = "import random\nP = 'data'\n" + "".join(
+    f"if random.random() < .5:\n    P += '/{s}'\n" for s in "abcdefghi") + "P += '/stock.csv'\n"
+
+
+def _nine_names(value: str) -> str:
+    """Nine names, each another name for the one before, the first `value`:
+    more than the command reading follows (`_commands`)."""
+    return f"p0 = {value!r}\n" + "".join(f"p{i} = p{i - 1}\n" for i in range(1, 10))
+
+
+@pytest.mark.parametrize("code, value", [
+    ("import subprocess\nsubprocess.run(['ls', {p}])", "stock.csv"),
+    ("import os\nos.system('cat ' + {p})", "stock.csv"),
+    ("import subprocess\nprint(subprocess.check_output(['wc', '-l', {p}]))", "stock.csv"),
+    ("import subprocess\nsubprocess.run('head -n 3 ' + {p}, shell=True)", "stock.csv"),
+    ("import subprocess\nsubprocess.run(['cat', {p}])", "job.py"),
+    ("import os\nos.system('ls -l ' + {p})", "lib/job.py"),
+    ("import os\nos.system({p})", "cat job.py"),
+    ("import subprocess\nsubprocess.run(['python', '-m', {p}])", "job"),
+    ("import subprocess\nsubprocess.run(['cp', 'job.txt', {p}])", "/usr/lib/python3/site-packages/hook.pth"),
+    ("import subprocess\nsubprocess.run('python -m ' + {p}, shell=True)", "job"),
+    ("import os\nos.system('cp job.txt ' + {p})", "/usr/lib/python3/site-packages/hook.pth"),
+], ids=["ls", "cat", "wc-output", "head-through-a-shell", "cat-of-a-python-file", "ls-of-a-python-file-through-a-shell",
+        "a-whole-command-that-reads-a-python-file", "a-module-python-runs", "a-copy-onto-a-startup-hook",
+        "a-module-python-runs-through-a-shell", "a-copy-onto-a-startup-hook-through-a-shell"])
+def test_a_command_word_past_the_depth_limit_gets_the_card_its_shallow_twin_gets(code, value, snap):
+    """A command's word read through more names than the command reading
+    follows is read on past the limit (`_shell_commands`): one plain
+    command that only reads, even a Python file, gets no card, as its twin
+    with the word written out gets none, and a later cell gets nothing from
+    it. One that runs Python or writes a startup hook is code the check
+    stopped reading, a card under every value, as its twin holds, and every
+    later cell stops after it."""
+    deep = find_cell_writes(code=code.format(p="p9"), earlier=_earlier([_nine_names(value)]), snapshots=(snap,))
+    flat = find_cell_writes(code=code.format(p=repr(value)), earlier=_earlier(()), snapshots=(snap,))
+    assert deep.needs_approval() is flat.needs_approval()
+    assert deep.stopped is flat.needs_approval()
+    later = find_cell_writes(code="print(1)", earlier=_earlier([_nine_names(value), code.format(p="p9")]),
+                             snapshots=(snap,))
+    assert later.needs_approval() is later.stopped is deep.stopped
+
+
+@pytest.mark.parametrize("value", ["stock.csv", "new.csv"], ids=["a-file-there", "a-new-file"])
+@pytest.mark.parametrize("code, twin", [
+    ("import subprocess\nsubprocess.run(['rm', {p}])", "import os\nos.remove({p})"),
+    ("import os\nos.system('rm -f ' + {p})", "import os\nos.remove({p})"),
+    ("import subprocess\nsubprocess.run(['mv', {p}, '/tmp/x.csv'])", "import shutil\nshutil.move({p}, '/tmp/x.csv')"),
+    ("import os\nos.system(f'mv {{{p}}} /tmp/x.csv')", "import shutil\nshutil.move({p}, '/tmp/x.csv')"),
+], ids=["rm-words", "rm-script", "mv-words", "mv-script"])
+def test_a_delete_or_move_whose_operand_is_past_the_depth_limit_holds_what_its_python_twin_holds(
+    code, twin, value, snap,
+):
+    """An `rm` or `mv` whose operand is read through more names than the
+    command reading follows holds whole, under every value, as the Python
+    delete or move through the same name holds past the path depth limit,
+    and neither stops (`_does_something`)."""
+    earlier = [_nine_names(value)]
+    deep = find_cell_writes(code=code.format(p="p9"), earlier=_earlier(earlier), snapshots=(snap,))
+    python = find_cell_writes(code=twin.format(p="p9"), earlier=_earlier(earlier), snapshots=(snap,))
+    assert [(c.action, c.paths) for c in deep.held_files] == [(c.action, c.paths) for c in python.held_files] == [
+        ("move" if "mv" in code else "delete", ())]
+    assert not deep.stopped and not python.stopped
+    assert _cards(code.format(p="p9"), snap, earlier=earlier) == [True, True, True]
+
+
+@pytest.mark.parametrize("command, held", [
+    ("rm stock.csv", True), ("rm -f new.csv", False), ("rm -rf docs", True), ("mv stock.csv /tmp/x.csv", True),
+    ("mv new.csv /tmp/x.csv", False),
+], ids=["rm-a-file-there", "rm-a-new-file", "rm-a-folder-there", "mv-a-file-there", "mv-a-new-file"])
+@pytest.mark.parametrize("run", ["import os\nos.system({p})", "import subprocess\nsubprocess.run({p}.split())"],
+                         ids=["script", "words"])
+def test_a_whole_delete_or_move_command_past_the_depth_limit_gets_its_shallow_twins_decision(command, held, run, snap):
+    """An `rm` or `mv` read whole through more names than the command
+    reading follows is read on past the limit as a path is
+    (`_FileFinder.shell`, `_FileFinder.decided`): the check stops where its
+    twin with the command written out holds a file, a card under every
+    value, and one of a new file gets no card, as its twin gets none."""
+    earlier = [_nine_names(command)]
+    assert bool(_files(run.format(p=repr(command)), (snap,))) is held
+    deep = find_cell_writes(code=run.format(p="p9"), earlier=_earlier(earlier), snapshots=(snap,))
+    assert deep.stopped is held
+    assert _cards(run.format(p="p9"), snap, earlier=earlier) == [held] * 3
+
+
+@pytest.mark.parametrize("code, value, flat", [
+    ("import subprocess\nsubprocess.run(['sed', '-i', 's/a/b/', {p}])", "stock.csv", False),
+    ("import subprocess\nsubprocess.run(['cp', 'job.txt', {p}])", "stock.csv", False),
+    ("import os\nos.system('echo x > ' + {p})", "stock.csv", False),
+    ("import os\nos.system('echo x | tee ' + {p})", "stock.csv", False),
+    ("import subprocess\nsubprocess.run(['curl', '-X', 'DELETE', {p}])", "https://example.com/items/1", False),
+    ("import os\nos.system('cat a.txt > ' + {p})", "new.csv", False),
+    ("import os\nos.system('ls ' + {p} + ' | head')", "docs", False),
+    ("import os\nos.system({p})", "cat a.txt > b.txt", False),
+    ("import os\nos.system({p})", "ls docs | head", False),
+    ("import os\nos.system({p})", "cd docs && rm a.pdf", True),
+], ids=["sed-i", "cp", "a-redirect", "tee", "a-remote-delete", "cat-into-a-file", "ls-into-head",
+        "a-whole-cat-into-a-file", "a-whole-ls-into-head", "a-whole-list-that-deletes"])
+def test_a_command_past_the_depth_limit_that_is_more_than_a_plain_read_delete_or_move_stops(code, value, flat, snap):
+    """Past the depth limit on a command's words, the read within the limit
+    may have missed what the command changes: unless it is one plain
+    command that only reads, deletes or moves (`_does_something`), it is
+    code the check stopped reading. The cell stops, under every value, and
+    the card quotes the call it stopped at, though the twin with the word
+    written out may get no card, as a shell write or a remote change gets
+    none. Every later cell stops too, with the earlier step's line and the
+    same quote."""
+    earlier = [_nine_names(value)]
+    deep = find_cell_writes(code=code.format(p="p9"), earlier=_earlier(earlier), snapshots=(snap,))
+    assert deep.stopped and _cards(code.format(p="p9"), snap, earlier=earlier) == [True, True, True]
+    [limit] = [c for c in deep.causes if c.kind == "limit"]
+    assert limit.code == code.format(p="p9").splitlines()[-1] and not limit.in_earlier
+    assert _held(code.format(p=repr(value)), snap) is flat
+    before = [*earlier, code.format(p="p9")]
+    later = find_cell_writes(code="print(1)", earlier=_earlier(before), snapshots=(snap,))
+    assert [(c.kind, c.in_earlier, c.code) for c in later.causes] == [("limit", True, limit.code)]
+    assert _cards("print(1)", snap, earlier=before) == [True, True, True]
+
+
+@pytest.mark.parametrize("script", [
+    "cat a.txt && curl -X DELETE https://example.com/items/1", "cat a.txt & curl -X DELETE https://example.com/items/1",
+    "cat a.txt; curl -X DELETE https://example.com/items/1", "cat a.txt\ncurl -X DELETE https://example.com/items/1",
+    "cat $(curl -X DELETE https://example.com/items/1)", "cat `curl -X DELETE https://example.com/items/1`",
+    "cat a.txt && sed -i s/a/b/ stock.csv", "cat < a.txt", "$BIN/cat a.txt",
+], ids=["and-list", "background", "semicolon", "newline", "substitution", "backticks", "and-sed-i", "input-redirect",
+        "a-program-the-check-cant-name"])
+def test_a_read_with_shell_syntax_around_it_past_the_depth_limit_stops(script, snap):
+    """Only one plain command whose program the check names as one that
+    only reads, with no redirect, pipe, list, substitution, backticks or
+    here-document (`_SHELL_SYNTAX`), is free past the depth limit
+    (`_does_something`): a read beside a remote delete or a shell write, or
+    a program the check can't name, stops, under every value, though the
+    twin with the script written out holds no file."""
+    earlier = [_nine_names(script)]
+    code = "import os\nos.system(p9)"
+    assert not any(f.held for f in find_cell_writes(code=code.replace("p9", repr(script)), earlier=(),
+                                                    snapshots=(snap,)).files)
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert writes.stopped and _cards(code, snap, earlier=earlier) == [True, True, True]
+
+
+@pytest.mark.parametrize("command", [
+    "os.system('curl -X DELETE https://api.example.com/items/' + p9)",
+    "subprocess.run(['kubectl', 'delete', 'pod', p9])",
+    "os.system('sed -i s/a/b/ ' + p9)",
+    "subprocess.run(['python', p9])",
+], ids=["a-remote-delete", "kubectl-delete", "sed-i", "python"])
+@pytest.mark.parametrize("project", ["no-snapshot", "an-empty-folder"])
+def test_a_command_past_the_depth_limit_stops_where_the_project_holds_no_file(command, project, tmp_path, monkeypatch):
+    """With no file to hold, the file finder reads nothing, and the walk of
+    what a cell launches stops on such a command too (`_shell_commands`):
+    in the cell's own code, the card quoting the call it stopped at, and,
+    as code the check stopped reading, for every later cell, as where
+    files are there."""
+    monkeypatch.chdir(tmp_path)
+    snapshots = () if project == "no-snapshot" else (
+        snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60),)
+    code = "import os, subprocess\n" + _nine_names("x") + command
+    writes = find_cell_writes(code=code, earlier=(), snapshots=snapshots)
+    assert writes.stopped and [c.code for c in writes.causes if c.kind == "limit"] == [command]
+    defined = "import os, subprocess\n" + _nine_names("x") + "def go():\n    " + command
+    assert find_cell_writes(code="go()", earlier=_earlier([defined]), snapshots=snapshots).stopped
+    later = find_cell_writes(code="print(1)", earlier=_earlier([code]), snapshots=snapshots)
+    assert [(c.kind, c.in_earlier, c.code) for c in later.causes] == [("limit", True, command)]
+
+
+# The ways a later cell may reach a function an earlier cell defined: what
+# runs it and what the earlier cell defines beside it for that.
+_REACHES_GO = {
+    "a-call": ("", "go()"),
+    "an-alias": ("", "g = go\ng()"),
+    "a-thread-target": ("", "import threading\nt = threading.Thread(target=go)\nt.start()\nt.join()"),
+    "a-key-function": ("", "sorted([1, 2], key=lambda _: go())"),
+    "an-executor": ("", "import concurrent.futures as cf\ncf.ThreadPoolExecutor().submit(go).result()"),
+    "a-partial": ("", "import functools\nfunctools.partial(go)()"),
+    "a-decorator": ("def deco(f):\n    go()\n    return f\n", "@deco\ndef h():\n    pass"),
+    "a-context-manager": ("class C:\n    def __enter__(self):\n        go()\n    def __exit__(self, *a):\n        pass\n",
+                          "with C():\n    pass"),
+    "a-property": ("class K:\n    @property\n    def x(self):\n        go()\n        return 1\n", "K().x"),
+    "a-thread-subclass": ("import threading\nclass T(threading.Thread):\n    def run(self):\n        go()\n",
+                          "t = T()\nt.start()\nt.join()"),
+    "getattr-of-main": ("", "import __main__\ngetattr(__main__, 'go')()"),
+    "globals-by-name": ("", "globals()['go']()"),
+    "nothing-runs-it": ("", "print(1)"),
+}
+
+
+@pytest.mark.parametrize("reach", list(_REACHES_GO), ids=list(_REACHES_GO))
+@pytest.mark.parametrize("command", [
+    "os.system('curl -X DELETE ' + p9)", "os.system('sed -i s/a/b/ ' + p9)", "subprocess.run(['python', p9])",
+], ids=["a-remote-delete", "sed-i", "python"])
+def test_a_shell_command_past_the_depth_limit_in_an_earlier_function_stops_every_later_cell(command, reach, snap):
+    """A shell command past the depth limit on its words that does more than
+    one plain read, delete or move is code the check stopped reading
+    wherever it sits in an earlier cell, in a function nothing has run
+    among them, so every later cell stops under every value whatever
+    reaches that function, or nothing does: the card gives the earlier
+    step's line and quotes the command, and never the line for a stop in
+    the cell's own code."""
+    beside, code = _REACHES_GO[reach]
+    earlier = [f"{_NINE_TO_A_URL}import os, subprocess\ndef go():\n    {command}\n{beside}"]
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert writes.stopped and [(c.kind, c.in_earlier, c.code) for c in writes.causes[:1]] == [("limit", True, command)]
+    assert not any(c.kind == "limit" and not c.in_earlier for c in writes.causes)
+    assert _cards(code, snap, earlier=earlier) == [True, True, True]
+
+
+def test_a_shell_command_past_the_depth_limit_through_a_parameter_stops_the_cell_that_hands_it(snap):
+    """A function an earlier cell defined may read a command's word past the
+    depth limit only through what the checked cell hands it: then the
+    checked cell stops, with the line for a stop in its own code and the
+    quote of the command in the function."""
+    earlier = ["import os\ndef go(url):\n    os.system('curl -X DELETE ' + url)"]
+    writes = find_cell_writes(code=f"{_NINE_TO_A_URL}go(p9)", earlier=_earlier(earlier), snapshots=(snap,))
+    assert [(c.kind, c.in_earlier, c.code) for c in writes.causes] == [
+        ("limit", False, "os.system('curl -X DELETE ' + url)")]
+    assert _cards(f"{_NINE_TO_A_URL}go(p9)", snap, earlier=earlier) == [True, True, True]
+
+
+@pytest.mark.parametrize("source", [
+    ("OUT = 'new.csv'\ndef configure(path):\n    global OUT\n    OUT = path\n", "OUT"),
+    ("cfg = {'o': 'new.csv'}\ndef change():\n    cfg['o'] = 'stock.csv'\n", "cfg['o']"),
+], ids=["a-rebound-name", "a-dict-entry-a-cell-may-change"])
+@pytest.mark.parametrize("command, stops", [
+    ("os.system(f'sed -i s/a/b/ {p9}')", True),
+    ("os.system('curl -X DELETE https://api.example.com/items/' + p9)", True),
+    ("subprocess.run(['python', p9])", True),
+    ("os.system('cat ' + p9)", False),
+], ids=["sed-i", "a-remote-delete", "python", "cat"])
+def test_a_command_past_the_depth_limit_through_a_value_the_check_cant_place_stops(source, command, stops, snap):
+    """Read on past the depth limit, a word a name code may rebind or a dict
+    entry a cell may change gives is still a placeholder, as within the
+    limit: the cut may hide its value, so the command stops the check
+    (`_shell_commands`), unless it is one plain read, as `cat` is."""
+    setup, value = source
+    code = "import os, subprocess\n" + setup + f"p0 = {value}\n" + "".join(
+        f"p{i} = p{i - 1}\n" for i in range(1, 10)) + command
+    assert find_cell_writes(code=code, earlier=(), snapshots=(snap,)).stopped is stops
+
+
+@pytest.mark.parametrize("command, value, later, stops", [
+    ("['cp', 'job.txt', {p}]", "job.py", "import job", True),
+    ("['git', 'clone', 'https://example.com/r.git', {p}]", "lib", "import sys\nsys.path.append('lib')\nimport thing",
+     True),
+    ("'cp job.txt ' + {p}, shell=True", "job.py", "import job", True),
+    ("['mv', 'job.txt', {p}]", "job.py", "import job", False),
+    ("'mv job.txt ' + {p}, shell=True", "job.py", "import job", False),
+], ids=["a-copy-onto-a-module", "a-clone-into-a-folder", "a-copy-onto-a-module-through-a-shell", "a-move-onto-a-module",
+        "a-move-onto-a-module-through-a-shell"])
+def test_a_command_word_past_the_depth_limit_that_writes_a_module_keeps_a_later_imports_card(
+    command, value, later, stops, snap,
+):
+    """A later cell's import of a module an earlier command wrote, or of one
+    from a folder it cloned into, gets a card (`_written_modules`). Where
+    the command's word is read past the depth limit, a copy or a clone is
+    code the check stopped reading, so the import stops, under every value.
+    A move is read on past the limit, by the module walk too
+    (`_shell_commands`), even where the name is bound in another cell than
+    the command's, so the later import gets the card its twin with the
+    word written out gets, and nothing stops."""
+    code = "import subprocess\nsubprocess.run(" + command + ")"
+    flat = find_cell_writes(code=later, earlier=_earlier([code.format(p=repr(value))]), snapshots=(snap,))
+    deep = find_cell_writes(code=later, earlier=_earlier([_nine_names(value), code.format(p="p9")]),
+                            snapshots=(snap,))
+    assert flat.needs_approval() and not flat.stopped
+    assert deep.needs_approval() and deep.stopped is stops
+    assert deep.cause_kinds == (("limit", *flat.cause_kinds) if stops else flat.cause_kinds)
+
+
+@pytest.mark.parametrize("earlier", [
+    [_nine_names("job.py"), "import subprocess\nsubprocess.run(['mv', 'job.txt', p9])"],
+    ["P = 'job.py'", "import subprocess\nsubprocess.run(['cp', 'job.txt', P])"],
+    ["P = 'job.py'", "import os\nos.system(f'cp job.txt {P}')"],
+], ids=["a-move-past-the-depth-limit", "a-name-another-cell-binds", "a-name-in-a-script"])
+def test_a_module_a_command_writes_through_a_name_another_cell_binds_holds_a_later_import(earlier, tmp_path,
+                                                                                          monkeypatch):
+    """A program's word may come from another cell than the command's, past
+    the depth limit or not: a later import of the module the copy or move
+    overwrote runs code the check didn't read, as after the twin with the
+    word written out, and nothing stops."""
+    (tmp_path / "job.py").write_text("x = 1\n")
+    (tmp_path / "job.txt").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    project = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    assert not find_cell_writes(code="import job", earlier=_earlier(()), snapshots=(project,)).needs_approval()
+    flat = find_cell_writes(code="import job", snapshots=(project,),
+                            earlier=_earlier(["import subprocess\nsubprocess.run(['cp', 'job.txt', 'job.py'])"]))
+    later = find_cell_writes(code="import job", earlier=_earlier(earlier), snapshots=(project,))
+    assert flat.needs_approval() and later.needs_approval() and later.cause_kinds == flat.cause_kinds
+    assert not later.stopped
+
+
+def test_a_command_past_the_depth_limit_that_only_reads_adds_no_stop_beside_one_python_runs(snap):
+    """The check stops only where a command the depth limit cut short does
+    something (`_shell_commands`, `_does_something`): the module Python runs
+    within the limit gets its own card, and the listing past it, which its
+    twin with the word written out holds nothing for, adds no stop."""
+    code = ("import subprocess, random\ncmd = ['python', '-m', 'job']\nif random.random() > 0.5:\n"
+            "    cmd = ['ls', p9]\nsubprocess.run(cmd)")
+    writes = find_cell_writes(code=code, earlier=_earlier([_nine_names("stock.csv")]), snapshots=(snap,))
+    assert writes.needs_approval()
+    assert not writes.stopped
+
+
+# An errored cell that failed on its first line, before it bound `name`
+# again: only the reading of errored cells as maybe stopped anywhere gives
+# `name` the value 'stock.csv'.
+_FAILED_FIRST = "df0 = pd.read_csv('missing.csv')\nname = 'new.csv'"
+
+
+@pytest.mark.parametrize("before", ["stock.csv", "other.csv"], ids=["a-file-there", "a-new-file"])
+@pytest.mark.parametrize("stopped_at", [1, None], ids=["first-line", "line-not-given"])
+@pytest.mark.parametrize("code", [
+    "pd.DataFrame().to_csv({p}name)",
+    "open({p}name, 'w').write('x')",
+    "open({p}name, 'a').write('x')",
+], ids=["to-csv", "open-for-writing", "append"])
+def test_a_path_past_the_depth_limit_in_the_reading_of_an_errored_cell_gets_the_card_its_shallow_twin_gets(
+    code, stopped_at, before, daily,
+):
+    """The reading of errored cells as maybe stopped anywhere reads on past
+    the path depth limit too (`_FileFinder.decided`), so a deep path gets
+    the decision its shallow twin gets there as well."""
+    earlier = [*_DAILY, f"name = {before!r}", _FAILED_FIRST]
+    errored, lines = [False] * 5 + [True], [None] * 5 + [stopped_at]
+    deep = find_cell_writes(code=code.format(p="DAILY / "), snapshots=(daily,),
+                            earlier=_earlier(earlier, errored=errored, stopped_at=lines))
+    flat = find_cell_writes(code=code.format(p=_FLAT), snapshots=(daily,),
+                            earlier=_earlier(earlier, errored=errored, stopped_at=lines))
+    assert deep.needs_approval() is flat.needs_approval()
+    assert flat.needs_approval() is (before == "stock.csv" and "'a'" not in code)
+
+
+def test_a_delete_through_a_path_past_the_depth_limit_holds_whole_and_stops_nothing(daily):
+    """A delete through a path the check can't place holds whole, and that
+    holds the file the read past the limit finds too (`_covers`): no stop."""
+    writes = find_cell_writes(code="(DAILY / 'stock.csv').unlink()", earlier=_earlier(_DAILY), snapshots=(daily,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("delete", ())]
+    assert not writes.stopped and not writes.unchecked
+
+
+@pytest.mark.parametrize("where", ["project", "shared"])
+def test_a_delete_past_the_depth_limit_onto_a_whole_root_is_a_stopped_read(where, tmp_path, monkeypatch):
+    """Read within the depth limit, the path is a file in a folder of the
+    project or of the shared folder, which the delete holds. Read on past
+    the limit, it is that root itself, which its twin with the word written
+    out holds whole. Those files don't cover the root (`_covers`), so the
+    check stops, and the card names none of them, only the code that picks
+    what it deletes (`_FileFinder.decided`), as they read as all it may
+    delete."""
+    root, shared = tmp_path / "proj", tmp_path / "shared"
+    for path in (root / "docs" / "a.pdf", shared / "team" / "plan.docx"):
+        path.parent.mkdir(parents=True)
+        path.write_text("x")
+    monkeypatch.chdir(root)
+    taken_at = time.time() + 60
+    snapshots = (snapshot_project_files(root=root, label="project", taken_at=taken_at),
+                 snapshot_project_files(root=shared, label="shared", taken_at=taken_at))
+    folder = "docs" if where == "project" else str(shared / "team")
+    code = f"import shutil, os\nshutil.rmtree(os.path.join({folder!r}, {{p}}))"
+    flat = find_cell_writes(code=code.format(p="'..'"), earlier=_earlier(()), snapshots=snapshots)
+    deep = find_cell_writes(code=code.format(p="p9"), earlier=_earlier([_nine_names("..")]), snapshots=snapshots)
+    assert [(f.whole_project, f.whole_shared) for f in flat.held_files] == [(where == "project", where == "shared")]
+    assert deep.stopped
+    assert [(f.action, f.paths, f.whole_project, f.whole_shared) for f in deep.held_files] == [
+        ("delete", (), False, False)]
+
+
+def test_an_overwrite_past_the_depth_limit_after_a_change_the_cell_made_first_is_a_stopped_read(snap):
+    """`_FileFinder.decided` hands the deep twin of a node what the cell
+    changed before that node, and reads only what the twin finds past it:
+    an append first doesn't hide the overwrite read on past the limit."""
+    code = "open('stock.csv', 'a').write('x')\nopen(p9, 'w').write('x')"
+    writes = find_cell_writes(code=code, earlier=_earlier([_nine_names("stock.csv")]), snapshots=(snap,))
+    assert writes.stopped
+
+
+def test_an_overwrite_through_a_path_within_the_depth_limit_is_read(tmp_path, monkeypatch):
+    (tmp_path / "data" / "out").mkdir(parents=True)
+    (tmp_path / "data" / "out" / "stock.csv").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    earlier = ["from pathlib import Path\nimport pandas as pd\nPROJECT = Path('.')", "DATA = PROJECT / 'data'"]
+    writes = find_cell_writes(code="pd.DataFrame().to_csv(DATA / 'out' / 'stock.csv')", earlier=_earlier(earlier),
+                              snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("overwrite", ("data/out/stock.csv",))]
+    assert not writes.unchecked
+
+
+def test_a_path_past_what_the_reading_of_an_errored_cell_keeps_is_a_stopped_read(snap):
+    """An errored cell that may have stopped anywhere gives P each value it
+    binds or the one before it: past `_PATH_LIMIT` of them that reading gives
+    up, and the overwrite of stock.csv it would hold stops the read."""
+    def rebinds(n: int) -> str:
+        return "\n".join(f"P = 'a{i}.csv'" for i in range(n))
+
+    held = find_cell_writes(code="open(P, 'w').write('x')", snapshots=(snap,),
+                            earlier=_earlier(["P = 'stock.csv'", rebinds(3)], errored=(False, True)))
+    assert [(f.action, f.paths) for f in held.held_files] == [("overwrite", ("stock.csv",))]
+    past = find_cell_writes(code="open(P, 'w').write('x')", snapshots=(snap,),
+                            earlier=_earlier(["P = 'stock.csv'", rebinds(300)], errored=(False, True)))
+    assert past.unchecked and past.stopped and not past.unread_here
+    # Given up on once, a name stays given up on where a later write reads it.
+    again = find_cell_writes(code="Q = P\nopen(Q, 'a').write('x')\nopen(Q, 'w').write('x')", snapshots=(snap,),
+                             earlier=_earlier(["P = 'stock.csv'", rebinds(300)], errored=(False, True)))
+    assert again.stopped
+    # A copy onto it lands on what the reading gave up on too.
+    copied = find_cell_writes(code="import shutil\nshutil.copy('summary.md', P)", snapshots=(snap,),
+                              earlier=_earlier(["P = 'stock.csv'", rebinds(300)], errored=(False, True)))
+    assert copied.unchecked and copied.stopped
+    # The files the reading still holds stay on the card beside the stop.
+    both = find_cell_writes(code="open(P, 'w').write('x')\nopen(Q, 'w').write('x')", snapshots=(snap,),
+                            earlier=_earlier(["P = 'stock.csv'\nQ = 'report.pdf'", rebinds(300) + "\nQ = 'new.txt'"],
+                                             errored=(False, True)))
+    assert both.stopped and [(f.action, f.paths) for f in both.held_files] == [("overwrite", ("report.pdf",))]
+
+
+@pytest.mark.parametrize("fixture, earlier, errored", [
+    ("daily", [*_DAILY, "pd.DataFrame().to_csv(DAILY / 'stock.csv')"], ()),
+    ("snap", ["import os, random\nP = 'output'\n" + "".join(
+        f"if random.random() < .5:\n    P += {part!r}\n" for part in ["/old.png", *(f"_v{i}" for i in range(8))])
+              + "open(P, 'w').write('x')"], ()),
+    ("snap", ["P = 'stock.csv'", "\n".join(f"P = 'a{i}.csv'" for i in range(300)), "open(P, 'w').write('x')"],
+     (False, True, False)),
+], ids=["path-past-the-depth-limit", "path-past-what-one-value-keeps", "reading-of-an-errored-cell-gave-up"])
+def test_a_stop_that_left_only_a_value_unplaced_stops_no_later_cell(fixture, earlier, errored, request):
+    """A limit that left a value unplaced, not code unread, stopped only the
+    cell whose write lands on it: a later cell runs no code it left unread."""
+    snapshot = request.getfixturevalue(fixture)
+    own = find_cell_writes(code=earlier[-1], earlier=_earlier(earlier[:-1], errored=errored[:-1]),
+                           snapshots=(snapshot,))
+    assert own.stopped
+    later = find_cell_writes(code="print(1)", earlier=_earlier(earlier, errored=errored), snapshots=(snapshot,))
+    assert not later.unchecked
+
+
+@pytest.mark.parametrize("code, value", [
+    ("import subprocess\nsubprocess.run(['rm', {p}])", "new.csv"),
+    ("import subprocess\nsubprocess.run(['mv', 'job.txt', {p}])", "new.csv"),
+    ("import subprocess\nsubprocess.run(['cat', {p}])", "job.py"),
+    ("open({p}, 'w').write('x')", "lib/mod.py"),
+], ids=["rm", "mv-onto", "cat-a-module", "python-write-of-a-module"])
+def test_a_later_cell_gets_nothing_from_an_earlier_cells_value_stop(code, value, snap):
+    """A path past the depth limit, or the word of one plain command that
+    only reads, deletes or moves, is a value the check left unplaced, not
+    code it left unread: the module and hook walks read it on past the
+    limit (`_shell_commands`), so a later cell that only reads gets no card
+    from it, and never the line for a stop in its own code."""
+    earlier = [_nine_names(value), code.format(p="p9")]
+    later = find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,))
+    assert not later.needs_approval() and not later.stopped
+
+
+@pytest.mark.parametrize("earlier, code, quote", [
+    ([_nine_names("stock.csv")], "open(p9, 'w').write('x')", "open(p9, 'w').write('x')"),
+    ([_nine_names("stock.csv")], "import subprocess\nsubprocess.run(['sed', '-i', 's/a/b/', p9])",
+     "subprocess.run(['sed', '-i', 's/a/b/', p9])"),
+    ([_nine_names("rm stock.csv")], "import os\nos.system(p9)", "os.system(p9)"),
+    ([], _VARIANTS + "open(P, 'w').write('x')", "open(P, 'w').write('x')"),
+], ids=["python-write-past-the-depth-limit", "shell-write-past-the-depth-limit", "shell-delete-past-the-depth-limit",
+        "a-path-past-the-path-cap"])
+def test_a_value_stop_quotes_the_call_it_stopped_at(earlier, code, quote, snap):
+    """Where a limit left the value a write lands on unplaced, the card
+    quotes the call it stopped at under "The check stopped at:"
+    (`_FileFinder.stopped_at`), as for code a limit left unread."""
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert writes.stopped
+    [limit] = [c for c in writes.causes if c.kind == "limit"]
+    assert limit.code == quote and not limit.in_earlier
+    assert "The check stopped at:" in _card(code, snap, earlier=earlier)
+
+
+def test_a_stop_quote_and_the_steps_code_keep_no_token_after_a_header_name(snap):
+    """The card's quotes and the step's code go through `scrub_output`, so
+    a token after a header name such as `X-Api-Key:` in a command the
+    check stopped at shows as a marker, in the step's own card and in a
+    later step's."""
+    token = "ghp_" + "aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xY2zA4"
+    command = f"os.system('curl -H \"X-Api-Key: {token}\" -X DELETE ' + p9)"
+    earlier = [_nine_names("https://api.example.com/items/1")]
+    code = f"import os\n{command}"
+    for card in (_card(code, snap, earlier=earlier), _card("print(1)", snap, earlier=[*earlier, code])):
+        assert "The check stopped at:" in card and "X-Api-Key: [REDACTED_TOKEN]" in card and token not in card
+
+
+def test_a_dict_entry_read_that_gives_up_is_a_stopped_read(snap):
+    """A read again with a dict display's entry may place the write on a
+    file the turn began with; where it gives up past `_PATH_LIMIT` paths,
+    the read stops, as its twin within the limit holds output/old.png."""
+    def cell(branches: int) -> str:
+        grows = "".join(f"if random.random() < .5:\n    P += {part!r}\n"
+                        for part in ["old.png", *(f"_v{i}" for i in range(branches - 1))])
+        return f"import random\ncfg = {{'d': 'output/'}}\nP = ''\n{grows}open(cfg['d'] + P, 'w').write('x')"
+
+    assert find_cell_writes(code=cell(9), earlier=(), snapshots=(snap,)).stopped
+    within = find_cell_writes(code=cell(8), earlier=(), snapshots=(snap,))
+    assert not within.unchecked and any("output/old.png" in f.paths for f in within.held_files)
+
+
+def test_a_read_outside_the_paths_a_write_lands_on_is_never_left_given_up_on():
+    """Only a read of the paths a write lands on gives up on a value past
+    `_PATH_LIMIT` paths (`_Reader.one_value`): any other read, as of the
+    folder a chdir() reaches, reads the next value afresh."""
+    from anton.core.utils import write_check
+
+    code = _grown(9, "os.chdir(P)\nprint('x')")
+    cell = write_check._Cell(write_check._parse(code), code, 0)
+    reader = write_check._Reader([cell], current=cell)
+    target = next(n for n in ast.walk(cell.tree) if isinstance(n, ast.Name) and n.id == "P"
+                  and isinstance(cell.parents.get(n), ast.Call))
+    text = next(n for n in ast.walk(cell.tree) if isinstance(n, ast.Constant) and n.value == "x")
+    assert isinstance(reader.paths(target, cell=cell), write_check._Unknown)
+    assert reader.paths(text, cell=cell) == ["x"]
+    with reader.one_value():
+        reader.paths(target, cell=cell)
+        assert reader.past_limit
+    assert not reader.past_limit
+    # A read that gave up outside one doesn't carry into the next value read.
+    reader.past_limit = True
+    with reader.one_value():
+        assert not reader.past_limit
+
+
+def _grown(branches: int, use: str) -> str:
+    """A cell that builds P on `output` under `branches` ifs, each of which
+    may add a part, the first `/old.png`, then uses P."""
+    parts = ["/old.png", *(f"_v{i}" for i in range(branches - 1))]
+    grows = "".join(f"if random.random() < .5:\n    P += {part!r}\n" for part in parts)
+    return f"import os, random\nP = 'output'\n{grows}{use}"
+
+
+@pytest.mark.parametrize("use, stops", [
+    ("open(P, 'w').write('x')", True),
+    ("os.remove(P)", True),
+    ("os.rename(P, 'kept.png')", True),
+    ("open(P, 'a').write('x')", False),
+    ("print(open(P).read())", False),
+    ("print(os.path.exists(P))", False),
+], ids=["overwrite", "delete", "move", "append", "read", "exists"])
+def test_a_path_built_on_past_what_one_value_keeps_is_a_stopped_read(use, stops, snap):
+    """Past `_PATH_LIMIT` paths built on one path, a reading gives up on the
+    value: an overwrite, delete or move it lands on may be output/old.png,
+    which its twin within the limit holds, so the read stops; an append, a
+    read or a look stops nothing."""
+    past = find_cell_writes(code=_grown(9, use), earlier=(), snapshots=(snap,))
+    assert past.stopped is stops and past.unchecked is stops and not past.unread_here
+    within = find_cell_writes(code=_grown(8, use), earlier=(), snapshots=(snap,))
+    assert not within.unchecked
+    assert any("output/old.png" in f.paths for f in within.held_files) is stops
+
+
+@pytest.mark.parametrize("bindings, writes", [(5, 900), (20, 210), (60, 80)])
+def test_the_reading_of_an_errored_cell_gives_up_one_value_at_a_time(bindings, writes, snap):
+    """The reading of an errored cell as maybe stopped anywhere reads each
+    value within its own budget (`_WIDE_BINDINGS`), so a cell of many
+    writes through a name the errored cell binds a few ways is read whole,
+    and gets no card for files that aren't there."""
+    errored = "\n".join(f"if x == {i}:\n    out = 'r{i}.csv'" for i in range(bindings)) + "\n1 / 0"
+    code = "import pandas as pd\n" + "\n".join("pd.DataFrame().to_csv(out)" for _ in range(writes))
+    result = find_cell_writes(code=code, snapshots=(snap,), earlier=_earlier(["x = 3", errored], errored=(False, True)))
+    assert not result.needs_approval()
+
+
+def test_an_append_the_reading_of_an_errored_cell_gave_up_on_stops_nothing(snap):
+    """An append is never held, so a value given up on that it lands on
+    hides nothing the card would hold."""
+    rebinds = "\n".join(f"P = 'a{i}.csv'" for i in range(300))
+    writes = find_cell_writes(code="open(P, 'a').write('x')", snapshots=(snap,),
+                              earlier=_earlier(["P = 'stock.csv'", rebinds], errored=(False, True)))
+    assert not writes.needs_approval()
+
+
+@pytest.mark.parametrize("earlier, code", [
+    ([], "import pandas as pd\ncfg = {'out': 'stock.csv', 'n': 3}\npd.DataFrame().to_csv(cfg['out'])"),
+    (["cfg = {'out': 'summary.md', 'out': 'stock.csv'}", "print(cfg, 'out' in cfg, cfg.get('out'))"],
+     "open(cfg['out'], 'w').write('x')"),
+    ([], "def save(df):\n    paths = {'out': 'stock.csv'}\n    df.to_csv(paths['out'])\n"
+         "import pandas as pd\nsave(pd.DataFrame())"),
+    (["cfg = {'outs': ('stock.csv',)}"], "import pandas as pd\nfor t in cfg['outs']:\n    pd.DataFrame().to_csv(t)"),
+    (["cfg: dict = {'out': 'stock.csv'}"], "import pandas as pd\npd.DataFrame().to_csv(cfg['out'])"),
+    (["cfg = {'out': 'stock.csv'}"], "from pathlib import Path\nPath('fresh.txt').rename(cfg['out'])"),
+    (["cfg = {'out': 'stock.csv'}"], "from pathlib import Path\nPath('fresh.txt').replace(cfg['out'])"),
+    (["cfg = {'out': 'stock.csv'}"], "import os\nos.rename('fresh.txt', cfg['out'])"),
+    (["cfg = {'out': 'stock.csv'}"], "import shutil\nshutil.copy('fresh.txt', cfg['out'])"),
+    (["cfg = {'out': 'stock.csv'}"], "import shutil\nshutil.move('fresh.txt', cfg['out'])"),
+    (["cfg = {'out': 'stock.csv'}"], "from pathlib import Path\nhow = 'rename'\ngetattr(Path('fresh.txt'), how)(cfg['out'])"),
+], ids=["to-csv", "last-entry-of-a-key-looked-at", "in-a-function", "a-tuple-entry", "an-annotated-display",
+        "a-path-renamed-onto-it", "a-path-replaced-onto-it", "a-file-renamed-onto-it", "a-file-copied-onto-it",
+        "a-file-moved-onto-it", "a-path-method-looked-up-by-name"])
+def test_a_path_read_from_a_dict_display_by_a_literal_key_is_held(earlier, code, snap):
+    """Where an overwrite lands, a copy's or a move's destination among
+    them, however it is spelled, an entry places the path a write onto a
+    file the turn began with lands on (`_FileFinder.paths`)."""
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("overwrite", ("stock.csv",))]
+
+
+@pytest.mark.parametrize("earlier", [
+    ["from pathlib import Path\ncfg = {'outs': Path('.').glob('*.csv')}"],
+    ["name = 'stock'\ncfg = {'outs': (f'{name}.csv', 'summary.md')}"],
+], ids=["an-entry-a-method-gives", "a-tuple-of-an-f-string-with-a-name-in-it"])
+def test_a_dict_entry_that_isnt_a_literal_text_or_a_path_places_no_overwrite(earlier, snap):
+    """Only an entry that builds a literal, text or a path, which nothing
+    changes in place, places an overwrite (`_Reader._unchanging_entry`): a
+    method's result, as a glob's, or a tuple that holds an f-string with a
+    name in it, places none, so the overwrite counts as a new file, as it
+    does with no entry read."""
+    writes = find_cell_writes(code="for t in cfg['outs']:\n    open(t, 'w').write('x')", earlier=_earlier(earlier),
+                              snapshots=(snap,))
+    assert writes.held_files == ()
+
+
+def test_a_dict_entry_read_through_more_names_than_the_check_follows_places_no_overwrite(snap):
+    """An entry is read through at most `_PARAM_DEPTH` names
+    (`_Reader._unchanging_entry`): past them it places none, so the
+    overwrite counts as a new file, as with no entry read, and no read
+    stops."""
+    earlier = ["a0 = 'stock.csv'\n" + "".join(f"a{i} = a{i - 1}\n" for i in range(1, 12)) + "cfg = {'out': a11}"]
+    writes = find_cell_writes(code="import pandas as pd\npd.DataFrame().to_csv(cfg['out'])", earlier=_earlier(earlier),
+                              snapshots=(snap,))
+    assert not writes.needs_approval()
+
+
+@pytest.mark.parametrize("earlier, path", [
+    (["OUT = 'stock.csv'\ncfg = {'out': OUT}"], "stock.csv"),
+    (["OUT = 'stock.csv'\ncfg = {'out': OUT}\nOUT = 'new.csv'"], "stock.csv"),
+    (["from pathlib import Path\ncfg = {'out': Path('output') / 'old.png'}"], "output/old.png"),
+    (["import os\nD = 'output'\ncfg = {'out': os.path.join(D, 'old.png')}"], "output/old.png"),
+    (["D = 'output'\ncfg = {'out': f'{D}/old.png'}"], "output/old.png"),
+    (["D = 'output/'\ncfg = {'out': D + 'old.png'}"], "output/old.png"),
+    (["from pathlib import Path\ncfg = {'out': Path('output').joinpath('old.png')}"], "output/old.png"),
+    (["from pathlib import Path\ncfg = {'out': Path('output/old.txt').with_suffix('.png')}"], "output/old.png"),
+    (["from pathlib import Path\ncfg = {'out': Path('output/new.png').with_name('old.png')}"], "output/old.png"),
+    (["from pathlib import Path\ncfg = {'out': Path('output/new.png').with_stem('old')}"], "output/old.png"),
+], ids=["a-name-of-text", "a-name-bound-again-after", "a-path-built-with-a-slash", "a-joined-path", "an-f-string",
+        "text-added-to-text", "a-path-joinpath", "a-path-with-suffix", "a-path-with-name", "a-path-with-stem"])
+def test_a_dict_entry_built_as_text_or_a_path_is_held(earlier, path, snap):
+    """An entry that builds text or a path, which nothing changes in place,
+    places the write as a literal entry does, read where the dict is built."""
+    writes = find_cell_writes(code="import pandas as pd\npd.DataFrame().to_csv(cfg['out'])", earlier=_earlier(earlier),
+                              snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("overwrite", (path,))]
+
+
+# Each change below points cfg['f'] from report.pdf to stock.csv where a
+# read of the dict display alone would still name report.pdf.
+@pytest.mark.parametrize("earlier, here", [
+    (["cfg['f'] = 'stock.csv'"], ""),
+    (["cfg.update(f='stock.csv')"], ""),
+    (["cfg.setdefault('g', 'x')"], ""),
+    (["cfg |= {'f': 'stock.csv'}"], ""),
+    (["del cfg['f']"], ""),
+    (["fill(cfg)"], ""),
+    (["c = cfg\nc['f'] = 'stock.csv'"], ""),
+    (["box = [cfg]\nbox[0]['f'] = 'stock.csv'"], ""),
+    (["fix = cfg.update\nfix(f='stock.csv')"], ""),
+    (["def f():\n    global cfg\n    cfg = {'f': 'stock.csv'}", "f()"], ""),
+    ([], "def f():\n    global cfg\n    cfg = {'f': 'stock.csv'}\nf()\n"),
+    (["def o():\n    cfg = 1\n    def i():\n        nonlocal cfg\n    i()\no()"], ""),
+    (["for cfg in [{'f': 'stock.csv'}]:\n    pass"], ""),
+    (["import contextlib\nwith contextlib.nullcontext({'f': 'stock.csv'}) as cfg:\n    pass"], ""),
+    (["try:\n    1 / 0\nexcept ZeroDivisionError as cfg:\n    pass"], ""),
+    (["from json import decoder as cfg"], ""),
+    (["(cfg := {'f': 'stock.csv'})"], ""),
+    (["def g(cfg):\n    cfg['f'] = 'stock.csv'"], ""),
+    (["from os.path import *"], ""),
+    (["globals()['cfg']['f'] = 'stock.csv'"], ""),
+    (["ns = globals()\nns['cfg']['f'] = 'stock.csv'"], ""),
+    (["globals().update(cfg={'f': 'stock.csv'})"], ""),
+    (["vars()['cfg']['f'] = 'stock.csv'"], ""),
+    (["import __main__\n__main__.cfg['f'] = 'stock.csv'"], ""),
+    (["import sys\nsys.modules['__main__'].cfg['f'] = 'stock.csv'"], ""),
+    (["import sys\nsetattr(sys.modules['__main__'], 'cfg', {'f': 'stock.csv'})"], ""),
+    (["import sys\nsys._getframe().f_globals['cfg']['f'] = 'stock.csv'"], ""),
+    (["exec(\"cfg['f'] = 'stock.csv'\")"], ""),
+    (["exec(open('job.txt').read())"], ""),
+    (["base = {'f': 'stock.csv'}", "cfg = {'f': 'report.pdf', **base}"], ""),
+    (["match {'f': 'stock.csv'}:\n    case cfg:\n        pass"], ""),
+    (["__import__('__main__').cfg['f'] = 'stock.csv'"], ""),
+    (["import importlib\nimportlib.import_module('__main__').cfg['f'] = 'stock.csv'"], ""),
+    (["from importlib import import_module\nimport_module('__main__').cfg['f'] = 'stock.csv'"], ""),
+    (["from __main__ import cfg as c\nc['f'] = 'stock.csv'"], ""),
+    (["f = lambda: 0\ng = f.__globals__\ng['cfg']['f'] = 'stock.csv'"], ""),
+    (["import inspect\ninspect.currentframe().f_locals['cfg']['f'] = 'stock.csv'"], ""),
+    (["import inspect\ninspect.getmodule(lambda: 0).cfg['f'] = 'stock.csv'"], ""),
+    (["import inspect\nsetattr(inspect.getmodule(lambda: 0), 'cfg', {'f': 'stock.csv'})"], ""),
+    (["import inspect\ninspect.getmodule(lambda: 0).__dict__['cfg']['f'] = 'stock.csv'"], ""),
+    (["import operator, sys\noperator.attrgetter('f_globals')(sys._getframe())['cfg']['f'] = 'stock.csv'"], ""),
+    (["import gc\nfor o in gc.get_objects():\n    if type(o) is dict and o.get('f') == 'report.pdf':\n"
+      "        o['f'] = 'stock.csv'"], ""),
+    (["match {'f': 'stock.csv'}:\n    case {**cfg}:\n        pass"], ""),
+    (["try:\n    1 / 0\nexcept ZeroDivisionError as e:\n    e.__traceback__.tb_frame.f_globals['cfg']['f'] = 'stock.csv'"], ""),
+    (["try:\n    1 / 0\nexcept ZeroDivisionError as e:\n    e.__traceback__.tb_frame.f_locals['cfg']['f'] = 'stock.csv'"], ""),
+    (["import gc\nfor o in gc.get_referrers('report.pdf'):\n    if type(o) is dict:\n        o['f'] = 'stock.csv'"], ""),
+    (["from sys import modules\nmodules[__name__].cfg['f'] = 'stock.csv'"], ""),
+    (["def cfg():\n    return {'f': 'stock.csv'}"], ""),
+    (["class cfg:\n    pass"], ""),
+], ids=["entry-stored", "updated", "setdefault", "merged", "entry-deleted", "handed-on", "changed-through-a-name",
+        "changed-through-a-list", "method-taken-as-a-value", "rebound-in-a-function", "rebound-in-a-function-here",
+        "declared-nonlocal", "loop-target", "with-target", "except-target", "imported-as", "walrus", "parameter",
+        "star-import", "through-globals", "through-an-alias-of-globals", "globals-updated", "through-vars",
+        "through-main", "through-sys-modules", "setattr-on-main", "through-a-frame", "literal-exec", "unread-exec",
+        "spread", "match-capture", "through-dunder-import-of-main", "through-import-module-of-main",
+        "through-import-module-by-its-name", "imported-from-main", "through-a-functions-globals",
+        "through-a-frames-locals", "through-getmodule", "setattr-on-getmodule", "through-getmodules-dict",
+        "through-attrgetter", "through-every-live-object", "match-rest", "through-a-traceback-frames-globals",
+        "through-a-traceback-frames-locals", "through-gc-referrers", "through-modules-imported-from-sys",
+        "redefined-as-a-function", "redefined-as-a-class"])
+def test_a_path_from_a_dict_the_cells_may_change_stays_one_the_check_cant_place(earlier, here, snap):
+    """A dict a cell may change, or rebind, or reach through a namespace,
+    or one code the check can't read may change, holds a path the check
+    can't place: an overwrite through it names no file the display names."""
+    writes = find_cell_writes(code=f"{here}open(cfg['f'], 'w').write('x')",
+                              earlier=_earlier(["cfg = {'f': 'report.pdf'}", *earlier]), snapshots=(snap,))
+    assert not any("report.pdf" in f.paths for f in writes.files)
+
+
+@pytest.mark.parametrize("code", [
+    "globals()", "vars()", "locals()", "setattr(o, 'a', 1)", "delattr(o, 'a')", "__builtins__.open",
+    "__import__('m')", "sys._getframe()", "inspect.currentframe()", "inspect.getmodule(f)",
+    "operator.attrgetter('a')", "operator.methodcaller('a')", "gc.get_objects()", "gc.get_referrers(cfg)",
+    "gc.get_referents(f)", "o.__dict__", "f.__globals__", "f.__builtins__", "frame.f_globals", "frame.f_locals", "sys.modules",
+    "importlib.import_module('m')", "__main__", "import __main__", "import builtins", "from __main__ import cfg",
+    "from builtins import open", "from sys import modules", "_getframe()", "currentframe()", "getmodule(f)",
+    "attrgetter('a')", "methodcaller('a')", "get_objects()", "get_referrers(cfg)", "get_referents(f)",
+])
+def test_each_way_to_reach_a_namespace_other_than_by_name_refuses_a_dict_entry_on_its_own(code):
+    """A cell that may reach a namespace's names other than by name may
+    change a dict there, so no entry places a path (`_reaches_a_namespace`).
+    Most of these ways also make code the check can't read run, which
+    refuses an entry too (`find_cell_writes`), so each is read here on its
+    own."""
+    from anton.core.utils import write_check
+
+    assert write_check._reaches_a_namespace(ast.walk(ast.parse(code)))
+    assert not write_check._reaches_a_namespace(ast.walk(ast.parse("print(cfg['f'], o.a, f(x))")))
+
+
+@pytest.mark.parametrize("code", ["del cfg", "def f(cfg):\n    pass", "def f():\n    global cfg"],
+                         ids=["a-delete", "a-parameter", "a-global-declaration"])
+def test_a_delete_parameter_or_declaration_of_a_dicts_name_is_another_place_that_binds_it(code):
+    """Each counts as a place that binds the name (`_Cell.binding_sites`),
+    so a dict display under that name places no path: the name may hold
+    another value there."""
+    from anton.core.utils import write_check
+
+    assert write_check._Cell(write_check._parse(code), code, 0).binding_sites["cfg"] == 1
+
+
+@pytest.mark.parametrize("earlier", [
+    [],
+    ["import gc\ndef h():\n    pass\nfor o in gc.get_referents(h):\n    if type(o) is dict and 'cfg' in o:\n"
+     "        o['cfg']['f'] = 'stock.csv'"],
+    ["def h():\n    pass\nobject.__getattribute__(h, '__globals__')['cfg']['f'] = 'stock.csv'"],
+    ["def h():\n    pass\ngetattr(h, '__glob' + 'als__')['cfg']['f'] = 'stock.csv'"],
+    ["import pickle\npickle.loads(open('state.pkl', 'rb').read())"],
+    ["import helpers"],
+    ["cfg2 = {'f': 'new.txt'}"],
+], ids=["unchanged", "through-gc-referents", "through-getattribute", "through-a-getattr-of-built-text",
+        "through-a-pickle-load", "through-a-project-module", "an-entry-naming-a-file-not-there"])
+@pytest.mark.parametrize("code, held", [
+    ("import os\nos.remove(cfg['f'])", [("delete", ())]),
+    ("import shutil\nshutil.move(cfg['f'], 'archive.pdf')", [("move", ())]),
+    ("from pathlib import Path\nPath(cfg['f']).unlink()", [("delete", ())]),
+], ids=["delete", "move", "unlink"])
+def test_a_delete_or_move_through_a_dict_entry_holds_whole(earlier, code, held, snap):
+    """A delete or move the check can't place already holds, whole, so a
+    dict display's entry never narrows it to the file the display names:
+    the entry may have changed since in ways no refusal names."""
+    writes = find_cell_writes(code=code, earlier=_earlier(["cfg = {'f': 'report.pdf'}", *earlier]), snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == held
+
+
+@pytest.mark.parametrize("earlier", [
+    ["cfg = alias = {'f': 'report.pdf'}", "alias['f'] = 'stock.csv'"],
+    ["alias = (cfg := {'f': 'report.pdf'})", "alias['f'] = 'stock.csv'"],
+], ids=["chained-assignment", "walrus-inside-an-assignment"])
+def test_a_dict_display_another_name_holds_too_places_no_path(earlier, snap):
+    """Another name bound to the same display may change it where the check
+    reads only `cfg`: an overwrite through it names no file."""
+    writes = find_cell_writes(code="open(cfg['f'], 'w').write('x')", earlier=_earlier(earlier), snapshots=(snap,))
+    assert not any("report.pdf" in f.paths for f in writes.files)
+
+
+@pytest.mark.parametrize("before", [["def f1():\n    f2()", "def f2():\n    f3()", "def f3():\n    f4()",
+                                     "def f4():\n    f5()", "def f5():\n    f6()", "def f6():\n    pass"]],
+                         ids=["call-chain-past-the-depth-limit"])
+@pytest.mark.parametrize("here", ["f1()\n", "import functools\np0 = functools.partial(print, 1)\n"
+                                  + "".join(f"p{i} = functools.partial(p{i - 1})\n" for i in range(1, 7)) + "p6()\n"],
+                         ids=["call-chain", "partials"])
+def test_a_dict_entry_in_a_cell_that_leaves_code_unread_at_a_limit_places_no_path(before, here, snap):
+    """Code the checked cell itself leaves unread at a limit may change the
+    dict before the overwrite runs: it names no file beside the stop."""
+    writes = find_cell_writes(code=f"{here}open(cfg['f'], 'w').write('x')",
+                              earlier=_earlier(["cfg = {'f': 'report.pdf'}", *before]), snapshots=(snap,))
+    assert writes.stopped and not any("report.pdf" in f.paths for f in writes.files)
+
+
+def test_a_tuple_entry_that_holds_a_list_stays_a_path_the_check_cant_place(snap):
+    """A tuple of literals changes in no place, but a tuple that holds a list
+    hands the list out to change."""
+    writes = find_cell_writes(code="for t in cfg['f'][0]:\n    open(t, 'w').write('x')",
+                              earlier=_earlier(["cfg = {'f': (['report.pdf'],)}", "x = cfg['f'][0]\nx.append('stock.csv')"]),
+                              snapshots=(snap,))
+    assert not any("report.pdf" in f.paths for f in writes.files)
+
+
+# Each change below adds stock.csv to the list, set or name cfg['outs']
+# holds, through a reference the dict hands out, where a read of the dict
+# display alone would name report.pdf alone.
+@pytest.mark.parametrize("earlier", [
+    ["cfg = {'outs': ['report.pdf']}", "lst = cfg['outs']\nlst.append('stock.csv')"],
+    ["cfg = {'outs': ['report.pdf']}", "for v in cfg.values():\n    v.append('stock.csv')"],
+    ["cfg = {'outs': ['report.pdf']}", "for k, v in cfg.items():\n    v.append('stock.csv')"],
+    ["cfg = {'outs': ['report.pdf']}", "cfg.get('outs').append('stock.csv')"],
+    ["cfg = {'outs': ['report.pdf']}", "c2 = cfg.copy()\nc2['outs'].append('stock.csv')"],
+    ["cfg = {'outs': ['report.pdf']}", "def add(xs):\n    xs.append('stock.csv')\nadd(cfg['outs'])"],
+    ["cfg = {'outs': {'report.pdf'}}", "s = cfg['outs']\ns.add('stock.csv')"],
+    ["P = ['report.pdf']", "cfg = {'outs': P}", "lst = cfg['outs']\nlst.append('stock.csv')"],
+    ["P = list(['report.pdf'])", "cfg = {'outs': P}", "lst = cfg['outs']\nlst.append('stock.csv')"],
+    ["for P in [['report.pdf']]:\n    cfg = {'outs': P}", "lst = cfg['outs']\nlst.append('stock.csv')"],
+    ["def mk(P):\n    global cfg\n    cfg = {'outs': P}", "mk(['report.pdf'])",
+     "lst = cfg['outs']\nlst.append('stock.csv')"],
+    ["P = 'report.pdf'", "P = ['report.pdf']\ncfg = {'outs': P}", "lst = cfg['outs']\nlst.append('stock.csv')"],
+], ids=["through-an-alias", "through-values", "through-items", "through-get", "through-a-copy",
+        "through-a-function", "a-set-entry", "a-name-entry", "a-name-a-call-gives-a-list", "a-name-a-loop-binds",
+        "a-parameter", "a-name-rebound-to-a-list"])
+def test_a_dict_entry_a_reference_the_dict_hands_out_may_change_stays_a_path_the_check_cant_place(earlier, snap):
+    """Only an entry nothing can change in place, a literal, a tuple of
+    them, or text or a path, places a path: a list or set entry, or a name
+    that may hold one, may hold what a cell added through a reference the
+    dict hands out, so an overwrite through it names no file, not
+    report.pdf alone."""
+    writes = find_cell_writes(code="for t in cfg['outs']:\n    open(t, 'w').write('x')", earlier=_earlier(earlier),
+                              snapshots=(snap,))
+    assert not any("report.pdf" in f.paths for f in writes.files)
+
+
+def test_an_overwrite_through_a_dict_entry_a_reference_may_change_names_no_file_it_may_not_write(snap):
+    """`cfg['outs'][0]` names stock.csv once `lst[0]` changed it, so the
+    card doesn't name report.pdf."""
+    earlier = _earlier(["cfg = {'outs': ['report.pdf']}", "lst = cfg['outs']\nlst[0] = 'stock.csv'"])
+    writes = find_cell_writes(code="import pandas as pd\npd.DataFrame().to_csv(cfg['outs'][0])", earlier=earlier,
+                              snapshots=(snap,))
+    assert not any("report.pdf" in f.paths for f in writes.files)
+
+
+@pytest.mark.parametrize("earlier, code", [
+    (["for cfg in {'f': 'report.pdf'}:\n    pass"], "open(cfg['f'], 'w').write('x')"),
+    (["k = 'f'\ncfg = {'f': 'report.pdf', k: 'stock.csv'}"], "open(cfg['f'], 'w').write('x')"),
+    ([], "def make():\n    cfg = {'f': 'report.pdf'}\nopen(cfg['f'], 'w').write('x')"),
+    (["cfg = {'g': 'report.pdf'}"], "open(cfg['f'], 'w').write('x')"),
+], ids=["loop-over-a-display", "a-key-that-isnt-literal", "a-display-another-scope-binds", "missing-key"])
+def test_a_lookup_the_dict_display_doesnt_answer_stays_a_path_the_check_cant_place(earlier, code, snap):
+    """A lookup whose name doesn't hold the display where it reads it, or
+    whose key the display doesn't name, places an overwrite on no file."""
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert not any("report.pdf" in f.paths for f in writes.files)
+
+
+def test_a_dict_display_is_read_once_per_name_however_many_lookups_a_cell_makes(snap, monkeypatch):
+    """Whether no cell changes a dict is read once per check and name
+    (`_Reader._dict_display`), not again at each of its lookups."""
+    from anton.core.utils import write_check
+
+    asked: list[str] = []
+    changed = write_check._changed_in_place
+    monkeypatch.setattr(write_check, "_changed_in_place",
+                        lambda name, found, reader: asked.append(name) or changed(name, found, reader))
+    cfg = "cfg = {" + ", ".join(f"'k{n}': 'new{n}.csv'" for n in range(50)) + "}"
+    code = "\n".join(f"open(cfg['k{n}'], 'w').write('x')" for n in range(50))
+    assert not find_cell_writes(code=code, earlier=_earlier([cfg]), snapshots=(snap,)).needs_approval()
+    assert asked == ["cfg"]
+
+
+def test_cause_kinds_names_every_kind_the_card_has_no_room_for(monkeypatch):
+    """The card gives at most three reasons; `cause_kinds`, which the log
+    line reads, names every kind, and an error building the reasons keeps it."""
+    from anton.core.utils import write_check
+
+    earlier = _earlier(["SCRIPT = open('job.txt').read()", "exec(SCRIPT)"])
+    code = "exec(SCRIPT)\nexec(SCRIPT + '1')\nexec(SCRIPT + '2')\njob_main()"
+    writes = find_cell_writes(code=code, earlier=earlier, snapshots=())
+    assert [c.kind for c in writes.causes] == ["runs", "runs", "runs"]
+    assert writes.cause_kinds == ("runs", "uses")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("reasons")
+
+    monkeypatch.setattr(write_check, "_quoted", boom)
+    failed = find_cell_writes(code=code, earlier=earlier, snapshots=())
+    assert failed.causes == () and failed.cause_kinds == ("runs", "uses")
 
 
 def test_a_client_bound_through_more_names_than_the_read_follows_is_a_stopped_read():
@@ -650,11 +2460,24 @@ def test_unread_here_is_code_the_cell_runs_not_a_hold_carried_from_an_earlier_ce
 @pytest.mark.parametrize(("code", "hook"), [
     ("import site\nopen(site.getsitepackages()[0] + '/x.pth', 'w').write('import boot')", True),
     ("import site, subprocess\nsubprocess.run(['cp', 'h.txt', site.getsitepackages()[0] + '/x.pth'])", True),
+    ("import subprocess\nsubprocess.run(['cp', '-vt', '/usr/lib/python3/site-packages', 'h.pth'])", True),
+    ("import subprocess\nsubprocess.run(['rsync', '-avt', 'h.pth', '/usr/lib/python3/site-packages/'])", True),
     ("exec(input())", False),
-], ids=["pth-open", "pth-cp", "exec"])
+], ids=["pth-open", "pth-cp", "pth-cp-into-a-folder-t-names-in-a-cluster", "pth-rsync-keeping-times", "exec"])
 def test_writes_startup_hook_is_a_hook_write_among_the_code_the_cell_runs(code, hook):
     writes = find_cell_writes(code=code, earlier=(), snapshots=())
     assert writes.unchecked and writes.unread_here and writes.writes_startup_hook is hook
+
+
+def test_a_hook_write_after_code_a_limit_left_unread_is_a_stop_and_a_hook_write_both():
+    """Rule L's stop for code an earlier cell left unread and the cell's own
+    write of a startup hook combine: each keeps the card under every value
+    (`_unchecked_hold_dropped`), and the card gives both reasons."""
+    hook = "import site\nopen(site.getsitepackages()[0] + '/x.pth', 'w').write('import boot')"
+    writes = find_cell_writes(code=hook, earlier=_earlier([_NINTH]), snapshots=())
+    assert writes.stopped and writes.writes_startup_hook and writes.unread_here
+    assert writes.cause_kinds == ("limit", "runs")
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True), ("runs", False)]
 
 
 def test_an_error_building_the_reasons_keeps_what_the_check_found(monkeypatch):
@@ -740,30 +2563,84 @@ def test_everyday_cells_raise_no_card(context: "_EverydayContext", cell: "_Every
     assert not writes.needs_approval(), _card_prompt(writes)
 
 
-# Literal code too deep for Python's parser fails when it runs, so it runs
-# nothing: the parser runs out of stack on each.
-_TOO_DEEP = "1" + "+1" * 20_000
-_TOO_NESTED = "-" * 20_000 + "1"
-# Literal code longer than the check reads as one more cell.
-_TOO_LONG = "\n".join(f"x{n} = {n}" for n in range(12_000))
-
-
 @pytest.mark.parametrize("earlier, code, card", [
-    ([f"exec({_TOO_NESTED!r})"], "print(1)", "none"),
-    ([], f"import timeit\ntimeit.timeit({_TOO_DEEP!r})", "none"),
-    ([], f"import subprocess\nsubprocess.run(['python3', '-c', {_TOO_DEEP!r}])", "none"),
-    ([f"import timeit\ntimeit.timeit('pass', setup={_TOO_DEEP!r})"], "print(1)", "none"),
-    ([], f"exec({_TOO_LONG!r})", "unchecked"),
-    ([], f"import subprocess\nsubprocess.run(['python3', '-c', {_TOO_LONG!r}])", "unchecked"),
-], ids=["earlier-exec-too-deep", "timeit-too-deep", "python-c-too-deep", "earlier-timeit-setup-too-deep",
-        "exec-too-long", "python-c-too-long"])
+    ([f"exec({_TOO_NESTED!r})"], "print(1)", "stopped"),
+    ([f"exec({_TOO_NESTED!r})"], "x = 1", "stopped"),
+    ([], f"exec({_TOO_DEEP!r})", "stopped"),
+    ([], f"import timeit\ntimeit.timeit({_TOO_DEEP!r})", "stopped"),
+    ([], f"import subprocess\nsubprocess.run(['python3', '-c', {_TOO_DEEP!r}])", "stopped"),
+    ([f"import timeit\ntimeit.timeit('pass', setup={_TOO_DEEP!r})"], "print(1)", "stopped"),
+    ([f"import subprocess\nsubprocess.run(['python3', '-c', {_TOO_DEEP!r}])"], "print(1)", "stopped"),
+    ([f"exec({_TOO_DEEP + chr(10) + 'import os' + chr(10) + 'def push():' + chr(10) + '    os.remove(1)'!r})"],
+     "push()", "stopped"),
+    ([], f"exec({_TOO_LONG!r})", "stopped"),
+    ([], f"import subprocess\nsubprocess.run(['python3', '-c', {_TOO_LONG!r}])", "stopped"),
+], ids=["earlier-exec-too-deep", "earlier-exec-too-deep-then-a-cell-that-loads-nothing", "exec-too-deep",
+        "timeit-too-deep",
+        "python-c-too-deep", "earlier-timeit-setup-too-deep", "earlier-python-c-too-deep",
+        "call-into-what-earlier-too-deep-code-defined", "exec-too-long", "python-c-too-long"])
 def test_literal_code_too_deep_or_too_long_to_read(earlier, code, card, snap):
-    """Literal code Python's parser can't take runs nothing, so it gets no
-    card, and the check doesn't crash on it; literal code past the length
-    the check reads is code it can't read."""
+    """Literal code too deep for the check's parser is a stop, as a cell too
+    deep to parse is: a pad may still run it. So is literal code past the
+    length the check reads. A later cell after such code an earlier cell
+    ran, here or in another process, stops too, and the check doesn't
+    crash on it."""
     writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
-    assert writes.unchecked is (card == "unchecked")
+    assert writes.stopped is (card == "stopped")
     assert writes.needs_approval() is (card != "none")
+    if card == "stopped":
+        assert writes.causes[0].kind == "limit" and not writes.unread_here
+
+
+@pytest.mark.parametrize("deep", [_TOO_NESTED, _TOO_DEEP], ids=["nested", "a-long-sum"])
+def test_an_earlier_cell_too_deep_to_parse_that_kept_nothing_stops_no_later_cell(deep, snap):
+    """A cell too deep for the check's parser whose record says it kept
+    nothing (`NOTHING_KEPT`, its process gone) stops no later cell, and
+    later checks don't fail."""
+    earlier = _earlier([deep, "x = 1"], errored=(True, False), stopped_at=(NOTHING_KEPT, None), ended=(True, False))
+    assert not find_cell_writes(code="print(x)", earlier=earlier, snapshots=(snap,)).needs_approval()
+    writes = find_cell_writes(code="import os\nos.remove('stock.csv')", earlier=earlier, snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("delete", ("stock.csv",))]
+    assert not writes.unchecked
+
+
+def test_a_stop_in_the_steps_own_code_is_not_an_earlier_steps(snap):
+    writes = find_cell_writes(code=f"{_EIGHT_EXECS}\nexec({_DEFINES_PUSH!r})", earlier=(), snapshots=(snap,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", False)]
+
+
+def test_a_long_line_of_code_the_check_cant_read_is_quoted_cut(snap):
+    """A card's reason quotes at most `_QUOTED_CHARS` characters of a line,
+    as a concatenation handed exec() may be one line of 100,000."""
+    code = "exec(\"import os; os.remove('stock.csv')  # \" + 'zz' + '" + "q" * 100_050 + "')"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(snap,))
+    assert [c.kind for c in writes.causes] == ["runs"]
+    assert writes.causes[0].code == code[:397] + "..."
+
+
+def test_a_dict_entry_after_an_earlier_cell_too_deep_to_parse_that_may_have_run_places_no_path(snap):
+    """Such a cell may have changed the dict, and every later cell stops
+    for it (`_earlier_stop`), so its display's entry places no write: the
+    card holds no file the display alone names."""
+    earlier = _earlier(["cfg = {'out': 'stock.csv'}", _TOO_DEEP])
+    writes = find_cell_writes(code="import pandas as pd\npd.DataFrame().to_csv(cfg['out'])", earlier=earlier,
+                              snapshots=(snap,))
+    assert writes.stopped and writes.held_files == ()
+    alone = find_cell_writes(code="import pandas as pd\npd.DataFrame().to_csv(cfg['out'])",
+                             earlier=_earlier(["cfg = {'out': 'stock.csv'}"]), snapshots=(snap,))
+    assert [(f.action, f.paths) for f in alone.held_files] == [("overwrite", ("stock.csv",))]
+
+
+def test_literal_code_past_the_limit_ends_what_the_check_reads_of_a_cell(snap):
+    """Once a call takes a cell past `_EXEC_LIMIT` texts, the check reads no
+    later literal code in it, as two texts one shell hands `python -c`
+    take it past: the read stops at that call, and the rename after it
+    isn't read, though one more text would fit."""
+    seven = "\n".join(["exec('y = 2')"] * 7)
+    code = f"import os\n{seven}\nos.system(\"python -c 'y = 1' && python -c 'y = 2'\")\nexec({_RENAME!r})"
+    writes = find_cell_writes(code=code, earlier=(), snapshots=(snap,))
+    assert writes.stopped and [c.code for c in writes.causes] == ["os.system(\"python -c 'y = 1' && python -c 'y = 2'\")"]
+    assert writes.held_files == ()
 
 
 # A cell with an invalid escape sequence, which Python's parser warns about,
@@ -988,6 +2865,8 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
     (["import importlib.util, sys\nspec = importlib.util.spec_from_file_location('job', 'job.py')\n" + "spec = spec\n" * 200
       + "m = importlib.util.module_from_spec(spec)\nsys.modules[spec.name] = m\nspec.loader.exec_module(m)"],
      "import json\nprint(json.dumps(1))", "none"),
+    ([], "import importlib.util, sys\nspec = importlib.util.spec_from_file_location('job', 'job.py')\n" + "spec = spec\n" * 200
+     + "m = importlib.util.module_from_spec(spec)\nsys.modules[spec.name] = m\nspec.loader.exec_module(m)", "unchecked"),
     ([], "import os\ncmd = 'ls'; cmd = cmd + ' -a'; cmd = cmd + ' -l'\nos.system(cmd)", "none"),
     ([], "import os\ncmd = 'python3'; cmd = cmd + ' -u'; cmd = cmd + ' job.py'\nos.system(cmd)", "unchecked"),
     (["exec(open('helpers.py').read())"], _nest_of_true_ifs(30, "push = print") + "push()", "none"),
@@ -1017,7 +2896,8 @@ def _flags_under_ifs(start: str, flag: str, *, count: int) -> str:
         "python-command-text-rebuilt-three-hundred-times", "names-derived-from-unread-code-over-a-hundred-cells",
         "two-thousand-names-derived-from-unread-code-in-one-cell", "pip-install-loop-over-three-thousand-names",
         "command-joined-from-two-loops-over-a-thousand-names", "import-after-a-path-rebuilt-three-hundred-times",
-        "import-after-a-module-stored-at-the-end-of-a-spec-alias-chain", "command-text-rebuilt-twice-on-its-first-line",
+        "import-after-a-module-stored-at-the-end-of-a-spec-alias-chain", "a-module-loaded-at-the-end-of-a-spec-alias-chain",
+        "command-text-rebuilt-twice-on-its-first-line",
         "python-command-text-rebuilt-twice-on-its-first-line", "call-after-thirty-nested-true-ifs-after-unread-code",
         "call-after-thirty-nested-true-ifs-beside-a-global-setter", "import-at-the-end-of-150-stored-modules-each-from-the-last",
         "import-at-the-end-of-300-stored-modules-each-from-the-last",
@@ -1049,8 +2929,9 @@ def test_a_recursion_or_a_rebuilt_command_is_read_in_well_under_a_second(earlier
     each store reaches by name (`_StoredReach`), each store read in the
     same worklist as the names it fills (`_names_tainted`); a name a cell
     binds by a def, class or import is found by its name
-    (`_Reader.makers`); and what a function returns is read once per def
-    (`_Cell.returns_of`).
+    (`_Reader.makers`); what a function returns is read once per def
+    (`_Cell.returns_of`); and a name rebound from itself, handed to a call,
+    reads each binding once per call and depth (`_Reader.callees`).
 
     The bound covers a later turn's check, with the earlier cells already
     parsed (`_EARLIER_CELLS`): each blowup these cases pin is in the read
@@ -1097,6 +2978,196 @@ def test_a_helper_many_errored_cells_redefine_is_read_once_per_call(snap):
     writes = find_cell_writes(code=code, earlier=_earlier(earlier, errored=[True] * 200, stopped_at=[3] * 200), snapshots=(snap,))
     assert time.perf_counter() - started < 1
     assert not writes.needs_approval()
+
+
+def test_a_long_conversation_of_helper_calls_is_read_in_well_under_a_second(snap):
+    """Each earlier cell is read for a stop alone, once for its place in
+    the conversation (`_LEFT_UNREAD`), so a check after many cells
+    that each call helpers an earlier cell defined doesn't read each helper
+    again at each call. The first call parses and reads the cells and isn't
+    timed."""
+    helpers = "import pandas as pd, sqlite3\ncon = sqlite3.connect(':memory:')\n" + "\n".join(
+        f"def h{i}(df, name):\n" + "".join(f"    df = df.assign(c{j}=1)\n    con.execute('select {j}')\n"
+                                           for j in range(25)) + "    df.to_csv(name)\n    return df"
+        for i in range(20))
+    earlier = [helpers, *("df = pd.DataFrame()\n" + "\n".join(f"df = h{(k + j) % 20}(df, 'out_{k}_{j}.csv')"
+                                                              for j in range(20)) for k in range(200))]
+    find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,))
+    started = time.perf_counter()
+    writes = find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,))
+    assert time.perf_counter() - started < 1
+    assert not writes.needs_approval()
+
+
+def test_a_long_conversation_of_calls_that_go_five_deep_is_read_in_well_under_a_second(snap):
+    """A call whose functions go past `_CALL_DEPTH` may stop the check, so
+    the first check reads each earlier cell's calls for their stops alone
+    (`_CellRead.stops_only`), not for every change they make, and keeps
+    what it found by each cell's place (`_LEFT_UNREAD`): the timed check
+    reads no earlier cell again."""
+    chain = "def n4(df):\n    return df.dropna()\n" + "".join(f"def n{i}(df):\n    return n{i + 1}(df)\n"
+                                                             for i in range(3, 0, -1))
+    helpers = "import pandas as pd, sqlite3\ncon = sqlite3.connect(':memory:')\n" + chain + "\n".join(
+        f"def h{i}(df, name):\n    df = n1(df)\n" + "".join(f"    df = df.assign(c{j}=1)\n    con.execute('select {j}')\n"
+                                                         for j in range(10)) + "    df.to_csv(name)\n    return df"
+        for i in range(5))
+    earlier = [helpers, *("df = pd.DataFrame()\n" + "\n".join(f"df = h{(k + j) % 5}(df, 'out_{k}_{j}.csv')"
+                                                              for j in range(3)) for k in range(300))]
+    find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,))
+    started = time.perf_counter()
+    writes = find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,))
+    assert time.perf_counter() - started < 1
+    assert not writes.needs_approval()
+
+
+@pytest.mark.parametrize("also", ["", "ns = {}\nexec('def f():\\n    return 1', ns)\n"],
+                         ids=["plain-calls", "literal-code-that-defines-a-name-in-a-namespace-of-its-own"])
+def test_earlier_cells_read_for_a_stop_read_each_helper_that_holds_none_once(also, snap, monkeypatch):
+    """Earlier cells no check kept a stop for, as after a restart of the
+    process, are read with one reader (`_earlier_stop`), which tells once,
+    for every cell, that a helper's read can find no stop
+    (`_stop_free_depth`, `_Reader.stop_free`): no cell's call reads the
+    helper again. A later cell that rebinds what each cell binds, which no
+    function reads, or that defines a name again in a namespace of its own,
+    changes no earlier cell's read (`_read_apart`)."""
+    import ast
+
+    from anton.core.utils import write_check
+
+    reads: list[str] = []
+    unread_code = write_check._unread_code
+
+    def counted(reader, root, *args, **kwargs):
+        if isinstance(root, ast.FunctionDef):
+            reads.append(root.name)
+        return unread_code(reader, root, *args, **kwargs)
+
+    monkeypatch.setattr(write_check, "_unread_code", counted)
+    helpers = "\n".join(f"def h{i}(x):\n    y = x + {i}\n    return y" for i in range(3))
+    earlier = [f"{helpers}  # read once {also!r}", *(f"{also}a = h0({k})\nb = h1(a)\nc = h2(b)" for k in range(20))]
+    assert not find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,)).unchecked
+    assert sorted(reads) == ["h0", "h1", "h2"]
+
+
+@pytest.mark.parametrize("again, apart", [
+    ("import pandas as pd\n", False),
+    ("import polars as pd\n", True),
+    ("pd = None\nimport pandas as pd\n", True),
+], ids=["the-same-module", "another-module-under-the-name", "the-name-bound-another-way-too"])
+def test_an_import_again_of_the_same_module_reads_no_earlier_cell_apart(again, apart, snap, monkeypatch):
+    """A name each cell binds only by an import of one module holds that
+    module from the first such import on, so a later import of it changes
+    no earlier cell's read, at its top level or in a function: read after a
+    restart, no cell is read with the cells up to it alone (`_read_apart`).
+    A name a later cell binds to another module, or binds another way too,
+    still sends a cell apart."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    found: list[frozenset[int]] = []
+    read_apart = write_check._read_apart
+    monkeypatch.setattr(write_check, "_read_apart", lambda cells: found.append(read_apart(cells)) or found[-1])
+    earlier = ["import pandas as pd\ndef load():\n    return pd.read_csv('stock.csv')\ndf0 = pd.read_csv('stock.csv')",
+               *(f"{again}df{i} = load()" for i in range(1, 6))]
+    find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,))
+    assert bool(found[0]) is apart
+
+
+def test_a_long_conversation_that_imports_a_module_again_in_each_cell_is_read_in_well_under_a_second(
+    snap, monkeypatch,
+):
+    """Read after a restart, a conversation that imports pandas again in
+    each cell costs about what one that imports it once does, not a read of
+    each cell apart from the later ones (`_read_apart`). CPU time, with a
+    parse cache of its own, the cells parsed before the timed read."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_EARLIER_CELLS", write_check._EarlierCells(budget=1_000_000))
+
+    def first_check_after_a_restart(again: str) -> float:
+        earlier = _earlier(("import pandas as pd\n" if i == 0 else again)
+                           + f"df{i} = pd.read_csv('stock.csv')\ndf{i}['b'] = df{i}['a'] * 2" for i in range(400))
+        find_cell_writes(code="print(1)", earlier=earlier, snapshots=(snap,))
+        monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+        started = time.process_time()
+        find_cell_writes(code="print(1)", earlier=earlier, snapshots=(snap,))
+        return time.process_time() - started
+
+    once = first_check_after_a_restart("")
+    assert first_check_after_a_restart("import pandas as pd\n") < 2 * once + 0.05
+
+
+def test_a_long_conversation_after_unread_code_reads_each_earlier_cell_for_a_stop_once(snap):
+    """Code the check can't read in the first cell changes nothing in how
+    often each later cell is read for a stop: once for its place in the
+    conversation (`_LEFT_UNREAD`), not again at each check, for each
+    helper call in it. CPU time, so a loaded machine doesn't fail it; the
+    first call parses and reads the cells and isn't timed."""
+    helpers = "\n".join(f"def h{i}(x):\n" + "".join(f"    x = x + {j}\n" for j in range(20)) + "    return x"
+                        for i in range(5))
+    earlier = ["exec(open('setup_helpers.py').read())", helpers,
+               *("\n".join(f"y = h{(k + j) % 5}({k})" for j in range(3)) for k in range(200))]
+    find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,))
+    started = time.process_time()
+    writes = find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,))
+    assert time.process_time() - started < 0.25
+    assert not writes.needs_approval()
+
+
+def test_a_long_conversation_of_functions_that_rebind_names_is_read_in_well_under_a_second(snap, monkeypatch):
+    """The names each earlier cell may rebind where the check can't order
+    it, by a `global` in a function or in literal code a function runs, are
+    read once per cell and kept with it (`_Cell.rebinds_globally`), not
+    again at each check. CPU time, with a parse cache of its own so a busy
+    worker's cache doesn't drop the cells; the first call parses and reads
+    the cells and isn't timed."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_EARLIER_CELLS", write_check._EarlierCells(budget=1_000_000))
+    body = "".join(f"    r{j} = df.shape[0] + {j}\n" for j in range(30))
+    earlier = [f"import pandas as pd\ndf = pd.DataFrame()\ndef step{i}():\n    global df\n{body}    df = df.head()\n"
+               f"    exec({''.join(f't{j} = {j} + {i}' + chr(10) for j in range(150))!r})" for i in range(200)]
+    find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,))
+    started = time.process_time()
+    writes = find_cell_writes(code="print(1)", earlier=_earlier(earlier), snapshots=(snap,))
+    assert time.process_time() - started < 0.1
+    assert not writes.needs_approval()
+
+
+def test_literal_code_a_function_runs_is_parsed_once_though_the_parse_cache_drops_its_cell(snap, monkeypatch):
+    """The names literal code a function runs binds are kept by a hash of
+    the text (`_LITERAL_BINDS`), apart from the parsed cells, which a busy
+    process may not keep (`_EarlierCells`): a later check of a cell the
+    parse cache dropped parses none of that literal code again
+    (`_Cell.rebinds_globally`)."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_EARLIER_CELLS", write_check._EarlierCells(budget=0))
+    monkeypatch.setattr(write_check, "_LITERAL_BINDS", write_check._Kept(limit=100))
+    literal = "".join(f"t{j} = {j}\n" for j in range(50))
+    parsed: list[str] = []
+    parse_ran = write_check._parse_ran
+    monkeypatch.setattr(write_check, "_parse_ran", lambda text: parsed.append(text) or parse_ran(text))
+    earlier = _earlier([f"def step():\n    exec({literal!r})"])
+    assert not find_cell_writes(code="print(1)", earlier=earlier, snapshots=(snap,)).needs_approval()
+    first = parsed.count(literal)
+    for _ in range(2):
+        assert not find_cell_writes(code="print(1)", earlier=earlier, snapshots=(snap,)).needs_approval()
+    assert parsed.count(literal) == first
+
+
+def test_two_literal_codes_functions_run_each_keep_the_names_they_bind(snap, monkeypatch):
+    """The names each literal code text a function runs binds are kept by a
+    hash of that text (`_LITERAL_BINDS`), so a second text reads its own
+    names, not the first one's: OUT, which only the second binds, is a name
+    code may rebind where the check can't order it."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_LITERAL_BINDS", write_check._Kept(limit=100))
+    earlier = _earlier(["OUT = 'new_out.csv'", "def a():\n    exec('Q = 1')",
+                        "def b():\n    exec(\"OUT = 'stock.csv'\")", "b()"])
+    writes = find_cell_writes(code="open(OUT, 'w').write('x')", earlier=earlier, snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("overwrite", ())]
 
 
 def test_a_long_conversation_of_literal_execs_is_read_in_under_two_seconds(snap):
@@ -2124,22 +4195,23 @@ def test_a_folder_the_wide_reading_cant_place_is_held_beside_the_whole_project(b
     assert sorted((c.whole_project, c.paths) for c in writes.held_files) == [(False, ()), (True, ())]
 
 
-@pytest.mark.parametrize("retry, code, held", [
+@pytest.mark.parametrize("retry, code, held, stopped", [
     ("folder = 'tmp_{i}'\nname = 'part_{i}'\next = 'tsv{i}'", "df.to_csv(p, index=False)",
-     [("overwrite", ("data/stock.csv",))]),
+     [("overwrite", ("data/stock.csv",))], True),
     ("folder = 'tmp_{i}'\nname = 'part_{i}'\next = 'tsv{i}'", "import os\nos.remove(p)",
-     [("delete", ("data/stock.csv",))]),
+     [("delete", ("data/stock.csv",))], True),
     ("folder = 'data'\nname = 'q3'\next = 'csv'", "df.to_csv(p, index=False)",
-     [("overwrite", ("data/q3.csv",)), ("overwrite", ("data/stock.csv",))]),
+     [("overwrite", ("data/q3.csv",)), ("overwrite", ("data/stock.csv",))], False),
 ], ids=["new-values", "new-values-delete", "same-values"])
-def test_a_run_of_failed_retries_is_read_in_well_under_a_second(retry, code, held, beside_shared, monkeypatch):
+def test_a_run_of_failed_retries_is_read_in_well_under_a_second(retry, code, held, stopped, beside_shared, monkeypatch):
     """Each failed retry may have stopped before or after it gave `folder`,
     `name` and `ext` the values the plain reading reads, so the wide reading
     gives each name every value. A value counts once, so twelve retries of
     the same values still hold data/q3.csv too. Twelve new values for each
-    name pass the path limit, and the wide reading gives up: the path the
-    three build is never one path per pick of values, and the plain
-    reading's data/stock.csv stays held, alone."""
+    name pass the path limit, and the wide reading gives up on the path the
+    three build: it is never one path per pick of values. The plain
+    reading's data/stock.csv stays held, alone, and the check stops, since
+    a path it gave up on may be a file the turn began with."""
     from anton.core.utils import write_check
 
     largest = 0
@@ -2159,6 +4231,7 @@ def test_a_run_of_failed_retries_is_read_in_well_under_a_second(retry, code, hel
     writes = find_cell_writes(code=code, earlier=_earlier(earlier, errored=(False, *(True,) * len(retries), False)), snapshots=beside_shared)
     assert time.perf_counter() - started < 1
     assert sorted((c.action, c.paths) for c in writes.held_files) == held
+    assert writes.stopped is stopped
     assert largest < 50
 
 
@@ -2867,13 +4940,389 @@ def test_a_name_resolves_to_its_latest_binding(snap):
     ("fname = 'export_' + 'q3'\nfname += '.csv'", "import os\nfname = 'stock.csv'\nos.remove(fname)", ("stock.csv",)),
     ("from pathlib import Path\nd = Path('.')\nd /= 'output'",
      "import shutil\nfrom pathlib import Path\nd = Path('docs')\nshutil.rmtree(d)", ("docs",)),
-    ("def deeper():\n    global out\n    out /= 'charts'",
-     "from pathlib import Path\nout = Path('report.pdf')\nout.unlink()", ("report.pdf",)),
-], ids=["path-join", "text-add", "folder-join", "join-in-an-uncalled-function"])
+], ids=["path-join", "text-add", "folder-join"])
 def test_an_addition_before_a_name_is_bound_again_does_not_change_it(earlier, code, expected, snap):
     assert _files(code, (snap,), earlier=(earlier,)) == [("delete", expected)]
     same_cell = "import os\np = 'stock'\np += '.csv'\nprint(open(p).read())\np = 'report.pdf'\nos.remove(p)"
     assert "report.pdf" in _files(same_cell, (snap,))[0][1]
+
+
+# TARGET bound at module level, and a function that rebinds it as a global.
+_RETARGETS = "TARGET = 'scratch.tmp'\ndef retarget():\n    global TARGET\n    TARGET = 'stock.csv'"
+
+
+@pytest.mark.parametrize("earlier, code", [
+    ([_RETARGETS, "retarget()"], "import os\nos.remove(TARGET)"),
+    ([_RETARGETS + "\nretarget()"], "import os\nos.remove(TARGET)"),
+    ([_RETARGETS], "import os\nos.remove(TARGET)"),
+    ([_RETARGETS, "retarget()"], "import shutil\nshutil.move(TARGET, 'kept.csv')"),
+    ([_RETARGETS, "retarget()"], "import os\ndef wipe():\n    os.remove(TARGET)\nwipe()"),
+    (["from pathlib import Path\nout = Path('report.pdf')\ndef deeper():\n    global out\n    out /= 'charts'"],
+     "out.unlink()"),
+    (["def deeper():\n    global out\n    out /= 'charts'"],
+     "from pathlib import Path\nout = Path('report.pdf')\nout.unlink()"),
+    (["TARGET = 'scratch.tmp'\ndef retarget(x):\n    global TARGET\n    match x:\n        case TARGET:\n            pass",
+      "retarget('stock.csv')"], "import os\nos.remove(TARGET)"),
+    (["TARGET = 'scratch.tmp'\ndef retarget():\n    global TARGET\n    TARGET = 'other.tmp'", "retarget()"],
+     "import os\nos.remove(os.path.join('docs', TARGET))"),
+], ids=["delete-after-a-call", "delete-after-a-call-in-the-same-cell", "delete-where-no-call-is-seen", "move",
+        "delete-in-a-function", "join-in-a-function", "join-in-a-function-before-the-name-is-bound",
+        "rebound-by-a-match-capture", "delete-of-a-file-joined-to-a-folder-where-each-value-seen-is-new"])
+def test_a_path_through_a_name_a_function_rebinds_as_a_global_is_one_the_check_cant_place(earlier, code, snap):
+    """A call may rebind such a name at module level whenever it runs, which
+    the check can't order against the read, so it never uses the name's
+    module-level value: a delete or move of it gets the card a target the
+    check can't place gets, as its twin through a name bound to input does."""
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    twin = find_cell_writes(code=code, earlier=_earlier([*earlier, "TARGET = input()\nout = input()"]),
+                            snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [(twin.held_files[0].action, ())]
+    assert [(f.action, f.paths) for f in twin.held_files] == [(writes.held_files[0].action, ())]
+
+
+# A folder bound at module level, and a function that rebinds it as a global.
+_REFOLDERS = "OUT = 'docs'\ndef refolder():\n    global OUT\n    OUT = 'output'"
+# A file name bound at module level, one in the folder docs, and a function
+# that rebinds it as a global.
+_RENAMES = "NAME = 'a.pdf'\nDIR = 'docs'\ndef rename_to(n):\n    global NAME\n    NAME = n"
+# A new file bound at module level, and a function that rebinds it as a
+# global to docs' file a.pdf.
+_RESETS = "NAME = 'new.csv'\ndef reset():\n    global NAME\n    NAME = 'a.pdf'"
+# A new file bound at module level, and a function that rebinds it as a
+# global to what each call passes.
+_AIMS = "TARGET = 'new.csv'\ndef aim(x):\n    global TARGET\n    TARGET = x"
+# A function that sets an output folder as a global from what each call passes.
+_CONFIGURES = ("from pathlib import Path\nimport pandas as pd\ndef configure(run):\n    global OUT_DIR\n"
+               "    OUT_DIR = Path('runs') / run")
+
+
+@pytest.mark.parametrize("earlier, code", [
+    ([_RETARGETS, "retarget()"], "open(TARGET, 'w').write('x')"),
+    (["TARGET = 'stock.csv'", "def retarget():\n    global TARGET\n    TARGET = 'scratch.tmp'"],
+     "import pandas as pd\npd.DataFrame().to_csv(TARGET)"),
+    ([_RETARGETS], "TARGET = 'stock.csv'\nopen(TARGET, 'w').write('x')"),
+    ([_RETARGETS], "import pandas as pd\nTARGET = 'stock.csv'\npd.DataFrame().to_csv(TARGET)"),
+    ([_RETARGETS], "from pathlib import Path\nTARGET = 'stock.csv'\nPath(TARGET).write_text('x')"),
+    ([_RETARGETS], "import shutil\nTARGET = 'stock.csv'\nshutil.copy('summary.md', TARGET)"),
+    ([_REFOLDERS], "import os\nopen(os.path.join(OUT, 'a.pdf'), 'w').write('x')"),
+    ([_REFOLDERS], "from pathlib import Path\n(Path(OUT) / 'a.pdf').write_text('x')"),
+    ([_REFOLDERS], "open(f'{OUT}/a.pdf', 'w').write('x')"),
+    # The rebound name as the file in a folder: a part the code picks when
+    # it runs, which an overwrite would otherwise drop as a new file's.
+    ([_RENAMES], "import os\nopen(os.path.join('docs', NAME), 'w').write('x')"),
+    ([_RENAMES, "rename_to('b.pdf')"], "import os\nopen(os.path.join('docs', NAME), 'w').write('x')"),
+    ([_RENAMES, "rename_to('b.pdf')"], "import os\nopen(os.path.join(DIR, NAME), 'w').write('x')"),
+    ([_RENAMES], "from pathlib import Path\n(Path('docs') / NAME).write_text('x')"),
+    ([_RENAMES], "open(f'docs/{NAME}', 'w').write('x')"),
+    ([_RENAMES], "open('docs/' + NAME, 'w').write('x')"),
+    ([_RENAMES], "import os\nimport pandas as pd\npd.DataFrame().to_csv(os.path.join('docs', NAME))"),
+    ([_RENAMES], "import pandas as pd\nfrom pathlib import Path\npd.DataFrame().to_excel(Path('docs') / NAME)"),
+    ([_RENAMES, "rename_to('b.pdf')"], "import os, shutil\nshutil.copy('summary.md', os.path.join('docs', NAME))"),
+    ([_RENAMES], "import os\nfor p in [os.path.join('docs', NAME), 'docs/new.pdf']:\n    open(p, 'w').write('x')"),
+    ([_RENAMES], "import os, random\np = 'docs/new.pdf'\nif random.random() > 0.5:\n    p = os.path.join('docs', NAME)\n"
+     "open(p, 'w').write('x')"),
+    ([_AIMS, "[aim(x) for x in ['stock.csv']]"], "open(TARGET, 'w').write('x')"),
+    ([_AIMS, "def main():\n    aim('stock.csv')\nmain()"], "open(TARGET, 'w').write('x')"),
+    ([_AIMS], "open(TARGET, 'w').write('x')"),
+    (["BASE = 'output'\ndef aim(f):\n    global TARGET\n    TARGET = BASE + '/' + f", "aim('old.png')"],
+     "open(TARGET, 'w').write('x')"),
+    (["TARGET = 'stock'\ndef aim():\n    global TARGET\n    TARGET += '.csv'", "aim()"], "open(TARGET, 'w').write('x')"),
+    (["TARGET = 'new.csv'\ndef aim():\n    global TARGET\n    TARGET, n = 'stock.csv', 1", "aim()"],
+     "open(TARGET, 'w').write('x')"),
+    (["TARGET = 'new.csv'\nclass Aim:\n    global TARGET\n    TARGET = 'stock.csv'"], "open(TARGET, 'w').write('x')"),
+    (["TARGET = 'new.csv'\ndef aim(x):\n    global TARGET\n    match x:\n        case str() as TARGET:\n            pass",
+      "aim('stock.csv')"], "open(TARGET, 'w').write('x')"),
+    (["cfg = {'dir': 'docs'}", _RESETS, "reset()"], "import os\nopen(os.path.join(cfg['dir'], NAME), 'w').write('x')"),
+    (["cfg = {'dir': 'docs'}", _RESETS, "reset()"], "open(f\"{cfg['dir']}/{NAME}\", 'w').write('x')"),
+    (["cfg = {'dir': 'docs'}", _RESETS, "reset()"],
+     "import os\nimport pandas as pd\npd.DataFrame().to_csv(os.path.join(cfg['dir'], NAME))"),
+    (["cfg = {'dir': 'newdir'}", _RENAMES, "rename_to('b.pdf')"],
+     "import os\nopen(os.path.join(cfg['dir'], NAME), 'w').write('x')"),
+], ids=["after-a-call", "bound-in-an-earlier-cell", "bound-in-the-cell-just-before", "to-csv-bound-in-the-cell",
+        "write-text-bound-in-the-cell", "copy-onto-it-bound-in-the-cell", "folder-joined", "folder-divided",
+        "folder-in-an-f-string", "file-joined-to-a-folder-where-no-call-is-seen", "file-joined-to-a-folder-after-a-call",
+        "file-joined-to-a-folder-a-name-holds", "file-divided-from-a-folder", "file-in-an-f-string",
+        "file-added-to-a-folder", "to-csv-of-a-file-joined-to-a-folder", "to-excel-of-a-file-divided-from-a-folder",
+        "copy-onto-a-file-joined-to-a-folder", "a-loop-over-a-file-joined-to-a-folder-and-a-new-file",
+        "a-new-file-a-branch-rebinds-to-a-file-joined-to-a-folder", "a-value-a-setter-called-in-a-comprehension-gives",
+        "a-value-a-setter-called-from-a-function-gives", "a-value-a-setter-no-call-passes-may-give",
+        "a-value-a-setter-builds-on-another-name", "a-setter-that-adds-to-the-name",
+        "a-setter-that-unpacks-into-the-name", "a-class-body-that-binds-the-name",
+        "a-setter-that-captures-the-name-in-a-match", "a-file-joined-to-a-folder-there-a-dict-entry-names",
+        "a-file-in-an-f-string-in-a-folder-there-a-dict-entry-names",
+        "to-csv-of-a-file-joined-to-a-folder-there-a-dict-entry-names",
+        "a-file-joined-to-a-new-folder-a-dict-entry-names"])
+def test_an_overwrite_through_a_name_a_function_rebinds_as_a_global_is_held_whole(earlier, code, snap):
+    """Such a name may hold a file the turn began with wherever the check
+    reads it, even right after the cell binds it: the overwrite is held as
+    one onto a file the code picks when it runs (`_FileFinder.unplaced`),
+    under every value of the setting, where its twin through a name bound
+    to input counts as a new file. So is one through a path the name is the
+    file part of (`_FileFinder.paths`), a dict entry naming the folder or
+    not: an entry only ever adds a hold, so it never takes this one off."""
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("overwrite", ())]
+    assert not writes.unchecked
+    twin = code.replace("TARGET = 'stock.csv'\n", "").replace("'stock.csv'", "input()")
+    unplaced = find_cell_writes(code=twin, earlier=_earlier(["TARGET = input()\nOUT = input()\nNAME = input()\nDIR = 'docs'"]),
+                                snapshots=(snap,))
+    assert not unplaced.needs_approval()
+
+
+# A function that sets OUT as a global to a new file from what each call passes.
+_SETS_OUT = "def configure(r):\n    global OUT\n    OUT = f'out_{r}.csv'"
+
+
+@pytest.mark.parametrize("earlier, code", [
+    ([_CONFIGURES, "configure('exp1')"], "pd.DataFrame().to_csv(OUT_DIR / 'results.csv')"),
+    ([_CONFIGURES, "configure('exp1')"], "import matplotlib.pyplot as plt\nplt.savefig(OUT_DIR / 'plot.png')"),
+    ([_CONFIGURES, "configure('exp1')"], "open(OUT_DIR / 'notes.txt', 'w').write('x')"),
+    ([_CONFIGURES, "configure('exp1')"], "import time\npd.DataFrame().to_csv(f'{OUT_DIR}/r_{time.time()}.csv')"),
+    ([_CONFIGURES + "\nOUT_DIR = Path('runs/exp1')"], "pd.DataFrame().to_csv(OUT_DIR / 'results.csv')"),
+    ([_AIMS, "aim('other_new.csv')"], "open(TARGET, 'w').write('x')"),
+    ([_AIMS, "aim('other_new.csv')"], "TARGET = 'brand_new.csv'\nopen(TARGET, 'w').write('x')"),
+    ([_RENAMES, "rename_to('b.pdf')"], "import shutil\nshutil.copy('summary.md', os.path.join('output', NAME))"),
+    (["OUT = 'new.csv'", _SETS_OUT, "configure('a')", "exec(open('job.py').read())"], "pd.DataFrame().to_csv(OUT)"),
+    (["OUT = 'new.csv'", _SETS_OUT, "configure('a')", "def load():\n    exec(open('job.py').read(), globals())\nload()"],
+     "pd.DataFrame().to_csv(OUT)"),
+    (["OUT = 'new.csv'", _SETS_OUT, "configure('a')", "k = 'OUT'\nglobals()[k] = 'report.pdf'"],
+     "pd.DataFrame().to_csv(OUT)"),
+    (["OUT = 'new.csv'", _SETS_OUT, "list(map(configure, ['a']))"], "pd.DataFrame().to_csv(OUT)"),
+], ids=["to-csv-into-a-folder-a-setter-sets", "savefig-into-a-folder-a-setter-sets",
+        "open-in-a-folder-a-setter-sets", "a-dated-file-in-a-folder-a-setter-sets",
+        "into-a-folder-a-setter-no-call-runs-may-set", "a-new-file-a-setter-sets", "a-new-file-the-cell-binds",
+        "copy-onto-a-new-file-joined-to-a-folder", "a-new-file-a-setter-sets-beside-code-the-check-cant-read",
+        "a-new-file-a-setter-sets-beside-code-a-function-runs-in-the-globals",
+        "a-new-file-a-setter-sets-beside-a-store-into-globals-by-a-name", "a-new-file-a-setter-map-calls-sets"])
+def test_an_overwrite_through_a_name_a_function_rebinds_as_a_global_is_held_whole_where_each_value_seen_is_new(
+    earlier, code, snap,
+):
+    """The check never places such a name on a value it sees for it: code
+    it can't read, a store into the module's names it doesn't count, or a
+    call it doesn't follow may have rebound the name to a file the turn
+    began with. So an overwrite through it is held as one onto a file the
+    code picks when it runs, under every value of the setting, even where
+    each value the check sees for the name, the module-level ones and those
+    a `global` in a function gives it, is a new file."""
+    writes = find_cell_writes(code=f"import os\nimport pandas as pd\n{code}", earlier=_earlier(earlier),
+                              snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("overwrite", ())]
+
+
+def test_each_overwrite_through_a_name_bound_to_a_rebound_global_is_held_whole(snap):
+    """The second read of Q's binding is one the reader remembers
+    (`_Reader.recalled`): it still counts the global it read
+    (`_Reader.rebound_reads`), so the copy is held as the open is."""
+    writes = find_cell_writes(code="open(Q, 'w').write('x')\nimport shutil\nshutil.copy('summary.md', Q)",
+                              earlier=_earlier([_RETARGETS, "Q = TARGET"]), snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("overwrite", ()), ("overwrite", ())]
+
+
+def test_a_move_onto_a_name_a_function_rebinds_as_a_global_holds_the_overwrite_too(snap):
+    """The move holds its source, and the file it may land on is held as one
+    the code picks when it runs, so the card stays whole."""
+    writes = find_cell_writes(code="import shutil\nTARGET = 'stock.csv'\nshutil.move('report.pdf', TARGET)",
+                              earlier=_earlier([_RETARGETS]), snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("move", ("report.pdf",)), ("overwrite", ())]
+
+
+def test_an_append_through_a_name_a_function_rebinds_as_a_global_is_not_held(snap):
+    writes = find_cell_writes(code="open(TARGET, 'a').write('x')", earlier=_earlier([_RETARGETS, "retarget()"]),
+                              snapshots=(snap,))
+    assert not writes.needs_approval()
+
+
+@pytest.mark.parametrize("earlier, code", [
+    (["TARGET = 'stock.csv'\ndef show():\n    global TARGET\n    print(TARGET)", "show()"],
+     "import os\nos.remove(TARGET)"),
+    (["import os\ndef retarget():\n    global TARGET\n    TARGET = 'stock.csv'\n    os.remove(TARGET)"],
+     "retarget()"),
+    (["TARGET = 'stock.csv'\ndef retarget():\n    TARGET = 'scratch.tmp'\n    return TARGET", "retarget()"],
+     "import os\nos.remove(TARGET)"),
+    (["global TARGET\nTARGET = 'stock.csv'"], "import os\nos.remove(TARGET)"),
+    (["TARGET = 'stock.csv'\nclass O:\n    pass\no = O()\nvars(o)['TARGET'] = 'report.pdf'"],
+     "import os\nos.remove(TARGET)"),
+    (["TARGET = 'stock.csv'\nclass O:\n    pass\no = O()\nsetattr(o, 'TARGET', 'report.pdf')\no.TARGET = 'x'"],
+     "import os\nos.remove(TARGET)"),
+    (["TARGET = 'stock.csv'\nclass O:\n    pass\no = O()\no.__dict__['TARGET'] = 'report.pdf'"],
+     "import os\nos.remove(TARGET)"),
+    (["TARGET = 'stock.csv'\nglobals().__setitem__('LABEL', 'TARGET')"], "import os\nos.remove(TARGET)"),
+    (["TARGET = 'stock.csv'\nd = {}\ndict.__setitem__(d, 'TARGET', 'report.pdf')"], "import os\nos.remove(TARGET)"),
+    (["TARGET = 'stock.csv'\ndef show():\n    print(globals(), 'TARGET')", "show()"], "import os\nos.remove(TARGET)"),
+    (["TARGET = 'stock.csv'\nclass C:\n    def globals(self):\n        return {}\nc = C()\nc.globals()['TARGET'] = 'report.pdf'"],
+     "import os\nos.remove(TARGET)"),
+    (["TARGET = 'stock.csv'\nd = {}\nd |= {'TARGET': 'report.pdf'}"], "import os\nos.remove(TARGET)"),
+    (["TARGET = 'stock.csv'\nglobals().update(LABELS={'TARGET': 'report.pdf'})"], "import os\nos.remove(TARGET)"),
+], ids=["global-a-function-only-reads", "read-in-the-function-after-it-binds-it", "local-of-the-same-name",
+        "global-at-module-level", "a-store-into-vars-of-an-instance", "an-attribute-of-an-instance",
+        "a-store-into-the-dict-of-an-instance", "a-setitem-on-globals-whose-value-names-the-name",
+        "dict-setitem-handed-another-dict", "a-print-of-globals-beside-the-names-text",
+        "a-store-into-what-another-objects-globals-method-gives", "a-merge-into-another-dict",
+        "an-update-of-globals-whose-named-keyword-holds-a-dict-naming-the-name"])
+def test_a_name_no_code_rebinds_out_of_order_keeps_its_place(earlier, code, snap):
+    """A `global` at module level binds nothing a call may change later;
+    `vars()` of an instance, its `__dict__` or its attribute holds none of
+    the module's names; a store into the module's names sets only the key
+    it names, not one its value names; and a store into another dict sets
+    none (`_namespace_stores`)."""
+    assert _files(code, (snap,), earlier=earlier) == [("delete", ("stock.csv",))]
+
+
+def test_literal_code_too_deep_to_parse_in_a_function_rebinds_no_name_the_check_reads(snap):
+    """The names literal code a function runs binds are read from what it
+    parses to (`_Cell.rebinds_globally`): code too deep for the check's
+    parser binds none it can name, and the check still reads the cell, a
+    stop where the read of that code stopped (`_earlier_stop`)."""
+    earlier = _earlier(["TARGET = 'stock.csv'", f"def f():\n    exec({_TOO_DEEP!r})"])
+    writes = find_cell_writes(code="import os\nos.remove(TARGET)", earlier=earlier, snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("delete", ("stock.csv",))]
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+
+
+# T bound to a file this turn made, and a function that rebinds it, as a
+# global, to one the turn began with.
+_REBINDS_T = ["T = 'made_now.csv'", "open(T, 'w').write('x')", "def g0():\n    global T\n    T = 'report.pdf'", "g0()"]
+
+
+@pytest.mark.parametrize("code, action", [
+    ("import os\nos.system(f'rm {T}')", "delete"),
+    ("import os\nos.system('rm ' + T)", "delete"),
+    ("import subprocess\nsubprocess.run(['rm', T])", "delete"),
+    ("import subprocess\nsubprocess.run(f'rm {T}', shell=True)", "delete"),
+    ("import subprocess\nsubprocess.run(['mv', T, 'x.pdf'])", "move"),
+], ids=["rm-in-an-f-string", "rm-added-to", "rm-in-a-list", "rm-through-a-shell", "mv-in-a-list"])
+def test_a_command_through_a_name_a_function_rebinds_as_a_global_holds_whole(code, action, snap):
+    """A command's word is read through the same lookup as a path
+    (`_Reader.bindings_of`), so it never reads the name's module-level
+    value: the rm or mv holds whole, not as a file the turn made."""
+    writes = find_cell_writes(code=code, earlier=_earlier(_REBINDS_T), snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [(action, ())]
+
+
+@pytest.mark.parametrize("earlier", [
+    ["def arm():\n    globals()['OUT'] = 'stock.csv'", "arm()"],
+    ["def arm():\n    globals().update(OUT='stock.csv')", "arm()"],
+    ["def arm():\n    globals().update({'OUT': 'stock.csv'})", "arm()"],
+    ["def arm():\n    exec(\"global OUT\\nOUT = 'stock.csv'\")", "arm()"],
+    ["globals()['OUT'] = 'stock.csv'"],
+    ["vars()['OUT'] = 'stock.csv'"],
+    ["def arm():\n    exec(\"OUT = 'stock.csv'\", globals())", "arm()"],
+    ["def arm():\n    g = globals()\n    g['OUT'] = 'stock.csv'", "arm()"],
+    ["def arm():\n    globals().__setitem__('OUT', 'stock.csv')", "arm()"],
+    ["def arm():\n    globals().update([('OUT', 'stock.csv')])", "arm()"],
+    ["def arm():\n    globals().update(dict(OUT='stock.csv'))", "arm()"],
+    ["def arm():\n    arm.__globals__['OUT'] = 'stock.csv'", "arm()"],
+    ["import sys\ndef arm():\n    sys._getframe().f_globals['OUT'] = 'stock.csv'", "arm()"],
+    ["import sys\ndef arm():\n    setattr(sys.modules[__name__], 'OUT', 'stock.csv')", "arm()"],
+    ["import __main__\ndef arm():\n    __main__.OUT = 'stock.csv'", "arm()"],
+    ["import sys\ndef arm():\n    sys.modules['__main__'].OUT = 'stock.csv'", "arm()"],
+    ["import sys\ndef arm():\n    vars(sys.modules['__main__'])['OUT'] = 'stock.csv'", "arm()"],
+    ["arm = lambda: globals().__setitem__('OUT', 'stock.csv')", "arm()"],
+    ["import timeit\ndef arm():\n    timeit.timeit(stmt=\"OUT = 'stock.csv'\", number=1, globals=globals())", "arm()"],
+    ["import sys\nsys._getframe().f_locals['OUT'] = 'stock.csv'"],
+    ["locals()['OUT'] = 'stock.csv'"],
+    ["import __main__\ndef arm():\n    __main__.__dict__['OUT'] = 'stock.csv'", "arm()"],
+    ["import __main__ as m\ndef arm():\n    m.OUT = 'stock.csv'", "arm()"],
+    ["import sys\ndef arm():\n    m = sys.modules['__main__']\n    m.OUT = 'stock.csv'", "arm()"],
+    ["import sys\ndef arm():\n    sys.modules.get('__main__').OUT = 'stock.csv'", "arm()"],
+    ["import inspect\ndef arm():\n    inspect.getmodule(arm).OUT = 'stock.csv'", "arm()"],
+    ["def arm():\n    if (g := globals()) is not None:\n        g['OUT'] = 'stock.csv'", "arm()"],
+    ["def arm():\n    (g := globals())['OUT'] = 'stock.csv'", "arm()"],
+    ["(g := globals())['OUT'] = 'stock.csv'"],
+    ["import operator\ndef arm():\n    operator.setitem(globals(), 'OUT', 'stock.csv')", "arm()"],
+    ["def arm():\n    dict.__setitem__(globals(), 'OUT', 'stock.csv')", "arm()"],
+    ["def arm():\n    dict.update(globals(), OUT='stock.csv')", "arm()"],
+    ["def arm():\n    dict.setdefault(globals(), 'OUT', 'stock.csv')", "arm()"],
+    ["def arm():\n    (globals() or {})['OUT'] = 'stock.csv'", "arm()"],
+    ["G = globals\ndef arm():\n    G()['OUT'] = 'stock.csv'", "arm()"],
+    ["V = vars\ndef arm():\n    V()['OUT'] = 'stock.csv'", "arm()"],
+    ["L = locals\nL()['OUT'] = 'stock.csv'"],
+    ["def arm():\n    g = globals()\n    g |= {'OUT': 'stock.csv'}", "arm()"],
+    ["G = globals()\nG |= dict(OUT='stock.csv')"],
+    ["(globals() if True else {})['OUT'] = 'stock.csv'"],
+    ["globals().update(**{'OUT': 'stock.csv'})"],
+    ["import builtins\ndef arm():\n    builtins.globals()['OUT'] = 'stock.csv'", "arm()"],
+], ids=["a-store-into-globals-in-a-function", "an-update-of-globals", "an-update-of-globals-from-a-dict",
+        "a-global-in-literal-code-a-function-runs", "a-store-into-globals-at-module-level",
+        "a-store-into-vars-at-module-level", "literal-code-a-function-runs-in-the-globals",
+        "a-store-through-a-name-for-globals", "a-setitem-on-globals", "an-update-of-globals-from-pairs",
+        "an-update-of-globals-from-dict-keywords", "a-store-into-a-functions-globals",
+        "a-store-into-a-frames-globals", "a-setattr-on-the-module-sys-modules-holds", "an-attribute-of-main",
+        "an-attribute-of-the-module-sys-modules-holds", "a-store-into-vars-of-the-module",
+        "a-lambda-that-sets-an-item-of-globals", "a-timeit-statement-by-keyword-in-the-globals",
+        "a-store-into-the-frames-locals-at-module-level", "a-store-into-locals-at-module-level",
+        "a-store-into-the-dict-of-main", "an-attribute-of-main-imported-under-another-name",
+        "an-attribute-of-a-name-for-the-module-sys-modules-holds", "an-attribute-of-what-sys-modules-get-gives",
+        "an-attribute-of-what-getmodule-gives", "a-store-through-a-walrus-name-for-globals",
+        "a-store-into-a-walrus-for-globals-in-place", "a-store-into-a-walrus-for-globals-at-module-level",
+        "operator-setitem-on-globals", "dict-setitem-handed-globals", "dict-update-handed-globals",
+        "dict-setdefault-handed-globals", "a-store-into-globals-or-another-dict",
+        "a-store-into-what-a-name-for-the-globals-builtin-gives", "a-store-into-what-a-name-for-the-vars-builtin-gives",
+        "a-store-into-what-a-name-for-the-locals-builtin-gives-at-module-level", "a-merge-into-a-name-for-globals",
+        "a-merge-of-dict-keywords-into-a-name-for-globals", "a-store-into-globals-a-conditional-expression-gives",
+        "an-update-of-globals-from-a-dict-spread-as-keywords", "a-store-into-what-builtins-globals-gives"])
+def test_an_overwrite_through_a_name_a_namespace_store_or_literal_code_rebinds_is_held_whole(earlier, snap):
+    """A store into the module's names by a literal key, keyword or
+    attribute, however the code reaches them (`_namespace_stores`), and
+    literal code a function runs, rebind a name where the reader doesn't
+    order it (`_Reader.rebound_globally`), as a global in a function does,
+    to a value the reader doesn't read: an overwrite
+    through it is held whole, and so is a delete, where the name's
+    module-level value names no file the turn began with."""
+    writes = find_cell_writes(code="import pandas as pd\npd.DataFrame().to_csv(OUT)",
+                              earlier=_earlier(["OUT = 'new_out.csv'", *earlier]), snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("overwrite", ())]
+    writes = find_cell_writes(code="import os\nos.remove(OUT)", earlier=_earlier(["OUT = 'new_out.csv'", *earlier]),
+                              snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("delete", ())]
+
+
+@pytest.mark.parametrize("code", [
+    "import os\nos.system(CMD)",
+    "import subprocess\nsubprocess.run(CMD, shell=True)",
+    "import os\nos.popen(CMD)",
+    "import subprocess\nsubprocess.run(ARGS)",
+    "import subprocess\nsubprocess.check_output(ARGS)",
+], ids=["os-system", "a-shell", "popen", "an-argument-list", "check-output"])
+def test_a_whole_command_through_a_name_a_function_rebinds_as_a_global_is_one_the_check_cant_read(code, snap):
+    """A command held whole in such a name may be any once a call rebound
+    it (`_node_commands`), so the call reads as its twin through a name
+    bound to input does: one that runs code the check can't read, never
+    the harmless module-level command alone."""
+    armed = ["CMD = 'echo hi'\nARGS = ['echo', 'hi']",
+             "def arm():\n    global CMD, ARGS\n    CMD = 'rm report.pdf'\n    ARGS = ['rm', 'report.pdf']", "arm()"]
+    writes = find_cell_writes(code=code, earlier=_earlier(armed), snapshots=(snap,))
+    twin = find_cell_writes(code=code, earlier=_earlier(["CMD = input()\nARGS = input()"]), snapshots=(snap,))
+    assert writes.unchecked and writes.unread_here
+    assert writes.cause_kinds == twin.cause_kinds == ("runs",)
+
+
+@pytest.mark.parametrize("bound", ["push = _mv", "push = lambda: _mv()", "def push():\n    _mv()"],
+                         ids=["an-alias", "a-lambda", "a-def"])
+def test_a_call_through_a_name_a_function_rebinds_as_a_global_still_reads_its_module_level_value(bound, snap):
+    """A function may not have run, so a call through such a name still
+    reads what its module-level value runs, beside one the check can't
+    place: that adds to the card, never takes off it."""
+    earlier = ["import os\ndef _mv():\n    os.rename('report.pdf', 'old.pdf')", bound,
+               "def g():\n    global push\n    push = print", "g()"]
+    writes = find_cell_writes(code="push()", earlier=_earlier(earlier), snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("rename", ("report.pdf",))]
+
+
+@pytest.mark.parametrize("earlier", [
+    "(lambda: open('report.pdf', 'w').write('x'))()",
+    "def reg(_):\n    return lambda f: f\n@reg(open('report.pdf', 'w').write('x'))\ndef g():\n    pass",
+], ids=["a-lambda-called-at-once", "a-decorators-argument"])
+def test_a_rewrite_after_a_write_in_a_lambda_or_a_decorator_keeps_its_card(earlier, snap):
+    """An earlier cell's write inside a lambda or a decorator's argument
+    isn't among the code `_nodes_that_run` counts, so it doesn't make the
+    file the agent's own (`_OwnedFiles`): a later rewrite of it keeps its
+    card, as its plain top-level twin's does not."""
+    writes = find_cell_writes(code="open('report.pdf', 'w').write('y')", earlier=_earlier([earlier]), snapshots=(snap,))
+    assert [(f.action, f.paths) for f in writes.held_files] == [("overwrite", ("report.pdf",))]
+    twin = find_cell_writes(code="open('report.pdf', 'w').write('y')",
+                            earlier=_earlier(["open('report.pdf', 'w').write('x')"]), snapshots=(snap,))
+    assert not twin.held_files
 
 
 def test_a_list_name_bound_again_drops_what_was_added_before(snap):
@@ -3071,15 +5520,773 @@ def test_paths_gathered_into_a_list_are_held(code, earlier, snap):
     ("import os\nos.system('# rm report.pdf\\necho done')", []),
     ("import subprocess\nc0 = ['rm', 'report.pdf']\nc1 = c0\nsubprocess.run(c1)", [("delete", ("report.pdf",))]),
     ("import pty\npty.spawn(['rm', 'report.pdf'])", [("delete", ("report.pdf",))]),
+    ("import subprocess\nsubprocess.run(['rsync', '--remove-source-files', 'report.pdf', 'docs/'])",
+     [("move", ("report.pdf",))]),
 ], ids=["named-command", "named-words", "built-up-command", "f-string", "plus", "format", "percent",
         "f-string-root", "sh-c", "bash-lc", "getoutput", "getstatusoutput", "mv-t", "mv-target-directory",
         "sudo", "xargs", "find-delete", "find-exec-rm", "git-clean", "spawnlp", "shell-variable",
         "if-then", "for-do", "helper-command", "exec-code", "split-text", "shlex-split", "list-plus-list",
         "list-plus-glob", "mv-flags-then-t", "timeout", "stdbuf", "ionice", "busybox", "piped-into-sh",
         "sh-input", "command-substitution", "sudo-keep-env", "setsid", "comment-line-first",
-        "comment-ends-at-its-line", "commented-out", "aliased-words", "pty-spawn"])
+        "comment-ends-at-its-line", "commented-out", "aliased-words", "pty-spawn", "rsync-removing-its-source"])
 def test_shell_deletes_and_moves_in_every_form(code, expected, snap):
     assert _files(code, (snap,)) == expected
+
+
+_REBINDS_OUT = "OUT = 'new.csv'\ndef configure(path):\n    global OUT\n    OUT = path"
+
+
+@pytest.mark.parametrize("words", [
+    ["curl", "-X", "DELETE", "https://example.com/items/1"],
+    ["kubectl", "delete", "pod", "web-1"],
+    ["aws", "s3", "rm", "s3://bucket/stock.csv"],
+    ["git", "push", "origin", "main"],
+], ids=["curl-delete", "kubectl-delete", "aws-s3-rm", "git-push"])
+def test_a_command_whose_change_is_remote_gets_no_card(words, snap):
+    """The write relay holds such a change to a host it relays, and anywhere
+    else the account the command uses decides; the check reads only local
+    files."""
+    assert not _held(f"import subprocess\nsubprocess.run({words!r})", snap)
+    assert not _held(f"import os\nos.system({' '.join(words)!r})", snap)
+
+
+@pytest.mark.parametrize("script", [
+    "f'rm {p}'", "'rm -f ' + p", "'rm {}'.format(p)", "'rm %s' % p", "f'mv {p} /tmp/x.csv'",
+], ids=["f-string", "plus", "format", "percent", "mv"])
+@pytest.mark.parametrize("shell", ["['sh', '-c'", "['bash', '-c'", "['bash', '-lc'"],
+                         ids=["sh-c", "bash-c", "bash-lc"])
+def test_a_shells_script_the_code_builds_in_a_list_of_words_is_read_as_os_systems_is(script, shell, snap):
+    """A shell's script after its `-c` in a list of words is read as the
+    text `os.system` is handed (`_listed_commands`), each part picked at
+    run time a placeholder, so its deletes and moves are read and the card
+    under every value matches `os.system`'s, not code the check can't
+    read, which `off` drops."""
+    from anton.core.utils.scratchpad import _unchecked_hold_dropped
+
+    def cards(code: str) -> list[bool]:
+        writes = find_cell_writes(code=code, earlier=_earlier(["p = 'stock.csv'"]), snapshots=(snap,))
+        return [writes.needs_approval() and not _unchecked_hold_dropped(writes, mode) for mode in ("all", "own", "off")]
+
+    listed = cards(f"import subprocess\nsubprocess.run({shell}, {script}])")
+    assert listed == cards(f"import os\nos.system({script})") == [True, True, True]
+
+
+@pytest.mark.parametrize("script", [
+    "f'sed -i s/a/b/ {p}'", "f'echo x > {p}'", "'echo x | tee ' + p", "'cp job.txt {}'.format(p)",
+    "'truncate -s 0 %s' % p",
+], ids=["sed-i", "a-redirect", "tee", "cp", "truncate"])
+@pytest.mark.parametrize("shell", ["['sh', '-c'", "['bash', '-c'", "['bash', '-lc'"],
+                         ids=["sh-c", "bash-c", "bash-lc"])
+def test_a_shells_script_the_code_builds_in_a_list_of_words_stays_code_the_check_cant_read(script, shell, snap):
+    """Beside the deletes and moves read in it, a shell's script after its
+    `-c` that the code builds stays a word the check can't read
+    (`_listed_commands`): a write other than those runs code the check
+    can't read, a card under all and own."""
+    code = f"import subprocess\nsubprocess.run({shell}, {script}])"
+    writes = find_cell_writes(code=code, earlier=_earlier(["p = 'stock.csv'"]), snapshots=(snap,))
+    assert [c.kind for c in writes.causes] == ["runs"] and not writes.held_files
+    assert _cards(code, snap, earlier=["p = 'stock.csv'"]) == [True, True, False]
+
+
+@pytest.mark.parametrize("store", [
+    "__import__('__main__').cfg['o'] = 'stock.csv'",
+    "def h():\n    pass\nimport gc\nfor x in gc.get_referents(h):\n"
+    "    if type(x) is dict and 'cfg' in x:\n        x['cfg']['o'] = 'stock.csv'",
+    "vars()['cfg']['o'] = 'stock.csv'",
+    "cfg.update(o='stock.csv')",
+], ids=["through-main", "through-gc-referents", "through-vars", "updated"])
+@pytest.mark.parametrize("code", [
+    "import os\nos.system(f\"rm {cfg['o']}\")", "import subprocess\nsubprocess.run(['rm', cfg['o']])",
+    "import os\nos.system(f\"mv {cfg['o']} /tmp/x\")",
+], ids=["rm-script", "rm-words", "mv-script"])
+def test_a_shell_delete_through_a_dict_entry_a_cell_may_change_holds_whole(store, code, snap):
+    """The command reading refuses a dict entry where the reading of a path
+    would (`_entry_refused`): a cell may change the dict out of sight, so
+    the shell delete or move holds whole, as `os.remove(cfg['o'])` and
+    `shutil.move(cfg['o'], ...)` do, and never reads the display's stale
+    entry."""
+    earlier = ["cfg = {'o': 'new2.csv'}", store]
+    twin = "import shutil\nshutil.move(cfg['o'], '/tmp/x')" if "mv" in code else "import os\nos.remove(cfg['o'])"
+    assert _files(code, (snap,), earlier=earlier) == _files(twin, (snap,), earlier=earlier) != []
+
+
+@pytest.mark.parametrize("code", ["import os\nos.system(CMD)", "import subprocess\nsubprocess.run(CMD, shell=True)"],
+                         ids=["os-system", "shell-true"])
+def test_a_whole_command_held_in_a_rebound_name_names_no_stale_file(code, snap):
+    """A command held in a name a function rebinds with `global` is one the
+    check can't place: never its stale value's delete, but a delete it
+    picks when it runs, beside the code the check can't read."""
+    earlier = ["CMD = 'rm report.pdf'\ndef quiet():\n    global CMD\n    CMD = 'ls'", "quiet()"]
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert [(c.action, c.paths) for c in writes.held_files] == [("delete", ())]
+    assert "report.pdf" not in _card(code, snap, earlier=earlier)
+
+
+def test_a_write_through_a_rebound_name_past_the_depth_limit_stops(snap):
+    """Its shallow twin holds whole, as onto a file the code picks when it
+    runs (GLOBAL), which no hold the read within the limit finds covers
+    (`_covers`): the check stops."""
+    code = "open(p9, 'w').write('x')"
+    earlier = [_REBINDS_OUT + "\np0 = OUT\n" + "".join(f"p{i} = p{i - 1}\n" for i in range(1, 10))]
+    assert _files(code.replace("p9", "OUT"), (snap,), earlier=earlier) == [("overwrite", ())]
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert writes.stopped and writes.needs_approval()
+
+
+def test_a_script_whose_quote_never_closes_reads_each_word_without_its_quotes(snap):
+    """Where a quote never closes, the words split at spaces with each pair
+    of quotes taken off (`_script_commands`), so a quoted operand still
+    names its file."""
+    assert _files("import os\nos.system('rm -f \\'stock.csv\\'\\necho \"x')", (snap,)) == [("delete", ("stock.csv",))]
+
+
+def _cards(code: str, snap, *, earlier=()) -> list[bool]:
+    """Whether the cell `code` gets a card under all, own and off."""
+    from anton.core.utils.scratchpad import _unchecked_hold_dropped
+
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    return [writes.needs_approval() and not _unchecked_hold_dropped(writes, mode) for mode in ("all", "own", "off")]
+
+
+@pytest.mark.parametrize("binder", [
+    ["def quiet():\n    global CMD\n    CMD = 'rm report.pdf'", "quiet()"],
+    ["globals()['CMD'] = 'rm report.pdf'"],
+    ["class Setup:\n    global CMD\n    CMD = 'rm report.pdf'"],
+    ["def quiet():\n    exec(\"global CMD\\nCMD = 'rm report.pdf'\")", "quiet()"],
+    ["def quiet():\n    global CMD\n    CMD = ['rm', 'report.pdf']", "quiet()"],
+], ids=["a-functions-global", "a-counted-store", "a-class-bodys-global", "literal-code-in-a-function",
+        "a-functions-global-of-a-list"])
+@pytest.mark.parametrize("code", [
+    "import os\nos.system(CMD)", "import subprocess\nsubprocess.run(CMD, shell=True)",
+    "import os\nos.popen(CMD).read()", "import subprocess\nsubprocess.run(['sh', '-c', CMD])",
+    "import subprocess\nsubprocess.run(('bash', '-lc', CMD))", "import subprocess\nsubprocess.run(['env', 'sh', '-c', CMD])",
+    "import subprocess\nsubprocess.run(CMD.split())", "import subprocess\nsubprocess.Popen(CMD.split(' '))",
+    "import shlex, subprocess\nsubprocess.run(shlex.split(CMD))", "import os\nos.execlp('sh', 'sh', '-c', CMD)",
+    "import os\nos.system(str(CMD))", "import os\nos.system(CMD.strip())",
+    "import os\nos.system(CMD.format(x=1))", "import os\nos.system('{} -v'.format(CMD))",
+    "import os\nos.system(CMD.replace('-i', '-f'))", "import os\nos.system(' '.join(CMD))",
+    "import os\nos.system(' && '.join([CMD, 'ls']))", "import subprocess\nsubprocess.run([*CMD])",
+    "import subprocess\nsubprocess.run(['sudo', *CMD])", "import os\nos.system(f'sudo {CMD}')",
+    "import os\nos.system('nohup ' + CMD + ' &')", "import os\nos.system(f'timeout 10 {CMD}')",
+    "import os\nos.system('env ' + CMD)", "import subprocess\nsubprocess.run(f'sudo {CMD}', shell=True)",
+    "import os\nos.system(\"bash -c '\" + CMD + \"'\")",
+    "import subprocess\nsubprocess.run(['sh', '-c', 'sudo ' + CMD])",
+    "import subprocess\nsubprocess.run(['sudo', *CMD.split()])", "import subprocess\nsubprocess.run(CMD + ['-f'])",
+    "import subprocess\nsubprocess.run(['sudo'] + CMD)", "import os, shlex\nos.system(shlex.join(CMD))",
+], ids=["os-system", "shell-true", "popen", "sh-c-in-a-list-of-words", "bash-lc-in-a-tuple", "env-sh-c", "split",
+        "split-on-a-space", "shlex-split", "execlp-sh-c", "str", "strip", "format", "format-around-it", "replace",
+        "a-join-of-it", "a-join-with-it", "spread-into-a-list-of-words", "spread-after-a-prefix", "after-sudo",
+        "after-nohup", "after-timeout", "after-env", "after-sudo-shell-true", "a-shells-c-in-a-script",
+        "after-sudo-in-sh-c", "split-spread-after-sudo", "a-list-added-after-it", "a-list-added-before-it",
+        "shlex-join"])
+def test_a_whole_command_only_a_rebinding_gives_a_value_is_a_delete_it_picks_when_it_runs(binder, code, snap):
+    """With no top-level value, a command held in a name a function's or
+    class body's `global`, a counted store or literal code binds is one
+    the check can't place (`_rebound_name`): a delete it picks when it
+    runs, under every value of the setting, as the path twin
+    `os.system(f'rm {CMD}')` holds whole. It is a script, so a shell's
+    `-c` in a list of words, `split()`, `shlex.split()`, `str()` and
+    `strip()` read it as `os.system` does; and where the code around it
+    gives no command the check reads, as `format()`, `replace()`, a join
+    or a spread into a list of words does, the command is still the one
+    the name holds when it runs (`_node_commands`, `_listed_commands`),
+    after `sudo`, `env`, `nohup` or `timeout` too, as a shell's `-c` code
+    and in a list added to another (`_program_filled`, `_word_lists`)."""
+    writes = find_cell_writes(code=code, earlier=_earlier(binder), snapshots=(snap,))
+    assert [(c.action, c.paths) for c in writes.held_files] == [("delete", ())]
+    assert _cards(code, snap, earlier=binder) == [True, True, True]
+    assert _cards("import os\nos.system(f'rm {CMD}')", snap, earlier=binder) == [True, True, True]
+
+
+@pytest.mark.parametrize("binder, code", [
+    ("def quiet():\n    global CMDS\n    CMDS = ['rm report.pdf']", "import os\nos.system(CMDS[0])"),
+    ("def quiet():\n    global CMDS\n    CMDS = ['rm report.pdf']", "import os\nos.system(CMDS.pop())"),
+    ("CMDS = ['ls']\ndef quiet():\n    global CMDS\n    CMDS = ['rm report.pdf']", "import os\nos.system(CMDS[0])"),
+    ("def quiet():\n    global CFG\n    CFG = {'c': 'rm report.pdf'}", "import os\nos.system(CFG['c'])"),
+    ("def quiet():\n    global CFG\n    CFG = {'c': 'rm report.pdf'}", "import os\nos.system(CFG.get('c'))"),
+], ids=["an-index", "a-pop", "an-index-with-a-stale-list", "a-key", "a-get"])
+def test_a_command_taken_out_of_a_rebound_list_or_dict_is_a_delete_it_picks_when_it_runs(binder, code, snap):
+    """A command taken out of a list or dict a function rebinds with
+    `global` gives no command the check reads, so it is the one the name
+    holds when it runs (`_node_commands`): a delete it picks when it runs,
+    under every value, never the stale list's `ls`."""
+    earlier = [binder, "quiet()"]
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert [(c.action, c.paths) for c in writes.held_files] == [("delete", ())]
+    assert _cards(code, snap, earlier=earlier) == [True, True, True]
+
+
+@pytest.mark.parametrize("code", [
+    "import os\nos.system(f'{PROG} stock.csv')", "import subprocess\nsubprocess.run([PROG, 'stock.csv'])",
+    "import subprocess\nsubprocess.run(['sudo', PROG, 'stock.csv'])",
+    "import subprocess\nsubprocess.run(['env', PROG, 'stock.csv'])",
+    "import subprocess\nsubprocess.run(['timeout', '5', PROG, 'stock.csv'])",
+    "import os\nos.system(f'sudo {PROG} stock.csv')",
+], ids=["script", "words", "words-after-sudo", "words-after-env", "words-after-timeout", "script-after-sudo"])
+@pytest.mark.parametrize("top", ["PROG = 'ls'\n", ""], ids=["a-top-level-value-too", "no-top-level-value"])
+def test_a_program_held_in_a_rebound_name_is_a_delete_it_picks_when_it_runs(code, top, snap):
+    """A program word held in such a name is the one it holds when it
+    runs, as `$RM` is in a shell (`_rebound_name`), after a word such as
+    `sudo` too: a delete it picks when it runs, under every value."""
+    earlier = [top + "def f():\n    global PROG\n    PROG = 'rm'", "f()"]
+    assert ("delete", ()) in _files(code, (snap,), earlier=earlier)
+    assert _cards(code, snap, earlier=earlier) == [True, True, True]
+
+
+@pytest.mark.parametrize("code, earlier", [
+    ("import os\nos.system('sudo ' + CMD)", ["CMD = 'rm report.pdf'", "def g():\n    global CMD\n    CMD = 'ls'"]),
+    ("import os\nos.system('nohup ' + CMD)", ["CMD = 'rm report.pdf'", "def g():\n    global CMD\n    CMD = 'ls'"]),
+    ("import subprocess\nsubprocess.run(f'sudo {CMD}', shell=True)",
+     ["CMD = 'rm report.pdf'", "def g():\n    global CMD\n    CMD = 'ls'"]),
+    ("import subprocess\nsubprocess.run(ARGV + ['-f'])",
+     ["ARGV = ['rm', 'report.pdf']", "def h():\n    global ARGV\n    ARGV = ['ls']"]),
+    ("import subprocess\nsubprocess.run(['sudo'] + ARGV)",
+     ["ARGV = ['rm', 'report.pdf']", "def h():\n    global ARGV\n    ARGV = ['ls']"]),
+], ids=["after-sudo", "after-nohup", "after-sudo-shell-true", "a-list-added-after-it", "a-list-added-before-it"])
+def test_a_whole_command_whose_top_level_value_deletes_holds_where_a_function_may_rebind_it(code, earlier, snap):
+    """A function nothing called yet may rebind the name, so the command is
+    the one it holds when it runs (`_rebound_name`), never the top-level
+    value read alone: here that value deletes report.pdf, and the cell
+    holds a delete it picks when it runs, under every value."""
+    assert ("delete", ()) in _files(code, (snap,), earlier=earlier)
+    assert _cards(code, snap, earlier=earlier) == [True, True, True]
+
+
+@pytest.mark.parametrize("code", [
+    "import os\nos.system(' '.join(CMD))", "import subprocess\nsubprocess.run(' '.join(CMD), shell=True)",
+    "import os\nos.system('sudo ' + ' '.join(CMD))", "import os\nos.system(' '.join(CMD) + ' -v')",
+    "import os\nos.system(f\"{' '.join(CMD)}\")", "import os\nos.system('{}'.format(' '.join(CMD)))",
+    "import subprocess\nsubprocess.run(['sh', '-c', ' '.join(CMD)])",
+    "import subprocess\nsubprocess.run(' '.join(CMD).split())", "import os\nos.system('; '.join(CMDS))",
+    "import os\nc = ' '.join(CMD)\nos.system(c)", "import subprocess\nsubprocess.run(['sudo'] + sorted(CMD))",
+    "import subprocess\nsubprocess.run(['sudo'] + [c for c in CMD])",
+    "import subprocess\nsubprocess.run(['sudo'] + CMD[:])", "import subprocess\nsubprocess.run([CMD[0], 'report.pdf'])",
+    "import os\nos.system(CMD[0] + ' report.pdf')",
+], ids=["a-join", "a-join-shell-true", "a-join-after-sudo", "a-join-with-more", "a-join-in-an-f-string",
+        "a-join-formatted", "a-join-as-a-shells-c", "a-join-split", "a-join-of-scripts", "a-name-bound-to-a-join",
+        "a-sorted-copy-after-sudo", "a-comprehension-after-sudo", "a-slice-after-sudo", "its-program-in-words",
+        "its-program-in-a-script"])
+@pytest.mark.parametrize("earlier", [
+    ["CMD = ['ls']\nCMDS = ['ls']\ndef quiet():\n    global CMD, CMDS\n    CMD = ['rm', 'report.pdf']\n"
+     "    CMDS = ['rm report.pdf']", "quiet()"],
+    ["CMD = ['rm', 'report.pdf']\nCMDS = ['rm report.pdf']\ndef quiet():\n    global CMD, CMDS\n    CMD = ['ls']\n"
+     "    CMDS = ['ls']", "quiet()"],
+    ["CMD = ['ls']\nCMDS = ['ls']", "globals()['CMD'] = ['rm', 'report.pdf']\nglobals()['CMDS'] = ['rm report.pdf']"],
+], ids=["a-stale-listing", "a-stale-delete", "a-counted-store-over-a-stale-listing"])
+def test_a_list_command_a_function_may_rebind_is_never_read_as_its_top_level_value(code, earlier, snap):
+    """A list command a name code may have rebound holds is the one it holds
+    when it runs, joined, copied or read by its program word too, never its
+    top-level value (`_command_text`, `_unplaced_word`): a delete it picks
+    when it runs, under every value, and no card naming report.pdf, which
+    a stale `rm report.pdf` names though the step may only list. The same
+    list no code rebinds is read: a listing holds nothing."""
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert [(c.action, c.paths) for c in writes.held_files] == [("delete", ())]
+    assert _cards(code, snap, earlier=earlier) == [True, True, True]
+    assert _cards(code, snap, earlier=["CMD = ['ls']\nCMDS = ['ls']"]) == [False, False, False]
+
+
+@pytest.mark.parametrize("code", [
+    "import os\nos.system(f\"rm {cfg['o']}\")", "import subprocess\nsubprocess.run(['rm', cfg['o']])",
+    "import os\nos.system('mv ' + cfg['o'] + ' /tmp/x')",
+], ids=["rm-script", "rm-words", "mv"])
+@pytest.mark.parametrize("earlier", [
+    ["cfg = {'o': 'new.csv'}"],
+    ["cfg = {'o': 'new.csv'}", "import pickle\npickle.loads(blob)"],
+    ["cfg = {'o': 'new.csv'}", "import helpers"],
+    ["cfg = {'o': 'stock.csv'}"],
+], ids=["a-clean-dict", "a-pickle-load-later", "a-project-module-later", "a-file-there"])
+def test_a_shell_delete_or_move_through_a_dict_entry_holds_whole(code, earlier, snap):
+    """A delete or a move never narrows to a dict entry: a cell may change
+    the entry, however it reaches it, so the shell `rm` or `mv` holds
+    whole, as `os.remove(cfg['o'])` and `shutil.move` do."""
+    twin = "import shutil\nshutil.move(cfg['o'], '/tmp/x')" if "mv" in code else "import os\nos.remove(cfg['o'])"
+    assert _files(code, (snap,), earlier=earlier) == _files(twin, (snap,), earlier=earlier) == [
+        ("move" if "mv" in code else "delete", ())]
+
+
+@pytest.mark.parametrize("change", [
+    "cfg.update(tool='rm')", "__import__('__main__').cfg['tool'] = 'rm'", "vars()['cfg']['tool'] = 'rm'",
+    "import helpers\nhelpers.fix(cfg)",
+], ids=["updated", "through-main", "through-vars", "handed-to-a-call"])
+@pytest.mark.parametrize("code", [
+    "import os\nos.system(f\"{cfg['tool']} stock.csv\")", "import subprocess\nsubprocess.run([cfg['tool'], 'stock.csv'])",
+    "import os\nos.system(cfg['tool'] + ' stock.csv')",
+], ids=["f-string", "words", "plus"])
+def test_a_program_a_dict_entry_a_cell_may_change_gives_is_one_the_check_cant_read(change, code, snap):
+    """The command reading refuses a dict entry a cell may change out of
+    sight (`_entry_refused`), so a program it gives is the one the entry
+    holds when it runs, never the display's stale `ls`: a delete it picks
+    when it runs, under every value, as a program a rebound name holds
+    (`_unplaced_word`). The dict no cell changes gives `ls`, which holds
+    nothing."""
+    assert ("delete", ()) in _files(code, (snap,), earlier=["cfg = {'tool': 'ls'}", change])
+    assert _cards(code, snap, earlier=["cfg = {'tool': 'ls'}", change]) == [True, True, True]
+    assert _cards(code, snap, earlier=["cfg = {'tool': 'ls'}"]) == [False, False, False]
+
+
+@pytest.mark.parametrize("change", [
+    "cfg.update(t='rm report.pdf')", "cfg['t'] = 'rm report.pdf'", "d = cfg\nd['t'] = 'rm report.pdf'",
+    "globals()['cfg']['t'] = 'rm report.pdf'", "__import__('__main__').cfg['t'] = 'rm report.pdf'",
+    "import helpers\nhelpers.fix(cfg)", "cfg.pop('t')\ncfg.setdefault('t', 'rm report.pdf')",
+    "import operator\noperator.setitem(cfg, 't', 'rm report.pdf')", "fix = cfg.update\nfix(t='rm report.pdf')",
+    "holder = [cfg]\nholder[0]['t'] = 'rm report.pdf'", "d = cfg\nd.update(t='rm report.pdf')",
+    "c = cfg\nimport helpers\nhelpers.fix(c)", "outer = {'c': cfg}\nouter['c']['t'] = 'rm report.pdf'",
+], ids=["updated", "stored", "through-another-name", "through-globals", "through-main", "handed-to-a-call",
+        "popped-then-set", "through-setitem", "a-method-taken", "in-a-list", "another-name-updated",
+        "another-name-handed-on", "in-another-dict"])
+@pytest.mark.parametrize("code", [
+    "import os\nos.system(cfg['t'])", "import subprocess\nsubprocess.run(cfg['t'], shell=True)",
+    "import subprocess\nsubprocess.run(cfg['t'].split())", "import os\nos.system(cfg.get('t'))",
+    "import os\nc = cfg['t']\nos.system(c)",
+], ids=["os-system", "shell-true", "split", "get", "a-name-bound-to-it"])
+def test_a_whole_command_a_dict_entry_a_cell_may_change_gives_is_a_delete_it_picks_when_it_runs(change, code, snap):
+    """A whole command read from a dict entry a cell may change out of
+    sight (`_entry_refused`), by a store, a method of the dict or a call
+    handed it, or after a cell hands the dict on under another name, in a
+    list or another dict, is the one the entry holds when it runs, never
+    the display's stale `ls stock.csv`: a delete it picks when it runs,
+    under every value, as a whole command a rebound name holds
+    (`_unplaced_in`). The dict no cell changes gives `ls`, which holds
+    nothing."""
+    earlier = ["cfg = {'t': 'ls stock.csv'}", change]
+    assert ("delete", ()) in _files(code, (snap,), earlier=earlier)
+    assert _cards(code, snap, earlier=earlier) == [True, True, True]
+    assert _cards(code, snap, earlier=earlier[:1]) == [False, False, False]
+
+
+@pytest.mark.parametrize("change, code", [
+    ("cfg.update(t='rm report.pdf')", "import os\nos.system(cfg['t'])"),
+    ("cfg.pop('t')\ncfg.setdefault('t', 'rm report.pdf')", "import os\nos.system(cfg['t'])"),
+    ("import operator\noperator.setitem(cfg, 't', 'rm report.pdf')", "import os\nos.system(cfg.get('t'))"),
+    ("cfg.update(t='rm')", "import subprocess\nsubprocess.run([cfg['t'], 'report.pdf'])"),
+], ids=["updated", "popped-then-set", "through-setitem", "a-program-updated"])
+def test_a_command_from_a_dict_a_dict_call_built_that_a_cell_changes_is_a_delete_it_picks_when_it_runs(
+    change, code, snap,
+):
+    """A dict built by a `dict(...)` call holds its keywords as entries, as
+    a display does (`_Reader.items_of`), so a cell that changes it refuses
+    them too (`_entry_refused`): the command or program read from the
+    entry is the one it holds when it runs, a delete it picks when it runs,
+    under every value, never the stale `ls`. The dict no cell changes gives
+    `ls`, which holds nothing."""
+    built = "cfg = dict(t='ls')"
+    assert ("delete", ()) in _files(code, (snap,), earlier=[built, change])
+    assert _cards(code, snap, earlier=[built, change]) == [True, True, True]
+    assert _cards(code, snap, earlier=[built]) == [False, False, False]
+
+
+def test_whether_a_cell_may_change_a_dict_is_read_once_per_check(snap, monkeypatch):
+    """Whether a cell may change a dict display out of sight
+    (`_entry_refused`) is one read of every cell's loads of it per check
+    (`_Reader.entries_refused`), not one per lookup in each command:
+    counted, not timed."""
+    from anton.core.utils import write_check
+
+    asked: list[str] = []
+    real = write_check._changed_in_place
+    monkeypatch.setattr(write_check, "_changed_in_place",
+                        lambda name, found, reader: asked.append(name) or real(name, found, reader))
+    earlier = ["cfg = {" + ", ".join(f"'k{i}': 'ls f{i}.csv'" for i in range(200)) + "}"]
+    code = "import os\n" + "".join(f"os.system(f\"cat {{cfg['k{i}']}}\")\n" for i in range(200))
+    find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+    assert asked.count("cfg") <= 3
+
+
+@pytest.mark.parametrize("code", [
+    "import os\nCMDS = {'clean': 'rm new.csv'}\nos.system(CMDS['clean'])",
+    "import os\nCMDS = {'clean': 'rm new.csv'}\nos.system(CMDS.get('clean'))",
+], ids=["by-key", "by-get"])
+def test_a_shell_delete_a_dict_entry_holds_whole(code, snap):
+    """A whole command read from a dict entry deletes what the entry holds
+    when it runs: it holds whole, as a delete through an entry does."""
+    assert _files(code, (snap,)) == [("delete", ())]
+    assert _files(code.replace("CMDS['clean']", "'rm new.csv'").replace("CMDS.get('clean')", "'rm new.csv'"),
+                  (snap,)) == []
+
+
+@pytest.mark.parametrize("run", [
+    "subprocess.run(['psql', '-h', 'db.example.com', '-c', sql])", "subprocess.run(['mysql', '-e', sql])",
+    "subprocess.run(['sqlite3', 'app.db', sql])", "subprocess.run(['psql', '-h', 'db.example.com'], input=sql)",
+], ids=["psql-c", "mysql-e", "sqlite3", "input"])
+def test_a_sql_file_an_earlier_cell_reads_past_the_cap_is_held_where_a_command_line_client_runs_it(run, sql_files):
+    """A database's command line client runs the SQL text a call hands it
+    as a word or as its input (`_feeds_a_program`): the big file an
+    earlier cell read gets the sql_file card, as in its own cell and as
+    its small twin does."""
+    code = "import subprocess\n" + run
+    big = find_cell_writes(code=code, earlier=_earlier(["sql = open('big.sql').read()"]), snapshots=(sql_files,))
+    assert [c.via for c in big.calls] == ["sql_file"]
+    same = code.replace(", sql]", ", open('big.sql').read()]").replace("=sql)", "=open('big.sql').read())")
+    assert [c.via for c in find_cell_writes(code=same, earlier=_earlier(()), snapshots=(sql_files,)).calls] == [
+        "sql_file"]
+    small = find_cell_writes(code=code, earlier=_earlier(["sql = open('fix.sql').read()"]), snapshots=(sql_files,))
+    assert small.needs_approval()
+
+
+@pytest.mark.parametrize("read", [
+    ["script = ''", "script += open('db.sql').read()"],
+    ["script = ''", "script = script + open('db.sql').read()"],
+    ["script = ''", "script += 'DELETE FROM orders;'"],
+], ids=["plus-equals-a-file", "plus-a-file", "plus-equals-a-literal"])
+def test_a_small_sql_files_delete_added_to_a_name_in_another_cell_is_held(read, tmp_path, monkeypatch):
+    """What another cell adds to a name, or a binding adds to the name's
+    own value, is read on its own for the statements it holds
+    (`_Reader.statements_held`): the DELETE runs on app.db, as it does
+    where the same cell builds the text or the file is past the cap. A
+    SELECT added the same way holds nothing."""
+    (tmp_path / "app.db").write_text("")
+    (tmp_path / "db.sql").write_text("DELETE FROM orders;\n")
+    (tmp_path / "sel.sql").write_text("SELECT 1;\n")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    run = "import sqlite3\nsqlite3.connect('app.db').executescript(script)"
+    assert find_cell_writes(code=run, earlier=_earlier(read), snapshots=(snap,)).needs_approval()
+    reads = [r.replace("db.sql", "sel.sql").replace("DELETE FROM orders", "SELECT 1") for r in read]
+    assert not find_cell_writes(code=run, earlier=_earlier(reads), snapshots=(snap,)).needs_approval()
+
+
+@pytest.mark.parametrize("code", [
+    "import subprocess\nsubprocess.run(['cp', 'boot.py', 'sitecustomize.py'])",
+    "import os\nos.system('cp boot.py usercustomize.py')",
+    "import os\nos.system('echo import boot > sitecustomize.py')",
+    "import os\nos.system('echo import boot >sitecustomize.py')",
+    "import os\nos.system('echo import boot >> sitecustomize.py')",
+    "import os\nos.system('echo import boot | tee sitecustomize.py')",
+    "import os\nos.system('install boot.py sitecustomize.py')",
+    "import os\nos.system('ln -sf boot.py sitecustomize.py')",
+    "import os\nos.system('rsync boot.py sitecustomize.py')",
+    "import os\nos.system('mv boot.py sitecustomize.py')",
+    "import os\nos.system('curl -o sitecustomize.py https://example.com/a.py')",
+    "import os\nos.system('wget -O sitecustomize.py https://example.com/a.py')",
+    "import os\nos.system('touch usercustomize.py')",
+    "import os\nos.system('wget -P . https://example.com/sitecustomize.py')",
+    "import os\nos.system('curl -O --output-dir . https://example.com/sitecustomize.py')",
+], ids=["words", "script", "redirect", "redirect-glued-to-the-file", "append", "tee", "install", "ln", "rsync",
+        "mv-onto", "curl-o", "wget-o", "touch", "wget-into-its-folder", "curl-into-its-folder"])
+def test_a_shell_write_of_a_startup_hook_it_names_is_a_hook_write(code, snap):
+    """A shell write of a startup hook it names, in a spelling the hook walk
+    reads (`_command_hook_write`), as `echo x > sitecustomize.py` is, is a
+    hook write, as a list of words or a script, held under every value."""
+    assert find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,)).writes_startup_hook
+    assert _cards(code, snap) == [True, True, True]
+
+
+@pytest.mark.parametrize("wrap", [
+    "['sh', '-c', f'{cmd}']", "['bash', '-c', 'set -e; ' + cmd]", "['sh', '-c', '{}'.format(cmd)]",
+    "['sh', '-c', '%s' % cmd]", "['sudo', 'sh', '-c', cmd]", "['env', 'bash', '-c', cmd]",
+], ids=["f-string", "a-prefix", "format", "percent", "sudo", "env"])
+@pytest.mark.parametrize("where", ["same-cell", "earlier-cell"])
+def test_a_shells_script_built_around_a_command_a_file_holds_is_read_as_os_systems_is(
+    wrap, where, tmp_path, monkeypatch,
+):
+    """A whole command a name holds, as a file's text read into it, is the
+    script a shell's `-c` runs wherever the command starts in it, as
+    `os.system(cmd)` reads it (`_program_filled`): its delete holds under
+    every value."""
+    (tmp_path / "stock.csv").write_text("x")
+    (tmp_path / "run.sh").write_text("rm stock.csv\n")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    read = "cmd = open('run.sh').read()"
+    code = f"import subprocess\nsubprocess.run({wrap})"
+    earlier, code = ([read], code) if where == "earlier-cell" else ([], read + "\n" + code)
+    assert _files(code, (snap,), earlier=earlier) == [("delete", ("stock.csv",))]
+    assert _cards(code, snap, earlier=earlier) == [True, True, True]
+
+
+@pytest.mark.parametrize("change", [
+    "open('lsjob.txt', 'a').write('rm report.pdf\\n')\n",
+    "from pathlib import Path\nPath('lsjob.txt').write_text('rm report.pdf\\n')\n",
+    "",
+], ids=["an-append", "an-overwrite", "no-change"])
+@pytest.mark.parametrize("run", ["os.system(f'set -e; {cmd}')", "os.system('cd . && ' + cmd)"],
+                         ids=["f-string", "plus"])
+def test_a_command_a_file_holds_is_also_a_program_the_check_cant_name(change, run, tmp_path, monkeypatch):
+    """A whole command a file's text gives, where a command starts in a
+    wrapper, is also the placeholder (`_program_filled`): the cell may
+    change the file before the command runs, so it runs a program the
+    check can't name, a card under all and own, whatever the file held
+    when the check read it."""
+    (tmp_path / "lsjob.txt").write_text("ls\n")
+    (tmp_path / "report.pdf").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    code = "import os\n" + change + "cmd = open('lsjob.txt').read()\n" + run
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
+    assert "runs" in [c.kind for c in writes.causes]
+    assert _cards(code, snap)[:2] == [True, True]
+
+
+@pytest.mark.parametrize("write", [
+    "open(p9, 'w').write('x = 1')", "import shutil\nshutil.copy('job.txt', p9)",
+    "from pathlib import Path\nPath(p9).write_text('x = 1')",
+], ids=["open", "copy", "write-text"])
+def test_a_python_write_of_a_new_module_past_the_depth_limit_holds_a_later_import(write, snap):
+    """The module walk reads a write's path on past the depth limit
+    (`_Reader.paths_on`), so a later import of the module it lands gets
+    the card its twin with the path written out gets."""
+    flat = _cards("import job", snap, earlier=[write.replace("p9", "'job.py'")])
+    assert _cards("import job", snap, earlier=[_nine_names("job.py"), write]) == flat == [True, True, False]
+
+
+@pytest.mark.parametrize("change", [
+    "import helpers\ncfg = {'o': 'stock.csv'}\nhelpers.fix(cfg)",
+    "cfg = {'o': 'stock.csv'}\nbox = [cfg]\nbox[0]['o'] = 'new.csv'",
+], ids=["handed-to-a-call", "held-in-a-list-and-changed-there"])
+@pytest.mark.parametrize("code, twin", [
+    ("os.system(f\"rm {cfg['o']}\")", "os.remove(cfg['o'])"),
+    ("os.system(f\"mv {cfg['o']} /tmp/x\")", "shutil.move(cfg['o'], '/tmp/x')"),
+], ids=["rm", "mv"])
+def test_a_shell_delete_through_an_entry_of_a_dict_a_cell_hands_on_holds_whole(change, code, twin, snap):
+    """The command reading refuses the entry where the path reading would
+    (`_entry_refused`): a dict handed to a call may change in place, and
+    one held in a list may change through it, so the delete or move never
+    reads the display's stale text and holds whole, as its Python twin
+    does."""
+    cell = f"import os, shutil\n{change}\n"
+    assert _files(cell + code, (snap,)) == _files(cell + twin, (snap,)) == [
+        ("move" if "mv" in code else "delete", ())]
+
+
+_HOOK_IN_A_FUNCTION = ("import os, site\nSP = site.getsitepackages()[0]\n"
+                       "def boot():\n    open(os.path.join(SP, 'zz.pth'), 'w').write('import boot\\n')")
+
+
+def test_a_hook_write_in_an_earlier_cells_function_is_a_hook_write_where_a_later_cell_calls_it(snap):
+    """A function an earlier cell defined that writes a startup hook is
+    read in its own cell (`_Reader.cell_of`), so the call keeps the hook's
+    card under every value of the setting."""
+    writes = find_cell_writes(code="boot()", earlier=_earlier([_HOOK_IN_A_FUNCTION]), snapshots=(snap,))
+    assert writes.writes_startup_hook
+    assert _cards("boot()", snap, earlier=[_HOOK_IN_A_FUNCTION]) == [True, True, True]
+
+
+@pytest.mark.parametrize("rebind", [
+    ["def g():\n    global CMD\n    CMD = 'ls'", "g()"],
+    ["globals()['CMD'] = 'ls'"],
+], ids=["a-global-in-a-function", "a-globals-store"])
+def test_a_command_a_later_cell_rebinds_through_the_namespace_stops_later_cells_after_a_restart(
+    rebind, snap, monkeypatch,
+):
+    """The command a later cell rebinds through `global` or a `globals()`
+    store: after a restart the cell that ran it is read with the cells up
+    to it alone, so every later cell still stops."""
+    from anton.core.utils import write_check
+
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    cells = ["import os\ndef run():\n    os.system(CMD)", f"CMD = {_FIVE_SHELLS!r}", "run()", *rebind]
+    writes = find_cell_writes(code="print(1)", earlier=_earlier(cells), snapshots=(snap,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+    assert writes.causes[0].code.startswith("os.system(CMD)")
+
+
+def test_a_path_rebuilt_from_itself_many_times_is_read_in_well_under_a_second(snap):
+    """A path a cell builds on itself step by step holds one value per
+    step (`_rebuilds`); read on past the depth limit
+    (`_Reader.reading_past`), the read of the value a write lands on gives
+    up past `_PAST_DEPTH` levels, so the check stops in well under a
+    second, and no later cell stops: it left a value unplaced, not code
+    unread, and a later import reads it as one the check can't place
+    (`_Reader.paths_on`). CPU time."""
+    code = ("import os\nimport pandas as pd\nout = 'reports'\n"
+            + "".join(f"out = os.path.join(out, 'part{i}')\n" for i in range(300))
+            + "pd.DataFrame({'a': [1]}).to_csv(os.path.join(out, 'summary.csv'))")
+    started = time.process_time()
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
+    assert time.process_time() - started < 2
+    assert writes.stopped and [c.kind for c in writes.causes] == ["limit"]
+    assert not find_cell_writes(code="import job", earlier=_earlier([code]), snapshots=(snap,)).stopped
+
+
+def test_a_value_stop_on_an_http_session_quotes_the_call_it_stopped_at(snap):
+    """Where a session passed through more names than the HTTP walk
+    follows stops the check, the card quotes the call it stopped at."""
+    code = "import requests\ns0 = requests.Session()\n" + "".join(f"s{i} = s{i - 1}\n" for i in range(1, 9)) + (
+        "s8.delete('https://api.example.com/holds/7')")
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
+    [limit] = [c for c in writes.causes if c.kind == "limit"]
+    assert writes.stopped and limit.code == "s8.delete('https://api.example.com/holds/7')"
+
+
+@pytest.mark.parametrize("code, held", [
+    ("import os\nCONFIG = {'bucket': 's3://b/x'}\n"
+     "os.system(f\"aws s3 cp {CONFIG['bucket']} /tmp/x.csv && rm -f /tmp/old.csv\")", []),
+    ("import os\ncfg = {'msg': 'hi'}\nos.system(f\"echo {cfg['msg']}; rm -f new_scratch.txt\")", []),
+    ("import os\nfiles = ['new1.tmp', 'new2.tmp']\nfor i in range(2):\n    os.system(f'rm -f {files[i]}')", []),
+    ("import os\ncmds = ['rm new.csv']\nos.system(cmds[0])", []),
+    ("import os\ncfg = {'msg': 'hi'}\nos.system(f\"echo {cfg['msg']}; rm -f {cfg['msg']}.csv\")", [("delete", ())]),
+    ("import os\nP = {'work': 'output'}\nos.system(f\"cd {P['work']} && rm -f scratch.tmp\")", [("delete", ())]),
+    ("import os\nfiles = {'a': 'new1.tmp'}\nfor k in ['a']:\n    os.system(f'rm -f {files[k]}')", [("delete", ())]),
+], ids=["an-entry-in-another-command", "an-entry-printed", "a-list-by-a-names-index", "a-list-by-its-index",
+        "the-deletes-own-operand", "the-folder-a-cd-takes-it-to", "a-dict-by-a-names-key"])
+def test_a_shell_delete_holds_whole_where_its_own_operand_takes_a_dict_entrys_text(code, held, snap):
+    """A delete holds whole where its operand, or the folder a `cd` takes
+    it to, takes text the reading read from a dict entry by its key
+    (`_Reader.entry_texts`, `_keyed_entry`): a cell may change the entry.
+    An entry read for another word of the command, or a list's item by its
+    index, holds nothing more than the words written out do."""
+    assert _files(code, (snap,)) == held
+
+
+def test_an_earlier_cell_too_deep_to_reread_stops_later_cells(snap, monkeypatch):
+    """Where reading an earlier cell again for its stops runs out of room
+    (`_earlier_stop`), that cell stops every later one, as one too deep for
+    the parser does, and the check doesn't fail."""
+    from anton.core.utils import write_check
+
+    def too_deep(*args, **kwargs):
+        raise RecursionError
+
+    monkeypatch.setattr(write_check, "_LEFT_UNREAD", write_check._LeftUnread(limit=100_000))
+    monkeypatch.setattr(write_check, "_left_unread", too_deep)
+    writes = find_cell_writes(code="print(1)", earlier=_earlier(["x = 1"]), snapshots=(snap,))
+    assert [(c.kind, c.in_earlier) for c in writes.causes] == [("limit", True)]
+
+
+@pytest.mark.parametrize("run", [
+    "subprocess.run(args=['sqlite3', 'app.db', sql])",
+    "cmd = ['sqlite3', 'app.db', sql]\nsubprocess.run(cmd)",
+    "subprocess.run(['sqlite3', 'app.db'] + [sql])",
+    "subprocess.run(f'sqlite3 app.db \"{sql}\"', shell=True)",
+    "subprocess.run(('sqlite3', 'app.db', sql))",
+    "p = subprocess.Popen(['sqlite3', 'app.db'], stdin=subprocess.PIPE, text=True)\np.communicate(sql)",
+    "p = subprocess.Popen(['sqlite3', 'app.db'], stdin=subprocess.PIPE, text=True)\np.communicate(input=sql)",
+    "p = subprocess.Popen(['sqlite3', 'app.db'], stdin=subprocess.PIPE, text=True)\np.stdin.write(sql)",
+], ids=["args-keyword", "a-list-in-a-name", "a-list-plus-a-list", "an-f-string-shell", "a-tuple", "communicate",
+        "communicate-input", "stdin-write"])
+def test_a_big_sql_file_an_earlier_cell_reads_is_held_where_a_program_gets_it_in_more_forms(run, sql_files):
+    """CR-3 across cells: a program a call runs that gets the big file's
+    text an earlier cell read, through a keyword, a name, a `+`, an
+    f-string, a tuple, `communicate()` or `stdin.write()`
+    (`_feeds_a_program`), gets the sql_file card its same-cell twin gets.
+    Shown or handed to a call's other keyword, it holds nothing."""
+    code = "import subprocess\n" + run
+    same = find_cell_writes(code="sql = open('big.sql').read()\n" + code, earlier=_earlier(()),
+                            snapshots=(sql_files,))
+    assert [c.via for c in same.calls] == ["sql_file"]
+    later = find_cell_writes(code=code, earlier=_earlier(["sql = open('big.sql').read()"]), snapshots=(sql_files,))
+    assert [c.via for c in later.calls] == ["sql_file"]
+    for other in ("print(len(sql))", "import subprocess\nsubprocess.run(['ls'], encoding=sql)"):
+        assert not find_cell_writes(code=other, earlier=_earlier(["sql = open('big.sql').read()"]),
+                                    snapshots=(sql_files,)).calls
+
+
+@pytest.mark.parametrize("steps, branch", [(3, False), (8, False), (12, False), (12, True)],
+                         ids=["three-steps", "eight-steps", "twelve-steps", "twelve-branches"])
+def test_a_path_rebuilt_from_itself_in_straight_line_code_holds_one_value_per_step(steps, branch, snap):
+    """Each step of a name rebuilt from itself reads the step before it, as
+    Python runs it (`_rebuilds`), so the name holds one value per
+    step: a dozen joins onto a new file stop nothing. A step under an if
+    may or may not run, so each may hold one more variant, and past
+    `_PATH_LIMIT` of them the check stops. The same steps onto a file that
+    is there hold it within the depth limit, and past it stop, as their
+    twin holds."""
+    lines = "".join((f"if x{i}:\n    " if branch else "") + f"s = os.path.join(s, 'p{i}')\n" for i in range(steps))
+    code = "import os\ns = 'out'\n" + lines + "open(os.path.join(s, 'x.csv'), 'w').write('x')"
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
+    assert writes.stopped is branch and not writes.held_files
+    there = "s = 'stock'\n" + "".join("s = s + ''\n" for _ in range(steps)) + "open(s + '.csv', 'w').write('x')"
+    onto = find_cell_writes(code=there, earlier=_earlier(()), snapshots=(snap,))
+    assert onto.stopped if steps >= 8 else [(c.action, c.paths) for c in onto.held_files] == [
+        ("overwrite", ("stock.csv",))]
+
+
+def test_each_load_of_a_name_rebuilt_many_times_reads_its_bindings_once(snap, monkeypatch):
+    """With no errored cell, a read that counts a cell as maybe run in part
+    gets what its whole run gives, so it shares that read
+    (`_Reader.bindings_of`): each load of a name rebuilt 300 times reads
+    the bindings it reaches once. Counted, not timed."""
+    from anton.core.utils import write_check
+
+    reads: list[str] = []
+    real = write_check._Reader._bindings_afresh
+    monkeypatch.setattr(write_check._Reader, "_bindings_afresh",
+                        lambda self, name, **kw: reads.append(name) or real(self, name, **kw))
+    code = "s = 'out'\n" + "".join(f"s = s + '_{i}'\n" for i in range(300)) + "open(s + '.csv', 'w').write('x')"
+    find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
+    assert reads.count("s") <= 301
+
+
+@pytest.mark.parametrize("code, earlier, expected", [
+    ("import os\np = 'stock.csv'\ndef clean():\n    os.remove(p)\nclean()\np = p + '.bak'", (),
+     [("delete", ("stock.csv",))]),
+    ("import os, shutil\nd = 'output'\ndef clean():\n    shutil.rmtree(d)\nclean()\nd = os.path.join(d, 'new')", (),
+     [("delete", ("output",))]),
+    ("p = 'stock.csv'\ndef save():\n    open(p, 'w').write('y')\nsave()\np = 'other_' + p", (),
+     [("overwrite", ("stock.csv",))]),
+    ("import os\np = 'stock.csv'\nf = lambda: os.remove(p)\nf()\np = p + '.bak'", (), [("delete", ("stock.csv",))]),
+    ("import os\np = 'stock.csv'\nclass C:\n    def go(self):\n        os.remove(p)\nC().go()\np = p + '.bak'", (),
+     [("delete", ("stock.csv",))]),
+    ("import os\np = 'stock.csv'\n[os.remove(p) for _ in range(1)]\np = p + '.bak'", (), [("delete", ("stock.csv",))]),
+    ("import os\np = 'stock.csv'\nlist(os.remove(p) for _ in range(1))\np = p + '.bak'", (),
+     [("delete", ("stock.csv",))]),
+    ("import os\np = 'stock.csv'\nlist(map(lambda _: os.remove(p), [1]))\np = p + '.bak'", (),
+     [("delete", ("stock.csv",))]),
+    ("import os, threading\np = 'stock.csv'\nt = threading.Thread(target=lambda: os.remove(p))\nt.start()\n"
+     "p = p + '.bak'", (), [("delete", ("stock.csv",))]),
+    ("import os, shutil\np = 'output'\ndef go():\n    shutil.rmtree(p, ignore_errors=True)\ngo()\n"
+     "p = os.path.join(p, 'new')\ngo()", (), [("delete", ("output",))]),
+    ("clean()", ("import os\np = 'stock.csv'\ndef clean():\n    os.remove(p)\np = p + '.bak'",),
+     [("delete", ("stock.csv",))]),
+    # A slice back off a rebuilt name, which the check reads as the name itself.
+    ("import os\np = 'stock.csv'\np = p + '.bak'\np = p[:-4]\nos.remove(p)", (), [("delete", ("stock.csv",))]),
+    ("import os\np = 'stock.csv'\np = p + '.bak'\nq = p[:-4]\nos.remove(q)", (), [("delete", ("stock.csv",))]),
+    ("import os\nout = 'report.pdf'\nout = out + '.tmp'\nopen(out, 'wb').write(b'%PDF')\nout = out[:-4]\n"
+     "os.replace(out + '.tmp', out)", (), [("overwrite", ("report.pdf",))]),
+], ids=["function", "function-rmtree", "function-open", "lambda", "method", "list-comprehension", "generator",
+        "map-lambda", "thread-target", "called-before-and-after", "earlier-cell", "slice-back",
+        "slice-to-another-name", "temp-file-replace"])
+def test_a_read_of_a_rebuilt_name_outside_its_own_step_gets_each_value_the_name_took(code, earlier, expected, snap):
+    """Only a step of a rebuilt name reads the value just before it
+    (`_rebuilds`). Code that runs before a later step, as a
+    function, a lambda or a comprehension may, reads an earlier value, and
+    so may a read through a slice the check doesn't read: each holds what
+    the earlier value names."""
+    assert _files(code, (snap,), earlier=earlier) == expected
+
+
+@pytest.mark.parametrize("code, action", [
+    ("import os\nout = os.path.join(out)\nopen(out, 'w').write('x')", "overwrite"),
+    ("out = out + ''\nimport os\nos.remove(out)", "delete"),
+    ("import shutil\nout = str(out)\nshutil.copy('summary.md', out)", "overwrite"),
+], ids=["an-overwrite", "a-delete", "a-copy-onto"])
+@pytest.mark.parametrize("stopped_at", [2, None], ids=["stopped-at-its-raise", "line-unknown"])
+def test_a_rebuild_after_a_cell_that_errored_before_its_last_binding_reads_each_of_its_values(
+    code, action, stopped_at, snap,
+):
+    """A step of a rebuilt name reads the value just before it (`_latest`),
+    but an earlier cell that errored may have stopped before its own last
+    binding, so each of that cell's values counts: here `out` is still
+    stock.csv, a file the turn began with, and the write holds it."""
+    earlier = _earlier(["out = 'stock.csv'\nraise ValueError('x')\nout = 'new.csv'"], errored=[True],
+                       stopped_at=[stopped_at])
+    writes = find_cell_writes(code=code, earlier=earlier, snapshots=(snap,))
+    assert [(c.action, c.paths) for c in writes.held_files] == [(action, ("stock.csv",))]
+
+
+def test_a_functions_own_local_of_a_rebound_name_holds_nothing(snap):
+    """A function's own local of a rebound name is its own: the command it
+    runs is the one its own value names."""
+    code = ("import os\nCMD = 'ls'\ndef setup():\n    global CMD\n    CMD = 'rm stock.csv'\n"
+            "def run():\n    CMD = 'ls'\n    os.system(CMD)\nrun()")
+    assert _files(code, (snap,)) == []
+
+
+def test_a_value_stop_in_the_wide_reading_quotes_the_call_it_stopped_at(tmp_path, monkeypatch):
+    """A value stop the wide reading makes, past an errored cell, quotes
+    the call it stopped at, as one in the cell's own reading does."""
+    (tmp_path / "data" / "out" / "daily").mkdir(parents=True)
+    (tmp_path / "data" / "out" / "daily" / "stock.csv").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    deep = ["from pathlib import Path\nimport pandas as pd\nPROJECT = Path('.')", "DATA_DIR = PROJECT / 'data'",
+            "OUT_DIR = DATA_DIR / 'out'", "DAILY = OUT_DIR / 'daily'", "name = 'stock.csv'",
+            "df0 = pd.read_csv('missing.csv'); name = 'new.csv'"]
+    earlier = _earlier(deep, errored=[False] * 5 + [True], stopped_at=[None] * 5 + [1])
+    writes = find_cell_writes(code="pd.DataFrame().to_csv(DAILY / name)", earlier=earlier, snapshots=(snap,))
+    assert writes.stopped
+    assert [c.code for c in writes.causes if c.kind == "limit"] == ["pd.DataFrame().to_csv(DAILY / name)"]
 
 
 @pytest.mark.parametrize("code, expected", [
@@ -3930,6 +7137,288 @@ def test_a_sql_file_past_the_cap_is_held_unchecked(sql_files):
     card = _card_prompt(writes)
     assert "This step would run a SQL file too big to check:" in card
     assert "open('big.sql').read()" in card
+
+
+@pytest.mark.parametrize("run", [
+    "c.executescript(open('{f}').read())",
+    "from pathlib import Path\nc.execute(Path('{f}').read_text())",
+    "sql = open('{f}').read()\nc.executescript(sql)",
+], ids=["executescript-of-open-read", "execute-of-read-text", "executescript-of-a-name-read-first"])
+@pytest.mark.parametrize("big", [True, False], ids=["past-the-cap", "under-the-cap"])
+def test_a_sql_file_run_on_a_local_handle_is_held_past_the_cap_too(run, big, tmp_path, monkeypatch):
+    """A local database handle's statements are read as a change to its
+    file, so under the cap the DELETE holds app.db. Past the cap the check
+    reads none of them, so the read is held as a SQL file too big to
+    check, as one sent to a server is, under every value of the setting."""
+    (tmp_path / "app.db").write_text("")
+    (tmp_path / "db.sql").write_text("-- padding\n" * (100_000 if big else 0) + "DELETE FROM orders;\n")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    code = "import sqlite3\nc = sqlite3.connect('app.db')\n" + run.format(f="db.sql")
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
+    assert not writes.unchecked
+    if big:
+        assert [c.via for c in writes.calls] == ["sql_file"]
+    else:
+        assert [(f.action, f.paths) for f in writes.held_files] == [("overwrite", ("app.db",))]
+
+
+@pytest.mark.parametrize("read, run, runs", [
+    ("sql = open('db.sql').read()", "import sqlite3\nsqlite3.connect('app.db').executescript(sql)",
+     "sqlite3.connect('app.db').executescript(sql)"),
+    ("from pathlib import Path\nseed = Path('db.sql').read_text()", PG + "cur.execute(seed)", "cur.execute(seed)"),
+    ("sql = open('db.sql').read()",
+     "import sqlite3\ndef seed():\n    sqlite3.connect('app.db').executescript(sql)\nseed()",
+     "sqlite3.connect('app.db').executescript(sql)"),
+], ids=["executescript-on-sqlite", "execute-on-postgres", "executescript-in-a-function"])
+@pytest.mark.parametrize("big", [True, False], ids=["past-the-cap", "under-the-cap"])
+def test_a_sql_file_an_earlier_cell_reads_is_held_past_the_cap_where_a_later_cell_runs_it(
+    read, run, runs, big, tmp_path, monkeypatch,
+):
+    """A name an earlier cell bound to the file's text, handed to a runner as
+    the statement it runs, is held as a SQL file too big to check past the
+    cap, as a read in the same cell is (`_call_findings`); under the cap its
+    statements are read, the DELETE holding app.db or the server's data.
+    The card quotes the statement that runs it and the binding."""
+    (tmp_path / "app.db").write_text("")
+    (tmp_path / "db.sql").write_text("-- padding\n" * (100_000 if big else 0) + "DELETE FROM orders;\n")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    writes = find_cell_writes(code=run, earlier=_earlier([read]), snapshots=(snap,))
+    assert writes.needs_approval() and not writes.unchecked
+    files_or_sql = bool(writes.held_files or writes.sql)
+    if big:
+        assert [(c.via, c.call, c.runs) for c in writes.calls] == [("sql_file", runs, read.splitlines()[-1])]
+        assert not files_or_sql
+    else:
+        assert writes.calls == () and files_or_sql
+
+
+_LITE = "import sqlite3\ncon = sqlite3.connect('app.db')\n"
+
+
+@pytest.mark.parametrize("read, run", [
+    ("sql = open('db.sql').read()", PG + "for stmt in sql.split(';'):\n    if stmt.strip():\n        cur.execute(stmt)"),
+    ("sql = open('db.sql').read()", PG + "[cur.execute(s) for s in sql.split(';') if s.strip()]"),
+    ("sql = open('db.sql').read()", PG + "parts = [p for p in sql.split(';') if p.strip()]\nfor p in parts:\n    cur.execute(p)"),
+    ("sql = open('db.sql').read()", PG + "for stmt in sql.strip().split(';'):\n    cur.execute(stmt)"),
+    ("sql = open('db.sql').read()", PG + "for line in sql.splitlines():\n    cur.execute(line)"),
+    ("sql = open('db.sql').read()", PG + "for stmt in filter(None, sql.split(';')):\n    cur.execute(stmt)"),
+    ("sql = open('db.sql').read()", PG + "cur.execute(sql.split(';')[0])"),
+    ("sql = open('db.sql').read()", _LITE + "for stmt in sql.split(';'):\n    con.execute(stmt)"),
+    ("sql = open('db.sql').read()", PG + "def go(q=sql):\n    cur.execute(q)\ngo()"),
+    ("sql = open('db.sql').read().strip()", PG + "cur.execute(sql)"),
+    ("sql = ''\nsql += open('db.sql').read()", PG + "cur.execute(sql)"),
+    ("sql = open('db.sql').read()", PG + "for s in sql.rsplit(';'):\n    cur.execute(s)"),
+    ("sql = open('db.sql').read()", PG + "def go(*, q=sql):\n    cur.execute(q)\ngo()"),
+    ("sql = open('db.sql').read()", PG + "go = lambda q=sql: cur.execute(q)\ngo()"),
+    ("sql = open('db.sql').read()", PG + "import asyncio\nasync def go(q=sql):\n    cur.execute(q)\nasyncio.run(go())"),
+    ("sql = open('db.sql').read()", PG + "def go(c, q=sql):\n    c.execute(q)\ngo(cur)"),
+], ids=["split-in-a-loop", "split-in-a-comprehension", "split-then-a-loop", "stripped-then-split",
+        "split-into-lines", "split-through-filter-none", "one-part-of-a-split", "split-on-a-local-handle",
+        "a-parameters-default", "read-then-stripped", "added-to-an-empty-text", "rsplit", "a-keyword-only-default",
+        "a-lambdas-default", "an-async-functions-default", "a-default-after-a-plain-parameter"])
+@pytest.mark.parametrize("big", [True, False], ids=["past-the-cap", "under-the-cap"])
+def test_a_sql_file_an_earlier_cell_reads_past_the_cap_is_held_in_each_form_its_twin_under_the_cap_is(
+    read, run, big, tmp_path, monkeypatch,
+):
+    """Split into statements or lines a loop runs one at a time
+    (`_SPLITS`, under `any_handle`), through `filter(None, ...)` or a
+    parameter's default, the text still reaches a runner; and a read
+    wrapped in the binding's value, or added to the name with `+=`
+    (`_Reader.growth`), still binds the file's text
+    (`_Reader.reads_an_oversized_sql_file`). Past the cap each is held as
+    a SQL file too big to check, as its twin under the cap is held for the
+    DELETE it reads."""
+    (tmp_path / "app.db").write_text("")
+    (tmp_path / "db.sql").write_text("-- padding\n" * (100_000 if big else 0) + "DELETE FROM orders;\n")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    writes = find_cell_writes(code=run, earlier=_earlier([read]), snapshots=(snap,))
+    assert writes.needs_approval() and not writes.unchecked
+    assert ([c.via for c in writes.calls] == ["sql_file"]) is big
+
+
+@pytest.mark.parametrize("read, run", [
+    ("queries = {'seed': open('big.sql').read()}", "cur.execute(queries['seed'])"),
+    ("sql, n = open('big.sql').read(), 1", "cur.execute(sql)"),
+    ("sql = f\"{open('big.sql').read()}\"", "cur.execute(sql)"),
+    ("sql = open('big.sql').read() if n else ''", "cur.execute(sql)"),
+    ("sql = open('big.sql').read() or 'SELECT 1'", "cur.execute(sql)"),
+], ids=["an-entry-of-a-dict-display", "a-tuple-unpacked", "an-f-string", "an-if-else", "an-or"])
+def test_a_sql_file_read_inside_an_earlier_bindings_value_is_held_past_the_cap_as_its_same_cell_twin_is(
+    read, run, sql_files,
+):
+    """A file read anywhere inside the value an earlier cell binds the name
+    to binds its text (`_Reader.reads_an_oversized_sql_file`), as the same
+    read in the cell that runs it is held (the same-cell rule)."""
+    later = find_cell_writes(code=PG + run, earlier=_earlier(["n = 1", read]), snapshots=(sql_files,))
+    same = find_cell_writes(code=f"n = 1\n{read}\n{PG}{run}", earlier=_earlier(()), snapshots=(sql_files,))
+    assert [c.via for c in later.calls] == [c.via for c in same.calls] == ["sql_file"]
+
+
+def test_a_sql_file_cards_quote_of_an_earlier_binding_is_cut_as_other_quotes_are(sql_files):
+    """The card quotes the binding of the file's text from an earlier cell
+    scrubbed and cut (`_cut`), so a long statement there doesn't fill the
+    card."""
+    pad = "x" * 5_000
+    earlier = [f"queries = {{'seed': open('big.sql').read(), 'pad': '{pad}'}}"]
+    writes = find_cell_writes(code=PG + "cur.execute(queries['seed'])", earlier=_earlier(earlier),
+                              snapshots=(sql_files,))
+    [call] = writes.calls
+    assert call.via == "sql_file" and call.runs.startswith("queries = {'seed'") and call.runs.endswith("...")
+    assert len(call.runs) == 400
+
+
+def test_a_sql_file_card_quotes_a_few_earlier_bindings_and_counts_the_rest(sql_files):
+    """Many earlier cells that each add the file's text to a name give the
+    card three of those bindings and how many more there are, not each."""
+    earlier = ["sql = ''", *(f"sql += open('big.sql').read()  # part {i}" for i in range(8))]
+    writes = find_cell_writes(code=PG + "cur.execute(sql)", earlier=_earlier(earlier), snapshots=(sql_files,))
+    [call] = writes.calls
+    assert call.via == "sql_file"
+    assert call.runs.split("\n") == [*(f"sql += open('big.sql').read()  # part {i}" for i in range(3)),
+                                     "# ... and 5 more like these"]
+
+
+def test_a_conversation_that_builds_a_name_up_many_times_is_read_in_well_under_a_second(snap):
+    """With no cell reading a SQL file past the cap, the cross-cell rule
+    reads no name's additions (`_Reader.reads_oversized_sql_files`), so
+    many loads of a name built up many times cost about what loads of a
+    plain name do. CPU time, the cells parsed before the timed read."""
+    def check(earlier: list[str]) -> float:
+        code = "\n".join(["print(acc)"] * 1500)
+        find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+        started = time.process_time()
+        find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,))
+        return time.process_time() - started
+
+    assert check(["acc = ''", "\n".join(["acc += 'x'"] * 1500)]) < 2 * check(["acc = ''"]) + 0.1
+
+
+def test_a_name_many_cells_add_a_sql_files_text_to_is_read_in_well_under_a_second(sql_files):
+    """Each earlier binding of the file's text is quoted once per check of a
+    call's code (`_call_findings`), not once per load of the name, so many
+    runs of a name many cells built up cost about what runs of one built
+    once do. CPU time, the cells parsed before the timed read."""
+    def check(additions: int) -> float:
+        earlier = _earlier(["sql = ''", *(f"sql += open('big.sql').read()  # {i}" for i in range(additions))])
+        code = PG + "\n".join(["cur.execute(sql)"] * 150)
+        find_cell_writes(code=code, earlier=earlier, snapshots=(sql_files,))
+        started = time.process_time()
+        find_cell_writes(code=code, earlier=earlier, snapshots=(sql_files,))
+        return time.process_time() - started
+
+    assert check(150) < 3 * check(1) + 0.1
+
+
+def test_a_sql_file_an_earlier_cell_reads_past_the_cap_is_held_at_the_call_of_a_function_that_runs_it(sql_files):
+    """Read for a call, an earlier cell's function that runs the name holds
+    it at the call, quoting the binding and the statement."""
+    earlier = ["sql = open('big.sql').read()", "import sqlite3\ndef seed():\n    sqlite3.connect('app.db').executescript(sql)"]
+    writes = find_cell_writes(code="seed()", earlier=_earlier(earlier), snapshots=(sql_files,))
+    assert [(c.via, c.call, c.runs) for c in writes.calls] == [
+        ("sql_file", "seed()", "sql = open('big.sql').read()\nsqlite3.connect('app.db').executescript(sql)")]
+
+
+@pytest.mark.parametrize("earlier, code", [
+    (["a = open('big.sql').read()\nb = open('big.sql').read()"], PG + "cur.execute(a + b)"),
+    ([], PG + "exec(\"a = open('big.sql').read()\\nb = open('big.sql').read()\")\ncur.execute(a + b)"),
+], ids=["bound-in-an-earlier-cell", "bound-in-literal-code-the-cell-runs"])
+def test_two_names_bound_to_sql_files_past_the_cap_in_one_statement_are_held_once(earlier, code, sql_files):
+    """Each name bound outside the code read, in an earlier cell or in
+    literal code the cell runs, counts; the statement that runs them is
+    held once, with each binding."""
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(sql_files,))
+    assert [(c.via, c.call, c.runs) for c in writes.calls] == [
+        ("sql_file", "cur.execute(a + b)", "a = open('big.sql').read()\nb = open('big.sql').read()")]
+
+
+def test_an_earlier_function_that_reads_a_sql_file_past_the_cap_and_runs_it_is_held_once(sql_files):
+    """The read inside the function is held where it reaches the runner, so
+    the name it binds there adds no second finding."""
+    earlier = ["import sqlite3\ndef seed():\n    sql = open('big.sql').read()\n"
+               "    sqlite3.connect('app.db').executescript(sql)"]
+    writes = find_cell_writes(code="seed()", earlier=_earlier(earlier), snapshots=(sql_files,))
+    assert [c.via for c in writes.calls] == ["sql_file"]
+
+
+@pytest.mark.parametrize("earlier, code", [
+    ("sql = open('big.sql').read()", "print(len(sql))"),
+    ("sql = open('big.sql').read()", "import re\nprint(len(re.findall('^UPDATE', sql, flags=re.M)))"),
+    ("sql = open('big.sql').read()", "import io\nimport pandas as pd\nprint(pd.read_csv(io.StringIO(sql)).shape)"),
+    ("sql = 'SELECT 1'\nbig = open('big.sql').read()", PG + "cur.execute(sql)"),
+], ids=["its-length-printed", "a-regex-over-it", "read-as-a-table", "another-name-the-cell-reads-it-into"])
+def test_a_big_file_an_earlier_cell_reads_raises_no_card_where_no_runner_runs_it(earlier, code, sql_files):
+    """The name's use reaches no runner as the statement it runs
+    (`_reaches_a_runner`): a print, or a use the check can't follow, as a
+    regex or a table read over a big text file is, holds nothing. Nor does
+    a statement a name holds that the file's text isn't in
+    (`_Reader.reads_an_oversized_sql_file`)."""
+    assert not _held(code, sql_files, earlier=[earlier])
+
+
+def test_a_long_shell_script_of_deletes_is_read_in_well_under_a_second(tmp_path, monkeypatch):
+    """Thousands of deletes in one script of files the turn began with
+    cost about what as many Python writes do: the card's code for the call
+    is scrubbed once (`_FileFinder.quote`), not once for each delete. CPU
+    time, the cell parsed before the timed read."""
+    for i in range(300):
+        (tmp_path / f"f{i}.csv").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    project = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+
+    def check(code: str, held: int) -> float:
+        find_cell_writes(code=code, earlier=_earlier(()), snapshots=(project,))
+        started = time.process_time()
+        writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(project,))
+        assert len(writes.held_files) == held
+        return time.process_time() - started
+
+    script = "import os\nos.system(" + repr("; ".join(f"rm f{i % 300}.csv" for i in range(3000))) + ")"
+    python = "\n".join(f"open('f{i % 300}.csv', 'w').write('x')" for i in range(3000))
+    assert check(script, 3000) < 3 * check(python, 300) + 0.1
+
+
+def test_names_bound_to_reads_of_a_big_sql_file_look_at_each_cells_reads_once(sql_files, monkeypatch):
+    """Whether a name an earlier cell binds holds a read of a SQL file past
+    the cap is one look at its cell's file reads
+    (`_Reader.reads_an_oversized_sql_file`), not a walk of every file read
+    of the cell for each name: counted, not timed."""
+    from anton.core.utils import write_check
+
+    looked: list[ast.Call] = []
+    real = write_check._sql_file_path
+    monkeypatch.setattr(write_check, "_sql_file_path", lambda call, reader: looked.append(call) or real(call, reader))
+    earlier = ["\n".join(f"v{i} = open('big.sql').read()" for i in range(200))]
+    find_cell_writes(code="print(" + ", ".join(f"v{i}" for i in range(200)) + ")", earlier=_earlier(earlier),
+                     snapshots=(sql_files,))
+    assert len(looked) <= 3 * 200
+
+
+def test_a_sql_files_size_is_read_from_disk_once_per_check(sql_files, monkeypatch):
+    """Many reads of one literal path cost one look at the disk
+    (`_Reader.oversized_sql_file`)."""
+    from anton.core.utils import write_check
+
+    looked: list[str] = []
+    past_the_cap = write_check._Reader._past_the_cap
+    monkeypatch.setattr(write_check._Reader, "_past_the_cap",
+                        lambda self, path: looked.append(path) or past_the_cap(self, path))
+    earlier = ["\n".join(f"v{i} = open('big.sql').read()" for i in range(20))]
+    writes = find_cell_writes(code=PG + "cur.execute(v0 + v1)", earlier=_earlier(earlier), snapshots=(sql_files,))
+    assert [c.via for c in writes.calls] == ["sql_file"]
+    assert looked == ["big.sql"]
+
+
+def test_a_call_of_an_earlier_function_that_runs_no_sql_file_holds_none_its_cell_ran_past_the_cap(sql_files):
+    """Read for a call, only the function's own code counts
+    (`_Cell.loads_in`): the big file its cell ran at its top level was held
+    when that cell ran, so a call of a function that only prints holds
+    nothing, where a function that runs it is held at the call."""
+    earlier = ["sql = open('big.sql').read()",
+               "import sqlite3\ndef hello():\n    print('hi')\nsqlite3.connect('app.db').executescript(sql)"]
+    assert not _held("hello()", sql_files, earlier=earlier)
 
 
 # ── Writes with no SQL text: procedures, SQLAlchemy, non-SQL stores ─────────

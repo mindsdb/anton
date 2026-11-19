@@ -331,6 +331,18 @@ _CODE_VALUE_PATTERN = re.compile(
     r"[a-z_/-]+(?:[ \t]+[a-z_/-]+)*|[a-z_]\w*(?:\.[A-Za-z_]\w*)+"
     r"|(?:[A-Z][a-z]{2,}){2,}|[A-Z]{2,}[0-9]?(?:_[A-Z]{2,}[0-9]?)+"
 )
+# A token after a header name that carries one, as `X-Api-Key:`, `api-key:`,
+# `X-Auth-Token:` or `Private-Token:` do: unquoted, as a curl `-H` or a printed
+# request gives it, or quoted after the quoted name, as a dict of headers holds
+# it. A value that reads as code (`_CODE_VALUE_PATTERN`) or a placeholder stays.
+# Group 1 is the name and what follows it up to the value.
+_HEADER_TOKEN_PATTERN = re.compile(
+    r"((?<![A-Za-z0-9_-])(?i:(?:[a-z0-9]+-)*(?:api[-_]?key|auth[-_]token|private[-_]token))"
+    r"(?:[ \t]*:[ \t]*|[\"'][ \t]*:[ \t]*[\"']))"
+    r"(?!(?:" + _CODE_VALUE_PATTERN.pattern + r")(?![A-Za-z0-9._~+/=%!-]))"
+    r"(?!!)[A-Za-z0-9._~+/=%!-]{16,}"
+    r"(?![A-Za-z0-9._~+/=%!(-])"
+)
 # What follows a value's first word in code rather than in a secret: an index,
 # a closing bracket or a `::` path, or after a space an operator, a comment, a
 # call or a keyword.
@@ -1084,16 +1096,18 @@ def scrub_output(text: str) -> str:
     """Scrub tool and scratchpad output before it reaches the LLM, a stream, or storage.
 
     Runs `scrub_credentials`, then redacts OAuth tokens that no configured
-    value names: JWTs, Google `ya29.` tokens, `Bearer` values, and the values
-    of access/refresh/id token and client secret keys. Use it on output only;
-    inbound user text keeps `scrub_credentials` so pasted connect
-    credentials still reach the vault.
+    value names: JWTs, Google `ya29.` tokens, `Bearer` values, a token after
+    a header name such as `X-Api-Key:`, and the values of access/refresh/id
+    token and client secret keys. Use it on output only; inbound user text
+    keeps `scrub_credentials` so pasted connect credentials still reach the
+    vault.
     """
     text = scrub_credentials(text)
     text = _TOKEN_SHAPE_PATTERN.sub("[REDACTED_TOKEN]", text)
     text = _redact_quoted_token_values(text)
     text = _QUOTED_BEARER_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
     text = _BEARER_VALUE_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
+    text = _HEADER_TOKEN_PATTERN.sub(r"\1[REDACTED_TOKEN]", text)
     return _redact_unquoted_token_values(text)
 
 
