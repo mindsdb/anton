@@ -375,7 +375,7 @@ async def test_a_budget_refusal_points_at_the_budget_not_at_credits():
     with pytest.raises(images.ImageGenerationError) as caught:
         await _client(gateway).generate_image(prompt="x")
     message = str(caught.value)
-    assert "https://console.mindshub.ai/settings/organization/billing?tab=budgets" in message
+    assert "https://console.mindshub.ai/settings/organization/billing?tab=budgets&from=budget_denial" in message
     assert "spending budget, not a fault in Cowork, that an owner or admin can raise it" in message
     assert "uses credits" not in message
     assert "give them the link in this message exactly as written" in message
