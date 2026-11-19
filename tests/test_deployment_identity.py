@@ -64,12 +64,13 @@ _DEFAULT_LINES = [
     "Do not draw a substitute unasked. Charts and diagrams are drawn with code. "
     "Without an image tool, a request that is itself for a simple drawing, such as "
     "line art or a coloring page, is made with code too: that is real output. Call a "
-    "drawing what it is, never a photo, an illustration or a video. The same holds for "
-    "pictures inside a larger piece of work, such as slides or a page: without an image "
-    "tool, draw simple graphics for it with code. Every time your reply names them, "
-    "summary included, call them simple drawn graphics, never illustrations, artwork or "
-    "images, and add one sentence saying that real illustrations or photos need image "
-    "generation, which you do not have here.",
+    "drawing what it is, never a photo, an illustration or a video. When a larger piece "
+    "of work, such as slides or a page, asks for pictures, illustrations or photos and "
+    "you have no image tool, draw simple graphics for it with code. Every time your reply "
+    "names them, summary included, call them simple drawn graphics, never illustrations, "
+    "artwork or images, and add one sentence saying that real illustrations or photos "
+    "need image generation, which you do not have here. A request that is itself for a "
+    "simple drawing, or work that asks for no pictures, needs no such sentence.",
 ]
 _DEFAULT_RULE = (
     "- If asked what Cowork is, who makes it, how to install, update or remove it, "
@@ -96,10 +97,10 @@ def test_default_product_lines_are_byte_identical(surface, line):
 
 
 @pytest.mark.parametrize(("surface", "digest"), [
-    (None, "12310b53810a4a04dfc033b0806740fac4a404424d3663e6556f159172b9db50"),
-    ("desktop", "3285b235fa34086be2253193c5707001bd93b8358201deeb80dbe0664bd9ca60"),
-    ("web", "b3495187806d695b943df5a4bcbea617e039a7fb324198b67da7284ed2df353a"),
-    ("cli", "557d2c880e1d5238fe82bbdd6add5ae46102a5462b06b5524760325cfa73e6bf"),
+    (None, "81103ba2562b72b2fc31853242f28c561f36b22fc9f0d21c2675015ca573b6fb"),
+    ("desktop", "a59b0c180bdb45afd245855518e407ab0bddd0bf0e5f834230477fd1838a4e75"),
+    ("web", "67c0f385d89dd6f68d286bc9b95c689929ff80d301824ce2a7f4e2d54a474cb7"),
+    ("cli", "efc6034490c87d8886f256ec9f4f3116402b7745348d63b3b1c9edd28b7b04bc"),
 ])
 def test_complete_default_builder_output_is_byte_identical(surface, digest):
     # Snapshot the current complete default prompt for each surface, including
@@ -277,7 +278,9 @@ def test_every_prompt_says_what_cannot_be_made(surface, identity):
     assert "never a photo, an illustration or a video" in joined
     # Asked for "a pitch deck with nice illustrations" without an image tool,
     # the agent drew SVGs and called them illustrations.
-    assert "pictures inside a larger piece of work" in joined
+    assert "When a larger piece of work, such as slides or a page, asks for pictures" in joined
+    # A coloring page or a chart deck is not asked to carry the disclaimer.
+    assert "A request that is itself for a simple drawing, or work that asks for no pictures, needs no such sentence" in joined
     assert "summary included, call them simple drawn graphics, never illustrations" in joined
     assert "real illustrations or photos need image generation" in joined
 

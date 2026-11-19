@@ -199,12 +199,13 @@ _CANNOT_MAKE_LINE = (
     "Do not draw a substitute unasked. Charts and diagrams are drawn with code. "
     "Without an image tool, a request that is itself for a simple drawing, such as "
     "line art or a coloring page, is made with code too: that is real output. Call a "
-    "drawing what it is, never a photo, an illustration or a video. The same holds for "
-    "pictures inside a larger piece of work, such as slides or a page: without an image "
-    "tool, draw simple graphics for it with code. Every time your reply names them, "
-    "summary included, call them simple drawn graphics, never illustrations, artwork or "
-    "images, and add one sentence saying that real illustrations or photos need image "
-    "generation, which you do not have here."
+    "drawing what it is, never a photo, an illustration or a video. When a larger piece "
+    "of work, such as slides or a page, asks for pictures, illustrations or photos and "
+    "you have no image tool, draw simple graphics for it with code. Every time your reply "
+    "names them, summary included, call them simple drawn graphics, never illustrations, "
+    "artwork or images, and add one sentence saying that real illustrations or photos "
+    "need image generation, which you do not have here. A request that is itself for a "
+    "simple drawing, or work that asks for no pictures, needs no such sentence."
 )
 
 #: Surface → the sentence naming where this conversation is running. A surface
