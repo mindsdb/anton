@@ -156,7 +156,8 @@ TOOL_ACCESS: dict[str, dict[str, str]] = {
         "slack_read_canvas": "read",
         "slack_read_list": "read",
         "slack_read_file": "read",
-        # WRITE
+        # WRITE: listed to record the classification; any tool not marked
+        # "read" is write-tier anyway.
         "slack_send_message": "write",
         "slack_schedule_message": "write",
         "slack_send_message_draft": "write",
