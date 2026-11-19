@@ -76,10 +76,11 @@ class _FakeLLM:
     error or a model that returns nothing would.
     """
 
-    def __init__(self, fail=(), empty=()):
+    def __init__(self, fail=(), empty=(), stop=None):
         self.images: list[Image.Image] = []
         self.asked: list[str] = []
         self.fail, self.empty = set(fail), set(empty)
+        self.stop = stop or {}  # page prompt -> stop_reason, as a cut-off or refused reply
 
     async def complete_async(self, *, system, messages, max_tokens):
         text_part, image_part = messages[0]["content"]
@@ -91,8 +92,29 @@ class _FakeLLM:
         if text_part["text"] in self.fail:
             raise RuntimeError("400 image rejected")
         if text_part["text"] in self.empty:
-            return SimpleNamespace(content="  ")
-        return SimpleNamespace(content=f"text of {text_part['text']}")
+            return SimpleNamespace(content="  ", stop_reason="end_turn")
+        return SimpleNamespace(content=f"text of {text_part['text']}",
+                               stop_reason=self.stop.get(text_part["text"], "end_turn"))
+
+
+def _out_dir(tmp_path: Path, stem: str) -> Path:
+    # Saved pages live in one folder per file content: <stem>-<hash>.
+    (found,) = (tmp_path / ".anton" / "output" / "extracted_text").glob(f"{stem}-*")
+    return found
+
+
+def _image_pdf(path: Path, img: Image.Image) -> None:
+    img.save(path, "PDF")
+
+
+def _with_text_layer(scan: Path, text_pdf: Path, out: Path) -> None:
+    # A scan whose text layer holds only some text: a stamp, or a poor OCR layer.
+    from pypdf import PdfReader, PdfWriter
+
+    writer = PdfWriter(clone_from=scan)
+    writer.pages[0].merge_page(PdfReader(text_pdf).pages[0])
+    with out.open("wb") as fh:
+        writer.write(fh)
 
 
 def test_the_scan_section_says_to_copy_the_cell_not_write_an_async_loop():
@@ -132,7 +154,7 @@ def _run_scan_snippet(tmp_path, monkeypatch, pages, llm):
           "print": lambda *a: printed.append(" ".join(map(str, a)))}
     # Runs the snippet as written, including the call it tells the agent to make.
     exec(_block("read_pages"), ns)
-    return ns, scanned_pdf, tmp_path / ".anton" / "output" / "extracted_text" / "scan", progress, printed
+    return ns, scanned_pdf, _out_dir(tmp_path, "scan"), progress, printed
 
 
 def test_scan_snippet_reads_every_page_through_the_model_and_resumes(tmp_path, monkeypatch):
@@ -305,3 +327,125 @@ def test_every_snippet_is_covered():
     assert len(_blocks()) == len(markers)
     for block in _blocks():
         assert any(m in block for m in markers)
+
+
+def _scan_cell(limit=None) -> str:
+    # The cell as the agent runs it, with LIMIT set the way the skill tells it to.
+    code = _block("read_pages")
+    if limit is not None:
+        code = code.replace("LIMIT = None", f"LIMIT = {limit}", 1)
+    return code
+
+
+def test_a_revised_file_with_the_same_name_is_read_again(tmp_path, monkeypatch):
+    # Saved pages are found by file content, not name: an updated contract.pdf
+    # uploaded in the same conversation must not get the old file's text back.
+    path = tmp_path / "contract.pdf"
+    monkeypatch.chdir(tmp_path)
+    llm = _FakeLLM()
+    ns = {"get_llm": lambda: llm, "progress": lambda m: None, "print": lambda *a: None, "path": str(path)}
+
+    _scanned_pdf(path, 2)
+    exec(_scan_cell(), ns)
+    assert len(llm.asked) == 2
+
+    images = [Image.new("RGB", (1240, 1754), "white") for _ in range(2)]
+    ImageDraw.Draw(images[0]).text((20, 20), "revised terms", fill="black")
+    images[0].save(path, "PDF", save_all=True, append_images=images[1:])
+    exec(_scan_cell(), ns)
+    assert len(llm.asked) == 3  # page 1 again; page 2 is blank and needs no call
+    assert len(list((tmp_path / ".anton" / "output" / "extracted_text").iterdir())) == 2
+
+
+def test_choosing_the_first_20_pages_reads_only_20(tmp_path, monkeypatch):
+    scanned_pdf = tmp_path / "scan.pdf"
+    _scanned_pdf(scanned_pdf, 25)
+    monkeypatch.chdir(tmp_path)
+    llm, printed = _FakeLLM(), []
+    ns = {"get_llm": lambda: llm, "progress": lambda m: None, "path": str(scanned_pdf),
+          "print": lambda *a: printed.append(" ".join(map(str, a)))}
+
+    exec(_scan_cell(limit=20), ns)
+
+    assert llm.asked == [f"Page {n}." for n in range(1, 21)]
+    assert printed == ["pages not read: none", "5 more scanned pages not read yet"]
+    # Running it again with the same choice reads nothing new.
+    exec(_scan_cell(limit=20), ns)
+    assert len(llm.asked) == 20
+
+
+def test_a_scan_with_a_stamp_or_ocr_text_layer_is_still_read_by_the_model(tmp_path, monkeypatch):
+    # The text layer has more than 20 characters, but an image covers the page.
+    text_pdf, scan, stamped = tmp_path / "text.pdf", tmp_path / "scan.pdf", tmp_path / "stamped.pdf"
+    _text_pdf(text_pdf)
+    _scanned_pdf(scan, 1)
+    _with_text_layer(scan, text_pdf, stamped)
+    monkeypatch.chdir(tmp_path)
+    llm = _FakeLLM()
+    ns = {"get_llm": lambda: llm, "progress": lambda m: None, "print": lambda *a: None, "path": str(stamped)}
+
+    exec(_block("pdfplumber.open"), ns)
+    assert "Quarterly revenue" in ns["pages"][0]
+    assert ns["scanned"] == [0]  # the PDF step and the scan step agree
+    exec(_scan_cell(), ns)
+    assert ns["scanned"] == [0]
+    assert llm.asked == ["Page 1."]
+
+    # A text page with no covering image still isn't sent.
+    ns["path"] = str(text_pdf)
+    exec(_block("pdfplumber.open"), ns)
+    assert ns["scanned"] == []
+    exec(_scan_cell(), ns)
+    assert llm.asked == ["Page 1."]
+
+
+def test_a_blank_page_is_saved_as_blank_without_a_model_call(tmp_path, monkeypatch):
+    from pypdf import PdfWriter
+
+    white_scan, empty_page = tmp_path / "white.pdf", tmp_path / "empty.pdf"
+    _image_pdf(white_scan, Image.new("RGB", (1240, 1754), "white"))
+    writer = PdfWriter()
+    writer.add_blank_page(width=595, height=842)
+    with empty_page.open("wb") as fh:
+        writer.write(fh)
+    monkeypatch.chdir(tmp_path)
+    llm, printed = _FakeLLM(), []
+    ns = {"get_llm": lambda: llm, "progress": lambda m: None,
+          "print": lambda *a: printed.append(" ".join(map(str, a)))}
+
+    for path in (white_scan, empty_page):
+        ns["path"] = str(path)
+        exec(_scan_cell(), ns)
+        assert (_out_dir(tmp_path, path.stem) / "page_0001.txt").read_text() == "[blank page]"
+    assert llm.asked == []
+    assert printed == ["pages not read: none"] * 2
+
+
+def test_a_very_large_page_renders_to_about_1600_pixels(tmp_path):
+    # At a fixed scale a poster-size page renders to gigabytes and kills the pad.
+    from pypdf import PdfWriter
+
+    path = tmp_path / "poster.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=4000, height=3000)
+    with path.open("wb") as fh:
+        writer.write(fh)
+    ns = {"get_llm": lambda: None}
+    exec(_block("read_pages").split("# Call it with asyncio.run")[0], ns)
+
+    import pypdfium2 as pdfium
+    img = ns["render"](pdfium.PdfDocument(str(path)), 0)
+    assert 1590 <= max(img.size) <= 1610
+
+
+@pytest.mark.parametrize("stop", ["max_tokens", "length", "refusal", "content_filter"])
+def test_a_cut_off_or_refused_reply_is_a_failed_page_not_a_saved_one(tmp_path, monkeypatch, stop):
+    llm = _FakeLLM(stop={"Page 2.": stop})
+    ns, scanned_pdf, out_dir, progress, printed = _run_scan_snippet(tmp_path, monkeypatch, 3, llm)
+
+    assert sorted(p.name for p in out_dir.iterdir()) == ["page_0001.txt", "page_0003.txt"]
+    assert "2:" in printed[0] and "ValueError" in printed[0]
+    # It is retried on the next run instead of being skipped for good.
+    llm.stop = {}
+    assert asyncio.run(ns["read_pages"](str(scanned_pdf), [0, 1, 2], out_dir)) == {}
+    assert llm.asked[3:] == ["Page 2."]
