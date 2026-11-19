@@ -147,6 +147,8 @@ from anton.core.tools.tool_defs import (
     STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
+    LEAN_TOOL_DESCRIPTIONS,
+    lean_scratchpad_description,
     scratchpad_tool as _scratchpad_tool_def,
     ToolDef,
 )
@@ -3250,6 +3252,12 @@ class ChatSession:
             getattr(cell, "code", "")
         )
 
+    def _lean_prompt_enabled(self) -> bool:
+        """`lean_prompt` from the settings the host passed; False without them, so a
+        session built without settings (the connector probe) keeps the full prompt."""
+        settings = getattr(self, "_settings", None)
+        return bool(getattr(settings, "lean_prompt", False)) if settings is not None else False
+
     def _direct_reports_enabled(self) -> bool:
         """`direct_reports` from the settings the host passed; True without
         them. Read from the settings object, not a config field: a host that
@@ -3463,6 +3471,9 @@ class ChatSession:
                 )
             for name in built - set(self._tool_allowlist):
                 self.tool_registry.unregister_tool(name)
+        if self._lean_prompt_enabled():
+            return [dict(t, description=LEAN_TOOL_DESCRIPTIONS.get(t["name"], t["description"]))
+                    for t in self.tool_registry.dump()]
         return self.tool_registry.dump()
 
     def _register_tool_bundle(self, label: str) -> None:
@@ -3512,6 +3523,11 @@ class ChatSession:
             internet_research=getattr(self, "_internet_research_enabled", True),
             classify=getattr(self, "_classify_enabled", True),
         ))
+        if self._lean_prompt_enabled():
+            scratchpad_tool.description = lean_scratchpad_description(
+                internet_research=getattr(self, "_internet_research_enabled", True),
+                classify=getattr(self, "_classify_enabled", True),
+            )
         pkg_list = self._scratchpads.available_packages
         if pkg_list:
             notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)
