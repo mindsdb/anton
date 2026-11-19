@@ -275,6 +275,16 @@ _SENTINEL_REASONS = {
     # wall, with nothing here to tell them apart — stays out of every trip
     # rung, same reasoning as `read_failed`/`bmp_convert_failed` above.
     "mcp_tool_error": (TIER_UNCLASSIFIED, "unclassified"),
+    # A cloud custom MCP tool the member switched off, or a connection the
+    # gateway does not know for this turn: only the member can change either.
+    "custom_mcp_tool_switched_off": (TIER_WALL, "service_unavailable"),
+    "custom_mcp_unknown_connection": (TIER_WALL, "service_unavailable"),
+    # Arguments that are not a JSON object or are too large, or an answer too
+    # large to show: the agent asks differently.
+    "custom_mcp_invalid_request": (TIER_SELF, "invalid_argument"),
+    "custom_mcp_too_large": (TIER_SELF, "invalid_argument"),
+    # The gateway's answer did not match the call contract: nothing says which side.
+    "custom_mcp_invalid_answer": (TIER_UNCLASSIFIED, "unclassified"),
     # The browser tool. A malformed step, or an element number from
     # a page that has since changed: the agent re-reads the page and fixes it.
     "browser_bad_input": (TIER_SELF, "invalid_argument"),

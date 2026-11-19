@@ -276,6 +276,30 @@ def _cloud_turn_workspace_env(request: TurnRequestV1, settings: AntonSettings) -
     return overlay
 
 
+def _custom_mcp_tool_defs(request: TurnRequestV1, settings: AntonSettings) -> list:
+    """Build this turn's custom MCP tools, refusing a turn whose calls could not reach its gateway.
+
+    Input: the parsed request and the turn's settings. Output: the tools in their
+    fixed form, or ``[]`` with no block. Raises ``ValueError`` when the turn's
+    inference connection is not this turn's own or the correlation id is not the
+    producer's UUID, as for a custom API turn. Makes no request.
+    """
+    if request.custom_mcp is None:
+        return []
+    from anton.cloud_turn.custom_mcp import build_custom_mcp_tools
+
+    if not _carries_this_turns_inference(request, settings):
+        raise ValueError("the turn's inference connection cannot carry custom MCP calls")
+    if not _is_canonical_uuid(request.correlation_id):
+        raise ValueError("custom MCP turn credentials are unavailable")
+    return build_custom_mcp_tools(
+        request.custom_mcp,
+        gateway_base_url=settings.openai_base_url,
+        turn_key=request.llm["api_key"],
+        correlation_id=request.correlation_id,
+    )
+
+
 def _safe_skill_file(skill_dir: Path, rel: str) -> Path | None:
     """Resolve a wire-supplied relative path inside `skill_dir`, or None.
 
@@ -1036,6 +1060,10 @@ def build_cloud_chat_session(
 
     cortex = _build_cortex(request.memory, llm_client)
 
+    # Built before the oauth block opens MCP sessions, so a refused custom MCP
+    # turn leaves none open; not gated on oauth, since the block alone carries them.
+    custom_mcp_tool_defs = _custom_mcp_tool_defs(request, settings)
+
     # Connectors ON only when this turn carries an oauth block (Google
     # Drive/Gmail today) — clears+reinjects DS_* env before the sandbox subprocess inherits it.
     data_vault = None
@@ -1088,13 +1116,16 @@ def build_cloud_chat_session(
     tool_allowlist = (
         CLOUD_TOOL_ALLOWLIST
         | {td.name for td in mcp_tool_defs}
+        | {td.name for td in custom_mcp_tool_defs}
         | ({"ask_user"} if elicitor is not None else set())
         | ({"browser"} if request.browser is not None else set())
     )
     # Only when cowork-server asked for it: the template a member saves can be
     # connected only where the host offers that, so the tool is off by default.
     connector_drafts = ConnectorDraftBox() if request.connector_drafts else None
-    extra_tools = list(mcp_tool_defs)
+    # Custom MCP tools sit right after the built-in MCP tools and before the
+    # draft tool, at one fixed place in the cached tool list.
+    extra_tools = [*mcp_tool_defs, *custom_mcp_tool_defs]
     if connector_drafts is not None:
         draft_tool = connector_draft_tool(connector_drafts)
         extra_tools.append(draft_tool)
@@ -1165,8 +1196,8 @@ def build_cloud_chat_session(
         data_vault=data_vault,              # connectors ON iff request.oauth is set
         connector_usage_notes=_connector_usage_notes(request.connectors),
         history_store=None,                 # disk history OFF (DB authoritative)
-        tools=extra_tools,                   # this turn's MCP tools, and the connector draft tool
-        # Static CLOUD_TOOL_ALLOWLIST plus this turn's own MCP and draft
+        tools=extra_tools,                   # this turn's MCP and custom MCP tools, and the connector draft tool
+        # Static CLOUD_TOOL_ALLOWLIST plus this turn's own MCP, custom MCP and draft
         # tool names — _build_tools() re-enforces the allowlist on every
         # call (not just the first), so an extra tool left out of it would
         # survive exactly one round then vanish on the turn's next rebuild.
