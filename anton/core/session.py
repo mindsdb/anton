@@ -147,6 +147,8 @@ from anton.core.tools.tool_defs import (
     STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
+    lean_scratchpad_description,
+    lean_tool_description,
     scratchpad_tool as _scratchpad_tool_def,
     ToolDef,
 )
@@ -3250,6 +3252,11 @@ class ChatSession:
             getattr(cell, "code", "")
         )
 
+    def _lean_prompt_enabled(self) -> bool:
+        """`lean_prompt` from the settings the host passed; False without them, so a
+        session built without settings (the connector probe) keeps the full prompt."""
+        return bool(getattr(getattr(self, "_settings", None), "lean_prompt", False))
+
     def _direct_reports_enabled(self) -> bool:
         """`direct_reports` from the settings the host passed; True without
         them. Read from the settings object, not a config field: a host that
@@ -3356,6 +3363,7 @@ class ChatSession:
             classify=getattr(self, "_classify_enabled", True),
             reading_files_offered=self._reading_files_offered(),
             direct_reports=self._direct_reports_enabled(),
+            lean=self._lean_prompt_enabled(),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
             output_dir=self._output_dir,
@@ -3480,7 +3488,11 @@ class ChatSession:
                 )
             for name in built - set(self._tool_allowlist):
                 self.tool_registry.unregister_tool(name)
-        return self.tool_registry.dump()
+        tools = self.tool_registry.dump()
+        if self._lean_prompt_enabled():
+            by_name = {t["name"]: t for t in tools}
+            return [dict(t, description=lean_tool_description(t, by_name) or t["description"]) for t in tools]
+        return tools
 
     def _register_tool_bundle(self, label: str) -> None:
         """Register the deferred tools a recalled skill unlocks.
@@ -3529,6 +3541,11 @@ class ChatSession:
             internet_research=getattr(self, "_internet_research_enabled", True),
             classify=getattr(self, "_classify_enabled", True),
         ))
+        if self._lean_prompt_enabled():
+            scratchpad_tool.description = lean_scratchpad_description(
+                internet_research=getattr(self, "_internet_research_enabled", True),
+                classify=getattr(self, "_classify_enabled", True),
+            )
         pkg_list = self._scratchpads.available_packages
         if pkg_list:
             notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)

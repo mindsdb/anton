@@ -170,6 +170,10 @@ class AntonSettings(CoreSettings):
     # every web artifact goes through `generate_artifact`.
     direct_reports: bool = True
 
+    # True sends the lean system prompt and short tool descriptions: general
+    # guidance cut to a short header, the artifact sections and every tool kept.
+    lean_prompt: bool = False
+
     disable_autoupdates: bool = False
 
     terms_consent: bool = False
