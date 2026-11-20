@@ -172,12 +172,11 @@ def _resolve_run(workflow: dict) -> str:
 
 
 def test_the_resolved_version_is_validated_whole_line(workflow: dict) -> None:
-    r"""A prefix match is not enough, because the value reaches a shell unquoted.
+    r"""A prefix match is not enough, because the value becomes a build arg line.
 
-    The shared action expands ``extra-build-args`` unquoted into ``docker buildx
-    build``, so ``2.26.8 --build-arg EVIL=1`` passes a ``^[0-9]+\.[0-9]`` prefix
-    check and becomes extra arguments to that command. ``grep -Eqx`` anchors
-    both ends, which is what actually closes it.
+    The shared action reads ``build-args`` one per line, so ``2.26.8\nEVIL=1``
+    passes a ``^[0-9]+\.[0-9]`` prefix check and becomes a second build arg.
+    ``grep -Eqx`` anchors both ends, which is what actually closes it.
     """
     run = _resolve_run(workflow)
     assert "grep -Eqx" in run, (
