@@ -3932,6 +3932,15 @@ def test_a_sql_file_past_the_cap_is_held_unchecked(sql_files):
     assert "open('big.sql').read()" in card
 
 
+@pytest.mark.parametrize("code", [
+    "sql = open('big.sql').read()\nprint(sql.count('UPDATE'))",
+    PG + "q = 'DELETE FROM t'\nif q.startswith('DELETE'):\n    print('a delete')",
+], ids=["count-a-word-in-a-sql-file", "sql-text-only-checked"])
+def test_a_large_file_only_counted_or_searched_raises_no_card(code, sql_files):
+    """A count, a search or a check of the text is used up where it is made, so nothing runs it."""
+    assert not _held(code, sql_files)
+
+
 # ── Writes with no SQL text: procedures, SQLAlchemy, non-SQL stores ─────────
 
 @pytest.mark.parametrize("code, via", [

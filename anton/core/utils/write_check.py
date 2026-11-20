@@ -1766,6 +1766,8 @@ _MAPPER_METHODS = frozenset({"apply", "map", "transform", "agg", "aggregate", "a
 _STR_METHODS = frozenset({
     "format", "strip", "lstrip", "rstrip", "replace", "upper", "lower", "decode", "encode",
 })
+# str methods that return a number or a flag about their text, which carries none of it.
+_STR_FACTS = frozenset({"count", "find", "rfind", "index", "rindex", "startswith", "endswith"})
 # List and set methods that add an item: the item goes wherever the list goes.
 _ADDERS = frozenset({"append", "extend", "insert", "add"})
 _EXEC_CALLS = frozenset({"exec", "eval", "compile"})
@@ -7522,6 +7524,8 @@ def _reaches_a_runner(
         called = isinstance(call, ast.Call) and call.func is parent
         if parent.attr in _MAPPER_METHODS and called:
             return into(call.args[0], call) if call.args else _Reach.ELSEWHERE
+        if parent.attr in _STR_FACTS and called:
+            return _Reach.NOWHERE
         if parent.attr in _STR_METHODS or parent.attr == "join" or parent.attr in _CARRIERS:
             return on(call if called else parent)
         if called:

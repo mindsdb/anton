@@ -152,7 +152,6 @@ no_write_carded:
   - D05.2  # D05 document build with skill helper
   - D05.3  # D05 document build with skill helper
   - E01.0  # E01 pdf guide text export
-  - E02.4  # E02 planner log
   - E04.0  # E04 large seed sql file
   - G01.3  # G01 ddl string then function
   - G01.6  # G01 ddl string then function
