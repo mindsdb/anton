@@ -232,6 +232,9 @@ _CUSTOM_MCP_CONNECTION_NAME = re.compile(r"cm-[0-9a-f]{32}")
 _CUSTOM_MCP_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]+")
 _CUSTOM_MCP_CONNECTION_KEYS = frozenset({"connection_id", "name", "label", "credential_version", "tools"})
 _CUSTOM_MCP_DEFINITION_KEYS = frozenset({"name", "description", "input_schema"})
+# auth's invisible characters: text the member cannot see but a model reads. The joiners U+200C and U+200D stay.
+_CUSTOM_MCP_INVISIBLE = re.compile("[\u061c\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff\U000e0000-\U000e007f]")
+_JSON_SCHEMA_TYPES = frozenset({"array", "boolean", "integer", "null", "number", "object", "string"})
 
 # The `turn_completed` key that names the artifact folders the turn touched.
 # scratchpad-controller's `scratchpad_controller/anton_turn.py` relays it and
@@ -470,13 +473,13 @@ def _finite_float(text: str) -> float:
 
 
 def _holds_unclean_text(value: object) -> bool:
-    """Whether any string or key inside ``value`` holds ``\\u0000`` or does not encode as UTF-8.
+    """Whether any string or key inside ``value`` holds ``\\u0000``, an invisible character, or does not encode as UTF-8.
 
     auth's text rule. An escaped lone surrogate passes the size step as ASCII
     and decodes to text no request can encode. The parser has bounded the depth.
     """
     if isinstance(value, str):
-        if "\x00" in value:
+        if "\x00" in value or _CUSTOM_MCP_INVISIBLE.search(value):
             return True
         try:
             value.encode("utf-8")
@@ -488,6 +491,39 @@ def _holds_unclean_text(value: object) -> bool:
     if isinstance(value, list):
         return any(_holds_unclean_text(item) for item in value)
     return False
+
+
+def _known_schema_type(value: object) -> bool:
+    """Whether ``value`` is a JSON Schema ``type``: one type name, or a non-empty list of distinct ones."""
+    if isinstance(value, str):
+        return value in _JSON_SCHEMA_TYPES
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(item, str) and item in _JSON_SCHEMA_TYPES for item in value)
+        and len(set(value)) == len(value)
+    )
+
+
+def _misshapen_schema(schema: object) -> bool:
+    """Whether ``schema``, or a schema under its ``properties`` or ``items``, is not a schema or names an unknown type.
+
+    A narrow part of auth's metaschema check, which needs a JSON Schema validator
+    anton does not declare. The parser has bounded the depth. No side effects.
+    """
+    if isinstance(schema, bool):
+        return False
+    if not isinstance(schema, dict):
+        return True
+    if "type" in schema and not _known_schema_type(schema["type"]):
+        return True
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        return True
+    subschemas = list(properties.values())
+    if "items" in schema:
+        subschemas.append(schema["items"])
+    return any(_misshapen_schema(subschema) for subschema in subschemas)
 
 
 def _custom_mcp_tool(text: object) -> CustomMcpToolV1 | None:
@@ -524,6 +560,7 @@ def _custom_mcp_tool(text: object) -> CustomMcpToolV1 | None:
         or schema.get("type") != "object"
         or not isinstance(schema.get("properties", {}), dict)
         or {"anyOf", "oneOf", "allOf"} & set(schema)
+        or _misshapen_schema(schema)
         or _holds_unclean_text(definition)
     ):
         return None

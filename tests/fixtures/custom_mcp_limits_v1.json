@@ -4,7 +4,8 @@
     "max_tool_name_length": 42,
     "max_schema_depth": 32,
     "max_tool_bytes": 16384,
-    "max_member_ceiling_bytes": 786432
+    "max_member_ceiling_bytes": 262144,
+    "max_switched_on_tools": 100
   },
   "samples": [
     {
@@ -56,6 +57,60 @@
       "reason": "text"
     },
     {
+      "name": "description_tag_characters",
+      "text": "{\"description\":\"Creates an issue.\udb40\udc49\udb40\udc67\udb40\udc6e\udb40\udc6f\udb40\udc72\udb40\udc65\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_bidi_override",
+      "text": "{\"description\":\"Reads \u202eselif eteled\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u200b",
+      "text": "{\"description\":\"Reads\u200b files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u200e",
+      "text": "{\"description\":\"Reads\u200e files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u200f",
+      "text": "{\"description\":\"Reads\u200f files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u061c",
+      "text": "{\"description\":\"Reads\u061c files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u2060",
+      "text": "{\"description\":\"Reads\u2060 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_ufeff",
+      "text": "{\"description\":\"Reads\ufeff files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "schema_value_bidi_isolate",
+      "text": "{\"description\":\"\",\"input_schema\":{\"properties\":{\"q\":{\"description\":\"\u2066x\u2069\",\"type\":\"string\"}},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
       "name": "schema_key_nul",
       "text": "{\"description\":\"\",\"input_schema\":{\"properties\":{\"a\\u0000b\":{\"type\":\"string\"}},\"type\":\"object\"},\"name\":\"text\"}",
       "usable": false,
@@ -76,6 +131,18 @@
     {
       "name": "type_string",
       "text": "{\"description\":\"\",\"input_schema\":{\"type\":\"string\"},\"name\":\"shape\"}",
+      "usable": false,
+      "reason": "schema"
+    },
+    {
+      "name": "property_not_a_schema",
+      "text": "{\"description\":\"\",\"input_schema\":{\"properties\":{\"q\":\"string\"},\"type\":\"object\"},\"name\":\"shape\"}",
+      "usable": false,
+      "reason": "schema"
+    },
+    {
+      "name": "property_unknown_type",
+      "text": "{\"description\":\"\",\"input_schema\":{\"properties\":{\"q\":{\"type\":\"strin\"}},\"type\":\"object\"},\"name\":\"shape\"}",
       "usable": false,
       "reason": "schema"
     },

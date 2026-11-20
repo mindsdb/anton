@@ -22,8 +22,8 @@ from anton.cloud_turn.contract import (
 _LIMITS_FILE = Path(__file__).parent / "fixtures" / "custom_mcp_limits_v1.json"
 #: Copied byte for byte from auth's docs/contracts/custom-mcp-limits-v1.json at this commit.
 #: Copy again, and update both, when auth's file changes.
-_LIMITS_SOURCE = "0775b30831e4fc123c21eaac728edb6b0822a8eb"
-_LIMITS_SHA256 = "df89094ef9861e546da9c41737255c66279ef1f8d52f1e881464c52498ccc223"
+_LIMITS_SOURCE = "b5f60d2d5304c53ce4728f93e6ca2bc1b420e241"
+_LIMITS_SHA256 = "f1bc62f45c6accdb358172cdf2a75ebe9d7ff410121874e5c9e4e2727cb4db1e"
 _LIMITS = json.loads(_LIMITS_FILE.read_text(encoding="utf-8"))
 _SAMPLES = {sample["name"]: sample for sample in _LIMITS["samples"]}
 _USABLE = [name for name, sample in _SAMPLES.items() if sample["usable"]]
@@ -130,6 +130,60 @@ def test_an_escaped_lone_surrogate_drops_the_block_as_auths_text_rule_does(caplo
     assert text.isascii()
 
     _dropped(caplog, _block(_connection([text])))
+
+
+@pytest.mark.parametrize(
+    "description",
+    ["Tags \U0001f469\u200d\U0001f4bb issues", "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"],
+    ids=["emoji-zwj", "persian-zwnj"],
+)
+def test_the_joiners_stay_usable_in_a_description_and_a_schema_value(description):
+    text = json.dumps(
+        {
+            "description": description,
+            "input_schema": {"properties": {"q": {"description": description, "type": "string"}}, "type": "object"},
+            "name": "joined",
+        },
+        ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    )
+
+    tool = contract_mod._custom_mcp_tool(text)
+
+    assert tool is not None
+    assert tool.description == description
+
+
+def _with_property(prop: object) -> str:
+    return json.dumps(
+        {"description": "", "input_schema": {"properties": {"q": prop}, "type": "object"}, "name": "shape"},
+        separators=(",", ":"), sort_keys=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "prop",
+    [
+        {"properties": {"r": "string"}, "type": "object"},
+        {"properties": {"r": {"type": "strin"}}, "type": "object"},
+        {"items": {"type": "strin"}, "type": "array"},
+        {"items": 1, "type": "array"},
+        {"type": ["string", "string"]},
+        {"type": []},
+    ],
+    ids=["nested-not-a-schema", "nested-unknown-type", "items-unknown-type", "items-not-a-schema",
+         "repeated-type", "empty-type-list"],
+)
+def test_a_misshapen_schema_below_the_top_drops_the_tool(prop):
+    assert contract_mod._custom_mcp_tool(_with_property(prop)) is None
+
+
+@pytest.mark.parametrize(
+    "prop",
+    [True, {}, {"type": ["string", "null"]}, {"items": {"type": "integer"}, "type": "array"}],
+    ids=["true-schema", "empty-schema", "type-list", "typed-items"],
+)
+def test_a_well_shaped_schema_below_the_top_stays_usable(prop):
+    assert contract_mod._custom_mcp_tool(_with_property(prop)) is not None
 
 
 def _nested(levels: int) -> str:
