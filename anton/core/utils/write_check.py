@@ -4343,6 +4343,8 @@ class _Reader:
         # What each name holds where a node reads it, by the name, the node's
         # id and `partly_run`, read once per check (`bindings_of`).
         self._bindings_read: dict[tuple[str, int, bool], tuple[_Binding, ...]] = {}
+        # `_rebound_by_def`'s answer for each read.
+        self.rebound_read: dict[int, tuple[int, ...] | None] = {}
         # The names a with's context may start from that hold what code the
         # check can't read made (`_tainted_contexts`): such a with may
         # swallow an error its body raises (`swallowers`).
@@ -7160,7 +7162,12 @@ def _name_statements(
         return reader.named[key]
     cell = reader.cell_of(use)
     found: list[str] = []
+    rebound = _rebound_by_def(use, reader)
     for b in reader.bindings_of(use.id, node=use):
+        # A def or class that ran after this top-level binding replaced what it
+        # held. A binding in a function body runs when it is called, not where it sits.
+        if rebound is not None and b.scope is None and (*b.cell.order, b.line) < rebound:
+            continue
         own = b.cell is cell and not cell.builds_up(use.id, scope=b.scope)
         if root is None and own:
             continue
@@ -7169,6 +7176,39 @@ def _name_statements(
         found += reader.statements_held(use.id, b, prose=prose)
     reader.named[key] = tuple(dict.fromkeys(found))
     return reader.named[key]
+
+
+def _rebound_by_def(use: ast.Name, reader: _Reader) -> tuple[int, ...] | None:
+    """Where the last def or class of `use`'s name surely ran before a
+    module-level `use` reads it: one at the top level of a cell that ran in
+    full (`ran_ahead`), so a binding before it no longer gives the name a
+    value. A decorator or a metaclass may bind the name to anything, so a
+    def or class with one doesn't count. None for a read inside a function,
+    which runs later, or when none did."""
+    if id(use) in reader.rebound_read:
+        return reader.rebound_read[id(use)]
+    # None while this read is worked out, so a walk that comes back to it keeps the old text.
+    reader.rebound_read[id(use)] = None
+    found: tuple[int, ...] | None = None
+    cell = reader.cell_of(use)
+    names = (reader.functions, reader.classes, cell.functions, cell.classes)
+    call = cell.parents.get(use)
+    # What a call of the new function returns may still be that text, so a call
+    # whose result is run as SQL keeps it.
+    runs_result = isinstance(call, ast.Call) and call.func is use and _reaches_a_runner(call, reader) is _Reach.RUNNER
+    if cell.scope_of(use) is None and not runs_result and any(use.id in table for table in names):
+        read_at = reader.position(use)
+        for ran in reader.ran_ahead(use):
+            if not ran.surely_run or ran.host in reader.stopped_early or ran.index in reader.errored:
+                continue
+            for stmt in ran.tree.body:
+                if (isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and stmt.name == use.id
+                        and not stmt.decorator_list and not getattr(stmt, "keywords", None)):
+                    at = reader.position(stmt)
+                    if at < read_at and (found is None or at > found):
+                        found = at
+    reader.rebound_read[id(use)] = found
+    return found
 
 
 def _held_texts(name: str, binding: _Binding, reader: _Reader, *, depth: int) -> list[str]:

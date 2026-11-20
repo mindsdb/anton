@@ -1265,6 +1265,40 @@ def test_a_connection_from_an_earlier_cell(snap):
     assert _held("cur.execute('UPDATE t SET a = 1')", snap, earlier=(PG,))
 
 
+DDL = 'ddl = "CREATE TABLE t (a int)"'
+DDL_FN = "def ddl(t):\n    return 'x'"
+
+
+@pytest.mark.parametrize("earlier, code", [
+    ([DDL], DDL_FN + "\nprint(ddl('a'))"),
+    ([DDL, DDL_FN], "print(ddl('a'))"),
+    ([DDL], "class ddl:\n    pass\nprint(ddl())"),
+    ([DDL], "ddl = 5\nprint(ddl)"),
+], ids=["def-in-the-next-cell", "def-in-an-earlier-cell", "class", "new-value"])
+def test_a_def_or_class_that_rebinds_a_name_drops_the_sql_it_held(snap, earlier, code):
+    """Calling what a def or class made runs no SQL, whatever text the name held before."""
+    assert not find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,)).needs_approval()
+
+
+@pytest.mark.parametrize("earlier, errored, code, statement", [
+    ([DDL], [], PG + "cur.execute(ddl)", "CREATE TABLE t (a int)"),
+    ([DDL, DDL_FN], [], PG + 'ddl = "CREATE TABLE u (b int)"\ncur.execute(ddl)', "CREATE TABLE u (b int)"),
+    ([], [], PG + DDL + "\ncur.execute(ddl)\n" + DDL_FN, "CREATE TABLE t (a int)"),
+    ([DDL], [], PG + "import random\nif random.random() > 2:\n    def ddl(t):\n        return 'x'\ncur.execute(ddl)",
+     "CREATE TABLE t (a int)"),
+    ([DDL, "1 / 0\n" + DDL_FN], [False, True], PG + "cur.execute(ddl)", "CREATE TABLE t (a int)"),
+    ([], [], PG + "def setsql():\n    global ddl\n    ddl = 'DROP TABLE t'\n" + DDL_FN + "\nsetsql()\ncur.execute(ddl)",
+     "DROP TABLE t"),
+    ([DDL, "def keep(f):\n    return globals()['_sql']", "_sql = ddl"], [],
+     PG + "@keep\ndef ddl():\n    pass\ncur.execute(ddl)", "CREATE TABLE t (a int)"),
+    ([DDL], [], PG + "_old = ddl\ndef ddl():\n    return globals()['_old']\ncur.execute(ddl())", "CREATE TABLE t (a int)"),
+], ids=["no-def", "sql-again-after-the-def", "run-before-the-def", "def-that-may-not-run", "def-in-a-cell-that-failed",
+        "global-set-in-a-function-called-after-the-def", "decorator-returns-the-sql", "new-function-returns-the-sql"])
+def test_sql_a_name_still_holds_keeps_its_card(snap, earlier, errored, code, statement):
+    writes = find_cell_writes(code=code, earlier=_earlier(earlier, errored=errored), snapshots=(snap,))
+    assert [w.statement for w in writes.sql] == [statement]
+
+
 @pytest.mark.parametrize("name", ["log", "logger"])
 def test_a_cursor_with_a_logger_name_still_runs_sql(snap, name):
     """A logger-named root reads as logging, but `execute` on it runs SQL."""

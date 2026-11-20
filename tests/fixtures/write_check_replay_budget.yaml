@@ -154,8 +154,6 @@ no_write_carded:
   - E01.0  # E01 pdf guide text export
   - E02.4  # E02 planner log
   - E04.0  # E04 large seed sql file
-  - G01.3  # G01 ddl string then function
-  - G01.6  # G01 ddl string then function
   - G05.1  # G05 p rebound after module
   - G05.2  # G05 p rebound after module
   - G05.5  # G05 p rebound after module
@@ -218,7 +216,6 @@ no_write_carded:
   - S02.10  # S02 daily exceptions report with a render helper
   - S02.11  # S02 daily exceptions report with a render helper
   - P02.1  # P02 helper module: walk the folder after it
-  - P05.2  # P05 DDL text printed
   - P07.2  # P07 page written through a path, read after a restart
   - P09.0  # P09 big text file read and counted
   - T15.2  # T15 restart free re-derives the path
@@ -227,6 +224,5 @@ no_write_carded:
 broken_pairs:
   - c2-exec
   - c2-helper
-  - c5-ddl
   - c7-restart
   - c8-big
