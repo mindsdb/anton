@@ -1163,11 +1163,11 @@ _BILLING_CTA = (
 )
 _BUDGET_CTA = (
     "An organization owner or admin can raise it at "
-    "https://console.mindshub.ai/settings/organization/billing?tab=budgets."
+    "https://console.mindshub.ai/settings/organization/billing?tab=budgets&from=budget_denial."
 )
 _SCOPED_BUDGET_CTA = (
     "An administrator can raise it at "
-    "https://console.mindshub.ai/settings/organization/billing?tab=budgets."
+    "https://console.mindshub.ai/settings/organization/billing?tab=budgets&from=budget_denial."
 )
 
 

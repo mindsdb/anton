@@ -305,3 +305,83 @@ def test_quick_edit_llm_from_settings_builds_the_client_like_chat_session(monkey
     settings = Settings()
     llm = quick_edit_llm_from_settings(settings)
     assert built == [settings] and llm.model_call_idle_timeout_s == 42.0
+
+
+# ── answer_request: the bar's quick reply (ENG-4455) ──────────────────
+
+
+async def test_answer_request_answers_from_the_artifact_context():
+    from anton.core.artifact_editor import answer_request
+    from anton.core.artifact_editor.reply import REPLY_SYSTEM
+
+    llm = ScriptedLLM([reply(text="  It shows monthly revenue for 2024, one bar per month.  ", stop="end_turn")])
+    answer = await answer_request(
+        "what does this chart show?", llm=llm, name="Sales", description="Revenue by month",
+        data='{"rows": [{"month": "str", "revenue": "float"}]}', outline="title: Sales; features: charts",
+        recent_changes=["Quick edit: navy heading"], history=[{"role": "user", "text": "make it navy"}],
+        chat=[{"role": "assistant", "text": "Built the Sales dashboard."}],
+    )
+    assert answer == "It shows monthly revenue for 2024, one bar per month."
+    [sent] = llm.calls
+    assert sent["system"] == REPLY_SYSTEM and sent["tools"] is None
+    prompt = sent["messages"][0]["content"]
+    assert "what does this chart show?" in prompt
+    for evidence in ("Sales", "Revenue by month", "features: charts", "navy heading", "make it navy",
+                     "Built the Sales dashboard", '\\"revenue\\"'):
+        assert evidence in prompt
+
+
+async def test_answer_request_uses_the_coding_stream_for_the_coding_role():
+    from anton.core.artifact_editor import answer_request
+
+    class CodingOnly(ScriptedLLM):
+        async def plan_stream(self, **_kw):
+            raise AssertionError("the planning stream was used")
+            yield  # pragma: no cover
+
+        code_stream = ScriptedLLM.plan_stream
+
+    llm = CodingOnly([reply(text="Hello! Ask me anything about this dashboard.", stop="end_turn")])
+    assert await answer_request("hi", llm=llm, role="coding") == "Hello! Ask me anything about this dashboard."
+
+
+async def test_answer_request_clips_a_long_answer():
+    from anton.core.artifact_editor import answer_request
+
+    llm = ScriptedLLM([reply(text="This is a sentence. " * 200, stop="end_turn")])
+    answer = await answer_request("explain the page", llm=llm, max_chars=100)
+    assert 0 < len(answer) <= 100 and answer.endswith(".")
+
+
+@pytest.mark.parametrize("step", [
+    RuntimeError("provider down"),
+    reply(text="HAND_OFF", stop="end_turn"),
+    reply(text="   ", stop="end_turn"),
+])
+async def test_answer_request_returns_empty_on_failure_or_hand_off(step):
+    from anton.core.artifact_editor import answer_request
+
+    assert await answer_request("add last quarter's numbers", llm=ScriptedLLM([step])) == ""
+
+
+async def test_answer_request_never_raises():
+    from anton.core.artifact_editor import answer_request
+
+    class Broken:
+        def plan_stream(self, **_kw):
+            raise TypeError("not a client")
+
+    assert await answer_request("hi", llm=Broken()) == ""
+    assert await answer_request("hi", llm=None) == ""
+    assert await answer_request("   ", llm=ScriptedLLM([])) == ""
+
+
+async def test_answer_request_gives_up_after_the_timeout():
+    import asyncio
+
+    from anton.core.artifact_editor import answer_request
+
+    async def slow(_messages):
+        await asyncio.sleep(5)
+
+    assert await answer_request("hi", llm=ScriptedLLM([slow]), timeout_s=0.05) == ""

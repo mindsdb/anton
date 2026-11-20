@@ -451,7 +451,7 @@ def test_a_billing_stop_names_its_limit_on_the_wire(status, code, type_name):
     # The whole curated message fits under the wire cap, billing link included.
     assert not error.endswith("…")
     assert error.endswith({
-        "budget_exceeded": "https://console.mindshub.ai/settings/organization/billing?tab=budgets.",
+        "budget_exceeded": "https://console.mindshub.ai/settings/organization/billing?tab=budgets&from=budget_denial.",
         "window_allowance_exhausted": "to continue now, or wait for it to reset.",
     }.get(code, "https://console.mindshub.ai/settings/organization/billing to continue."))
 
