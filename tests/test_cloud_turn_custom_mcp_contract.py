@@ -11,7 +11,9 @@ import pytest
 
 import anton.cloud_turn.contract as contract_mod
 from anton.cloud_turn.contract import (
+    CUSTOM_MCP_MAX_MEMBER_CEILING_BYTES,
     CUSTOM_MCP_MAX_SCHEMA_DEPTH,
+    CUSTOM_MCP_MAX_SWITCHED_ON_TOOLS,
     CUSTOM_MCP_MAX_TOOL_BYTES,
     CUSTOM_MCP_MAX_TOOL_NAME_LENGTH,
     MAX_CUSTOM_MCP_CONNECTIONS,
@@ -72,6 +74,8 @@ def test_the_parsers_limits_are_the_published_ones():
     assert _LIMITS["limits"]["max_tool_name_length"] == CUSTOM_MCP_MAX_TOOL_NAME_LENGTH
     assert _LIMITS["limits"]["max_schema_depth"] == CUSTOM_MCP_MAX_SCHEMA_DEPTH
     assert _LIMITS["limits"]["max_tool_bytes"] == CUSTOM_MCP_MAX_TOOL_BYTES
+    assert _LIMITS["limits"]["max_member_ceiling_bytes"] == CUSTOM_MCP_MAX_MEMBER_CEILING_BYTES
+    assert _LIMITS["limits"]["max_switched_on_tools"] == CUSTOM_MCP_MAX_SWITCHED_ON_TOOLS
     assert MAX_CUSTOM_MCP_CONNECTIONS == 25
 
 
@@ -256,6 +260,82 @@ def test_the_drop_warning_names_no_definition(caplog):
 
 def test_a_turn_without_the_block_parses_to_none():
     assert TurnRequestV1.from_json('{"protocol_version":1,"conversation_id":"c","input":"hi"}').custom_mcp is None
+
+
+def _definition(name: str, size: int | None = None, fill: str = "d") -> str:
+    """A usable stored text in auth's form, named ``name``.
+
+    With ``size``, the description is padded with ``fill`` and then ASCII to exactly ``size`` UTF-8 bytes.
+    """
+    def stored(description: str) -> str:
+        """The definition with ``description``: compact JSON, sorted keys, non-ASCII written as it is."""
+        return json.dumps(
+            {"name": name, "description": description, "input_schema": {"type": "object"}},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        )
+
+    if size is None:
+        return stored("")
+    room = size - len(stored("").encode("utf-8"))
+    wide, narrow = divmod(room, len(fill.encode("utf-8")))
+    return stored(fill * wide + "d" * narrow)
+
+
+def _tool_count_block(count: int) -> dict:
+    """A block of ``count`` small usable tools spread over connections of at most 25 tools each."""
+    names = [f"t{i}" for i in range(count)]
+    return _block(*[
+        _connection(
+            [_definition(name) for name in names[start:start + 25]],
+            connection_id=start + 1,
+            name=f"cm-{start + 1:032x}",
+        )
+        for start in range(0, count, 25)
+    ])
+
+
+def test_a_block_at_the_tool_count_limit_parses():
+    request = TurnRequestV1.from_json(_request(_tool_count_block(_LIMITS["limits"]["max_switched_on_tools"])))
+
+    assert request.custom_mcp is not None
+    assert sum(len(c.tools) for c in request.custom_mcp.connections) == _LIMITS["limits"]["max_switched_on_tools"]
+
+
+def test_a_block_one_tool_past_the_count_limit_is_dropped_whole(caplog):
+    _dropped(caplog, _tool_count_block(_LIMITS["limits"]["max_switched_on_tools"] + 1))
+
+    assert "too many tools" in caplog.text
+
+
+def _bytes_block(total: int) -> dict:
+    """A block whose stored texts add up to exactly ``total`` UTF-8 bytes, each within the per-tool limit."""
+    count = -(-total // _LIMITS["limits"]["max_tool_bytes"])
+    size, larger = divmod(total, count)
+    texts = [_definition(f"t{i}", size + (i < larger)) for i in range(count)]
+    assert sum(len(t.encode("utf-8")) for t in texts) == total
+    return _block(_connection(texts))
+
+
+def test_a_block_at_the_byte_limit_parses():
+    request = TurnRequestV1.from_json(_request(_bytes_block(_LIMITS["limits"]["max_member_ceiling_bytes"])))
+
+    assert request.custom_mcp is not None
+
+
+def test_a_block_one_byte_past_the_byte_limit_is_dropped_whole(caplog):
+    _dropped(caplog, _bytes_block(_LIMITS["limits"]["max_member_ceiling_bytes"] + 1))
+
+    assert "tool definitions too large" in caplog.text
+
+
+def test_the_byte_limit_counts_utf8_bytes_not_characters(caplog):
+    texts = [_definition(f"t{i}", _LIMITS["limits"]["max_tool_bytes"], fill="\u00e9") for i in range(16)]
+    texts.append(_definition("last"))
+    assert sum(len(text) for text in texts) <= _LIMITS["limits"]["max_member_ceiling_bytes"]
+
+    _dropped(caplog, _block(_connection(texts)))
+
+    assert "tool definitions too large" in caplog.text
 
 
 def test_a_label_is_cleaned_to_one_line_and_an_empty_one_reads_as_none():

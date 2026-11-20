@@ -433,6 +433,28 @@ def test_a_gateway_that_cannot_be_reached_reads_as_temporarily_unavailable(cloud
     assert outcome.content == _UNAVAILABLE
 
 
+def test_an_answer_streamed_past_the_call_deadline_reads_as_temporarily_unavailable(cloud, gateway, monkeypatch):
+    """Each piece arrives well within the deadline, but the whole answer does not."""
+    monkeypatch.setattr("anton.cloud_turn.custom_mcp.CALL_TIMEOUT_SECONDS", 0.2)
+    _, answers = gateway
+    answer = json.dumps(_CALL["call_response"]).encode()
+    step = -(-len(answer) // 10)
+    pieces = [answer[i:i + step] for i in range(0, len(answer), step)]
+
+    async def slowly():
+        for piece in pieces:
+            await asyncio.sleep(0.05)
+            yield piece
+
+    answers.append(httpx.Response(200, content=slowly()))
+
+    outcome = _call(cloud(_request()), _EXAMPLE["tool"], _EXAMPLE["arguments"])
+
+    assert outcome.ok is False
+    assert outcome.content == _UNAVAILABLE
+    assert outcome.reason == "mcp_transient_error"
+
+
 def test_a_redirect_is_not_followed_so_the_turn_key_goes_nowhere_else(cloud, gateway):
     seen, answers = gateway
     answers.extend(

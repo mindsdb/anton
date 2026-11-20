@@ -227,6 +227,10 @@ MAX_CUSTOM_MCP_CONNECTIONS = 25
 CUSTOM_MCP_MAX_TOOL_NAME_LENGTH = 42
 CUSTOM_MCP_MAX_SCHEMA_DEPTH = 32
 CUSTOM_MCP_MAX_TOOL_BYTES = 16384
+#: auth's limits on a whole block: tools across every connection, and the UTF-8 bytes of their stored texts.
+#: Past either, the provider can refuse every request in the turn.
+CUSTOM_MCP_MAX_SWITCHED_ON_TOOLS = 100
+CUSTOM_MCP_MAX_MEMBER_CEILING_BYTES = 262144
 #: auth draws every custom MCP connection name in this form.
 _CUSTOM_MCP_CONNECTION_NAME = re.compile(r"cm-[0-9a-f]{32}")
 _CUSTOM_MCP_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]+")
@@ -549,6 +553,8 @@ def _custom_mcp_tool(text: object) -> CustomMcpToolV1 | None:
     if not isinstance(definition, dict) or set(definition) != _CUSTOM_MCP_DEFINITION_KEYS:
         return None
     name, description, schema = definition["name"], definition["description"], definition["input_schema"]
+    # auth validates the whole schema against the 2020-12 metaschema before storing it;
+    # this is a second line on the top level, properties and items only.
     if (
         not isinstance(name, str)
         or not _CUSTOM_MCP_TOOL_NAME.fullmatch(name)
@@ -612,6 +618,11 @@ def _custom_mcp_connections(value: object) -> tuple[CustomMcpConnectionV1, ...] 
         or len({ref.name for ref in parsed}) != len(parsed)
     ):
         return "invalid connection or tool definition"
+    texts = [text for connection in connections for text in connection["tools"]]
+    if len(texts) > CUSTOM_MCP_MAX_SWITCHED_ON_TOOLS:
+        return "too many tools"
+    if sum(len(text.encode("utf-8")) for text in texts) > CUSTOM_MCP_MAX_MEMBER_CEILING_BYTES:
+        return "tool definitions too large"
     return tuple(parsed)
 
 

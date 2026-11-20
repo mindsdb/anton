@@ -14,6 +14,7 @@ same bytes on every request and every turn.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import ssl
@@ -265,19 +266,22 @@ def _make_handler(
             "Accept": "application/json",
         }
         try:
-            # As the custom API helper that sends the same key: no proxy from the
-            # environment, the default TLS context, and no redirects.
-            async with httpx.AsyncClient(
-                timeout=CALL_TIMEOUT_SECONDS,
-                follow_redirects=False,
-                trust_env=False,
-                verify=ssl.create_default_context(),
-            ) as client:
-                async with client.stream("POST", url, content=payload, headers=headers) as response:
-                    status = response.status_code
-                    limit = _ANSWER_READ_LIMIT if status == 200 else _ERROR_BODY_LIMIT
-                    body = await _read_capped(response, limit)
-        except httpx.HTTPError as exc:
+            # httpx times each step, not the call, so a slowly streamed answer
+            # would run past the deadline without the outer bound.
+            async with asyncio.timeout(CALL_TIMEOUT_SECONDS):
+                # As the custom API helper that sends the same key: no proxy from the
+                # environment, the default TLS context, and no redirects.
+                async with httpx.AsyncClient(
+                    timeout=CALL_TIMEOUT_SECONDS,
+                    follow_redirects=False,
+                    trust_env=False,
+                    verify=ssl.create_default_context(),
+                ) as client:
+                    async with client.stream("POST", url, content=payload, headers=headers) as response:
+                        status = response.status_code
+                        limit = _ANSWER_READ_LIMIT if status == 200 else _ERROR_BODY_LIMIT
+                        body = await _read_capped(response, limit)
+        except (httpx.HTTPError, TimeoutError) as exc:
             logger.warning(
                 "custom MCP call did not reach the gateway: %s",
                 type(exc).__name__,
