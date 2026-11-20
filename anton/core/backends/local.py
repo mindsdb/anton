@@ -301,6 +301,49 @@ def _clip_stdout(raw: str, total: int, cwd_note: str) -> str:
     return text
 
 
+def _inherited_requirements(requirements: list[str]) -> list[str]:
+    """The bare names in `requirements` the pad already has from this interpreter.
+
+    A pad sees this interpreter's site-packages, through `_parent_venv.pth` or
+    as its system site-packages, but `uv pip install --python <pad>` does not
+    look there: it would install a second, unpinned copy into the pad that then
+    shadows the one the image or app pinned. A requirement with a version,
+    extras or a marker is a deliberate request and still goes to the installer.
+
+    Only a distribution whose installed files show it imports from the folder
+    itself counts. One that needs its own `.pth` file (pywin32, an editable
+    install) is not importable in the pad, because Python does not read `.pth`
+    files in a folder a `.pth` added; and one with no file list can't be
+    checked. Both still go to the installer.
+
+    Only the requested names are looked up, so the cost does not grow with the
+    number of installed packages.
+    """
+    import site
+    from importlib.metadata import distributions
+
+    from packaging.requirements import InvalidRequirement, Requirement
+
+    def importable_from_the_folder(dist) -> bool:
+        files = dist.files
+        if not files:
+            return False
+        return not any(f.suffix == ".pth" and len(f.parts) == 1 for f in files)
+
+    path = site.getsitepackages()
+    inherited = []
+    for spec in requirements:
+        try:
+            req = Requirement(spec)
+        except InvalidRequirement:
+            continue
+        if req.specifier or req.extras or req.url or req.marker:
+            continue
+        if any(importable_from_the_folder(d) for d in distributions(name=req.name, path=path)):
+            inherited.append(spec)
+    return inherited
+
+
 # ── Namespace-snapshot layout (ENG-1124) ────────────────────────────────────
 # One derivation, shared by the writer (the runtime) and the single-scratchpad
 # guard (which needs to know which pads a conversation has already used, across
@@ -2091,6 +2134,14 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         refused = reject_invalid_packages(needed)
         if refused:
             return refused
+        inherited = _inherited_requirements(needed)
+        if inherited:
+            # Not added to _installed_packages: that set is saved with the pad
+            # and trusted when the pad is reused, possibly under a host that
+            # no longer has the package. The check is cheap; it runs each time.
+            needed = [p for p in needed if p not in inherited]
+            if not needed:
+                return "All packages already installed."
         await self._run_venv_work(self._ensure_venv)
 
         uv = self._uv()

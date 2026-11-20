@@ -865,7 +865,7 @@ class AllowanceExhaustedError(MindsHubBillingStop):
 
 
 class WindowAllowanceExhaustedError(MindsHubBillingStop):
-    """429 ``window_allowance_exhausted``: a subscription plan's rolling window is spent (ENG-4186).
+    """429 ``window_allowance_exhausted``: a subscription plan's rolling window is spent.
 
     The Plus/Pro counterpart of :class:`AllowanceExhaustedError`, shaped like
     it: the gateway sends ``reset_at`` (when the spent window frees up) on the
@@ -881,7 +881,7 @@ class WindowAllowanceExhaustedError(MindsHubBillingStop):
 
 
 class ModelNotInTierError(MindsHubBillingStop):
-    """403 ``model_not_in_tier``: the plan's allowance does not cover the model (ENG-4186).
+    """403 ``model_not_in_tier``: the plan's allowance does not cover the model.
 
     Fires only when the wallet cannot pay for the model either, so upgrading to
     ``required_tier`` or adding credit lifts it. No administrator refused the
@@ -1129,15 +1129,13 @@ _TRANSIENT_ERROR_TYPES = frozenset(
     {"overloaded_error", "overloaded", "api_error", "server_error", "service_unavailable"}
 )
 
-_MINDSHUB_BILLING_CTA = (
-    "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
-)
+_MINDSHUB_BILLING_URL = "https://console.mindshub.ai/settings/organization/billing"
+_MINDSHUB_BILLING_CTA = f"Add credits at {_MINDSHUB_BILLING_URL} to continue."
 # Credits do not lift a budget, so its stop points at the Budgets tab instead.
-_MINDSHUB_BUDGET_URL = "https://console.mindshub.ai/settings/organization/billing?tab=budgets"
+_MINDSHUB_BUDGET_URL = f"{_MINDSHUB_BILLING_URL}?tab=budgets"
 _MINDSHUB_BUDGET_CTA = f"An organization owner or admin can raise it at {_MINDSHUB_BUDGET_URL}."
 # A workspace or key budget may be managed below the org, so its hint names no role.
 _MINDSHUB_SCOPED_BUDGET_CTA = f"An administrator can raise it at {_MINDSHUB_BUDGET_URL}."
-_MINDSHUB_BILLING_URL = "https://console.mindshub.ai/settings/organization/billing"
 # A spent plan window lifts on its own too, so its hint offers waiting.
 _MINDSHUB_WINDOW_CTA = (
     f"Add credits at {_MINDSHUB_BILLING_URL} to continue now, or wait for it to reset."
@@ -1175,10 +1173,10 @@ class _BillingStopKind(NamedTuple):
 # The allowance copy does not say the allowance was used up either: the gate
 # sends the same code to an org that never had a free allowance at all.
 #
-# ENG-4186 adds the subscription plans' two stops, both sent only when the
-# wallet cannot pay: ``window_allowance_exhausted`` (429, a rolling plan window
-# is spent, ``x-should-retry: false``) and ``model_not_in_tier`` (403, the
-# plan's allowance does not cover the model). Their ``what`` here is the
+# The subscription plans add two stops, both sent only when the wallet cannot
+# pay: ``window_allowance_exhausted`` (429, a rolling plan window is spent,
+# ``x-should-retry: false``) and ``model_not_in_tier`` (403, the plan's
+# allowance does not cover the model). Their ``what`` here is the
 # fallback for a body that names no ``window`` / ``required_tier``;
 # :func:`mindshub_billing_stop` words it from those fields when they arrive.
 _MINDSHUB_BILLING_STOPS: dict[str, _BillingStopKind] = {
@@ -1195,7 +1193,7 @@ _MINDSHUB_BILLING_STOPS: dict[str, _BillingStopKind] = {
         _MINDSHUB_BUDGET_CTA),
     "window_allowance_exhausted": _BillingStopKind(
         WindowAllowanceExhaustedError,
-        "your MindsHub plan's allowance is used up until it resets.",
+        "your MindsHub plan's allowance is used up.",
         _MINDSHUB_WINDOW_CTA),
     "model_not_in_tier": _BillingStopKind(
         ModelNotInTierError,
@@ -1369,6 +1367,8 @@ class ErrorBodyFields:
     budget_scope: object = None
     budget_period: object = None
     budget_model: object = None
+    window: object = None
+    required_tier: object = None
     status: object = None
 
     @classmethod
@@ -1383,6 +1383,8 @@ class ErrorBodyFields:
             budget_scope=fields.get("budget_scope"),
             budget_period=fields.get("budget_period"),
             budget_model=fields.get("budget_model"),
+            window=fields.get("window"),
+            required_tier=fields.get("required_tier"),
             status=fields.get("status"),
         )
 
@@ -1496,8 +1498,9 @@ def mindshub_billing_stop(
     stream, which has no error status to check.
 
     A plan-window stop carries the body's ``window`` and a model-tier stop its
-    ``required_tier`` (see :func:`_top_level_body_values`); each is ``None``
-    when the gateway named none that this reads.
+    ``required_tier``, read from ``body`` and then from the response's own JSON
+    (:func:`_response_body`); each is ``None`` when the gateway named none that
+    this reads.
     """
     if origin_is_known_third_party(exc):
         return None
@@ -1516,13 +1519,26 @@ def mindshub_billing_stop(
     what = kind.what
     cta = kind.cta
     extra: dict[str, Any] = {}
+    levels: tuple[ErrorBodyFields, ...] = ()
+    if kind.error_type in (WindowAllowanceExhaustedError, ModelNotInTierError):
+        # Reading order: ``body`` (both dialects), then the response's own JSON.
+        sent = ProviderErrorBody.parse(body)
+        wire = _response_body(exc)
+        levels = (sent.top, sent.envelope, wire.top, wire.envelope)
     if kind.error_type is WindowAllowanceExhaustedError:
-        window = _plan_window(exc, body)
+        window = next(
+            (f.window for f in levels if isinstance(f.window, str) and f.window in _PLAN_WINDOW_WORDS),
+            None,
+        )
         if window is not None:
-            what = f"your MindsHub plan's {_PLAN_WINDOW_WORDS[window]} allowance is used up until it resets."
+            what = f"your MindsHub plan's {_PLAN_WINDOW_WORDS[window]} allowance is used up."
         extra["window"] = window
     if kind.error_type is ModelNotInTierError:
-        tier = _required_tier(exc, body)
+        tier = next(
+            (f.required_tier for f in levels
+             if isinstance(f.required_tier, str) and _PLAN_TIER_PATTERN.fullmatch(f.required_tier)),
+            None,
+        )
         name = _PLAN_TIER_NAMES.get(tier or "")
         if name is not None:
             what = f"your MindsHub plan does not cover this model; it needs {name}."
@@ -1550,46 +1566,18 @@ def mindshub_billing_stop(
     )
 
 
-def _top_level_body_values(exc: BaseException, body: Any, name: str) -> list[object]:
-    """Every copy of the body field ``name`` a gate denial may still carry, in reading order.
+def _response_body(exc: BaseException) -> ProviderErrorBody:
+    """The response's own JSON, parsed like ``exc.body``; empty when there is none or it is unreadable.
 
-    ENG-4186's ``window`` and ``required_tier`` sit at the top level of the
-    wire body, beside ``error``, with no header copy. The OpenAI SDK keeps only
-    the ``error`` envelope as ``exc.body``, which drops them, so the response's
-    own JSON is read as well. ``body`` comes first, in both dialects, then the
-    response. Never raises: an unreadable response adds nothing.
+    The OpenAI SDK keeps only the ``error`` envelope as ``exc.body``, which drops the
+    top-level ``window`` and ``required_tier``. Never raises.
     """
-    parsed = body if isinstance(body, dict) else {}
-    envelope = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
-    values: list[object] = [parsed.get(name), envelope.get(name)]
     resp = getattr(exc, "response", None)
-    if resp is not None:
-        try:
-            payload = resp.json()
-        except Exception:
-            payload = None
-        if isinstance(payload, dict):
-            values.append(payload.get(name))
-            inner = payload.get("error")
-            if isinstance(inner, dict):
-                values.append(inner.get(name))
-    return values
-
-
-def _plan_window(exc: BaseException, body: Any) -> str | None:
-    """The spent plan window (``5h`` or ``7d``) a ``window_allowance_exhausted`` body names, else ``None``."""
-    for value in _top_level_body_values(exc, body, "window"):
-        if isinstance(value, str) and value in _PLAN_WINDOW_WORDS:
-            return value
-    return None
-
-
-def _required_tier(exc: BaseException, body: Any) -> str | None:
-    """The tier a ``model_not_in_tier`` body names, as a short identifier, else ``None``."""
-    for value in _top_level_body_values(exc, body, "required_tier"):
-        if isinstance(value, str) and _PLAN_TIER_PATTERN.fullmatch(value):
-            return value
-    return None
+    try:
+        payload = resp.json() if resp is not None else None
+    except Exception:
+        payload = None
+    return ProviderErrorBody.parse(payload)
 
 
 def _budget_scope(exc: BaseException, body: Any) -> str | None:

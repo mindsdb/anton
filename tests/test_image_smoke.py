@@ -253,3 +253,47 @@ def test_user_site_fails_when_python_would_load_it(smoke, monkeypatch):
 def test_user_site_passes_when_python_skips_it(smoke, monkeypatch):
     monkeypatch.setattr(smoke, "sys", SimpleNamespace(flags=SimpleNamespace(no_user_site=1)))
     assert smoke.check_user_site_disabled() == []
+
+
+def test_scratchpad_group_is_read_from_pyproject(smoke, tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[dependency-groups]\nscratchpad = ["Python_Docx==1.2.0", "nonexistent-dist-x==1"]\n')
+
+    found = smoke.scratchpad_group_imports(pyproject)
+
+    assert set(found) == {"python-docx", "nonexistent-dist-x"}
+    assert found["nonexistent-dist-x"] == []
+
+
+def test_scratchpad_packages_names_a_package_that_is_not_installed(smoke, monkeypatch):
+    monkeypatch.setattr(smoke, "scratchpad_group_imports", lambda: {"pypdf": [], "requests": ["requests"]})
+    monkeypatch.setattr(smoke, "run_command", lambda argv: _completed(0))
+
+    assert smoke.check_scratchpad_packages() == ["scratchpad packages: pypdf is not installed"]
+
+
+def test_scratchpad_packages_reports_an_import_that_fails(smoke, monkeypatch):
+    monkeypatch.setattr(smoke, "scratchpad_group_imports", lambda: {"lxml": ["lxml"]})
+    monkeypatch.setattr(
+        smoke, "run_command",
+        lambda argv: _completed(1, stderr=b"ImportError: libxslt.so.1: cannot open shared object file"),
+    )
+
+    failures = smoke.check_scratchpad_packages()
+
+    assert len(failures) == 1
+    assert "import lxml (lxml) failed" in failures[0]
+    assert "libxslt" in failures[0]
+
+
+def test_scratchpad_packages_imports_each_module_in_its_own_interpreter(smoke, monkeypatch):
+    ran = []
+    monkeypatch.setattr(smoke, "scratchpad_group_imports", lambda: {"pillow": ["PIL"], "python-docx": ["docx"]})
+    monkeypatch.setattr(smoke, "run_command", lambda argv: ran.append(argv) or _completed(0))
+
+    assert smoke.check_scratchpad_packages() == []
+    assert ran == [[sys.executable, "-c", "import PIL"], [sys.executable, "-c", "import docx"]]
+
+
+def test_scratchpad_packages_is_a_build_check(smoke):
+    assert smoke.check_scratchpad_packages in smoke.CHECKS
