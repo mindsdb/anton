@@ -7182,8 +7182,9 @@ def _rebound_by_def(use: ast.Name, reader: _Reader) -> tuple[int, ...] | None:
     """Where the last def or class of `use`'s name surely ran before a
     module-level `use` reads it: one at the top level of a cell that ran in
     full (`ran_ahead`), so a binding before it no longer gives the name a
-    value. A decorator or a metaclass may bind the name to anything, so a
-    def or class with one doesn't count. None for a read inside a function,
+    value. A decorator or a metaclass, given or inherited from a base class,
+    may bind the name to anything, so a def or class with one, or a class
+    with a base, doesn't count. None for a read inside a function,
     which runs later, or when none did."""
     if id(use) in reader.rebound_read:
         return reader.rebound_read[id(use)]
@@ -7203,7 +7204,8 @@ def _rebound_by_def(use: ast.Name, reader: _Reader) -> tuple[int, ...] | None:
                 continue
             for stmt in ran.tree.body:
                 if (isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and stmt.name == use.id
-                        and not stmt.decorator_list and not getattr(stmt, "keywords", None)):
+                        and not stmt.decorator_list and not getattr(stmt, "keywords", None)
+                        and not getattr(stmt, "bases", None)):
                     at = reader.position(stmt)
                     if at < read_at and (found is None or at > found):
                         found = at
