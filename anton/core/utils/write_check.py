@@ -1768,14 +1768,14 @@ _STR_METHODS = frozenset({
 })
 # str methods that return a number or a flag about their text, which carries none of it.
 _STR_FACTS = frozenset({"count", "find", "rfind", "index", "rindex", "startswith", "endswith"})
-# str methods and re calls that return pieces of their text, and can't run
+# str methods and re or sqlparse calls that return pieces of their text, and can't run
 # code (re.sub can, through a function replacement). Their result counts as
 # going nowhere only when it is used up where it is made: stored anywhere, a
 # later cell can't read the pieces back, so it keeps the card.
 _STR_PIECES = frozenset({
     "split", "rsplit", "splitlines", "partition", "rpartition", "removeprefix", "removesuffix", "casefold",
 })
-_RE_PIECES = frozenset({"re.findall", "re.finditer", "re.split"})
+_RE_PIECES = frozenset({"re.findall", "re.finditer", "re.split", "sqlparse.split"})
 # List and set methods that add an item: the item goes wherever the list goes.
 _ADDERS = frozenset({"append", "extend", "insert", "add"})
 _EXEC_CALLS = frozenset({"exec", "eval", "compile"})

@@ -3957,12 +3957,23 @@ def test_a_large_file_only_counted_or_searched_raises_no_card(code, sql_files):
     PG + "d = {}\nd[open('big.sql').read().split(';')[0]] = 1\nfor k in d:\n    cur.execute(k)",
     PG + "print([1 for q in open('big.sql').read().split(';') if cur.execute(q)])",
     "saved = []\nprint([1 for q in open('big.sql').read().split(';') if saved.append(q)])",
+    PG + "import re\nfor s in re.split(';', open('big.sql').read()):\n    cur.execute(s)",
+    PG + "import sqlparse\nfor s in sqlparse.split(open('big.sql').read()):\n    cur.execute(s)",
 ], ids=["executed", "handed-to-unknown-code", "split-and-executed", "re-sub-runs-a-function-on-each-match",
-        "pieces-kept-for-a-later-step", "piece-kept-as-a-dict-key", "filter-runs-each-piece", "filter-stores-each-piece"])
+        "pieces-kept-for-a-later-step", "piece-kept-as-a-dict-key", "filter-runs-each-piece", "filter-stores-each-piece",
+        "re-split-and-executed", "sqlparse-split-and-executed"])
 def test_a_large_file_whose_text_may_reach_sql_keeps_its_card(code, sql_files):
     """Pieces that are stored anywhere can be run by a later cell the check can't connect back."""
     writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(sql_files,))
     assert [c.via for c in writes.calls] == ["sql_file"]
+
+
+def test_a_sql_file_split_by_sqlparse_and_run_keeps_its_card(sql_files):
+    code = PG + "import sqlparse\nfor s in sqlparse.split(open('fix.sql').read()):\n    cur.execute(s)"
+    assert _statements(code, sql_files) == [
+        "UPDATE suppliers SET lead_time_days = 21 WHERE supplier_id = 'S005'",
+        "DELETE FROM orders WHERE id = 3",
+    ]
 
 
 def test_a_comprehension_filter_that_runs_sql_text_keeps_its_card(snap):
