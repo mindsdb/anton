@@ -7519,7 +7519,10 @@ def _reaches_a_runner(
             return _Reach.ELSEWHERE
         comp = cell.parents[parent]
         body = [comp.key, comp.value] if isinstance(comp, ast.DictComp) else [comp.elt]
-        body += [g.iter for g in comp.generators[comp.generators.index(parent) + 1:]]
+        # A filter reads the name too, as `if cur.execute(q)` does.
+        body += parent.ifs
+        for g in comp.generators[comp.generators.index(parent) + 1:]:
+            body += [g.iter, *g.ifs]
         return via([u for n in names for u in _loads_in(body, n)])
     if isinstance(parent, (ast.For, ast.AsyncFor)):
         names = _target_names(parent.target) if node is parent.iter else None

@@ -3955,12 +3955,20 @@ def test_a_large_file_only_counted_or_searched_raises_no_card(code, sql_files):
     "import re, mylib\nre.sub(r'[^;]+', mylib.run, open('big.sql').read())",
     "parts = open('big.sql').read().split(';')",
     PG + "d = {}\nd[open('big.sql').read().split(';')[0]] = 1\nfor k in d:\n    cur.execute(k)",
+    PG + "print([1 for q in open('big.sql').read().split(';') if cur.execute(q)])",
+    "saved = []\nprint([1 for q in open('big.sql').read().split(';') if saved.append(q)])",
 ], ids=["executed", "handed-to-unknown-code", "split-and-executed", "re-sub-runs-a-function-on-each-match",
-        "pieces-kept-for-a-later-step", "piece-kept-as-a-dict-key"])
+        "pieces-kept-for-a-later-step", "piece-kept-as-a-dict-key", "filter-runs-each-piece", "filter-stores-each-piece"])
 def test_a_large_file_whose_text_may_reach_sql_keeps_its_card(code, sql_files):
     """Pieces that are stored anywhere can be run by a later cell the check can't connect back."""
     writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(sql_files,))
     assert [c.via for c in writes.calls] == ["sql_file"]
+
+
+def test_a_comprehension_filter_that_runs_sql_text_keeps_its_card(snap):
+    code = PG + "print([1 for q in 'DELETE FROM t'.split(';') if cur.execute(q)])"
+    assert [w.statement for w in find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,)).sql] == [
+        "DELETE FROM t"]
 
 
 # ── Writes with no SQL text: procedures, SQLAlchemy, non-SQL stores ─────────
