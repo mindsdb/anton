@@ -1100,7 +1100,8 @@ _MINDSHUB_BILLING_CTA = (
     "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
 )
 # Credits do not lift a budget, so its stop points at the Budgets tab instead.
-_MINDSHUB_BUDGET_URL = "https://console.mindshub.ai/settings/organization/billing?tab=budgets"
+# ``from`` lets the console count the visit as coming from a budget denial.
+_MINDSHUB_BUDGET_URL = "https://console.mindshub.ai/settings/organization/billing?tab=budgets&from=budget_denial"
 _MINDSHUB_BUDGET_CTA = f"An organization owner or admin can raise it at {_MINDSHUB_BUDGET_URL}."
 # A workspace or key budget may be managed below the org, so its hint names no role.
 _MINDSHUB_SCOPED_BUDGET_CTA = f"An administrator can raise it at {_MINDSHUB_BUDGET_URL}."
