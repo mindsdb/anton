@@ -13,7 +13,8 @@ What it finds:
   string or bytes literal, an f-string, a ``+`` chain, ``str.format`` or ``%``
   on a template, a ``str.join``, a name built up with ``+=`` or ``.append``,
   a name an earlier cell bound, or code passed to ``exec`` or ``eval`` as a
-  literal. Each statement in a string that holds a write is its own
+  literal. A name stops holding its text once a plain def or class replaces
+  it at the top level of a cell that ran (``_rebound_by_def``). Each statement in a string that holds a write is its own
   finding, writes or not, since one Approve runs them all. A
   statement only printed, logged or written to a file doesn't count, and
   neither does one run on an in-process DuckDB or SQLite handle: one that
@@ -7179,36 +7180,38 @@ def _name_statements(
 
 
 def _rebound_by_def(use: ast.Name, reader: _Reader) -> tuple[int, ...] | None:
-    """Where the last def or class of `use`'s name surely ran before a
-    module-level `use` reads it: one at the top level of a cell that ran in
-    full (`ran_ahead`), so a binding before it no longer gives the name a
-    value. A decorator or a metaclass, given or inherited from a base class,
-    may bind the name to anything, so a def or class with one, or a class
-    with a base, doesn't count. None for a read inside a function,
-    which runs later, or when none did."""
+    """Where a def or class replaced the value of `use`'s name before `use`
+    reads it, so a binding before that place no longer gives the name its
+    value; None when nothing surely did. The last module-level def or class of
+    the name made before the read decides (`ran_ahead`): it must be a plain
+    one, with no decorator, base or keyword, since a decorator or a metaclass
+    may bind the name to anything, at the top level of a conversation's cell
+    that ran in full. None too for a read in a def or lambda, which runs later;
+    for a name a function sets as a global (`global_setters`); and for a call
+    whose result is run as SQL, since the new function may return the old text."""
     if id(use) in reader.rebound_read:
         return reader.rebound_read[id(use)]
     # None while this read is worked out, so a walk that comes back to it keeps the old text.
     reader.rebound_read[id(use)] = None
     found: tuple[int, ...] | None = None
     cell = reader.cell_of(use)
-    names = (reader.functions, reader.classes, cell.functions, cell.classes)
-    call = cell.parents.get(use)
-    # What a call of the new function returns may still be that text, so a call
-    # whose result is run as SQL keeps it.
-    runs_result = isinstance(call, ast.Call) and call.func is use and _reaches_a_runner(call, reader) is _Reach.RUNNER
-    if cell.scope_of(use) is None and not runs_result and any(use.id in table for table in names):
+    runs_later = any(isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+                     for scope in cell.scopes_around(use))
+    defined = any(use.id in table for table in (reader.functions, reader.classes, cell.functions, cell.classes))
+    if not runs_later and defined and not reader.global_setters(use.id):
         read_at = reader.position(use)
-        for ran in reader.ran_ahead(use):
-            if not ran.surely_run or ran.host in reader.stopped_early or ran.index in reader.errored:
-                continue
-            for stmt in ran.tree.body:
-                if (isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and stmt.name == use.id
-                        and not stmt.decorator_list and not getattr(stmt, "keywords", None)
-                        and not getattr(stmt, "bases", None)):
-                    at = reader.position(stmt)
-                    if at < read_at and (found is None or at > found):
-                        found = at
+        made = [(ran, d) for ran in reader.ran_ahead(use) for d in ran.definitions
+                if d.name == use.id and ran.scope_of(d) is None and reader.position(d) < read_at]
+        if made:
+            ran, last = max(made, key=lambda m: reader.position(m[1]))
+            call = cell.parents.get(use)
+            if (ran.index == ran.host and last in ran.tree.body and ran.surely_run
+                    and ran.host not in reader.stopped_early and ran.index not in reader.errored
+                    and not last.decorator_list and not getattr(last, "bases", None)
+                    and not getattr(last, "keywords", None)
+                    and not (isinstance(call, ast.Call) and call.func is use
+                             and _reaches_a_runner(call, reader) is _Reach.RUNNER)):
+                found = reader.position(last)
     reader.rebound_read[id(use)] = found
     return found
 

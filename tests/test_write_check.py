@@ -1275,7 +1275,10 @@ DDL_FN = "def ddl(t):\n    return 'x'"
     ([DDL, DDL_FN], "print(ddl('a'))"),
     ([DDL], "class ddl:\n    pass\nprint(ddl())"),
     ([DDL], "ddl = 5\nprint(ddl)"),
-], ids=["def-in-the-next-cell", "def-in-the-same-cell", "def-in-an-earlier-cell", "class", "new-value"])
+    ([DDL], DDL_FN + "\ndf = ddl('orders')\ndf.head()"),
+    ([DDL], DDL_FN + "\nnames = ['a', 'b']\nprint([ddl(t) for t in names])"),
+], ids=["def-in-the-next-cell", "def-in-the-same-cell", "def-in-an-earlier-cell", "class", "new-value", "result-used",
+        "called-in-a-comprehension"])
 def test_a_def_or_class_that_rebinds_a_name_drops_the_sql_it_held(snap, earlier, code):
     """Calling what a def or class made runs no SQL, whatever text the name held before."""
     assert not find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,)).needs_approval()
@@ -1297,9 +1300,16 @@ def test_a_def_or_class_that_rebinds_a_name_drops_the_sql_it_held(snap, earlier,
            "            return globals()['_sql']\n        return super().__new__(m, name, bases, ns)\n"
            "class Base(metaclass=Meta):\n    pass"], [],
      PG + "class ddl(Base):\n    pass\ncur.execute(ddl)", "CREATE TABLE t (a int)"),
+    ([DDL, "def setsql():\n    global ddl\n    ddl = 'DROP TABLE t'", DDL_FN], [],
+     PG + "setsql()\ncur.execute(ddl)", "CREATE TABLE t (a int)"),
+    ([DDL, "def setup():\n    exec(\"def ddl(t):\\n    return 'x'\", globals())",
+      "import os\nif os.environ.get('RESET'):\n    setup()"], [], PG + "cur.execute(ddl)", "CREATE TABLE t (a int)"),
+    ([DDL, "def keep(f):\n    return globals()['_sql']", "_sql = ddl", DDL_FN], [],
+     PG + "@keep\ndef ddl():\n    pass\ncur.execute(ddl)", "CREATE TABLE t (a int)"),
 ], ids=["no-def", "sql-again-after-the-def", "run-before-the-def", "def-that-may-not-run", "def-in-a-cell-that-failed",
         "global-set-in-a-function-called-after-the-def", "decorator-returns-the-sql", "new-function-returns-the-sql",
-        "metaclass-inherited-from-a-base-returns-the-sql"])
+        "metaclass-inherited-from-a-base-returns-the-sql", "global-setter-from-an-earlier-cell",
+        "exec-def-in-a-function-that-may-not-run", "decorated-def-after-a-plain-one"])
 def test_sql_a_name_still_holds_keeps_its_card(snap, earlier, errored, code, statement):
     writes = find_cell_writes(code=code, earlier=_earlier(earlier, errored=errored), snapshots=(snap,))
     assert [w.statement for w in writes.sql] == [statement]
