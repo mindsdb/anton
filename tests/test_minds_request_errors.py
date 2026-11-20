@@ -229,11 +229,27 @@ def test_a_server_error_is_reported_without_a_cause(server, status, body):
     line = describe_minds_request_failure(caught.value)
     assert line.startswith(f"POST {base}/upload returned HTTP {status}")
     assert line.endswith(
-        "Anton's note: the server reported an error. Nothing here shows its cause, "
-        "or whether it is temporary or a retry would help."
+        "Anton's note: the HTTP status alone doesn't tell us what caused the failure, "
+        "whether it's temporary, or whether retrying would help."
     )
     note = line.split("Anton's note:", 1)[1].lower()
     assert not any(word in note for word in ("outage", "transient", "overload", "maintenance"))
+
+
+def test_a_server_error_note_leaves_room_for_the_servers_reason(server):
+    """When the server names a reason, the line quotes it, and anton's note
+    must not then say nothing shows a cause: its doubt is about the status."""
+    base, answer = server
+    answer("/upload", 504, {"error": "pip install timed out (540s)"}, "application/json")
+
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        minds_request(f"{base}/upload", "key", method="POST", payload=b"{}")
+
+    line = describe_minds_request_failure(caught.value)
+    reason, note = line.split("Anton's note:", 1)
+    assert 'The server said: "pip install timed out (540s)"' in reason
+    assert "status alone" in note
+    assert "nothing here" not in note.lower()
 
 
 @pytest.mark.parametrize("status", [302, 399, 600])

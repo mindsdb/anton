@@ -517,8 +517,8 @@ def _http_failure_hint(status: int) -> str:
         return "the server refused the request."
     if 500 <= status < 600:
         return (
-            "the server reported an error. Nothing here shows its cause, or whether "
-            "it is temporary or a retry would help."
+            "the HTTP status alone doesn't tell us what caused the failure, "
+            "whether it's temporary, or whether retrying would help."
         )
     return "the server answered with an unexpected status."
 
