@@ -7484,6 +7484,13 @@ def _reaches_a_runner(
                 isinstance(u, ast.Name) and reader.cell_of(u) is cell and cell.scope_of(u) is None
                 and _reads_another(reader.bindings_of(u.id, node=u), given)
             )]
+        # A read after a def or class rebinds the name gets the function or class,
+        # unless the binding is in a function body, which runs when it is called.
+        if reader.cell_of(at).scope_of(at) is None:
+            bound_at = reader.position(at)
+            uses = [u for u in uses if not (
+                isinstance(u, ast.Name) and (rebound := _rebound_by_def(u, reader)) is not None and rebound > bound_at
+            )]
         return via(uses)
 
     def wrapped(name: str, call: ast.Call) -> _Reach:

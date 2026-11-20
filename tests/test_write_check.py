@@ -1271,10 +1271,11 @@ DDL_FN = "def ddl(t):\n    return 'x'"
 
 @pytest.mark.parametrize("earlier, code", [
     ([DDL], DDL_FN + "\nprint(ddl('a'))"),
+    ([], DDL + "\n" + DDL_FN + "\nprint(ddl('a'))"),
     ([DDL, DDL_FN], "print(ddl('a'))"),
     ([DDL], "class ddl:\n    pass\nprint(ddl())"),
     ([DDL], "ddl = 5\nprint(ddl)"),
-], ids=["def-in-the-next-cell", "def-in-an-earlier-cell", "class", "new-value"])
+], ids=["def-in-the-next-cell", "def-in-the-same-cell", "def-in-an-earlier-cell", "class", "new-value"])
 def test_a_def_or_class_that_rebinds_a_name_drops_the_sql_it_held(snap, earlier, code):
     """Calling what a def or class made runs no SQL, whatever text the name held before."""
     assert not find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,)).needs_approval()
