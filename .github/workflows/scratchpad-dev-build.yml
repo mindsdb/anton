@@ -45,9 +45,10 @@ defaults:
 
 jobs:
 
-  # Who may build: pull requests from branches in this repository, and calls
-  # from the release pipelines. Anything else is refused with a run-summary
-  # line saying why.
+  # Whether a build can push: the ECR role is assumed over OIDC, and GitHub
+  # issues no OIDC token to a pull request from a fork, so that build would
+  # fail at the push. It is skipped here instead, with a run-summary line
+  # saying why. Release pipeline calls always build.
   gate:
     runs-on: ubuntu-latest
     outputs:
@@ -79,8 +80,9 @@ jobs:
             {
               echo "### Build skipped: fork pull request"
               echo
-              echo "The scratchpad image build pushes to our registry, so it does not"
-              echo "execute code from a fork. Nothing is wrong with this pull request."
+              echo "The scratchpad image build pushes to ECR with a role assumed over OIDC,"
+              echo "and GitHub issues no OIDC token to a pull request from a fork, so the"
+              echo "push could not succeed. Nothing is wrong with this pull request."
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
