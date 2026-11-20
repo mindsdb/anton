@@ -9,7 +9,7 @@ name: Scratchpad image build
 #   - release.yml and publish-staging.yml call this workflow after they mint a
 #     tag, building for `production` and `staging` respectively (ENG-2129).
 #
-# The shared build-push-ecr action tags every build three ways:
+# The shared build-image action tags every build three ways:
 # `<env>-<sha>`, `<env>-head-<pr head sha>` (pull requests only), and the
 # moving `<env>` tag. scratchpad-controller points each environment's
 # SCRATCHPAD_CONTROLLER__SCRATCHPAD_IMAGE at the moving tag and pulls with
@@ -28,7 +28,7 @@ on:
   workflow_call:
     inputs:
       environment:
-        description: "build-push-ecr environment: staging or production. Pull requests build development."
+        description: "build-image environment: staging or production. Pull requests build development."
         type: string
         required: true
       version:
@@ -45,9 +45,9 @@ defaults:
 
 jobs:
 
-  # Who may reach the self-hosted build runner: pull requests from branches in
-  # this repository, and calls from the release pipelines. Anything else is
-  # refused with a run-summary line saying why.
+  # Who may build: pull requests from branches in this repository, and calls
+  # from the release pipelines. Anything else is refused with a run-summary
+  # line saying why.
   gate:
     runs-on: ubuntu-latest
     outputs:
@@ -79,9 +79,8 @@ jobs:
             {
               echo "### Build skipped: fork pull request"
               echo
-              echo "The scratchpad image build runs on a self-hosted runner inside our"
-              echo "cluster, so it does not execute code from a fork. Nothing is wrong"
-              echo "with this pull request."
+              echo "The scratchpad image build pushes to our registry, so it does not"
+              echo "execute code from a fork. Nothing is wrong with this pull request."
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -89,12 +88,8 @@ jobs:
 
   # The version the image will report, resolved from tags (ENG-1796).
   #
-  # Its own job, on ubuntu-latest, for two reasons. The build runs on the
-  # self-hosted mdb-dev runner and nothing in this repo has ever run setup-uv
-  # there, so resolving the version in the build job would put an unproven
-  # dependency in front of the image. And keeping it separate leaves the build's
-  # checkout shallow: .git never enters the docker context (see .dockerignore),
-  # so only this job needs the history.
+  # Its own job so the build's checkout stays shallow: .git never enters the
+  # docker context (see .dockerignore), so only this job needs the history.
   #
   # A release pipeline passes the version it just minted instead, for the same
   # reason publish-staging.yml pins SETUPTOOLS_SCM_PRETEND_VERSION: a re-run on
@@ -136,9 +131,8 @@ jobs:
           version="${PINNED_VERSION:-$(uvx hatch version | tail -n 1)}"
 
           # Whole-line match, PEP 440 characters only. This is a boundary, not a
-          # formatting nicety: the shared action expands `extra-build-args`
-          # UNQUOTED into `docker buildx build`, so anything containing
-          # whitespace becomes additional arguments to that command.
+          # formatting nicety: the shared action reads `build-args` one per
+          # line, so a value containing a newline would become a second arg.
           if ! printf '%s' "$version" | grep -Eqx '[0-9]+\.[0-9][0-9A-Za-z.!+]*'; then
             echo "::error::refusing to build: '$version' is not a bare PEP 440 version"
             exit 1
@@ -164,7 +158,11 @@ jobs:
   build:
     needs: [version, gate]
     if: needs.gate.outputs.run == 'true'
-    runs-on: mdb-dev
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The OIDC token configure-aws-credentials exchanges for the ECR role.
+      id-token: write
     # Job-level rather than workflow-level so it holds when this workflow is
     # called: a pull request cancels its own superseded build; a release build
     # queues behind the previous one for the same environment and is never
@@ -180,14 +178,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - uses: mindsdb/github-actions/setup-env@main
-      - id: build
-        uses: mindsdb/github-actions/build-push-ecr@main
+      - name: Assume the ECR push role
+        # github-ecr-push from terraform's github-oidc stack, which every
+        # mindsdb repository may assume.
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
-          # Override the repo-slug default so the image lands at .../minds-anton-scratchpad.
+          role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
+          aws-region: us-east-1
+      - id: build
+        uses: mindsdb/github-actions/build-image@main
+        with:
           module-name: minds-anton-scratchpad
           build-for-environment: ${{ inputs.environment || 'development' }}
-          # Expanded unquoted by the shared action, so the value must not contain
-          # whitespace — a PEP 440 version never does, and the shape check in the
-          # `version` job would have rejected it.
-          extra-build-args: --build-arg ANTON_VERSION=${{ needs.version.outputs.version }}
+          # One arg per line, so the value must not contain a newline: a PEP
+          # 440 version never does, and the shape check in the `version` job
+          # would have rejected it.
+          build-args: |
+            ANTON_VERSION=${{ needs.version.outputs.version }}

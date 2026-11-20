@@ -287,11 +287,11 @@ def test_the_resolved_version_reaches_the_build(workflow: dict) -> None:
     leave the guard above firing on every build.
     """
     passed = [
-        (s.get("with") or {}).get("extra-build-args", "")
+        (s.get("with") or {}).get("build-args", "")
         for s in _steps(workflow, "build")
-        if "build-push-ecr" in str(s.get("uses", ""))
+        if "build-image" in str(s.get("uses", ""))
     ]
-    assert passed, "the build job no longer calls build-push-ecr"
-    assert any("--build-arg ANTON_VERSION=" in str(p) for p in passed), (
+    assert passed, "the build job no longer calls build-image"
+    assert any("ANTON_VERSION=" in str(p) for p in passed), (
         "the resolved version is not passed to the image build"
     )
