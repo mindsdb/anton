@@ -435,7 +435,7 @@ def _mapped_gate_denial(status, code):
     (429, "included_allowance_exhausted", "AllowanceExhaustedError"),
     (429, "free_air_daily_spend_fuse_exceeded", "FreeServingPausedError"),
     (402, "budget_exceeded", "BudgetExceededError"),
-    # ENG-4186. cowork-server's _REMOTE_TYPE_MAPPINGS keys on these exact names.
+    # cowork-server's _REMOTE_TYPE_MAPPINGS keys on these exact names.
     (429, "window_allowance_exhausted", "WindowAllowanceExhaustedError"),
     (403, "model_not_in_tier", "ModelNotInTierError"),
 ])
@@ -537,7 +537,7 @@ def test_an_all_models_budget_stop_leaves_the_model_off():
 
 @pytest.mark.parametrize("window", ["5h", "7d"])
 def test_a_plan_window_stop_carries_its_window_on_the_wire(window):
-    """ENG-4186. The host names the spent window on the card, so it rides the
+    """The host names the spent window on the card, so it rides the
     frame as `window` beside `reset_at`, the keys cowork-server's producer reads."""
     stop = WindowAllowanceExhaustedError(
         "denied", reason="window_allowance_exhausted", status_code=429,
@@ -563,7 +563,7 @@ def test_a_mapped_plan_window_stop_carries_its_window_on_the_wire():
 
 
 def test_a_model_tier_stop_carries_its_required_tier_on_the_wire():
-    """ENG-4186. The host names the tier that covers the model, so it rides the frame as `required_tier`."""
+    """The host names the tier that covers the model, so it rides the frame as `required_tier`."""
     events = _drive(_FakeSession(raise_on_stream=_mapped_denial(
         status=403, body={"code": "model_not_in_tier", "required_tier": "pro"},
     )))

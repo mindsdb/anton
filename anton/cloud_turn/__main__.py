@@ -552,7 +552,7 @@ async def _stream_turn(
             failed["budget_period"] = exc.budget_period
         if isinstance(exc, BudgetExceededError) and exc.budget_model:
             failed["budget_model"] = exc.budget_model
-        # ENG-4186: which plan window is spent, and which tier covers the model.
+        # Name the spent plan window and the tier that covers the model on the failure frame.
         if isinstance(exc, WindowAllowanceExhaustedError) and exc.window:
             failed["window"] = exc.window
         if isinstance(exc, ModelNotInTierError) and exc.required_tier:

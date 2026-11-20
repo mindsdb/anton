@@ -60,6 +60,24 @@ jobs:
       - name: Run E2E tests (stub)
         run: uv run --locked --group dev pytest tests/e2e/ -v --durations=20
 
+  sandbox-packages:
+    # The scratchpad image installs the `scratchpad` dependency group; the
+    # unit-test jobs do not. Tests that exercise those packages skip without
+    # them, so they run here, with the group installed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.30"
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Run tests that need the sandbox packages
+        env:
+          ANTON_REQUIRE_SANDBOX_PACKAGES: "1"
+        run: uv run --locked --group dev --group scratchpad pytest tests/test_reading_files_skill.py tests/test_image_smoke.py -v -rs
+
   windows-installer:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -76,7 +94,7 @@ jobs:
   # Preserve the required check name, and fail even if a dependency was skipped.
   run-tests:
     if: always()
-    needs: [unit-tests, stub-e2e, windows-installer]
+    needs: [unit-tests, stub-e2e, sandbox-packages, windows-installer]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -84,8 +102,10 @@ jobs:
         env:
           UNIT_RESULT: ${{ needs.unit-tests.result }}
           E2E_RESULT: ${{ needs.stub-e2e.result }}
+          SANDBOX_RESULT: ${{ needs.sandbox-packages.result }}
           WINDOWS_RESULT: ${{ needs.windows-installer.result }}
         run: |
           test "$UNIT_RESULT" = success &&
           test "$E2E_RESULT" = success &&
+          test "$SANDBOX_RESULT" = success &&
           test "$WINDOWS_RESULT" = success

@@ -755,6 +755,9 @@ def test_the_error_body_is_split_into_its_two_levels():
     assert both.code == "wallet_empty"
     # Values are kept as sent, not coerced.
     assert ProviderErrorBody.parse({"code": ["wallet_empty"]}).code == ["wallet_empty"]
+    # The plan stops' fields sit at the top level of the wire body, beside `error`.
+    plan = ProviderErrorBody.parse({"window": "5h", "required_tier": "pro", "error": {"window": "7d"}})
+    assert (plan.top.window, plan.top.required_tier, plan.envelope.window) == ("5h", "pro", "7d")
     # Anything but a dict parses as empty, and so does a non-object `error`.
     for junk in (None, "<html>402</html>", [{"code": "wallet_empty"}], {"error": "denied"}):
         parsed = ProviderErrorBody.parse(junk)
@@ -1201,7 +1204,7 @@ _BILLING_STOPS = [
     pytest.param("budget_exceeded", 402, BudgetExceededError,
                  "a MindsHub spending budget is used up.", id="budget"),
     pytest.param("window_allowance_exhausted", 429, WindowAllowanceExhaustedError,
-                 "your MindsHub plan's allowance is used up until it resets.", id="window"),
+                 "your MindsHub plan's allowance is used up.", id="window"),
     pytest.param("model_not_in_tier", 403, ModelNotInTierError,
                  "your MindsHub plan does not cover this model.", id="tier"),
 ]
@@ -1344,7 +1347,7 @@ def test_the_allowance_copy_never_states_the_window():
         assert word not in text, f"allowance copy names a window: {text}"
 
 
-# ENG-4186: the subscription plans' two stops carry a top-level body field each
+# The subscription plans' two stops carry a top-level body field each
 # (`window`, `required_tier`) that has no header copy. The OpenAI SDK keeps
 # only the `error` envelope as `exc.body`, so the mapper reads the response.
 
@@ -1367,8 +1370,7 @@ def test_a_plan_window_stop_carries_its_window(window, words):
     assert err.value.window == window
     assert err.value.reset_at == _RESET_AT_NORMALIZED
     assert str(err.value) == (
-        f"Server returned 429: your MindsHub plan's {words} allowance is used up "
-        f"until it resets. {_WINDOW_CTA}"
+        f"Server returned 429: your MindsHub plan's {words} allowance is used up. {_WINDOW_CTA}"
     )
 
 
@@ -1396,7 +1398,27 @@ def test_a_plan_window_the_copy_cannot_name_is_dropped(raw):
     with pytest.raises(WindowAllowanceExhaustedError) as err:
         _raise_for_status_error(exc, "sonnet")
     assert err.value.window is None
-    assert "your MindsHub plan's allowance is used up until it resets." in str(err.value)
+    assert "your MindsHub plan's allowance is used up." in str(err.value)
+
+
+@pytest.mark.parametrize("status,reason,error_type,field", [
+    (429, "window_allowance_exhausted", WindowAllowanceExhaustedError, "window"),
+    (403, "model_not_in_tier", ModelNotInTierError, "required_tier"),
+])
+def test_a_plan_stop_on_a_body_that_is_not_json_still_raises_its_typed_error(
+    status, reason, error_type, field,
+):
+    """The reason header alone names the stop, and the response's body is not
+    readable as JSON, so the field the body would have carried stays unset."""
+    exc = _sdk_error(
+        status, text_body="<html>upstream gateway page</html>",
+        headers={"X-MindsHub-Reason": reason, "Content-Type": "text/html"},
+    )
+    with pytest.raises(error_type) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.reason == reason
+    assert err.value.status_code == status
+    assert getattr(err.value, field) is None
 
 
 @pytest.mark.parametrize("tier,name", [("plus", "Plus"), ("pro", "Pro")])
@@ -1468,7 +1490,7 @@ def test_a_billing_code_on_a_status_the_gate_never_sends_it_on_is_no_stop(code, 
 
 
 def test_a_third_party_model_not_in_tier_is_no_stop():
-    """A BYOK endpoint echoing the code must not get the plan card (ENG-1693)."""
+    """A BYOK endpoint echoing the code must not get the plan card."""
 
     def handler(request):
         return httpx.Response(403, json={"error": {"code": "model_not_in_tier"},
