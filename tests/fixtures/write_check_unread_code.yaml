@@ -16,12 +16,16 @@
 #                          true for a cell whose process died, was killed
 #                          or never ran it, so the pad starts a new one
 #                          before the next cell.
-#   code     the cell the check runs before it runs for real.
+#   code     the cell the check runs before it runs for real. `<project>` in it,
+#            or in an earlier cell, is the project folder's absolute path.
 #   files    project files that exist when the turn begins, {path: text}
 #            (optional). The snapshot holds stock.csv besides these.
 #   empty_project
 #            true when the project folder is empty as the turn begins, so
 #            the snapshot holds no file at all, not even stock.csv
+#            (optional).
+#   swaps    true for a pad that runs the code the check hands it in place of
+#            the step's own (`CellWrites.run_code`), as a local pad does
 #            (optional).
 #   card     what the check raises:
 #              unchecked  the check couldn't read code the cell runs, so it
@@ -19598,3 +19602,1048 @@ cases:
     code: |-
       exec("import requests\nURL = 'https://other.example.test/api/orders'\ndef go():\n    exec('requests.post(URL)')\ngo()\n", {})
     card: none
+
+  # ── A script the step writes from a literal and runs in the same step ─────
+  # With `swaps`, the pad runs the code the check hands it in place of the
+  # step's own (`CellWrites.run_code`): Python gets `-c` and the script's text
+  # in place of the file, and exec() the text in place of the name or the read.
+  # So the check reads the text as one more cell: a script that only prints
+  # runs with no card, and one that writes gets that write's card. Fifteen
+  # steps a model wrote when asked to "write and run a script" come first,
+  # with the project folder written as <project>. The one that changes folder
+  # with os.chdir before it runs the script keeps "can't be checked". Then the
+  # writes such a script must keep, and the runs that stay unread: another
+  # environment, a shell, more words, a script an earlier step wrote or the
+  # project held, an import of a module a step wrote or the project holds,
+  # code an earlier step ran that the check couldn't read, a startup hook,
+  # multiprocessing, a change of folder, a run inside a def, and a pad that
+  # runs the step as written.
+
+  - name: a recorded step that saves and runs a chart script (1)
+    swaps: true
+    code: |-
+      import os
+      from pathlib import Path
+
+      import matplotlib
+      matplotlib.use('Agg')
+      import matplotlib.pyplot as plt
+
+      artifact_dir = Path('<project>/.anton/artifacts/counts-bar-chart-47fbf7a4')
+      script_path = artifact_dir / 'build_counts_chart.py'
+      image_path = artifact_dir / 'counts_bar_chart.png'
+      counts = {'a': 3, 'b': 7, 'c': 5}
+
+      script = '''import matplotlib
+      matplotlib.use("Agg")
+      import matplotlib.pyplot as plt
+
+      counts = {"a": 3, "b": 7, "c": 5}
+      labels = list(counts)
+      values = list(counts.values())
+      plt.figure(figsize=(6, 4))
+      plt.bar(labels, values, color=["#4C78A8", "#F58518", "#54A24B"])
+      plt.title("Counts")
+      plt.xlabel("Category")
+      plt.ylabel("Count")
+      plt.ylim(0, max(values) + 2)
+      for i, value in enumerate(values):
+          plt.text(i, value + 0.1, str(value), ha="center", va="bottom")
+      plt.tight_layout()
+      plt.savefig("counts_bar_chart.png", dpi=150)
+      '''
+      script_path.write_text(script)
+      # Run the script from its artifact directory so the relative output lands beside it.
+      old_cwd = Path.cwd()
+      os.chdir(artifact_dir)
+      try:
+          exec(compile(script_path.read_text(), str(script_path), 'exec'), {'__name__': '__main__'})
+      finally:
+          os.chdir(old_cwd)
+
+      from PIL import Image
+      with Image.open(image_path) as im:
+          print({'script_exists': script_path.exists(), 'image_exists': image_path.exists(), 'image_size': im.size, 'largest': max(counts, key=counts.get), 'largest_count': max(counts.values())})
+    card: unchecked
+
+  - name: a recorded step that saves and runs a Fibonacci script (1)
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import time
+
+
+      def fibonacci(n):
+          a, b = 0, 1
+          for _ in range(n):
+              a, b = b, a + b
+          return a
+
+
+      start = time.perf_counter()
+      result = fibonacci(30)
+      elapsed = time.perf_counter() - start
+
+      print(f"Fibonacci(30) = {result}")
+      print(f"Elapsed time = {elapsed:.9f} seconds")
+      '''
+      path = Path('fibonacci_30.py')
+      path.write_text(script, encoding='utf-8')
+      completed = subprocess.run([sys.executable, str(path)], capture_output=True, text=True, check=True)
+      print(f"Created: {path}")
+      print(completed.stdout, end='')
+    card: none
+
+  - name: a recorded step that saves and runs a primes script (1)
+    swaps: true
+    code: |-
+      from pathlib import Path
+
+      script = '''def is_prime(n):
+          if n < 2:
+              return False
+          for divisor in range(2, int(n ** 0.5) + 1):
+              if n % divisor == 0:
+                  return False
+          return True
+
+
+      primes = []
+      number = 2
+      while len(primes) < 20:
+          if is_prime(number):
+              primes.append(number)
+          number += 1
+
+      for prime in primes:
+          print(prime)
+      '''
+
+      path = Path('first_20_primes.py')
+      if path.exists():
+          raise FileExistsError(f'{path} already exists; refusing to overwrite it.')
+      path.write_text(script)
+
+      import subprocess
+      result = subprocess.run(['python', str(path)], capture_output=True, text=True, check=True)
+      print(f'Created: {path}')
+      print('Output:')
+      print(result.stdout, end='')
+    card: none
+
+  - name: a recorded step that saves and runs a Fibonacci script (2)
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import time
+
+      start = time.perf_counter()
+      a, b = 0, 1
+      for _ in range(30):
+          a, b = b, a + b
+      elapsed = time.perf_counter() - start
+
+      print(f"Fibonacci(30) = {a}")
+      print(f"Elapsed time = {elapsed:.9f} seconds")
+      '''
+      path = Path("fibonacci_30.py")
+      path.write_text(script)
+      result = subprocess.run([sys.executable, str(path)], capture_output=True, text=True, check=True)
+      print(result.stdout, end="")
+      print(f"Script written to {path}")
+    card: none
+
+  - name: a recorded step that saves and runs a primes script (2)
+    swaps: true
+    code: |-
+      from pathlib import Path
+
+      script = '''def is_prime(number):
+          if number < 2:
+              return False
+          for divisor in range(2, int(number ** 0.5) + 1):
+              if number % divisor == 0:
+                  return False
+          return True
+
+
+      primes = []
+      number = 2
+      while len(primes) < 20:
+          if is_prime(number):
+              primes.append(number)
+          number += 1
+
+      print(*primes)
+      '''
+
+      path = Path('prime_numbers.py')
+      path.write_text(script)
+
+      namespace = {}
+      exec(compile(script, str(path), 'exec'), namespace)
+      print(f'Created and ran: {path}')
+    card: none
+
+  - name: a recorded step that saves and runs a chart script (2)
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import matplotlib.pyplot as plt
+
+      out_dir = Path('<project>/.anton/artifacts/counts-bar-chart-e4bd8be8')
+      out_dir.mkdir(parents=True, exist_ok=True)
+      script_path = out_dir / 'build_counts_chart.py'
+      chart_path = out_dir / 'counts_bar_chart.png'
+
+      script = '''import matplotlib.pyplot as plt
+
+      counts = {"a": 3, "b": 7, "c": 5}
+      labels = list(counts)
+      values = list(counts.values())
+
+      plt.figure(figsize=(6, 4))
+      plt.bar(labels, values, color=["#4C78A8", "#F58518", "#54A24B"])
+      plt.title("Counts by Category")
+      plt.xlabel("Category")
+      plt.ylabel("Count")
+      plt.ylim(0, max(values) + 1)
+      for label, value in counts.items():
+          plt.text(label, value + 0.1, str(value), ha="center", va="bottom")
+      plt.tight_layout()
+      plt.savefig("counts_bar_chart.png", dpi=160)
+      '''
+      script_path.write_text(script)
+      # Run the script from its output directory so the relative output path is correct.
+      import subprocess, sys
+      run = subprocess.run([sys.executable, str(script_path)], cwd=out_dir, capture_output=True, text=True)
+      print('script_exit_code=', run.returncode)
+      print('chart_exists=', chart_path.exists(), 'bytes=', chart_path.stat().st_size if chart_path.exists() else 0)
+      print('largest=', max({"a": 3, "b": 7, "c": 5}, key={"a": 3, "b": 7, "c": 5}.get), 'count=7')
+    card: none
+
+  - name: a recorded step that saves and runs a primes script (3)
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess
+
+      artifact_dir = Path('<project>/.anton/artifacts/first-20-prime-numbers-script-0e813b54')
+      script = '''def is_prime(number):
+          if number < 2:
+              return False
+          for divisor in range(2, int(number ** 0.5) + 1):
+              if number % divisor == 0:
+                  return False
+          return True
+
+
+      primes = []
+      number = 2
+      while len(primes) < 20:
+          if is_prime(number):
+              primes.append(number)
+          number += 1
+
+      print(*primes)
+      '''
+      (artifact_dir / 'prime_numbers.py').write_text(script)
+      result = subprocess.run(['python', str(artifact_dir / 'prime_numbers.py')], capture_output=True, text=True, check=True)
+      print(result.stdout.strip())
+      print('verified_count=', len(result.stdout.split()))
+    card: none
+
+  - name: a recorded step that saves and runs a Fibonacci script (3)
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''from time import perf_counter_ns
+
+      n = 30
+      a, b = 0, 1
+      start = perf_counter_ns()
+      for _ in range(n):
+          a, b = b, a + b
+      elapsed_ns = perf_counter_ns() - start
+
+      print(f"F_{n} = {a}")
+      print(f"Elapsed time: {elapsed_ns} ns ({elapsed_ns / 1_000_000:.6f} ms)")
+      '''
+      path = Path("fibonacci_30.py")
+      path.write_text(script)
+      result = subprocess.run([sys.executable, str(path)], capture_output=True, text=True, check=True)
+      print(f"Script written to {path}")
+      print(result.stdout, end="")
+    card: none
+
+  - name: a recorded step that saves and runs a primes script (4)
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''def is_prime(n):
+          if n < 2:
+              return False
+          for divisor in range(2, int(n ** 0.5) + 1):
+              if n % divisor == 0:
+                  return False
+          return True
+
+      primes = []
+      number = 2
+      while len(primes) < 20:
+          if is_prime(number):
+              primes.append(number)
+          number += 1
+
+      for prime in primes:
+          print(prime)
+      '''
+
+      path = Path('first_20_primes.py')
+      path.write_text(script)
+      result = subprocess.run([sys.executable, str(path)], capture_output=True, text=True, check=True)
+      print(result.stdout, end='')
+      print(f'Created and ran: {path}')
+    card: none
+
+  - name: a recorded step that saves and runs a chart script (3)
+    swaps: true
+    code: |-
+      ### step 0
+      from pathlib import Path
+      import subprocess, sys
+
+      artifact_dir = Path('<project>/.anton/artifacts/counts-bar-chart-d54d7c00')
+      script = artifact_dir / 'build_counts_chart.py'
+      script.write_text('''import matplotlib.pyplot as plt\n\ncounts = {"a": 3, "b": 7, "c": 5}\nlargest = max(counts, key=counts.get)\n\nfig, ax = plt.subplots(figsize=(6, 4))\nax.bar(counts.keys(), counts.values(), color=["#4C78A8", "#F58518", "#54A24B"])\nax.set_title("Counts")\nax.set_xlabel("Category")\nax.set_ylabel("Count")\nax.set_ylim(0, 8)\nfor label, value in counts.items():\n    ax.text(label, value + 0.15, str(value), ha="center")\nfig.tight_layout()\nfig.savefig("counts_bar_chart.png", dpi=160)\nprint(f"Largest: {largest}={counts[largest]}")\n''')
+      result = subprocess.run([sys.executable, str(script)], cwd=artifact_dir, capture_output=True, text=True, check=True)
+      img = artifact_dir / 'counts_bar_chart.png'
+      print(result.stdout.strip())
+      print(f'script_exists={script.exists()} image_exists={img.exists()} image_bytes={img.stat().st_size if img.exists() else 0}')
+
+      ### step 1
+      from pathlib import Path
+      import subprocess, sys
+
+      artifact_dir = Path('<project>/.anton/artifacts/counts-bar-chart-d54d7c00')
+      script = artifact_dir / 'build_counts_chart.py'
+      script.write_text('''import matplotlib.pyplot as plt\n\ncounts = {"a": 3, "b": 7, "c": 5}\nlargest = max(counts, key=counts.get)\n\nfig, ax = plt.subplots(figsize=(6, 4))\nax.bar(counts.keys(), counts.values(), color=["#4C78A8", "#F58518", "#54A24B"])\nax.set_title("Counts")\nax.set_xlabel("Category")\nax.set_ylabel("Count")\nax.set_ylim(0, 8)\nfor label, value in counts.items():\n    ax.text(label, value + 0.15, str(value), ha="center")\nfig.tight_layout()\nfig.savefig("counts_bar_chart.png", dpi=160)\nprint(f"Largest: {largest}={counts[largest]}")\n''')
+      result = subprocess.run([sys.executable, str(script)], cwd=artifact_dir, capture_output=True, text=True, check=True)
+      img = artifact_dir / 'counts_bar_chart.png'
+      print(result.stdout.strip())
+      print(f'script_exists={script.exists()} image_exists={img.exists()} image_bytes={img.stat().st_size if img.exists() else 0}')
+    card: none
+
+  - name: a recorded step that saves and runs a Fibonacci script (4)
+    swaps: true
+    code: |-
+      ### step 0
+      from pathlib import Path
+      from time import perf_counter
+
+      artifact_dir = Path('<project>/.anton/artifacts/fibonacci-30-script-59301178')
+      script = '''from time import perf_counter
+
+      n = 30
+      a, b = 0, 1
+      start = perf_counter()
+      for _ in range(n):
+          a, b = b, a + b
+      elapsed = perf_counter() - start
+
+      print(f"F({n}) = {a}")
+      print(f"Elapsed time: {elapsed:.9f} seconds")
+      '''
+      (artifact_dir / 'fibonacci_30.py').write_text(script)
+
+      namespace = {}
+      exec(compile(script, str(artifact_dir / 'fibonacci_30.py'), 'exec'), namespace)
+      print(f'Script written: {(artifact_dir / "fibonacci_30.py").name}')
+    card: none
+
+  - name: a recorded step that saves and runs a primes script (5)
+    swaps: true
+    code: |-
+      ### step 0
+      from pathlib import Path
+
+      script = '''def is_prime(n):
+          if n < 2:
+              return False
+          for divisor in range(2, int(n ** 0.5) + 1):
+              if n % divisor == 0:
+                  return False
+          return True
+
+      primes = []
+      candidate = 2
+      while len(primes) < 20:
+          if is_prime(candidate):
+              primes.append(candidate)
+          candidate += 1
+
+      for prime in primes:
+          print(prime)
+      '''
+
+      path = Path("first_20_primes.py")
+      path.write_text(script)
+      exec(compile(script, str(path), "exec"))
+      print(f"\nScript written to {path}")
+    card: none
+
+  - name: a recorded step that saves and runs a chart script (4)
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import matplotlib.pyplot as plt
+
+      out_dir = Path('<project>/.anton/artifacts/counts-bar-chart-e93ec69f')
+      out_dir.mkdir(parents=True, exist_ok=True)
+      script_path = out_dir / 'build_counts_bar_chart.py'
+      script_path.write_text('''from pathlib import Path\nimport matplotlib.pyplot as plt\n\ncounts = {"a": 3, "b": 7, "c": 5}\nout = Path(__file__).with_name("counts_bar_chart.png")\nplt.bar(counts.keys(), counts.values(), color=["#4C78A8", "#F58518", "#54A24B"])\nplt.xlabel("Category")\nplt.ylabel("Count")\nplt.title("Counts by Category")\nplt.tight_layout()\nplt.savefig(out, dpi=150)\nprint(f"Saved {out}")\n''')
+      exec(compile(script_path.read_text(), str(script_path), 'exec'))
+
+      counts = {'a': 3, 'b': 7, 'c': 5}
+      assert max(counts, key=counts.get) == 'b'
+      assert (out_dir / 'counts_bar_chart.png').exists()
+      print({'counts': counts, 'largest': 'b', 'largest_count': 7, 'chart_exists': True, 'script_exists': True})
+    card: none
+
+  - name: a recorded step that saves and runs a Fibonacci script (5)
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess
+
+      script = '''import time
+
+      n = 30
+      start = time.perf_counter()
+      a, b = 0, 1
+      for _ in range(n):
+          a, b = b, a + b
+      elapsed = time.perf_counter() - start
+
+      print(f"Fibonacci({n}) = {a}")
+      print(f"Elapsed time = {elapsed:.9f} seconds")
+      '''
+      path = Path('fibonacci_30.py')
+      path.write_text(script)
+      result = subprocess.run(['python', str(path)], capture_output=True, text=True, check=True)
+      print(result.stdout, end='')
+      print(f"Script written to: {path}")
+    card: none
+
+  - name: a recorded step that saves and runs a primes script (6)
+    swaps: true
+    code: |-
+      from pathlib import Path
+
+      script = '''def first_n_primes(n):
+          primes = []
+          candidate = 2
+          while len(primes) < n:
+              is_prime = all(candidate % p != 0 for p in primes if p * p <= candidate)
+              if is_prime:
+                  primes.append(candidate)
+              candidate += 1
+          return primes
+
+
+      if __name__ == "__main__":
+          print(*first_n_primes(20))
+      '''
+      path = Path('primes.py')
+      path.write_text(script)
+
+      import subprocess, sys
+      result = subprocess.run([sys.executable, str(path)], capture_output=True, text=True, check=True)
+      print(result.stdout.strip())
+      print(f'Created and ran: {path}')
+    card: none
+
+  - name: a written script that only prints, run with python
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: none
+
+  - name: a written script that deletes a project file
+    swaps: true
+    files:
+      notes.txt: "x"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import os
+      os.remove('notes.txt')'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: read
+    kinds: [delete]
+
+  - name: a written script that runs a SQL write
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import os, psycopg2
+      conn = psycopg2.connect(host=os.environ['H'])
+      conn.cursor().execute('UPDATE suppliers SET lead_time_days = 3')'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: read
+    kinds: [sql]
+
+  - name: a written script that sends the request
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import requests
+      requests.post("https://erp.example.test/api/orders", json={"qty": 1})'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: read
+    kinds: [http]
+
+  - name: the request saved as job.py and run with python job.py
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess
+      script = '''import requests
+      requests.post("https://erp.example.test/api/orders", json={"qty": 1})'''
+      Path('job.py').write_text(script)
+      subprocess.run(['python', 'job.py'], check=True)
+    card: read
+    kinds: [http]
+
+  - name: a written script run with cwd= that deletes a file in that folder
+    swaps: true
+    files:
+      out/notes.txt: "x"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import os
+      os.remove('notes.txt')'''
+      path = Path('out/job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, 'job.py'], cwd='out')
+    card: read
+    kinds: [delete]
+
+  - name: a written script run with cwd= that deletes a file only the project root holds
+    swaps: true
+    files:
+      notes.txt: "x"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import os
+      os.remove('notes.txt')'''
+      path = Path('out/job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, 'job.py'], cwd='out')
+    card: none
+
+  - name: a script written through open and run
+    swaps: true
+    code: |-
+      import subprocess, sys
+      script = '''print(1)'''
+      with open('job.py', 'w') as f:
+          f.write(script)
+      subprocess.run([sys.executable, 'job.py'])
+    card: none
+
+  - name: exec of a name bound to a script that deletes a project file
+    swaps: true
+    files:
+      notes.txt: "x"
+    code: |-
+      script = '''import os
+      os.remove("notes.txt")'''
+      exec(compile(script, 'job.py', 'exec'))
+    card: read
+    kinds: [delete]
+
+  - name: exec of the read of a written script that deletes a project file
+    swaps: true
+    files:
+      notes.txt: "x"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import os
+      os.remove('notes.txt')'''
+      path = Path('job.py')
+      path.write_text(script)
+      exec(compile(path.read_text(), str(path), 'exec'))
+    card: read
+    kinds: [delete]
+
+  - name: a written script run with env=
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], env={})
+    card: unchecked
+
+  - name: a written script run through a shell
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], shell=True)
+    card: unchecked
+
+  - name: a written script run with os.system
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      import os
+      os.system('python job.py')
+    card: unchecked
+
+  - name: a written script run with an argument after it
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path), 'x'])
+    card: unchecked
+
+  - name: a written script run with a flag before it
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, '-u', str(path)])
+    card: unchecked
+
+  - name: a written script run from a list built before the call
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      args = [sys.executable, str(path)]
+      subprocess.run(args)
+    card: unchecked
+
+  - name: a written script run with runpy
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      import runpy
+      runpy.run_path(str(path))
+    card: unchecked
+
+  - name: a script an earlier step wrote
+    swaps: true
+    earlier:
+      - |-
+        from pathlib import Path
+        import subprocess, sys
+        script = '''print(1)'''
+        path = Path('job.py')
+        path.write_text(script)
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, 'job.py'])
+    card: unchecked
+
+  - name: a script the project held when the turn began
+    swaps: true
+    files:
+      job.py: "print(1)"
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, 'job.py'])
+    card: unchecked
+
+  - name: a written script that imports a module the step wrote
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      Path('helper.py').write_text('import os\nos.remove("stock.csv")')
+      script = '''import helper'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script that imports a module the project holds beside it
+    swaps: true
+    files:
+      lib/helper.py: "x = 1"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import helper'''
+      path = Path('lib/job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script after an earlier step ran code the check can't read
+    swaps: true
+    earlier:
+      - |-
+        exec(open('x.txt').read())
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script after an earlier step wrote a startup hook
+    swaps: true
+    earlier:
+      - |-
+        import site
+        from pathlib import Path
+        Path(site.getusersitepackages(), 'usercustomize.py').write_text('import os')
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script the step then overwrites from code the check can't read
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      path.write_text(open('x.txt').read())
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script that starts a multiprocessing pool
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import multiprocessing
+      print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script that changes folder
+    swaps: true
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import os
+      os.chdir('..')'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script that rewrites its own file, then imports itself
+    swaps: true
+    files:
+      notes.txt: "x"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import sys
+      open(sys.argv[0], 'w').write('import os\nos.remove("notes.txt")')
+      import job'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script that rewrites its own file, then runs it again
+    swaps: true
+    files:
+      notes.txt: "x"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import subprocess, sys
+      open(sys.argv[0], 'w').write('import os\nos.remove("notes.txt")')
+      subprocess.run([sys.executable, sys.argv[0], 'again'])'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script that rewrites its own file, then execs it
+    swaps: true
+    files:
+      notes.txt: "x"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import sys
+      open(sys.argv[0], 'w').write('import os\nos.remove("notes.txt")')
+      exec(open(sys.argv[0]).read())'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a step whose exec literal writes a script, rewrites it in a def and runs it
+    swaps: true
+    files:
+      notes.txt: "keep me"
+    code: |-
+      exec('from pathlib import Path\nimport subprocess, sys\ndef w():\n    Path(\'inner.py\').write_text("import os\\nos.remove(\'notes.txt\')")\ninner = "print(\'inner ok\')"\nPath(\'inner.py\').write_text(inner)\nw()\nsubprocess.run([sys.executable, \'inner.py\'])\n')
+    card: unchecked
+
+  - name: a step whose -c literal writes a script, rewrites it in a def and runs it
+    swaps: true
+    files:
+      notes.txt: "keep me"
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, '-c', 'from pathlib import Path\nimport subprocess, sys\ndef w():\n    Path(\'inner.py\').write_text("import os\\nos.remove(\'notes.txt\')")\ninner = "print(\'inner ok\')"\nPath(\'inner.py\').write_text(inner)\nw()\nsubprocess.run([sys.executable, \'inner.py\'])\n'])
+    card: unchecked
+
+  - name: a written script that writes another script, rewrites it in a def and runs it
+    swaps: true
+    files:
+      notes.txt: "keep me"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys, os
+      script = 'from pathlib import Path\nimport subprocess, sys\ndef w():\n    Path(\'inner.py\').write_text("import os\\nos.remove(\'notes.txt\')")\ninner = "print(\'inner ok\')"\nPath(\'inner.py\').write_text(inner)\nw()\nsubprocess.run([sys.executable, \'inner.py\'])\n'
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script that runs another script it rewrites to send the request
+    swaps: true
+    files:
+      notes.txt: "keep me"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = 'from pathlib import Path\nimport subprocess, sys\ndef w():\n    Path(\'inner.py\').write_text("import requests\\nrequests.post(\'https://erp.example.test/orders\', json={})")\ninner = "print(\'inner ok\')"\nPath(\'inner.py\').write_text(inner)\nw()\nsubprocess.run([sys.executable, \'inner.py\'])\n'
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script that imports multiprocessing in pieces after the step rewrites its file
+    swaps: true
+    files:
+      notes.txt: "keep me"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys, os
+      script = "mp = __import__('multi' 'processing')\nif __name__ == '__main__':\n    mp.set_start_method('spawn')\n    p = mp.Process(target=print, args=('child',))\n    p.start()\n    p.join()\n"
+      path = Path('job.py')
+      path.write_text(script)
+      Path('<project>/job.py').write_text("import os\nos.remove('notes.txt')")
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script run by a program named python the project holds
+    swaps: true
+    files:
+      notes.txt: "keep me"
+      python: |-
+        #!/bin/sh
+        rm -f notes.txt
+        echo wrapper-ran
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print('hello from job')'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run(['./python', str(path)])
+    card: unchecked
+
+  - name: a written script run by the word python after an earlier step changed PATH
+    swaps: true
+    earlier:
+      - |-
+        import os
+        os.environ['PATH'] = os.getcwd() + os.pathsep + os.environ['PATH']
+    files:
+      notes.txt: "keep me"
+      python: |-
+        #!/bin/sh
+        rm -f notes.txt
+        echo wrapper-ran
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print('hello from job')'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run(['python', str(path)])
+    card: unchecked
+
+  - name: a written script run after an earlier step rebound subprocess.run
+    swaps: true
+    earlier:
+      - |-
+        import subprocess, os
+        subprocess.run = lambda *a, **k: os.remove('notes.txt')
+    files:
+      notes.txt: "keep me"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print('hello from job')'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script run after an earlier step set subprocess.run with setattr
+    swaps: true
+    earlier:
+      - |-
+        import subprocess, os
+        setattr(subprocess, 'run', lambda *a, **k: os.remove('notes.txt'))
+    files:
+      notes.txt: "keep me"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print('hello from job')'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script run after an earlier step rebound sys.executable
+    swaps: true
+    earlier:
+      - |-
+        import sys, os
+        sys.executable = os.path.abspath('evil')
+    files:
+      notes.txt: "keep me"
+      evil: |-
+        #!/bin/sh
+        rm -f notes.txt
+        echo wrapper-ran
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print('hello from job')'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script that changes folder with fchdir
+    swaps: true
+    files:
+      notes.txt: "keep me"
+      sub/keep.txt: |-
+        x
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''import os\nfd = os.open('sub', os.O_RDONLY)\nos.fchdir(fd)\nos.remove('../notes.txt')'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: a written script a def rewrites before the run, which runs the text the check read
+    swaps: true
+    files:
+      notes.txt: "keep me"
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      def w():
+          Path('job.py').write_text("import os\nos.remove('notes.txt')")
+      script = "print('ok')"
+      Path('job.py').write_text(script)
+      w()
+      subprocess.run([sys.executable, 'job.py'])
+    card: none
+
+  - name: a written script run inside a def
+    swaps: true
+    code: |-
+      import subprocess, sys
+      from pathlib import Path
+      script = '''print(1)'''
+      Path('job.py').write_text(script)
+      def go():
+          subprocess.run([sys.executable, 'job.py'])
+      go()
+    card: unchecked
+
+  - name: a written script that only prints, on a pad that runs the step as written
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print(1)'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    card: unchecked
+
+  - name: exec of a name bound to a script, on a pad that runs the step as written
+    code: |-
+      script = '''print(1)'''
+      exec(script)
+    card: unchecked

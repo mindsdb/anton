@@ -97,6 +97,24 @@ class ScratchpadRuntime(ABC):
     # the order they ran. The process still holds what those cells imported
     # and bound, so the write check reads them too (`hold_unapproved_write`).
     compacted_cells: tuple[CompactedCell, ...] = ()
+    # Whether this runtime runs the code `expect_run` hands it in place of a
+    # cell's own (`code_to_run`), so the write check may read a script a cell
+    # writes and runs as the text that runs (`find_cell_writes`, `swaps`).
+    runs_checked_code: bool = False
+    _pending_run: tuple[str, str | None] | None = None
+
+    def expect_run(self, code: str, run_code: str | None) -> None:
+        """The code to run in place of the next cell's `code`, as its write
+        check read it (`CellWrites.run_code`); None runs `code` as written."""
+        self._pending_run = (code, run_code)
+
+    def code_to_run(self, code: str) -> str:
+        """`code` as this runtime runs it: what `expect_run` gave for this
+        same code, once, else `code` itself."""
+        pending, self._pending_run = self._pending_run, None
+        if pending is not None and pending[0] == code and pending[1] is not None:
+            return pending[1]
+        return code
 
     def __init__(
         self,

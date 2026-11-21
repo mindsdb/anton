@@ -450,6 +450,10 @@ def _venv_lock(*, venv_path: Path) -> threading.RLock:
 class LocalScratchpadRuntime(ScratchpadRuntime):
     """Runs scratchpad cells in a persistent per-named venv subprocess."""
 
+    # The payload sends `code_to_run`, so a script a cell writes and runs
+    # runs as the text the write check read.
+    runs_checked_code = True
+
     _MAX_VENV_RETRIES = 3
     # ENG-1273: how many times in a row execute_streaming() will silently
     # resume() a dead process before concluding resume() itself isn't the
@@ -1657,7 +1661,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._salvage_dropped = False
 
         await self._refresh_credential()
-        payload = code + "\n" + CELL_DELIM + "\n"
+        payload = self.code_to_run(code) + "\n" + CELL_DELIM + "\n"
         trace = get_trace_context()
         if trace is not None:
             payload = f"{CELL_TRACE_MARKER} {trace_context_to_json(trace)}\n" + payload
