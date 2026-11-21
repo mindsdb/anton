@@ -408,11 +408,21 @@ async def test_unusable_call_verdict_reports_hard_unusable_call(workspace):
 
 
 async def test_transient_verdict_reports_transient_class(workspace):
-    # A provider blip is the opposite claim from a capability failure: it
-    # hands back (ENG-1079) but must not read as "this model can't verify".
-    assert await _handback_with(
-        workspace, TransientProviderError("overloaded", provider="minds-cloud")
-    ) == ("transient", "TransientProviderError")
+    # A provider blip is the opposite claim from a capability failure: it must
+    # not read as "this model can't verify". The reply answered, so the turn
+    # ends on it, unverified, with no hand-back.
+    mock_llm = _verdict_llm("COMPLETE")
+    mock_llm.generate_object_code = AsyncMock(
+        side_effect=TransientProviderError("overloaded", provider="minds-cloud")
+    )
+    session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace, session_id="conv-t"))
+    _stub_tools(session)
+    with patch("anton.analytics.send_event") as send:
+        async for _ in session.turn_stream("run my script"):
+            pass
+    assert _ended_by(send) == "completed"
+    assert send.call_args.kwargs["verification_skipped"] == "true"
+    assert _verifier_fields(send) == ("transient", "TransientProviderError")
 
 
 async def test_verified_turn_carries_no_verifier_failure(workspace):

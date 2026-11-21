@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tests.conftest import make_mock_llm
+from tests.test_status_error_mapper import _sdk_error
 from tests.test_spend_ceiling import _REFUSAL, _described_call
 from tests.test_spend_ceiling import _session as _ceiling_session
 from tests.test_spend_ceiling import _text as _ceiling_text
@@ -25,15 +26,20 @@ from tests.test_turn_cost_terminals import (
     _verdict_llm,
 )
 
+from anton.core.llm.openai import _raise_for_status_error
 from anton.core.llm.provider import (
     LLMResponse,
+    RequestRefusedError,
     StreamComplete,
     StreamTaskProgress,
     StreamTextDelta,
     StreamTurnEnded,
+    TokenLimitExceeded,
     ToolCall,
+    TransientProviderError,
 )
 from anton.core.session import (
+    _CHECK_NOTE,
     ChatSession,
     ChatSessionConfig,
     _handback_report,
@@ -235,10 +241,11 @@ async def test_filtered_handback_is_dropped(workspace):
     # And the next question stays the user's own words, not merged into the note.
     session._append_history({"role": "user", "content": "next question"})
     assert session.history[-1] == {"role": "user", "content": "next question"}
-    # The answer stands, so no second try; the reason names the filter.
+    # The answer stands, so no second try. The filter stopped the diagnosis, not the
+    # answer, so the turn ends with the hand-back's own reason.
     assert session._llm.plan_stream.call_count == 3
-    assert booked == "content_filter"
-    assert events[-1] == StreamTurnEnded(ended_by="content_filter")
+    assert booked == "handback_verifier_failure"
+    assert events[-1] == StreamTurnEnded(ended_by="handback_verifier_failure")
 
 
 async def test_unfiltered_handback_still_streams(workspace):
@@ -477,3 +484,189 @@ async def test_filtered_main_reply_names_the_filter(workspace):
     events, booked = await _drain(session)
     assert booked == "content_filter"
     assert events[-1] == StreamTurnEnded(ended_by="content_filter")
+
+
+def _azure_429(*, retry_after_ms: bool) -> TransientProviderError:
+    """Azure's per-minute 429, mapped by anton's real status mapper from a real SDK error."""
+    headers = {"retry-after-ms": "5500", "retry-after": "6"} if retry_after_ms else {"retry-after": "6"}
+    exc = _sdk_error(429, json_body={"error": {
+        "code": "rate_limit_exceeded",
+        "message": "Requests have exceeded the token rate limit. Please retry after 6 seconds.",
+    }}, headers=headers)
+    try:
+        _raise_for_status_error(exc, "gpt")
+    except TransientProviderError as mapped:
+        return mapped
+    raise AssertionError("an Azure 429 must map to TransientProviderError")
+
+
+def _shown(events) -> str:
+    return "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+
+
+def _checking_in(events) -> bool:
+    return any(
+        isinstance(e, StreamTaskProgress) and e.message == "Confirming what was completed..."
+        for e in events
+    )
+
+
+async def _drain_with_books(session) -> tuple[list, dict]:
+    with patch("anton.analytics.send_event") as send:
+        events = [e async for e in session.turn_stream("do the thing")]
+    return events, send.call_args.kwargs
+
+
+@pytest.mark.parametrize("retry_after_ms", [True, False])
+async def test_rate_limited_check_after_an_answer_ends_on_the_answer(workspace, retry_after_ms):
+    # Azure rate-limits the completion check after the answer streamed, and would
+    # filter a diagnosis call after it. The turn ends on the answer, unverified,
+    # and never makes that call.
+    session = _verifier_failure_with_handback(
+        workspace, LLMResponse(content=_REFUSAL, stop_reason="content_filter"),
+    )
+    session._llm.generate_object_code = AsyncMock(side_effect=_azure_429(retry_after_ms=retry_after_ms))
+    events, books = await _drain_with_books(session)
+    assert _shown(events) == "the answer"
+    assert session.history[-1] == {"role": "assistant", "content": "the answer"}
+    assert _CHECK_NOTE not in str(session.history)
+    assert _REFUSAL not in str(session.history)
+    assert not _checking_in(events)
+    assert not any(isinstance(e, StreamTurnEnded) for e in events)
+    assert books["ended_by"] == "completed"
+    assert books["verification_skipped"] == "true"
+    assert (books["verifier_failure"], books["verifier_error_type"]) == (
+        "transient", "TransientProviderError",
+    )
+    # The tool round and the answer: no diagnosis call.
+    assert session._llm.plan_stream.call_count == 2
+    assert session._llm.generate_object_code.await_count == 1
+
+
+async def test_rate_limited_check_after_a_continuation_ends_on_its_answer(workspace):
+    # The first check asks for more; the continuation answers; the second check is rate-limited.
+    mock_llm = _handback_verifier_failure(workspace)._llm
+    plans = [
+        _Iter([StreamComplete(response=_tool_call(1))]),
+        _Iter([StreamTextDelta(text="first try"), StreamComplete(response=_text("first try"))]),
+        _Iter([StreamComplete(response=_tool_call(2))]),
+        _Iter([StreamTextDelta(text="the answer"), StreamComplete(response=_text("the answer"))]),
+        _filtered_stream(),
+    ]
+    mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: plans.pop(0))
+    mock_llm.generate_object_code = AsyncMock(side_effect=[
+        _VerifierVerdict(status="INCOMPLETE", reason="the total is missing"),
+        _azure_429(retry_after_ms=True),
+    ])
+    session = _plain(workspace, mock_llm)
+    events, books = await _drain_with_books(session)
+    assert mock_llm.generate_object_code.await_count == 2
+    assert session.history[-1] == {"role": "assistant", "content": "the answer"}
+    assert _REFUSAL not in _shown(events)
+    assert not _checking_in(events)
+    assert books["ended_by"] == "completed"
+    assert books["verification_skipped"] == "true"
+    assert len(plans) == 1, "no diagnosis call after the continuation's answer"
+
+
+async def test_rate_limited_check_with_no_answer_still_hands_back(workspace):
+    # With no answer to end on, the turn still explains itself.
+    explained = _Iter([StreamTextDelta(text="here is what I did"), StreamComplete(response=_text("here is what I did"))])
+    session = _unanswered_handback(workspace, explained)
+    session._llm.generate_object_code = AsyncMock(side_effect=_azure_429(retry_after_ms=True))
+    events, books = await _drain_with_books(session)
+    assert _shown(events) == "here is what I did"
+    assert books["ended_by"] == "handback_verifier_failure"
+    assert events[-1] == StreamTurnEnded(ended_by="handback_verifier_failure")
+
+
+@pytest.mark.parametrize("verdict", ["rate_limited", "COMPLETE"])
+async def test_a_filtered_reply_still_ends_content_filter(workspace, verdict):
+    # The reply itself is Azure's refusal, so it isn't an answer: the turn ends
+    # content_filter so the client can rerun it, whatever the check did.
+    mock_llm = make_mock_llm()
+    plans = [_Iter([StreamComplete(response=_tool_call(1))])]
+    mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: plans.pop(0) if plans else _filtered_stream())
+    if verdict == "rate_limited":
+        mock_llm.generate_object_code = AsyncMock(side_effect=_azure_429(retry_after_ms=True))
+    else:
+        mock_llm.generate_object_code = AsyncMock(return_value=_VerifierVerdict(status="COMPLETE", reason="ok"))
+    session = _plain(workspace, mock_llm)
+    events, books = await _drain_with_books(session)
+    assert books["ended_by"] == "content_filter"
+    assert events[-1] == StreamTurnEnded(ended_by="content_filter")
+    if verdict == "rate_limited":
+        # With no answer to end on, the turn still says where it stopped: both
+        # diagnosis tries are filtered here, so anton sends its own report.
+        assert _handback_calls(session) == 2
+        assert _shown(events).endswith('Reply "keep going" to continue from where I stopped.')
+
+
+class _Raising:
+    """A model stream that fails before its first event."""
+
+    def __init__(self, exc: BaseException):
+        self._exc = exc
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise self._exc
+
+
+def _answered_handback(workspace, base, *handbacks):
+    mock_llm = base(workspace)._llm
+    plans = [
+        _Iter([StreamComplete(response=_tool_call(1))]),
+        _Iter([StreamTextDelta(text="the answer"), StreamComplete(response=_text("the answer"))]),
+        *handbacks,
+    ]
+    mock_llm.plan_stream = MagicMock(side_effect=lambda **kw: plans.pop(0))
+    return _plain(workspace, mock_llm), plans
+
+
+@pytest.mark.parametrize(
+    "base,ended_by",
+    [(_handback_verifier_failure, "handback_verifier_failure"), (_handback_stuck, "handback_stuck")],
+)
+@pytest.mark.parametrize(
+    "error",
+    [
+        TransientProviderError("rate limited", code="rate_limited", session_backoff=True),
+        RequestRefusedError("The prompt was filtered.", code="content_filter", status_code=400),
+    ],
+    ids=["rate_limited", "prompt_filter_400"],
+)
+async def test_a_failed_handback_after_an_answer_ends_on_the_answer(workspace, base, ended_by, error):
+    # Raised on, the turn would run the agent again with tools on a history that
+    # ends on the note, and Azure's refusal of that call would stream after the answer.
+    session, plans = _answered_handback(workspace, base, _Raising(error), _filtered_stream())
+    events, books = await _drain_with_books(session)
+    assert _shown(events) == "the answer"
+    assert _REFUSAL not in str(session.history)
+    assert session.history[-1] == {"role": "assistant", "content": "the answer"}
+    assert len(plans) == 1, "the agent ran again after the failed hand-back"
+    assert books["ended_by"] == ended_by
+    assert events[-1] == StreamTurnEnded(ended_by=ended_by)
+
+
+async def test_a_failed_handback_with_no_answer_still_raises(workspace):
+    # With no answer to end on, the error reaches the turn handler as before.
+    session = _unanswered_handback(
+        workspace, _Raising(RequestRefusedError("The prompt was filtered.", code="content_filter", status_code=400)),
+    )
+    with patch("anton.analytics.send_event"), pytest.raises(RequestRefusedError):
+        async for _ in session.turn_stream("do the thing"):
+            pass
+
+
+async def test_a_billing_stop_on_the_handback_still_ends_the_turn(workspace):
+    # The person has to act on a billing stop, so it reaches the host even after an answer.
+    session, _plans = _answered_handback(
+        workspace, _handback_stuck,
+        _Raising(TokenLimitExceeded("Your wallet is empty.")),
+    )
+    with patch("anton.analytics.send_event"), pytest.raises(TokenLimitExceeded):
+        async for _ in session.turn_stream("do the thing"):
+            pass
