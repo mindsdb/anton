@@ -890,6 +890,13 @@ class TestCurrentSearchLabel:
         )
         assert _current_search_label(s) == "Brave Search (key: ****9876)"
 
+    def test_keenable_without_key_shows_label_only(self):
+        from anton.cli import _current_search_label
+        from types import SimpleNamespace
+
+        s = SimpleNamespace(external_search_provider="keenable", keenable_api_key=None)
+        assert _current_search_label(s) == "Keenable"
+
     def test_short_key_omits_the_mask_to_avoid_revealing_length(self):
         from anton.cli import _current_search_label
         from types import SimpleNamespace

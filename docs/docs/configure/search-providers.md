@@ -1,6 +1,6 @@
 ---
 title: Search providers
-description: Set up Exa.ai or Brave Search with anton setup-search for generic OpenAI-compatible endpoints.
+description: Set up Exa.ai, Brave Search, or Keenable with anton setup-search for generic OpenAI-compatible endpoints.
 ---
 
 # Search providers
@@ -29,6 +29,7 @@ anton setup-search
 | --- | --- | --- |
 | Exa.ai | AI-native semantic search | dashboard.exa.ai/api-keys |
 | Brave Search | privacy-focused web search | api.search.brave.com/app/keys |
+| Keenable | web search, no API key required | optional — keenable.ai |
 
 The setup screen shows which provider (if any) is currently configured, with
 a masked tail of the active key so you can recognize it without exposing it.
@@ -43,6 +44,9 @@ service errors, you can:
   re-picking from the menu),
 - **switch** — go back to the picker and try the other provider,
 - **skip** — disable `web_search` for now.
+
+Keenable needs no key, so there is no probe: an optional key is saved
+as-is and switches searches to Keenable's keyed endpoint.
 
 ## Switching providers
 
@@ -61,6 +65,6 @@ keystroke can't wipe a working setup.
 
 The provider choice and key are persisted to the **global** `~/.anton/.env`
 (as `ANTON_EXTERNAL_SEARCH_PROVIDER` plus `ANTON_EXA_API_KEY` or
-`ANTON_BRAVE_API_KEY`), so they survive across sessions and workspaces —
+`ANTON_BRAVE_API_KEY`, or the optional `ANTON_KEENABLE_API_KEY`), so they survive across sessions and workspaces —
 the same scope as your LLM keys. See
 [Environment variables](/configure/env-vars).

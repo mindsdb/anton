@@ -1537,6 +1537,9 @@ def _current_search_label(settings) -> str:
     elif provider == "brave":
         key = getattr(settings, "brave_api_key", None) or ""
         label = "Brave Search"
+    elif provider == "keenable":
+        key = getattr(settings, "keenable_api_key", None) or ""
+        label = "Keenable"
     else:
         return provider
     if len(key) >= 4:
@@ -1587,26 +1590,32 @@ def _setup_search_provider(settings, ws) -> None:
         "  [bold]2[/]  [link=https://brave.com/search/api][anton.cyan]Brave Search[/][/link] "
         "[anton.muted]privacy-focused web search[/]"
     )
-    console.print("  [bold]3[/]  [anton.muted]Skip — disable web_search[/]")
+    console.print(
+        "  [bold]3[/]  [link=https://keenable.ai][anton.cyan]Keenable[/][/link] "
+        "[anton.muted]web search, no API key required[/]"
+    )
+    console.print("  [bold]4[/]  [anton.muted]Skip — disable web_search[/]")
     console.print()
 
     # ``_setup_prompt`` (prompt_toolkit) gives us ESC-to-go-back support and
     # matches every other ``_setup_*`` helper in this file. Loop on invalid
     # input — the underlying prompt has no built-in choice validation.
     while True:
-        choice = _setup_prompt("Choose [1/2/3]", default="1").strip()
-        if choice in ("1", "2", "3"):
+        choice = _setup_prompt("Choose [1/2/3/4]", default="1").strip()
+        if choice in ("1", "2", "3", "4"):
             break
-        console.print("  [anton.warning]Please enter 1, 2, or 3.[/]")
+        console.print("  [anton.warning]Please enter 1, 2, 3, or 4.[/]")
 
-    if choice == "3":
+    if choice == "4":
         _skip_search_provider(settings, ws)
         return
 
     if choice == "1":
         _setup_exa(settings, ws)
-    else:
+    elif choice == "2":
         _setup_brave(settings, ws)
+    else:
+        _setup_keenable(settings, ws)
 
 
 def _setup_exa(settings, ws) -> None:
@@ -1719,6 +1728,24 @@ def _setup_brave(settings, ws) -> None:
     console.print("  [anton.success]Brave Search configured.[/]")
 
 
+def _setup_keenable(settings, ws) -> None:
+    """Configure Keenable. The API key is optional: without one, searches use
+    Keenable's keyless public endpoint."""
+    console.print()
+    console.print(
+        "  [anton.muted]Keenable works without an API key. Optionally paste a key "
+        "for higher rate limits, or press Enter to skip.[/]"
+    )
+    console.print()
+    api_key = _setup_prompt("Keenable API key (optional)", is_password=True).strip()
+
+    settings.external_search_provider = "keenable"
+    settings.keenable_api_key = api_key or None
+    ws.set_secret("ANTON_EXTERNAL_SEARCH_PROVIDER", "keenable")
+    ws.set_secret("ANTON_KEENABLE_API_KEY", api_key)
+    console.print("  [anton.success]Keenable configured.[/]")
+
+
 def _handle_search_retry(settings, ws, *, last_provider: str) -> None:
     """Retry the same provider, switch to the other, or skip web_search.
 
@@ -1762,7 +1789,7 @@ def setup(ctx: typer.Context) -> None:
 
 @app.command("setup-search")
 def setup_search(ctx: typer.Context) -> None:
-    """Configure an external search provider (Exa.ai or Brave Search).
+    """Configure an external search provider (Exa.ai, Brave Search, or Keenable).
 
     Only used when the active LLM endpoint is a generic OpenAI-compatible
     third-party (i.e. NOT Anthropic, OpenAI BYOK, or the mdb.ai passthrough —

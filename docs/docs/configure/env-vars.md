@@ -48,9 +48,10 @@ to the local one.
 | --- | --- | --- |
 | `ANTON_WEB_SEARCH_ENABLED` | `true` | Enable the `web_search` tool — see [Web search](/connect/web-search) |
 | `ANTON_WEB_FETCH_ENABLED` | `true` | Enable the `web_fetch` tool — see [Web fetch](/connect/web-fetch) |
-| `ANTON_EXTERNAL_SEARCH_PROVIDER` | unset | External search provider for generic endpoints: `exa` or `brave` |
+| `ANTON_EXTERNAL_SEARCH_PROVIDER` | unset | External search provider for generic endpoints: `exa`, `brave`, or `keenable` |
 | `ANTON_EXA_API_KEY` | unset | Exa.ai API key |
 | `ANTON_BRAVE_API_KEY` | unset | Brave Search API key |
+| `ANTON_KEENABLE_API_KEY` | unset | Optional Keenable API key (Keenable works without one) |
 
 The search provider variables are normally written by `anton setup-search` —
 see [Search providers](/configure/search-providers).
