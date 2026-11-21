@@ -756,6 +756,53 @@ def test_a_connection_after_one_left_out_for_size_is_still_sent():
     assert resolved.env == {"DS_REST_HTTPBIN__BASE_URL": "http://live-apps-relay:10001/"}
 
 
+def test_a_connection_past_the_slots_32_is_left_out():
+    names = [f"db{n:02}" for n in range(las.MAX_LAUNCH_CONNECTIONS + 1)]
+    approved = ApprovedConnections(version=1, connections=tuple(
+        ApprovedConnection(engine="postgres", name=name, kind="db", host="samples.mindsdb.com", port=5432)
+        for name in names))
+    vault = FakeVault({("postgres", name): {"HOST": "samples.mindsdb.com"} for name in names})
+    refs = [DatasourceRef(engine="postgres", name=name) for name in names]
+    resolved = las.resolve_connections(vault, refs, approved, slug="a")
+    assert [g.slot.name for g in resolved.granted] == names[:-1]
+    assert [m.model_dump() for m in resolved.missing] == [{"engine": "postgres", "name": "db32", "reason": "too_many"}]
+    assert "DS_POSTGRES_DB32__HOST" not in resolved.env
+
+
+@pytest.mark.parametrize("second, saved", [
+    # One prefix and a field both have: the later HOST would replace the earlier one.
+    (ApprovedConnection(engine="postgres", name="prod_db", kind="db", host="db.example.com", port=5432),
+     {"HOST": "db.example.com", "TOKEN": "tok"}),
+    # One prefix and no field in common: the later field would sit beside the earlier ones.
+    (ApprovedConnection(engine="postgres", name="prod_db", kind="http-read", host="api.example.com", port=443,
+                        relay_port=10002),
+     {"BASE_URL": "https://api.example.com/"}),
+    # Two prefixes and one name: the earlier X__HOST field and the later connection's HOST.
+    (ApprovedConnection(engine="postgres", name="prod-db__x", kind="db", host="db.example.com", port=5432),
+     {"HOST": "db.example.com"}),
+], ids=["shared-field", "same-prefix", "same-name"])
+def test_a_connection_that_builds_an_earlier_ones_names_is_left_out(second, saved):
+    first = ApprovedConnection(engine="postgres", name="prod-db", kind="db", host="samples.mindsdb.com", port=5432)
+    first_fields = {"HOST": "samples.mindsdb.com", "PASSWORD": _PG_PASSWORD, "X__HOST": "x"}
+    vault = FakeVault({("postgres", "prod-db"): first_fields, ("postgres", second.name): saved})
+    refs = [DatasourceRef(engine="postgres", name="prod-db"), DatasourceRef(engine="postgres", name=second.name)]
+    approved = ApprovedConnections(version=1, connections=(first, second))
+    resolved = las.resolve_connections(vault, refs, approved, slug="a")
+    assert resolved.env == {f"DS_POSTGRES_PROD_DB__{key}": value for key, value in first_fields.items()}
+    assert [g.slot.name for g in resolved.granted] == ["prod-db"]
+    assert [m.model_dump() for m in resolved.missing] == [
+        {"engine": "postgres", "name": second.name, "reason": "name_clash"}]
+
+
+def test_a_connection_declared_twice_is_sent_once():
+    vault = FakeVault({("postgres", "demo"): {"HOST": "samples.mindsdb.com", "PASSWORD": _PG_PASSWORD}})
+    refs = [_DECLARED[0], DatasourceRef(engine="Postgres", name="Demo")]
+    resolved = las.resolve_connections(vault, refs, _approved_set(), slug="a")
+    assert [g.slot.name for g in resolved.granted] == ["demo"]
+    assert resolved.missing == []
+    assert resolved.env == {"DS_POSTGRES_DEMO__HOST": "samples.mindsdb.com", "DS_POSTGRES_DEMO__PASSWORD": _PG_PASSWORD}
+
+
 def test_an_api_approved_for_writes_points_at_its_relay_and_carries_its_override():
     approved = ApprovedConnections(version=1, connections=(
         ApprovedConnection(engine="rest", name="planner", kind="http-write", host="planner.example.com", port=443,

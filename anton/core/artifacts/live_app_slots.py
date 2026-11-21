@@ -70,10 +70,10 @@ LAUNCH_DIRS = ("static",)
 MAX_LAUNCH_FILES = 500
 MAX_LAUNCH_FILE_BYTES = 8 * 1024 * 1024
 MAX_LAUNCH_TOTAL_BYTES = 64 * 1024 * 1024
-# The slot's rules for the env a launch sends, kept as the slot program keeps
-# them: it refuses the whole launch for one break, so a connection that would
-# break one is left out here instead.
-#
+# The slot's rules for the connections and env a launch sends, kept as the slot
+# program keeps them: it refuses the whole launch for one break, so a
+# connection that would break one is left out here instead.
+MAX_LAUNCH_CONNECTIONS = 32
 # A `DS_*` name is DS_<ENGINE>_<NAME>__<FIELD>: DS_, then only A-Z, 0-9 and _,
 # with a "__" that starts after the fourth character and comes before a letter
 # or digit. `env_name_is_valid` checks that in two linear passes. One pattern
@@ -110,7 +110,9 @@ MAX_PROBE_PATH_LENGTH = 512
 _SLOT_ADDRESS = re.compile(r"^http://[A-Za-z0-9.-]+:(?P<port>\d{1,5})$")
 
 ConnectionKind = Literal["db", "http-read", "http-write"]
-MissingReason = Literal["not_approved", "not_saved", "other_host", "field_names", "field_values", "too_large"]
+MissingReason = Literal[
+    "not_approved", "not_saved", "other_host", "field_names", "field_values", "too_large", "too_many", "name_clash",
+]
 SlotState = Literal["empty", "running", "exited"]
 SlotStopReason = Literal["idle", "max_time", "app_exited", "reset", "terminated"]
 # What a launch card approves, in card order. The `files` hash is no part of it.
@@ -122,7 +124,12 @@ MISSING_REASON_TEXT: dict[MissingReason, str] = {
     "other_host": "saved with a host other than the approved one",
     "field_names": "saved with a field name a live app can't receive (only letters, digits and _)",
     "field_values": "saved with a value a live app can't receive (over 16 KiB, or holding a NUL or a lone surrogate)",
-    "too_large": "too large for a live app's environment (a field of 128 KiB or more, or over 128 fields or 1 MiB in all)",
+    "too_large": (
+        "too large for a live app's environment (a field's name and value of 128 KiB or more together, "
+        "or over 128 fields or 1 MiB in all)"
+    ),
+    "too_many": "past the 32 connections a live app takes",
+    "name_clash": "builds the same DS_ names as another connection the app gets (rename one)",
 }
 
 
@@ -716,9 +723,11 @@ def resolve_connections(
     vault, datasources: Sequence[DatasourceRef], approved: ApprovedConnections, *, slug: str
 ) -> ResolvedConnections:
     """The `DS_*` a launch sends: for each declared connection that the
-    operator approved, the person saved pointing at the approved host, and
-    the slot would take, in declared order until the env is full. Every other
-    declared connection is named in `missing`.
+    operator approved, the person saved pointing at the approved host, the
+    slot would take, and no earlier connection already sends `DS_*` names
+    for. Connections go in declared order, each while the env and the slot's
+    connection count still have room for it. Every other declared connection
+    is named in `missing`.
 
     Resolved per connection with `build_datasource_env`, the resolver both
     in-process launch paths use, so a slot gets exactly what the local
@@ -727,10 +736,17 @@ def resolve_connections(
     from anton.core.artifacts.backend_launcher import build_datasource_env
 
     resolved = ResolvedConnections()
+    granted_prefixes: set[str] = set()
     for ref in datasources or ():
         entry = approved.find(ref)
         if entry is None:
             resolved.missing.append(_missing(ref, "not_approved"))
+            continue
+        if any(g.approved is entry for g in resolved.granted):
+            # Declared twice: its values already go.
+            continue
+        if len(resolved.granted) >= MAX_LAUNCH_CONNECTIONS:
+            resolved.missing.append(_missing(ref, "too_many"))
             continue
         env = build_datasource_env(vault, [ref], slug=slug)
         if not env:
@@ -759,6 +775,13 @@ def resolve_connections(
         if not all(_env_value_is_valid(value) for value in env.values()):
             resolved.missing.append(_missing(ref, "field_values"))
             continue
+        # Two approved connections can build one prefix, as postgres/prod-db
+        # and postgres/prod_db both build DS_POSTGRES_PROD_DB, or one name, when
+        # a name or field holds "__". The later one's values would then replace
+        # or sit beside the earlier one's, and the app can't tell them apart.
+        if ref.env_prefix in granted_prefixes or not env.keys().isdisjoint(resolved.env):
+            resolved.missing.append(_missing(ref, "name_clash"))
+            continue
         sent = {**resolved.env, **env}
         if (any(_env_string_bytes(name, value) + 1 > MAX_ENV_STRING_BYTES for name, value in env.items())
                 or len(sent) > MAX_ENV_NAMES
@@ -766,6 +789,7 @@ def resolve_connections(
             resolved.missing.append(_missing(ref, "too_large"))
             continue
         resolved.env = sent
+        granted_prefixes.add(ref.env_prefix)
         resolved.granted.append(
             GrantedConnection(
                 slot=SlotConnection(
