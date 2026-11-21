@@ -34,3 +34,28 @@ fails automatically when that code changes, so re-check these when touching:
   400 names `tool_choice` (`refuses_forced_tool_choice`); a server whose refusal
   says something else still fails the verifier, so the bullet stays until
   every refusal gets the fallback
+- what Cowork cannot make — anton's tool set (`anton/core/tools/tool_defs.py`
+  has no video or audio generator). Images: `generate_image` (ENG-4024) is
+  offered per turn by `ChatSession._settle_image_offer` and
+  `_provider_offers_images` in `anton/core/session.py` — on MindsHub when an
+  image model is configured or the key's catalogue lists one; it does not
+  look at the balance. Images use credits only: mindshub_inference
+  `minds/api/v1/endpoints/images.py` ("Billed to the wallet ... never to the
+  included allowance"), refused with a 402 `wallet_empty` when there are none,
+  which anton's `image_call_error` relays as a billing stop. The section is
+  worded in terms of that tool; revisit it when a video or audio tool lands
+- free Air allowance, refill and balance fallback — cowork's own copy:
+  `chatView.usageAlert.freeLow*` / `freeUsed*` and
+  `chatView.cards.connectProviderBody` in
+  `src/shared/i18n/locales/en/chat.json`; other models needing credits —
+  `chatView.model.needsCreditsTitle` / `needsCreditsBody` there. Sizes, prices and refill
+  times are deliberately not stated: they are server-side settings that change
+- billing page — `MINDS_BILLING_URL` in `src/renderer/lib/mindsUrls.ts`
+- chat subscriptions not usable, API keys on desktop only — the `Provider` enum
+  in cowork-server `cowork/common/settings/user_settings.py` (API keys and
+  OpenAI-compatible servers only, no account sign-in) and the `!orgMode` gate on
+  `LLM Providers` above
+- the existing-folder route — `canChooseFolder = host.isElectron && !orgMode`
+  and the `newProjectModal.useExistingFolder` / `locationLabel` /
+  `locationHelpChosen` strings in cowork's `NewProjectModal.jsx` and
+  `src/shared/i18n/locales/en/projects.json`

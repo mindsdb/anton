@@ -12,7 +12,10 @@ import pytest
 from anton.core.artifact_editor.router import (
     ACCEPT_P,
     CRITERIA,
+    INSTRUCTIONS,
     MAX_MESSAGE_CHARS,
+    REPLY_CRITERIA,
+    REPLY_INSTRUCTIONS,
     RouteDecision,
     describe_artifact,
     route_request,
@@ -243,6 +246,56 @@ async def test_outline_recent_changes_and_chat_reach_jev_clipped():
     assert len(state["chat"]) == 4 and len(state["chat"][-1]) <= 300 + len("assistant: ")
     instructions = jev.body()["questions"]["route"]["instructions"]
     assert "state.artifact.outline" in instructions and "recent_changes" in instructions
+
+
+# ── the reply route (ENG-4455) ────────────────────────────────────────
+
+
+async def test_without_allow_reply_the_question_is_exactly_the_two_route_one():
+    default, off = FakeJev(answer("edit", 0.9)), FakeJev(answer("edit", 0.9))
+    kw = {"name": "Sales", "outline": "title: Sales", "recent_changes": ["Quick edit: navy heading"]}
+    await route(default, "hi", **kw)
+    await route(off, "hi", allow_reply=False, **kw)
+
+    # allow_reply=False sends the very same bytes as a caller that does not know the keyword.
+    assert off.requests[0].content == default.requests[0].content
+    question = off.body()["questions"]["route"]
+    assert question == {"type": "choice", "instructions": INSTRUCTIONS, "criteria": CRITERIA}
+    assert set(question["criteria"]) == {"edit", "agent"}
+    assert "reply" not in json.dumps(off.body()["questions"]).lower()
+
+
+async def test_without_allow_reply_a_reply_answer_is_never_returned():
+    decision = await route(FakeJev(answer("reply", 0.99)), "hi")
+    assert (decision.route, decision.reason) == ("agent", "router_error")
+
+
+async def test_with_allow_reply_the_reply_criterion_is_sent():
+    jev = FakeJev(answer("agent", 0.9))
+    await route(jev, "what does this chart show?", allow_reply=True)
+    question = jev.body()["questions"]["route"]
+    assert question["instructions"] == REPLY_INSTRUCTIONS
+    assert question["criteria"] == REPLY_CRITERIA and set(question["criteria"]) == {"edit", "agent", "reply"}
+    assert question["criteria"]["edit"] == CRITERIA["edit"]
+    assert REPLY_INSTRUCTIONS.endswith("Choose agent when uncertain.")
+
+
+async def test_with_allow_reply_a_confident_reply_is_routed_to_the_reply():
+    decision = await route(FakeJev(answer("reply", 0.93)), "what does this chart show?", allow_reply=True)
+    assert (decision.route, decision.reason) == ("reply", "jev")
+    assert decision.confidence == pytest.approx(0.93)
+    decision = await route(FakeJev(answer("reply", ACCEPT_P)), "hi", allow_reply=True)
+    assert decision.route == "reply"
+
+
+async def test_with_allow_reply_an_uncertain_reply_goes_to_the_agent():
+    decision = await route(FakeJev(answer("reply", 0.7)), "how many slides?", allow_reply=True)
+    assert (decision.route, decision.reason) == ("agent", "uncertain")
+
+
+async def test_with_allow_reply_edit_and_agent_still_route_as_before():
+    assert (await route(FakeJev(answer("edit", 0.95)), allow_reply=True)).route == "edit"
+    assert (await route(FakeJev(answer("agent", 0.95)), "add last quarter", allow_reply=True)).route == "agent"
 
 
 def test_the_outline_shows_what_the_page_contains():

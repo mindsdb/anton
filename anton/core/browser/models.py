@@ -20,6 +20,7 @@ from pydantic import (
     ValidationError,
     ValidatorFunctionWrapHandler,
     field_validator,
+    model_validator,
 )
 
 
@@ -57,6 +58,11 @@ class Element(_Answer):
     disabled: bool = False
     offscreen: bool = False
     options: list[str] = []
+    #: The names of the containers around it, innermost last ("Select dates ›
+    #: November 2026"): what tells apart elements that share a name.
+    context: str = ""
+    #: Inside an open dialog, which is what a step on that page is about.
+    in_dialog: bool = False
 
     @property
     def secret(self) -> bool:
@@ -79,7 +85,10 @@ class Page(_Answer):
     text: str = ""
     truncated: bool = False
     scroll: Scroll | None = None
-    challenges: list[Challenge] = []
+    #: Check frames the person can see; the router's pod always sends it (empty
+    #: when there are none) and leaves out invisible checks. None from a host
+    #: that doesn't say.
+    challenges: list[Challenge] | None = None
 
 
 class ActionResult(_Answer):
@@ -97,8 +106,9 @@ class Control(_Answer):
     ``seq`` rises by one with every change. ``by`` says who made the change:
     the agent hands the browser to the person (``holder`` human, ``by``
     agent), and only the person hands it back, with Done in the browser
-    (``holder`` agent, ``by`` person). A host refuses an API request for
-    ``holder`` agent with 403 ``person_only``.
+    (``holder`` agent, ``by`` person), or a host that watches does it for
+    them (``watching``). A host refuses an API request for ``holder`` agent
+    with 403 ``person_only``.
     """
 
     holder: Literal["agent", "human"]
@@ -107,6 +117,31 @@ class Control(_Answer):
     since: int
     seq: int
     by: Literal["agent", "person"]
+    #: The host watches for what the hand-over waits for (``WaitFor``) and
+    #: hands the browser back by itself, as the person's Done, once it
+    #: happened. False from a host that doesn't say: only Done ends that
+    #: hand-over.
+    watching: bool = False
+
+
+class WaitFor(BaseModel):
+    """What a hand-over waits for, ``wait_for`` in ``POST
+    /sessions/{id}/control``: one element checked or filled (``element`` and
+    ``state``), or the page changing (``page``). It never carries a value."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    element: int | None = None
+    state: Literal["checked", "filled"] | None = None
+    page: Literal["changes"] | None = None
+
+    @model_validator(mode="after")
+    def _element_and_state_or_page(self) -> WaitFor:
+        on_element = self.element is not None and self.state is not None and self.page is None
+        on_page = self.page is not None and self.element is None and self.state is None
+        if not (on_element or on_page):
+            raise ValueError('wait_for is {"element": N, "state": "checked" or "filled"} or {"page": "changes"}')
+        return self
 
 
 class SessionInfo(_Answer):
@@ -116,6 +151,17 @@ class SessionInfo(_Answer):
     control: Control
     #: The active tab's address; null before a page loads.
     url: str | None = None
+    #: People watching it now: the router's viewers; None from a host that doesn't say.
+    viewers: int | None = None
+    #: The most tabs the agent may open for this task; None from a host that has no limit.
+    max_tabs: int | None = None
+    #: Tabs a recycled session noted, which reopen only when asked for.
+    parked_tabs: list["ParkedTab"] = []
+
+
+class ParkedTab(_Answer):
+    url: str
+    title: str = ""
 
 
 class Tab(_Answer):

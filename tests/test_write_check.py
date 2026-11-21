@@ -3899,6 +3899,8 @@ def sql_files(tmp_path: Path, monkeypatch):
     (tmp_path / "read.sql").write_text("SELECT name FROM suppliers ORDER BY 1")
     (tmp_path / "big.sql").write_text("UPDATE t SET a = 1;\n" * 80_000)
     assert (tmp_path / "big.sql").stat().st_size > 1_000_000
+    (tmp_path / "export.txt").write_text("ABCDE line of text\n" * 70_000)
+    assert (tmp_path / "export.txt").stat().st_size > 1_000_000
     monkeypatch.chdir(tmp_path)
     return snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
 
@@ -3930,6 +3932,54 @@ def test_a_sql_file_past_the_cap_is_held_unchecked(sql_files):
     card = _card_prompt(writes)
     assert "This step would run a SQL file too big to check:" in card
     assert "open('big.sql').read()" in card
+
+
+READ_EXPORT = "from pathlib import Path\ntext = Path('export.txt').read_text(errors='ignore')\n"
+
+
+@pytest.mark.parametrize("code", [
+    READ_EXPORT + "print(len(text.splitlines()))",
+    "import re\n" + READ_EXPORT + "print(re.findall(r'[A-Z]{5}', text)[:5])",
+    "sql = open('big.sql').read()\nprint(sql.count('UPDATE'))",
+    PG + "q = 'DELETE FROM t'\nif q.startswith('DELETE'):\n    print('a delete')",
+], ids=["count-lines", "regex-search", "count-a-word-in-a-sql-file", "sql-text-only-checked"])
+def test_a_large_file_only_counted_or_searched_raises_no_card(code, sql_files):
+    """A count, a search or a check of the text is used up where it is made, so nothing runs it."""
+    assert not _held(code, sql_files)
+
+
+@pytest.mark.parametrize("code", [
+    PG + READ_EXPORT + "cur.execute(text)",
+    "import mylib\nmylib.run(open('big.sql').read())",
+    PG + "sql = open('big.sql').read()\nfor stmt in sql.split(';'):\n    cur.execute(stmt)",
+    "import re, mylib\nre.sub(r'[^;]+', mylib.run, open('big.sql').read())",
+    "parts = open('big.sql').read().split(';')",
+    PG + "d = {}\nd[open('big.sql').read().split(';')[0]] = 1\nfor k in d:\n    cur.execute(k)",
+    PG + "print([1 for q in open('big.sql').read().split(';') if cur.execute(q)])",
+    "saved = []\nprint([1 for q in open('big.sql').read().split(';') if saved.append(q)])",
+    PG + "import re\nfor s in re.split(';', open('big.sql').read()):\n    cur.execute(s)",
+    PG + "import sqlparse\nfor s in sqlparse.split(open('big.sql').read()):\n    cur.execute(s)",
+], ids=["executed", "handed-to-unknown-code", "split-and-executed", "re-sub-runs-a-function-on-each-match",
+        "pieces-kept-for-a-later-step", "piece-kept-as-a-dict-key", "filter-runs-each-piece", "filter-stores-each-piece",
+        "re-split-and-executed", "sqlparse-split-and-executed"])
+def test_a_large_file_whose_text_may_reach_sql_keeps_its_card(code, sql_files):
+    """Pieces that are stored anywhere can be run by a later cell the check can't connect back."""
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(sql_files,))
+    assert [c.via for c in writes.calls] == ["sql_file"]
+
+
+def test_a_sql_file_split_by_sqlparse_and_run_keeps_its_card(sql_files):
+    code = PG + "import sqlparse\nfor s in sqlparse.split(open('fix.sql').read()):\n    cur.execute(s)"
+    assert _statements(code, sql_files) == [
+        "UPDATE suppliers SET lead_time_days = 21 WHERE supplier_id = 'S005'",
+        "DELETE FROM orders WHERE id = 3",
+    ]
+
+
+def test_a_comprehension_filter_that_runs_sql_text_keeps_its_card(snap):
+    code = PG + "print([1 for q in 'DELETE FROM t'.split(';') if cur.execute(q)])"
+    assert [w.statement for w in find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,)).sql] == [
+        "DELETE FROM t"]
 
 
 # ── Writes with no SQL text: procedures, SQLAlchemy, non-SQL stores ─────────
