@@ -172,11 +172,12 @@ def _resolve_run(workflow: dict) -> str:
 
 
 def test_the_resolved_version_is_validated_whole_line(workflow: dict) -> None:
-    r"""A prefix match is not enough, because the value becomes a build arg line.
+    r"""A prefix match is not enough, because the value reaches a shell unquoted.
 
-    The shared action reads ``build-args`` one per line, so ``2.26.8\nEVIL=1``
-    passes a ``^[0-9]+\.[0-9]`` prefix check and becomes a second build arg.
-    ``grep -Eqx`` anchors both ends, which is what actually closes it.
+    The shared action expands ``extra-build-args`` unquoted into ``docker buildx
+    build``, so ``2.26.8 --build-arg EVIL=1`` passes a ``^[0-9]+\.[0-9]`` prefix
+    check and becomes extra arguments to that command. ``grep -Eqx`` anchors
+    both ends, which is what actually closes it.
     """
     run = _resolve_run(workflow)
     assert "grep -Eqx" in run, (
@@ -286,11 +287,11 @@ def test_the_resolved_version_reaches_the_build(workflow: dict) -> None:
     leave the guard above firing on every build.
     """
     passed = [
-        (s.get("with") or {}).get("build-args", "")
+        (s.get("with") or {}).get("extra-build-args", "")
         for s in _steps(workflow, "build")
-        if "build-image" in str(s.get("uses", ""))
+        if "build-push-ecr" in str(s.get("uses", ""))
     ]
-    assert passed, "the build job no longer calls build-image"
-    assert any("ANTON_VERSION=" in str(p) for p in passed), (
+    assert passed, "the build job no longer calls build-push-ecr"
+    assert any("--build-arg ANTON_VERSION=" in str(p) for p in passed), (
         "the resolved version is not passed to the image build"
     )

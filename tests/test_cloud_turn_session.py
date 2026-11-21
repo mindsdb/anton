@@ -355,13 +355,6 @@ def test_jev_decisions_set_the_completion_check(tmp_path, monkeypatch, jev_decis
     assert cfg.settings.verifier_jev == verifier_jev
 
 
-@pytest.mark.parametrize(("jev_classify", "classify_jev"), [(False, "off"), (True, "on")])
-def test_jev_classify_sets_the_scratchpad_classify(tmp_path, monkeypatch, jev_classify, classify_jev):
-    monkeypatch.delenv("ANTON_CLASSIFY_JEV", raising=False)
-    _, cfg = _build(tmp_path, monkeypatch, jev_classify=jev_classify)
-    assert cfg.settings.classify_jev == classify_jev
-
-
 @pytest.mark.parametrize("ui_locale", ["es", None])
 def test_ui_locale_reaches_the_session(tmp_path, monkeypatch, ui_locale):
     """ENG-4149: the request's UI language is the session's."""
@@ -408,20 +401,6 @@ def test_llm_block_without_coding_model_keeps_default(tmp_path, monkeypatch):
     )
     default = AntonSettings.model_fields["coding_model"].default
     assert cfg.settings.coding_model == default
-
-
-@pytest.mark.parametrize("block, expected", [
-    ({"image_model": "gpt-image-2.6-sunburst"}, "gpt-image-2.6-sunburst"),
-    ({}, None),  # unset: the session reads the MindsHub catalogue (ENG-4024)
-])
-def test_llm_block_image_model_applied(tmp_path, monkeypatch, block, expected):
-    monkeypatch.delenv("ANTON_IMAGE_MODEL", raising=False)
-    _, cfg = _build(
-        tmp_path, monkeypatch,
-        llm={"provider": "minds-cloud", "api_key": "mdb_turnkey",
-             "base_url": "https://api.mindshub.ai/v1", **block},
-    )
-    assert cfg.settings.image_model == expected
 
 
 def test_cloud_session_without_llm_block_falls_back_to_env(tmp_path, monkeypatch):
@@ -756,9 +735,7 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
 
     session._build_tools()
     names = {t.name for t in session.tool_registry.get_tool_defs()}
-    # `generate_image` is withheld where no images API serves it, as with
-    # this mock client (ENG-4024); every other allowlisted tool is built.
-    assert names == set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}, (
+    assert names == set(CLOUD_TOOL_ALLOWLIST), (
         f"cloud tool set drifted from the allowlist: {sorted(names)}"
     )
 
@@ -780,13 +757,11 @@ def test_a_real_turn_with_connector_drafts_registers_and_drains_the_tool(tmp_pat
     session = _real_cloud_session(tmp_path, monkeypatch, connector_drafts=True)
     session._build_tools()
     names = {t.name for t in session.tool_registry.get_tool_defs()}
-    # `generate_image` is withheld with no images API (ENG-4024).
-    assert names == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}) | {"create_connector_draft"}
+    assert names == set(CLOUD_TOOL_ALLOWLIST) | {"create_connector_draft"}
 
     draft = {
         "connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}],
         "auth": {"type": "header", "headers": {"Authorization": "Bearer {api_key}"}},
-        "check": {"path": "/v1/me"},
     }
     tool = next(t for t in session._extra_tools if t.name == "create_connector_draft")
     assert asyncio.run(tool.handler(session, draft)).ok is True
@@ -842,8 +817,7 @@ def test_a_cloud_session_with_a_router_block_registers_exactly_the_browser_too(t
     session._scratchpads = MagicMock(available_packages=[])
     session._build_tools()
     names = {t.name for t in session.tool_registry.get_tool_defs()}
-    # `generate_image` is withheld with no images API (ENG-4024).
-    assert names == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}) | {"browser"}
+    assert names == set(CLOUD_TOOL_ALLOWLIST) | {"browser"}
 
 
 def test_the_environment_never_gives_a_browser(tmp_path, monkeypatch):
@@ -1004,8 +978,7 @@ def test_memorize_is_offered_with_or_without_existing_memory(tmp_path, monkeypat
         session = _real_cloud_session(tmp_path, monkeypatch, **overrides)
         session._build_tools()
         names = {t.name for t in session.tool_registry.get_tool_defs()}
-        # `generate_image` is withheld with no images API (ENG-4024).
-        assert names == set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}
+        assert names == set(CLOUD_TOOL_ALLOWLIST)
         assert "memorize" in names
 
 
@@ -1767,8 +1740,6 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
         "memorize",
         "recall_skill",
         "create_skill_draft",
-        # Takes a prompt and image paths: nothing a credential could ride in.
-        "generate_image",
     }
 
 

@@ -40,7 +40,6 @@ from anton.cloud_turn.elicitor import (
     ask_user_event,
 )
 from anton.cloud_turn.history_rows import split_turn_into_rows
-from anton.cloud_turn.launcher import forbid_same_user_access
 from anton.cloud_turn.session import (
     build_cloud_chat_session,
     build_turn_content,
@@ -52,7 +51,6 @@ from anton.cloud_turn.session import (
 )
 from anton.cloud_turn.preview_check import CloudPreviewChecks
 from anton.cloud_turn.stdin import start_answer_reader
-from anton.core.browser.tool import tidy_after_turn
 from anton.core.llm.liveness import MODEL_WAIT_PHASE, MODEL_WAIT_TICK_S
 from anton.core.llm.provider import ProviderErrorFilter
 
@@ -262,10 +260,7 @@ async def _stream_turn(
     a ``turn_completed`` naming the artifacts the turn touched. Any failure
     (parse or turn) -> one ``turn_failed`` with a scrubbed error string, plus
     ``reset_at`` when the failure is a MindsHub billing stop that knows when
-    its limit lifts, ``budget_scope`` / ``budget_period`` / ``budget_model`` when it is a spent
-    budget whose scope or period the gateway named, ``window`` when it is a spent plan
-    window the gateway named, and ``required_tier`` when it is a model outside the plan's
-    tier and the gateway named the tier that covers it.
+    its limit lifts.
 
     A background ticker emits a bare ``heartbeat`` event every
     ``ANTON_CLOUD_TURN_HEARTBEAT_SECONDS`` (default 5) so long-but-alive turns
@@ -278,9 +273,7 @@ async def _stream_turn(
     interleave mid-line - no lock needed.
     """
     from anton.core.llm.provider import (
-        BudgetExceededError,
         MindsHubBillingStop,
-        ModelNotInTierError,
         StreamAskUser,
         StreamAskUserAnswered,
         StreamBrowserSession,
@@ -293,7 +286,6 @@ async def _stream_turn(
         StreamToolUseEnd,
         StreamToolUseStart,
         StreamTurnEnded,
-        WindowAllowanceExhaustedError,
     )
 
     builder = session_builder or build_cloud_chat_session
@@ -517,10 +509,6 @@ async def _stream_turn(
             if rows:
                 logger.info("emitting %d turn-history row(s)", len(rows))
                 wire({"kind": "history", "rows": rows})
-        # Before the terminal: the browser tidy asks its decision with the
-        # turn key, which the host revokes once `turn_completed` arrives.
-        # Bounded by TIDY_TIMEOUT_S and never raises; close() then skips it.
-        await tidy_after_turn(session)
         logger.info("cloud turn completed")
         completed = {"kind": "turn_completed"}
         # The folders this turn's tools and cells touched, so the host stats
@@ -545,18 +533,6 @@ async def _stream_turn(
         # no instant that parses, and then the key is left off.
         if isinstance(exc, MindsHubBillingStop) and exc.reset_at:
             failed["reset_at"] = exc.reset_at
-        # A spent budget's scope rides the same way, so the host can say whose budget it is.
-        if isinstance(exc, BudgetExceededError) and exc.budget_scope:
-            failed["budget_scope"] = exc.budget_scope
-        if isinstance(exc, BudgetExceededError) and exc.budget_period:
-            failed["budget_period"] = exc.budget_period
-        if isinstance(exc, BudgetExceededError) and exc.budget_model:
-            failed["budget_model"] = exc.budget_model
-        # Name the spent plan window and the tier that covers the model on the failure frame.
-        if isinstance(exc, WindowAllowanceExhaustedError) and exc.window:
-            failed["window"] = exc.window
-        if isinstance(exc, ModelNotInTierError) and exc.required_tier:
-            failed["required_tier"] = exc.required_tier
         with contextlib.suppress(Exception):
             addons.return_unread()  # before the terminal: cowork stops reading at it
         wire(failed)
@@ -589,15 +565,6 @@ async def _stream_turn(
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Before the request is read: it carries the turn's credentials, and cell
-    # code runs as this process's user. A turn the launcher hands to the
-    # resident already has this; one exec'd directly has not, since exec resets it.
-    if sys.platform == "linux":
-        try:
-            forbid_same_user_access()
-        except OSError as exc:
-            # The launcher makes the same choice: losing it is not worth losing the turn.
-            print(f"cloud turn: could not close /proc access: {exc}", file=sys.stderr, flush=True)
     with _isolated_protocol_stdout() as emit:
         # A private reader over a dup of fd 0, never `sys.stdin` (why: see the
         # cloud_turn/stdin.py docstring).

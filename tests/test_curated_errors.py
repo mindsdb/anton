@@ -31,8 +31,6 @@ from anton.core.llm.provider import (
     FreeServingPausedError,
     BudgetExceededError,
     MindsHubBillingStop,
-    ModelNotInTierError,
-    WindowAllowanceExhaustedError,
     ModelCallTimeoutError,
     ModelRestrictedError,
     ModelUnavailableError,
@@ -309,14 +307,6 @@ _CURATED_SAMPLES = {
     AllowanceExhaustedError: lambda: AllowanceExhaustedError(
         "allowance used up", reason="included_allowance_exhausted", status_code=429,
         reset_at="2026-10-01T00:00:00Z",
-    ),
-    WindowAllowanceExhaustedError: lambda: WindowAllowanceExhaustedError(
-        "plan window used up", reason="window_allowance_exhausted", status_code=429,
-        reset_at="2026-11-20T05:00:00Z", window="5h",
-    ),
-    ModelNotInTierError: lambda: ModelNotInTierError(
-        "model not in plan", reason="model_not_in_tier", status_code=403,
-        required_tier="pro",
     ),
     FreeServingPausedError: lambda: FreeServingPausedError(
         "free serving paused", reason="free_air_daily_spend_fuse_exceeded",

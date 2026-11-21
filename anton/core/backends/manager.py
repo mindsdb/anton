@@ -84,8 +84,6 @@ class ScratchpadManager:
         coding_api_key_supplier: ApiKeySupplier | None = None,
         coding_flavor: str | None = None,
         internet_research_enabled: bool = True,
-        classify_enabled: bool = True,
-        image_model: str | None = None,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
         self._runtime_factory = runtime_factory
@@ -126,12 +124,6 @@ class ScratchpadManager:
         self._factory_takes_internet_research = self._probe_factory_kwarg(
             runtime_factory, "internet_research_enabled"
         )
-        # The image model the pads' generate_image() asks for; None leaves a
-        # pad to resolve it itself (`anton.core.llm.images.resolve_image_model`).
-        self._image_model = image_model.strip() if isinstance(image_model, str) and image_model.strip() else None
-        self._factory_takes_image_model = self._probe_factory_kwarg(runtime_factory, "image_model")
-        # Only a runtime that names `image_model` (the local one) speaks the pad's image protocol.
-        self.pads_offer_images = self._factory_names_kwarg(runtime_factory, "image_model")
         global _warned_no_internet_research_kwarg
         if (not internet_research_enabled and not self._factory_takes_internet_research
                 and not _warned_no_internet_research_kwarg):
@@ -140,8 +132,6 @@ class ScratchpadManager:
                 "this scratchpad runtime factory takes no internet_research_enabled, so "
                 "its pads keep web_search() although internet research is off"
             )
-        self._classify_enabled = classify_enabled
-        self._factory_takes_classify = self._probe_factory_kwarg(runtime_factory, "classify_enabled")
         # Unlike the kwargs above, a policy is never dropped: a factory that
         # cannot take it would run agent code unlocked. It must name the
         # parameter, since a bare **kwargs can swallow it, and get_or_create
@@ -388,16 +378,6 @@ class ScratchpadManager:
                 **(
                     {"internet_research_enabled": False}
                     if not self._internet_research_enabled and self._factory_takes_internet_research
-                    else {}
-                ),
-                **(
-                    {"classify_enabled": False}
-                    if not self._classify_enabled and self._factory_takes_classify
-                    else {}
-                ),
-                **(
-                    {"image_model": self._image_model}
-                    if self._factory_takes_image_model and self._image_model is not None
                     else {}
                 ),
             )

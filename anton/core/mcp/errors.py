@@ -37,21 +37,6 @@ class McpTokenRejected(McpPermanentError):
         self.status_code = status_code
 
 
-class McpEgressBlocked(McpPermanentError):
-    """A custom MCP server's URL or address is not one anton will connect to.
-
-    Permanent: retrying the same URL resolves to the same refusal.
-    """
-
-
-class McpHostUnresolved(McpTransientError):
-    """A custom MCP server's host name did not resolve.
-
-    Transient, and not an `McpEgressBlocked`: lookups fail for a moment too,
-    so a caller must never show one as an address that is not allowed.
-    """
-
-
 #: HTTP status codes that mean the credential itself was rejected, not that
 #: something transient went wrong in transit. OAuth Bearer auth is checked
 #: at the HTTP transport layer (before a request ever reaches JSON-RPC

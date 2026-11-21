@@ -22,7 +22,6 @@ import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 # Both entrypoints read one bounded thing from stdin and stop at EOF, so an empty
 # stdin drives a complete, harmless run: cloud_turn fails to parse the empty line
@@ -191,10 +190,10 @@ def check_scratchpad_boot() -> list[str]:
 
 
 def check_runtime_uv() -> list[str]:
-    """Each pad's venv is created and installed into with uv.
+    """scratchpad_boot shells out to `uv pip install` for a package a cell imports.
 
     ANTON_UV_PATH points at this exact path, so a uv that moved or lost its
-    execute bit breaks every pad package install.
+    execute bit turns every missing-package recovery into a failed cell.
     """
     uv = "/usr/local/bin/uv"
     if not os.access(uv, os.X_OK):
@@ -202,98 +201,19 @@ def check_runtime_uv() -> list[str]:
     return []
 
 
-#: Code the agent process loads. Cell code runs as the same uid, so any of it
-#: that uid can write is code a cell can change under the agent.
-#: ``/app`` is the turn's working directory, which ``python -m`` puts first on
-#: ``sys.path``. ``/usr/local/bin`` holds Python, uv and the entrypoint scripts.
-AGENT_CODE_ROOTS = ("/app", "/usr/local/lib/python3.12", "/usr/local/bin")
-#: Listing more than this many writable paths adds nothing to the verdict.
-MAX_WRITABLE_REPORTED = 10
+def check_venv_writable() -> list[str]:
+    """That same install writes into the venv as uid 1000.
 
-
-def writable_paths(roots) -> list[str]:
-    """Every file and folder under *roots* this process can write, links skipped."""
-    found: list[str] = []
-    for root in roots:
-        if os.access(root, os.W_OK):
-            found.append(root)
-        for folder, dirs, files in os.walk(root):
-            for name in dirs + files:
-                path = os.path.join(folder, name)
-                if not os.path.islink(path) and os.access(path, os.W_OK):
-                    found.append(path)
-    return found
-
-
-def check_agent_code_read_only() -> list[str]:
-    """The runtime user can write nothing the agent process loads.
-
-    That covers the venv, ``/app`` (anton's source and the turn's working
-    directory), the standard library and the binaries the pod runs. Pads
-    install into venvs of their own under the workspace, so nothing at turn
-    time needs to write here.
+    The Dockerfile chowns the venv for exactly this. A chown that stops covering
+    it leaves an image that serves turns normally right up until a cell imports
+    something that is not installed.
     """
     venv = os.environ.get("VIRTUAL_ENV", "")
     if not venv:
         return ["venv: VIRTUAL_ENV is not set in the image"]
-    found = writable_paths((venv, *AGENT_CODE_ROOTS))
-    if not found:
-        return []
-    shown = "\n  ".join(found[:MAX_WRITABLE_REPORTED])
-    more = f"\n  ... and {len(found) - MAX_WRITABLE_REPORTED} more" if len(found) > MAX_WRITABLE_REPORTED else ""
-    return [f"agent code: {len(found)} path(s) writable by uid {os.getuid()}:\n  {shown}{more}"]
-
-
-def check_user_site_disabled() -> list[str]:
-    """Python loads no startup files from the runtime user's home, which cells can write."""
-    if not sys.flags.no_user_site:
-        return ["user site: Python would load packages from the runtime user's home (set PYTHONNOUSERSITE)"]
+    if not os.access(venv, os.W_OK):
+        return [f"venv: {venv} is not writable by uid {os.getuid()}"]
     return []
-
-
-PYPROJECT_PATH = Path(__file__).resolve().parents[1] / "pyproject.toml"
-
-
-def scratchpad_group_imports(pyproject: Path = PYPROJECT_PATH) -> dict[str, list[str]]:
-    """Each distribution in the `scratchpad` dependency group, with the top-level
-    modules it installs. Read from pyproject so a package added to the group is
-    checked without anyone remembering to list it here."""
-    import tomllib
-    from importlib.metadata import packages_distributions
-
-    from packaging.requirements import Requirement
-    from packaging.utils import canonicalize_name
-
-    group = tomllib.loads(pyproject.read_text())["dependency-groups"]["scratchpad"]
-    wanted = {canonicalize_name(Requirement(spec).name) for spec in group}
-    found: dict[str, list[str]] = {name: [] for name in wanted}
-    for module, dists in packages_distributions().items():
-        for dist in dists:
-            name = canonicalize_name(dist)
-            if name in found:
-                found[name].append(module)
-    return found
-
-
-def check_scratchpad_packages() -> list[str]:
-    """Every package the agent is told the sandbox has must import in it.
-
-    Cells cannot install a package by importing it (imports never install), so a
-    package that is missing or whose native library fails to load costs every
-    turn that needs it a round, or the whole task. Each import runs in its own
-    interpreter so a native crash is reported rather than ending the smoke.
-    """
-    failures = []
-    for dist, modules in sorted(scratchpad_group_imports().items()):
-        if not modules:
-            failures.append(f"scratchpad packages: {dist} is not installed")
-            continue
-        for module in sorted(modules):
-            proc = run_command([sys.executable, "-c", f"import {module}"])
-            if proc.returncode != 0:
-                tail = proc.stderr.decode(errors="replace")[-500:]
-                failures.append(f"scratchpad packages: import {module} ({dist}) failed\n{tail}")
-    return failures
 
 
 #: One module per tree the Dockerfile compiles: stdlib, dependencies, anton.
@@ -327,9 +247,7 @@ CHECKS = (
     check_launcher_through_resident,
     check_scratchpad_boot,
     check_runtime_uv,
-    check_agent_code_read_only,
-    check_user_site_disabled,
-    check_scratchpad_packages,
+    check_venv_writable,
     check_bytecode,
 )
 

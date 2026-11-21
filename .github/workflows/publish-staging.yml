@@ -44,7 +44,6 @@ jobs:
     needs: release
     permissions:
       contents: read
-      id-token: write # the build's ECR role, assumed over OIDC
     uses: ./.github/workflows/scratchpad-dev-build.yml
     with:
       environment: staging

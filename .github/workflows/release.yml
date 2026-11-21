@@ -60,7 +60,6 @@ jobs:
     needs: [auto-release, verify-wheel]
     permissions:
       contents: read
-      id-token: write # the build's ECR role, assumed over OIDC
     uses: ./.github/workflows/scratchpad-dev-build.yml
     with:
       environment: production
@@ -92,46 +91,13 @@ jobs:
         # Trusted publisher (OIDC) — release.yml must be registered at the
         # anton-agent PyPI project's publishing settings (environment: pypi).
 
-  notify-cowork-server:
-    # Tells cowork-server that a final anton is on PyPI. Desktop installs exactly
-    # the anton cowork-server's lock names, and a production cowork-server release
-    # must lock a final, so cowork-server relocks staging to this one as soon as
-    # it publishes (its .github/workflows/anton-final-lock.yml). It runs after
-    # the upload and cannot affect it. A failure shows in `notify` below, and
-    # cowork-server's own periodic check still finds the final later.
-    needs: [auto-release, publish]
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions: {}  # The App token below does the work; GITHUB_TOKEN is unused.
-    steps:
-      - name: Mint a release-train App token for cowork-server
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: mindsdb
-          repositories: cowork-server
-          permission-contents: write  # what a repository_dispatch requires
-
-      - name: Send anton-final-published to cowork-server
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          VERSION: ${{ needs.auto-release.outputs.version }}
-        run: |
-          set -euo pipefail
-          gh api --method POST repos/mindsdb/cowork-server/dispatches \
-            -f event_type=anton-final-published \
-            -f "client_payload[version]=${VERSION}"
-          echo "Sent anton-final-published for ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
-
   notify:
     # Alert the eng channel if ANY job in the release pipeline fails (tests, tag,
-    # wheel verification, PyPI publish, or the cowork-server notice).
+    # wheel verification, or PyPI publish).
     # One job covers both outcomes: a `uses:` job cannot branch on status, so
     # the aggregate result picks the failed or recovered message, and a
     # cancelled run stays silent.
-    needs: [unit-tests, auto-release, verify-wheel, scratchpad-image, publish, notify-cowork-server]
+    needs: [unit-tests, auto-release, verify-wheel, scratchpad-image, publish]
     if: ${{ github.ref == 'refs/heads/main' && !cancelled() && !contains(needs.*.result, 'cancelled') }}
     permissions:
       contents: read

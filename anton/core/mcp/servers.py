@@ -16,7 +16,6 @@ from __future__ import annotations
 MCP_SERVER_URLS: dict[str, str] = {
     "hubspot": "https://mcp.hubspot.com",
     "notion": "https://mcp.notion.com/mcp",
-    "slack": "https://mcp.slack.com/mcp",
 }
 
 
