@@ -314,3 +314,185 @@ async def test_discovery_gets_the_general_analysis_rules(tmp_path, monkeypatch):
 
     monkeypatch.setattr(engine, "run_gathering_loop", gather)
     assert await fast_static.prepare(state)
+
+
+@pytest.mark.parametrize("known_data, prepared", [
+    ("site,qty\nToronto,4\nAustin,7", True),
+    ("", False),
+], ids=["completes-from-known-data", "falls-back"])
+async def test_a_read_only_refusal_completes_or_falls_back_without_looping(tmp_path, monkeypatch, known_data,
+                                                                            prepared):
+    """Act first: the builder's exec with one-call completion is refused
+    because the page builder only reads. The next round finishes: from the
+    rows the chat passed as known data, or, without them, by handing back to
+    the normal pipeline. Two model calls, not one per round up to the cap."""
+    from unittest.mock import AsyncMock
+
+    from anton.core.llm.provider import ToolCall, Usage
+    from anton.core.utils.scratchpad import WRITE_REFUSED_READ_ONLY, ReadOnlyRefusal
+    from tests.streaming_llm import StreamingLLM
+
+    refusal = ReadOnlyRefusal(content="Not run: the page builder only reads data", ok=True,
+                              reason=WRITE_REFUSED_READ_ONLY, change="change data in a connected source")
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", AsyncMock(return_value=refusal))
+    usage = Usage(input_tokens=1, output_tokens=1)
+    rounds = iter([
+        LLMResponse(content="", usage=usage, tool_calls=[ToolCall(id="read", name="scratchpad", input={
+            "action": "exec", "name": "main", "code": "save_sites()", "one_line_description": "Save the sites",
+            "complete_static_artifact": {"summary": "sites", "data_sources": ["sites"]}})]),
+        LLMResponse(content="", usage=usage, tool_calls=[ToolCall(id="done", name="finish_gathering", input={
+            "artifact_type": "html-app", "summary": "sites", "data_sources": ["sites"],
+            "data_findings": [{"source": "sites", "verified_by": "known_data"}]})]),
+    ])
+    model = AsyncMock(side_effect=lambda **kwargs: next(rounds))
+    session = SimpleNamespace(history=[], _llm=StreamingLLM(plan=model, code=model), question_count=0,
+                              elicitor=None, emit=AsyncMock())
+    state = GenState(session=session, artifact_type="html-app", artifact_path=tmp_path, slug="sites",
+                     user_request="Map the sites", agent_understanding="A map of the sites", act_first=True,
+                     known_data=known_data)
+    assert await fast_static.prepare(state) is prepared
+    assert model.await_count == 2
+    assert [step.description for step in state.skipped_steps] == ["Save the sites"]
+    assert state.gathering_complete is prepared
+
+
+async def test_a_refused_static_exec_on_an_edit_builds_from_the_known_data_not_the_previous_data(
+    tmp_path, monkeypatch
+):
+    """An edit whose one-call static exec is refused read-only, finished from
+    the rows the chat passed as known data. The previous build's
+    observed-data.json is still in the folder, and the page it built binds
+    the same data. Neither is this build's data: the page binds none of it,
+    and the writer builds from the caller's rows."""
+    import json
+    from unittest.mock import AsyncMock
+
+    from anton.core.llm.provider import ToolCall, Usage
+    from anton.core.tools.generate_artifact import observed_data, static_gathering
+    from anton.core.utils.scratchpad import WRITE_REFUSED_READ_ONLY, ReadOnlyRefusal
+    from tests.streaming_llm import StreamingLLM
+
+    previous = {"sites": [{"site": "Toronto", "qty": 3}]}
+    (tmp_path / "observed-data.json").write_text(json.dumps(previous))
+    page = ('<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width"></head>'
+            '<body>sites</body></html>')
+    (tmp_path / "index.html").write_text(observed_data.bind(page, {observed_data.identity(previous): previous}))
+    before = static_gathering.fingerprint(tmp_path)
+    refusal = ReadOnlyRefusal(content="Not run: the page builder only reads data", ok=True,
+                              reason=WRITE_REFUSED_READ_ONLY, change="change data in a connected source")
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", AsyncMock(return_value=refusal))
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    usage = Usage(input_tokens=1, output_tokens=1)
+    rounds = iter([
+        LLMResponse(content="", usage=usage, tool_calls=[ToolCall(id="read", name="scratchpad", input={
+            "action": "exec", "name": "main", "code": "save_sites()", "one_line_description": "Save the sites",
+            "complete_static_artifact": {"summary": "sites", "data_sources": ["sites"]}})]),
+        LLMResponse(content="", usage=usage, tool_calls=[ToolCall(id="done", name="finish_gathering", input={
+            "artifact_type": "html-app", "summary": "sites", "data_sources": ["sites"],
+            "data_findings": [{"source": "sites", "verified_by": "known_data"}]})]),
+        LLMResponse(content=page.replace("sites", "Toronto 4, Austin 7"), usage=usage),
+    ])
+    model = AsyncMock(side_effect=lambda **kwargs: next(rounds))
+    session = SimpleNamespace(history=[], _llm=StreamingLLM(plan=model, code=model), question_count=0,
+                              elicitor=None, emit=AsyncMock())
+    state = GenState(session=session, artifact_type="html-app", artifact_path=tmp_path, slug="sites",
+                     user_request="Map the sites", agent_understanding="Update the counts", act_first=True,
+                     known_data="site,qty\nToronto,4\nAustin,7")
+    assert await fast_static.prepare(state)
+    assert static_gathering.fingerprint(tmp_path) == before, "gathering wrote no fresh hand-off"
+    assert state.known_data_verified == ["sites"]
+    result = await fast_static.run(state)
+    assert result["status"] == "generated"
+    assert observed_data.previous_data((tmp_path / "index.html").read_text()) == {}
+    writer = model.await_args_list[2].kwargs
+    assert model.await_count == 3, "the ordinary HTML writer, since no data is bound"
+    assert "Caller-provided data: site,qty\nToronto,4\nAustin,7" in writer["messages"][0]["content"]
+    assert "window.ARTIFACT_DATA" not in writer["messages"][0]["content"]
+    assert '"qty":3' not in writer["messages"][0]["content"], "the previous build's data is not shown"
+    assert "replaces that data with the caller-provided data" in writer["system"]
+    assert "observed-data.json" not in state.internal_files
+
+
+@pytest.mark.parametrize("writes", [True, False], ids=["fresh hand-off", "earlier build's hand-off"])
+async def test_only_a_hand_off_this_gathering_wrote_is_bound(tmp_path, monkeypatch, writes):
+    """An edit after a page built from the caller's rows: that page binds no
+    data, and an earlier build's observed-data.json is still in the folder.
+    A gathering that writes a fresh hand-off gets it bound; one that writes
+    none gets nothing, not the earlier build's data."""
+    import json
+
+    from anton.core.tools.generate_artifact import component_page, observed_data
+    from anton.core.tools.generate_artifact.discovery import engine
+
+    earlier = {"sites": [{"site": "Toronto", "qty": 3}]}
+    fresh = {"sites": [{"site": "Toronto", "qty": 4}, {"site": "Austin", "qty": 7}]}
+    (tmp_path / "observed-data.json").write_text(json.dumps(earlier))
+    page = ('<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width"></head>'
+            '<body>Toronto 4, Austin 7</body></html>')
+    (tmp_path / "index.html").write_text(page)
+
+    async def gather(received):
+        if writes:
+            (tmp_path / "observed-data.json").write_text(json.dumps(fresh))
+        received.scratchpad_execs.append({"name": "main", "code": "load()", "output": "2 sites", "ok": True})
+        received.gathering_complete = True
+        received.final_artifact_type = "html-app"
+
+    calls = []
+
+    async def stream(**kwargs):
+        # The component writer declines, so the ordinary HTML writer builds the page.
+        calls.append(kwargs)
+        components = kwargs["system"].startswith(component_page.SYSTEM)
+        yield StreamComplete(LLMResponse(content=component_page.FALLBACK if components else page))
+
+    monkeypatch.setattr(engine, "run_gathering_loop", gather)
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(_llm=SimpleNamespace(code_stream=stream), history=[]),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="sites", act_first=True,
+                     agent_understanding="Make the header blue")
+    assert await fast_static.prepare(state)
+    assert (await fast_static.run(state))["status"] == "generated"
+    bound = observed_data.previous_data((tmp_path / "index.html").read_text())
+    assert bound == ({observed_data.identity(fresh): fresh} if writes else {})
+    assert not any('"qty":3' in call["messages"][0]["content"] for call in calls), (
+        "the earlier build's data reaches no writer")
+
+
+async def test_an_edit_whose_gathering_marks_nothing_keeps_the_pages_data(tmp_path, monkeypatch):
+    """An edit that passes known data inherits the earlier build's
+    `known_data` marks and its finished gathering from the checkpoint. This
+    call's gathering then answers in text and marks nothing: the marks are
+    the earlier build's, so the edit keeps the data the page binds."""
+    from anton.core.tools.generate_artifact import component_page, observed_data
+    from anton.core.tools.generate_artifact.discovery import engine
+
+    bound = {"sites": [{"site": "Toronto", "qty": 3}]}
+    page = ('<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width"></head>'
+            '<body>Toronto 3</body></html>')
+    (tmp_path / "index.html").write_text(observed_data.bind(page, {observed_data.identity(bound): bound}))
+
+    async def gather(received):
+        # A text reply: no tool call, so nothing completes or marks a source.
+        received.gathering_notes = "The page already has its data."
+
+    calls = []
+
+    async def stream(**kwargs):
+        calls.append(kwargs)
+        components = kwargs["system"].startswith(component_page.SYSTEM)
+        yield StreamComplete(LLMResponse(content=component_page.FALLBACK if components else page))
+
+    monkeypatch.setattr(engine, "run_gathering_loop", gather)
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(_llm=SimpleNamespace(code_stream=stream), history=[]),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="sites", act_first=True,
+                     agent_understanding="Make the header blue", known_data="site,qty\nToronto,3")
+    # What `engine._restore` brings back from the earlier build's checkpoint.
+    state.gathering_complete, state.final_artifact_type = True, "html-app"
+    state.known_data_verified = ["sites"]
+    assert await fast_static.prepare(state)
+    assert state.known_data_verified == []
+    assert (await fast_static.run(state))["status"] == "generated"
+    assert observed_data.previous_data((tmp_path / "index.html").read_text()) == {observed_data.identity(bound): bound}
+    assert not any("replaces that data with the caller-provided data" in call["system"] for call in calls)

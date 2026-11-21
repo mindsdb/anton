@@ -52,7 +52,7 @@ async def _drive(tmp_path: Path, responses, **kw):
     kw.setdefault("require_files", False)
     return await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend", **kw,
+        node_label="generate_frontend", skipped_steps=[], **kw,
     )
 
 

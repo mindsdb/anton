@@ -65,7 +65,7 @@ async def test_run_loop_allows_no_files_when_not_required(tmp_path: Path):
         kickoff="k",
         artifact_path=tmp_path,
         require_files=False,
-        node_label="fetch_data_sample",
+        node_label="fetch_data_sample", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["files_written"] == []
@@ -80,7 +80,7 @@ async def test_run_loop_still_requires_files_by_default(tmp_path: Path):
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend",
+        node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, str)
     assert "without writing any files" in result
@@ -108,7 +108,7 @@ async def test_run_loop_records_scratchpad_execs(tmp_path: Path, monkeypatch):
     result = await _run_loop(
         session=session, system="s", kickoff="k",
         artifact_path=tmp_path, require_files=False,
-        node_label="fetch_data_sample",
+        node_label="fetch_data_sample", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["scratchpad_execs"] == [
@@ -139,15 +139,111 @@ async def test_run_loop_records_no_cell_that_never_ran(tmp_path: Path, monkeypat
             ToolCall(id="3", name="finish", input={"summary": "done"}),
         ])
     )
+    skipped: list = []
     result = await _run_loop(
         session=session, system="s", kickoff="k",
         artifact_path=tmp_path, require_files=False,
-        node_label="fetch_data_sample",
+        node_label="fetch_data_sample", skipped_steps=skipped,
     )
     assert isinstance(result, dict)
     assert result["scratchpad_execs"] == [
         {"name": "pad", "code": "print(df.head())", "output": "cell 2 ok: 100 rows", "ok": True}
     ]
+    assert skipped == [], "a chat card's refusal is no read-only refusal"
+
+
+def _read_only_refusal(change: str):
+    from anton.core.utils.scratchpad import WRITE_REFUSED_READ_ONLY, ReadOnlyRefusal
+
+    return ReadOnlyRefusal(content=f"Not run: the page builder only reads data, and this step would {change}",
+                           ok=True, reason=WRITE_REFUSED_READ_ONLY, change=change)
+
+
+async def test_run_loop_records_the_steps_it_skipped_read_only(tmp_path: Path, monkeypatch):
+    """The page builder only reads: a step the gate refused that way goes
+    into the caller's list with its description and what it would change,
+    so the result can name it, and it is no data-access code that ran. A
+    refused reset skips no data."""
+    import anton.core.tools.tool_handlers as tool_handlers
+    from anton.core.tools.generate_artifact.state import SkippedStep
+    from anton.core.tools.registry import ToolOutcome
+    from anton.core.utils.scratchpad import WRITE_REFUSED_READ_ONLY
+
+    reset = ToolOutcome(content="Not run: the page builder only reads data", ok=True, reason=WRITE_REFUSED_READ_ONLY)
+    monkeypatch.setattr(tool_handlers, "handle_scratchpad", AsyncMock(side_effect=[
+        _read_only_refusal("change data in a connected source"), reset,
+        _read_only_refusal("overwrite `report.pdf`"), "cell ok",
+    ]))
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(_resp([
+        ToolCall(id="1", name="scratchpad", input={"action": "exec", "name": "pad", "code": "update()",
+                                                   "one_line_description": "Update the suppliers"}),
+        ToolCall(id="2", name="scratchpad", input={"action": "reset", "name": "pad"}),
+        ToolCall(id="3", name="scratchpad", input={"action": "exec", "name": "pad", "code": "save()"}),
+        ToolCall(id="4", name="scratchpad", input={"action": "exec", "name": "pad", "code": "read()"}),
+        ToolCall(id="9", name="finish", input={"summary": "done"}),
+    ]))
+    earlier = SkippedStep(description="Load the sites", change="run code the check couldn't read")
+    skipped = [earlier]
+    result = await _run_loop(session=session, system="s", kickoff="k", artifact_path=tmp_path,
+                             require_files=False, node_label="fetch_data_sample", skipped_steps=skipped)
+    assert skipped == [
+        earlier,
+        SkippedStep(description="Update the suppliers", change="change data in a connected source"),
+        SkippedStep(description="", change="overwrite `report.pdf`"),
+    ], "appended after the steps the caller's list already held"
+    assert "skipped_steps" not in result
+    assert [e["code"] for e in result["scratchpad_execs"]] == ["read()"]
+    assert [c.kwargs for c in tool_handlers.handle_scratchpad.await_args_list] == [{"origin": "page_builder"}] * 4
+
+
+async def test_every_run_loop_ending_keeps_the_skipped_steps(tmp_path: Path, monkeypatch):
+    """A loop that ends without `finish`, runs out of rounds or out of
+    budget, or fails with an error string, has still put each step it
+    skipped read-only in the caller's list."""
+    from types import SimpleNamespace
+
+    import anton.core.tools.generate_artifact.engine as engine_mod
+    import anton.core.tools.tool_handlers as tool_handlers
+    from anton.core.tools.generate_artifact.spend import WIND_DOWN_ROUNDS
+
+    monkeypatch.setattr(tool_handlers, "handle_scratchpad",
+                        AsyncMock(return_value=_read_only_refusal("change data in a connected source")))
+    exec_call = _resp([ToolCall(id="1", name="scratchpad", input={"action": "exec", "name": "pad", "code": "x"})])
+    prose = LLMResponse(content="that is all", tool_calls=[], usage=Usage(input_tokens=1, output_tokens=1),
+                        stop_reason="end_turn")
+    finish = _resp([ToolCall(id="2", name="finish", input={"summary": "couldn't get the sites"})])
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(exec_call)
+
+    async def ending(*, require_files: bool, **kw) -> tuple[object, int]:
+        skipped: list = []
+        result = await _run_loop(session=session, system="s", kickoff="k", artifact_path=tmp_path,
+                                 require_files=require_files, node_label="generate_frontend",
+                                 skipped_steps=skipped, **kw)
+        return result, len(skipped)
+
+    for require_files, expected in ((False, dict), (True, str)):
+        session._llm.code_stream = _stream_mock(prose)
+        stopped, count = await ending(require_files=require_files)
+        assert (type(stopped), count) == (expected, 1)
+    assert stopped.startswith("generator stopped without writing files")
+
+    session._llm.code_stream = _stream_mock(finish)
+    finished, count = await ending(require_files=True)
+    assert (finished, count) == ("generator finished without writing any files.", 1)
+
+    monkeypatch.setattr(engine_mod, "MAX_ROUNDS", 2)
+    session._llm.code_stream = _stream_mock(exec_call)
+    for require_files, expected in ((False, dict), (True, str)):
+        exhausted, count = await ending(require_files=require_files)
+        assert (type(exhausted), count) == (expected, 2)
+    assert exhausted.startswith("generator exceeded round budget")
+
+    # Each wind-down round runs its cell; the one after them stops the loop.
+    monkeypatch.setattr(engine_mod, "MAX_ROUNDS", WIND_DOWN_ROUNDS + 2)
+    over, count = await ending(require_files=False, spend=SimpleNamespace(should_wind_down=lambda: True))
+    assert (over.get("over_budget"), count) == (True, WIND_DOWN_ROUNDS)
 
 
 async def test_run_loop_records_a_cell_that_left_out_action(tmp_path: Path, monkeypatch):
@@ -168,7 +264,7 @@ async def test_run_loop_records_a_cell_that_left_out_action(tmp_path: Path, monk
     result = await _run_loop(
         session=session, system="s", kickoff="k",
         artifact_path=tmp_path, require_files=False,
-        node_label="fetch_data_sample",
+        node_label="fetch_data_sample", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["scratchpad_execs"] == [
@@ -195,7 +291,7 @@ async def test_run_loop_rejects_write_file_without_content(tmp_path: Path):
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        require_files=False, node_label="generate_frontend",
+        require_files=False, node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["files_written"] == []
@@ -215,7 +311,7 @@ async def test_run_loop_rejects_write_file_with_empty_content(tmp_path: Path):
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        require_files=False, node_label="generate_frontend",
+        require_files=False, node_label="generate_frontend", skipped_steps=[],
     )
     assert not (tmp_path / "index.html").exists()
 
@@ -245,7 +341,7 @@ async def test_a_truncated_body_writes_nothing(tmp_path: Path):
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        require_files=False, node_label="generate_frontend",
+        require_files=False, node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["files_written"] == []
@@ -276,7 +372,7 @@ async def test_a_body_without_write_file_still_answers_the_reply_s_other_tool_ca
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend",
+        node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict) and result["files_written"] == ["index.html"]
     assert (tmp_path / "index.html").read_text() == "<h1>Hi</h1>"
@@ -346,7 +442,7 @@ async def test_run_loop_writes_when_response_is_not_capped(tmp_path: Path):
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend",
+        node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["files_written"] == ["index.html"]
@@ -369,7 +465,7 @@ async def test_run_loop_ignores_unknown_token_cap(tmp_path: Path):
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend",
+        node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["files_written"] == ["index.html"]
@@ -396,7 +492,7 @@ async def test_append_mode_builds_a_file_across_rounds(tmp_path: Path):
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend",
+        node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["files_written"] == ["d.html"]
@@ -422,7 +518,7 @@ async def test_a_second_write_in_one_reply_is_refused(tmp_path: Path):
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        require_files=False, node_label="generate_frontend",
+        require_files=False, node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["files_written"] == []
@@ -461,7 +557,7 @@ async def test_truncation_is_caught_by_stop_reason_when_no_cap_is_readable(tmp_p
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        require_files=False, node_label="generate_frontend",
+        require_files=False, node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert not (tmp_path / "d.html").exists()
@@ -484,7 +580,7 @@ async def test_round_budget_with_files_hands_them_to_the_caller(tmp_path: Path):
 
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend",
+        node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["finished"] is False
@@ -505,7 +601,7 @@ async def test_round_budget_without_files_is_still_an_error(tmp_path: Path):
     with patch.object(tool_handlers, "handle_scratchpad", AsyncMock(return_value="ok")):
         result = await _run_loop(
             session=session, system="s", kickoff="k", artifact_path=tmp_path,
-            node_label="generate_frontend",
+            node_label="generate_frontend", skipped_steps=[],
         )
     assert isinstance(result, str)
     assert "round budget" in result
@@ -532,7 +628,7 @@ async def test_round_budget_of_a_fetch_without_files_hands_the_cells_to_the_call
 
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        require_files=False, node_label="fetch_data_sample",
+        require_files=False, node_label="fetch_data_sample", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["finished"] is False
@@ -552,7 +648,7 @@ async def test_finished_flag_is_true_on_a_clean_finish(tmp_path: Path):
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend",
+        node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["finished"] is True
@@ -577,7 +673,7 @@ async def test_rounds_left_note_rides_on_every_tool_result_message(tmp_path: Pat
 
     await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend",
+        node_label="generate_frontend", skipped_steps=[],
     )
     # The messages of the LAST round contain every earlier round's results.
     final_messages = captured[-1]
@@ -624,7 +720,7 @@ async def test_every_round_gets_the_raised_budget_including_round_zero(
     )
     await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend",
+        node_label="generate_frontend", skipped_steps=[],
     )
     assert session._llm.plan_stream.call_args.kwargs["max_tokens"] == GEN_WRITE_MAX_TOKENS
     assert session._llm.code_stream.call_args.kwargs["max_tokens"] == GEN_WRITE_MAX_TOKENS
@@ -664,7 +760,7 @@ async def test_a_top_effort_raises_each_rounds_budget_to_its_roles_write_budget(
     )
     await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend",
+        node_label="generate_frontend", skipped_steps=[],
     )
     assert session._llm.plan_stream.call_args.kwargs["max_tokens"] == 128000
     assert session._llm.code_stream.call_args.kwargs["max_tokens"] == 32768
@@ -698,7 +794,7 @@ async def test_truncation_on_a_write_round_is_judged_against_its_own_budget(
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend",
+        node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["files_written"] == ["index.html"]
@@ -747,7 +843,7 @@ async def test_dropped_stream_is_retried_once_with_a_halved_budget(tmp_path: Pat
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend",
+        node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["files_written"] == ["index.html"]
@@ -775,7 +871,7 @@ async def test_a_second_drop_in_the_same_round_propagates(tmp_path: Path):
     with pytest.raises(TransientProviderError):
         await _run_loop(
             session=session, system="s", kickoff="k", artifact_path=tmp_path,
-            node_label="generate_frontend",
+            node_label="generate_frontend", skipped_steps=[],
         )
     assert session._llm.code_stream.call_count == 2
 
@@ -805,7 +901,7 @@ async def test_read_text_file_paths_are_relative_to_the_artifact_folder(tmp_path
     )
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        require_files=False, node_label="generate_frontend",
+        require_files=False, node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert [call["path"] for call in seen] == [
@@ -870,7 +966,7 @@ async def _read_result_through_the_loop(tmp_path: Path, path: str) -> str:
     session._llm.code_stream = Mock(side_effect=_finish)
     result = await _run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        require_files=False, node_label="generate_frontend",
+        require_files=False, node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, dict)
     tool_results = [
@@ -931,7 +1027,7 @@ async def test_run_loop_marks_a_cell_the_runtime_reported_as_failed(tmp_path: Pa
     ]))
     result = await _run_loop(
         session=session, system="s", kickoff="k",
-        artifact_path=tmp_path, require_files=False, node_label="fetch_data_sample",
+        artifact_path=tmp_path, require_files=False, node_label="fetch_data_sample", skipped_steps=[],
     )
     assert result["scratchpad_execs"][0]["ok"] is False
 
@@ -948,7 +1044,7 @@ async def test_a_fetch_that_ends_in_prose_keeps_the_cells_it_ran(tmp_path: Path,
     session._llm.code_stream = _stream_mock(_resp([], body="Fetched 13 site rows into `rows`."))
     result = await _run_loop(
         session=session, system="s", kickoff="k",
-        artifact_path=tmp_path, require_files=False, node_label="fetch_data_sample",
+        artifact_path=tmp_path, require_files=False, node_label="fetch_data_sample", skipped_steps=[],
     )
     assert isinstance(result, dict)
     assert result["finished"] is False
@@ -962,7 +1058,7 @@ async def test_a_writer_that_ends_in_prose_still_fails(tmp_path: Path):
     session._llm.plan_stream = _stream_mock(_resp([], body="I would write the page now."))
     result = await _run_loop(
         session=session, system="s", kickoff="k",
-        artifact_path=tmp_path, node_label="generate_frontend",
+        artifact_path=tmp_path, node_label="generate_frontend", skipped_steps=[],
     )
     assert isinstance(result, str)
     assert "generator stopped without writing files" in result

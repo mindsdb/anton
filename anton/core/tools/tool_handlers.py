@@ -20,6 +20,9 @@ from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.utils.scratchpad import (
     SCRATCHPAD_ACTIONS,
+    WRITE_REFUSED_READ_ONLY,
+    CardOrigin,
+    log_builder_pad_refusal,
     scratchpad_action,
     prepare_scratchpad_exec,
     format_cell_result,
@@ -1803,6 +1806,11 @@ _OUT_OF_REPAIRS_REFUSED = (
     "Error: generate_artifact does not rebuild `{slug}` again this turn, since a page in it has no repair cells "
     "left ({pages}). Do not edit it again this turn: tell the user what its last browser check found."
 )
+# Joins the instruction of a `browser_check_failed` result that carries
+# `warnings`: the steps the page builder skipped.
+_SKIPPED_STEPS_INSTRUCTION = (
+    "`warnings` names the steps the page builder skipped: tell the user in one sentence which ones."
+)
 _CHANGES_INSTRUCTION = (
     "`changes_from_previous` names the views this build broke (`broke`), left without a graphic (`blank`), "
     "removed (`removed`) or left fewer than half their marks (`shrank`), against the page as it was before this "
@@ -1875,8 +1883,32 @@ def _data_unavailable(reason: str) -> str:
         "IMPORTANT: do NOT build the artifact yourself — no write_file / "
         "scratchpad fallback. Tell the user which data is missing and where "
         "it was looked for, and ask them to connect the source or provide "
-        "the data. Once they do, call generate_artifact again and pass the "
-        "data in `known_data`, naming the scratchpad and cell it lives in."
+        "the data. Once they do, call generate_artifact again: the reason's "
+        "last line says whether data passed in `known_data` can stand in for it."
+    )
+
+
+def _data_skipped_read_only(*, reason: str) -> str:
+    """Report a run whose data step stopped after the page builder skipped
+    steps that would have needed the user's approval, naming each one.
+
+    Apart from `_data_unavailable` on purpose: the data may well be there.
+    The builder only reads, so it didn't run those steps, and they may be
+    why the data isn't there. The reason's last line says whether data
+    passed in `known_data` can stand in for the reads
+    (`orchestrator._known_data_line`); otherwise the agent tells the user
+    what the builder couldn't get, and may ask for the source.
+    """
+    return (
+        "Error: the page builder couldn't get the data this artifact needs. It only reads data, so it skipped "
+        "the steps below, which would have needed the user's approval, and they may be why the data isn't "
+        "there.\n\n"
+        f"{reason}\n\n"
+        "IMPORTANT: do NOT build the artifact yourself (no write_file / scratchpad fallback), and don't run "
+        "these steps yourself unless the user asked for them. The reason's last line says whether data passed "
+        "in `known_data` can stand in for these reads. Where it can't, or the data isn't in this chat, tell the "
+        "user which data the page builder couldn't get, and why, and ask them to connect the source or provide "
+        "the data."
     )
 
 
@@ -2352,8 +2384,11 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         handled = True
         if restored is not None:
             _record_put_back(session, previous_page[0], restored)
+        # A crash's notes name the steps the page builder skipped before it
+        # (`engine.generate`).
+        crashed = "\n".join([f"generator crashed: {exc}", *getattr(exc, "__notes__", ())])
         yield ToolOutcome(
-            content=_with_put_back(failure_context(f"generator crashed: {exc}"), restored),
+            content=_with_put_back(failure_context(crashed), restored),
             ok=False,
             reason=type(exc).__name__,
         )
@@ -2378,15 +2413,17 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         yield await _browser_check_failed_outcome(session, store=store, slug=slug, folder=folder, result=result)
         return
     if isinstance(result, str):
-        from anton.core.tools.generate_artifact.state import NOT_ENOUGH_DATA_PREFIX
+        from anton.core.tools.generate_artifact.state import NOT_ENOUGH_DATA_PREFIX, SKIPPED_READ_ONLY_PREFIX
 
         # A failed run still worked inside the artifact folder on its way to
         # failing, so the turn touched the artifact.
         _track_artifact(session, store, slug, summary="Generated artifact files")
-        content = (
-            _data_unavailable(result) if result.startswith(NOT_ENOUGH_DATA_PREFIX)
-            else _generation_failed(result)
-        )
+        if result.startswith(NOT_ENOUGH_DATA_PREFIX):
+            content = _data_unavailable(result)
+        elif result.startswith(SKIPPED_READ_ONLY_PREFIX):
+            content = _data_skipped_read_only(reason=result)
+        else:
+            content = _generation_failed(result)
         yield ToolOutcome(
             content=_with_put_back(failure_context(content), restored), ok=False, reason="pipeline"
         )
@@ -2468,7 +2505,8 @@ async def _browser_check_failed_outcome(
     made worse then goes back to how the turn found it, as after a cell
     (`TurnPages.should_restore`), and the result says so instead of what
     the build's check found. Either way the page is kept as it is then
-    (`TurnPages.hold`)."""
+    (`TurnPages.hold`). When the page builder skipped steps, `warnings`
+    names them on every one of these results."""
     import asyncio
 
     from anton.core.artifacts import render_check
@@ -2486,6 +2524,10 @@ async def _browser_check_failed_outcome(
         "views_measured": render_check.view_coverage(views=result.views).checked,
         "repair_cells": left,
     }
+    skipped_note = ""
+    if result.warnings:
+        outcome["warnings"] = list(result.warnings)
+        skipped_note = f" {_SKIPPED_STEPS_INSTRUCTION}"
     if left == 0:
         # A rebuild of a page that already spent its repair cells this turn.
         turn_pages = turn_pages_of(session)
@@ -2496,7 +2538,7 @@ async def _browser_check_failed_outcome(
                 before = None
         if before is None:
             record_page_checks(session, checks={}, out_of_repairs=frozenset({key}))
-            body = {**outcome, "instruction": _BUILD_FAILED_NO_REPAIRS_LEFT}
+            body = {**outcome, "instruction": _BUILD_FAILED_NO_REPAIRS_LEFT + skipped_note}
         else:
             # The page the turn found, with how it fared then: no status
             # when no check this turn vouched for it.
@@ -2506,7 +2548,7 @@ async def _browser_check_failed_outcome(
             )
             body = {
                 **{name: value for name, value in outcome.items() if name not in ("findings", "views_measured")},
-                "instruction": _BUILD_RESTORED_NO_REPAIRS_LEFT,
+                "instruction": _BUILD_RESTORED_NO_REPAIRS_LEFT + skipped_note,
             }
         if turn_pages is not None:
             await asyncio.to_thread(turn_pages.hold, (key,), store)
@@ -2520,7 +2562,7 @@ async def _browser_check_failed_outcome(
     if changes.found:
         outcome["changes_from_previous"] = changes._asdict()
         instruction = f"{instruction} {_CHANGES_INSTRUCTION}"
-    text = json.dumps({**outcome, "instruction": instruction}, indent=2)
+    text = json.dumps({**outcome, "instruction": instruction + skipped_note}, indent=2)
     if result.screenshot is None or render_screenshots_refused(session):
         return ToolOutcome(content=text, ok=True)
     blocks = render_check.screenshot_blocks(result.screenshot, page=f"{slug}/{result.page}")
@@ -2713,7 +2755,7 @@ async def handle_memorize(
 
 
 async def handle_scratchpad(
-    session: ChatSession, tc_input: dict
+    session: ChatSession, tc_input: dict, *, origin: CardOrigin = "chat"
 ) -> str | ToolOutcome:
     """Dispatch a scratchpad tool call by action.
 
@@ -2721,6 +2763,15 @@ async def handle_scratchpad(
     failure verdict, so the error streak doesn't re-classify the result by
     reading it (ENG-1276). The other actions still return plain strings
     (legacy substring classification).
+
+    `origin` says whose step it is. The tool registry calls this with the
+    chat's; only the page builder's loops pass "page_builder", and nothing
+    reads it from `tc_input`. With write approval on, the write gate refuses
+    the builder's exec where a chat cell would get a card
+    (`hold_unapproved_write`). Whatever the setting, the builder neither
+    resets nor removes a scratchpad: it works in the chat's scratchpads, and
+    a reset would clear the chat's variables and the earlier cells the
+    write check reads.
     """
     action = scratchpad_action(tc_input)
     name = tc_input.get("name", "")
@@ -2752,7 +2803,7 @@ async def handle_scratchpad(
         # path (ChatSession.turn_stream) also calls — so they fire on both
         # paths. A str return is a message the call should not run past
         # (empty code, single-scratchpad challenge, or install failure).
-        result = await prepare_scratchpad_exec(session, tc_input)
+        result = await prepare_scratchpad_exec(session, tc_input, origin=origin)
         if isinstance(result, ToolOutcome):
             return result
         pad, code, description, estimated_time, estimated_seconds = result
@@ -2824,6 +2875,21 @@ async def handle_scratchpad(
         # a successful view of a failed cell as a fresh tool failure
         # (ENG-1276 false positive).
         return ToolOutcome(content=pad.view(), ok=True)
+
+    elif action in ("reset", "remove") and origin == "page_builder":
+        # Whatever the write approval setting: a reset clears a pad the
+        # chat's data lives in, along with the earlier cells the write check
+        # reads; a removal drops the pad.
+        log_builder_pad_refusal(action=action)
+        return ToolOutcome(
+            content=(
+                "Not run: the page builder doesn't reset or remove a scratchpad. It works in the chat's "
+                "scratchpads, and that would clear the conversation's earlier cells or a scratchpad the chat "
+                "uses. Keep working in the scratchpad as it is."
+            ),
+            ok=True,
+            reason=WRITE_REFUSED_READ_ONLY,
+        )
 
     elif action == "reset":
         pad = session._scratchpads.pads.get(name)

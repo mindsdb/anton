@@ -1193,7 +1193,7 @@ async def test_a_text_kickoff_refused_over_an_image_is_not_resent(tmp_path):
     with pytest.raises(_ImagePart400):
         await engine._run_loop(
             session=session, system="s", kickoff="write the page", artifact_path=tmp_path,
-            node_label="generate_frontend",
+            node_label="generate_frontend", skipped_steps=[],
         )
 
     assert model.images == [0]

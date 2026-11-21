@@ -209,7 +209,7 @@ async def test_wind_down_injects_a_closing_instruction_into_the_write_loop(tmp_p
 
     result = await engine._run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend", require_files=False,
+        node_label="generate_frontend", skipped_steps=[], require_files=False,
         spend=SpendGuard(session=session),
     )
     assert any("call `finish`" in s for s in seen)
@@ -233,7 +233,7 @@ async def test_the_write_loop_ends_when_its_closing_rounds_run_out(tmp_path):
 
     result = await engine._run_loop(
         session=session, system="s", kickoff="k", artifact_path=tmp_path,
-        node_label="generate_frontend", require_files=False,
+        node_label="generate_frontend", skipped_steps=[], require_files=False,
         spend=SpendGuard(session=session),
     )
     assert result["over_budget"] is True
@@ -269,7 +269,7 @@ async def test_each_parallel_loop_gets_its_own_closing_rounds(tmp_path):
         )
         return await engine._run_loop(
             session=local, system="s", kickoff="k", artifact_path=tmp_path,
-            node_label=f"generate_{label}", require_files=False, spend=guard,
+            node_label=f"generate_{label}", skipped_steps=[], require_files=False, spend=guard,
         )
 
     await asyncio.gather(_loop("backend"), _loop("frontend"))
@@ -295,7 +295,7 @@ async def test_the_data_loop_runs_under_the_guard(tmp_path):
 
     orig, engine._run_loop = engine._run_loop, _fake_loop
     try:
-        await orchestrator._fetch_data_sample(state)
+        await orchestrator._fetch_data_sample(state=state)
     finally:
         engine._run_loop = orig
 
@@ -319,7 +319,7 @@ async def test_a_data_fetch_that_runs_out_of_budget_is_not_reported_as_data(tmp_
 
     orig, engine._run_loop = engine._run_loop, _fake_loop
     try:
-        note, ok = await orchestrator._fetch_data_sample(state)
+        note, ok, _ = await orchestrator._fetch_data_sample(state=state)
     finally:
         engine._run_loop = orig
 
