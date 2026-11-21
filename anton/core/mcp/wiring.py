@@ -43,18 +43,13 @@ Three entry points:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections import Counter
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from anton.core.mcp.access import AccessMode
-from anton.core.mcp.client import McpSession, log_session_failure
-from anton.core.mcp.egress import check_server_url, resolve_public
-from anton.core.mcp.errors import McpEgressBlocked
-from anton.core.mcp.names import registrable_tool_name
-from anton.core.mcp.registry import discover_tool_defs, marked_read_only
+from anton.core.mcp.client import McpSession
+from anton.core.mcp.registry import discover_tool_defs
 from anton.core.mcp.servers import mcp_server_url
 
 if TYPE_CHECKING:
@@ -62,10 +57,6 @@ if TYPE_CHECKING:
     from anton.core.tools.tool_defs import ToolDef
 
 logger = logging.getLogger(__name__)
-
-#: Engine of every connection to an MCP server a user added by URL. Its
-#: record carries `_server_url`, `_allowed_tools` (a JSON list) and `_label`.
-CUSTOM_MCP_ENGINE = "custom_mcp"
 
 
 def _method_of(vault: "DataVault", engine: str, name: str) -> str | None:
@@ -151,8 +142,6 @@ async def _discover_one(
     `discover_mcp_tools_async` can run every connection concurrently via
     `asyncio.gather` — a bad connector never fails the whole turn over it,
     it just contributes `([], None)`."""
-    if engine == CUSTOM_MCP_ENGINE:
-        return await _discover_custom(vault, name)
     url = mcp_server_url(engine)
     if url is None:
         logger.warning("discover_mcp_tools: no known MCP server URL for engine %s", engine)
@@ -162,87 +151,22 @@ async def _discover_one(
         logger.warning("discover_mcp_tools: no access token for %s/%s", engine, name)
         return [], None
 
-    return await _open_and_discover(
-        McpSession(url=url, access_token=access_token),
-        engine=engine,
-        name=name,
-        access_mode=_access_mode_of(vault, engine, name),
-        connection_name=name if disambiguate else None,
-    )
-
-
-async def _discover_custom(vault: "DataVault", name: str) -> tuple[list["ToolDef"], McpSession | None]:
-    """Discover a user-added server's tools: its own URL, a guarded session,
-    and only the tools listed in `_allowed_tools`. Tool names always carry
-    the connection, since `custom_mcp` alone says nothing about the server.
-    A URL that fails the check or an unreadable tool list skips the
-    connection before any request."""
-    fields = (vault.read_record(CUSTOM_MCP_ENGINE, name) or {}).get("fields") or {}
-    url = str(fields.get("_server_url") or "")
-    try:
-        check_server_url(url)
-    except McpEgressBlocked as exc:
-        logger.warning("discover_mcp_tools: custom MCP connection %s skipped: %s", name, exc)
-        return [], None
-    allowed_tools = _allowed_tools_of(fields)
-    if allowed_tools is None:
-        logger.warning("discover_mcp_tools: custom MCP connection %s has no readable tool list", name)
-        return [], None
-    access_token = (vault.load(CUSTOM_MCP_ENGINE, name) or {}).get("access_token") or None
-    return await _open_and_discover(
-        McpSession(url=url, access_token=access_token, guarded=True),
-        engine=CUSTOM_MCP_ENGINE,
-        name=name,
-        access_mode=_access_mode_of(vault, CUSTOM_MCP_ENGINE, name),
-        connection_name=name,
-        allowed_tools=allowed_tools,
-        display_name=str(fields.get("_label") or name),
-    )
-
-
-def _allowed_tools_of(fields: dict[str, Any]) -> frozenset[str] | None:
-    """The tool names a custom connection's `_allowed_tools` JSON list holds,
-    or None when it is missing or not a list of strings."""
-    raw = fields.get("_allowed_tools")
-    if not isinstance(raw, str):
-        return None
-    try:
-        names = json.loads(raw)
-    except ValueError:
-        return None
-    if not isinstance(names, list) or not all(isinstance(item, str) for item in names):
-        return None
-    return frozenset(names)
-
-
-async def _open_and_discover(
-    mcp_session: McpSession,
-    *,
-    engine: str,
-    name: str,
-    access_mode: AccessMode,
-    connection_name: str | None,
-    allowed_tools: frozenset[str] | None = None,
-    display_name: str | None = None,
-) -> tuple[list["ToolDef"], McpSession | None]:
-    """Open `mcp_session` and discover its tools; a failure at either step
-    is logged and yields `([], None)` with the session closed."""
+    mcp_session = McpSession(url=url, access_token=access_token)
     try:
         await mcp_session.__aenter__()
     except Exception:
-        log_session_failure(logger, mcp_session, "discover_mcp_tools: failed to open MCP session for %s/%s", engine, name)
+        logger.exception("discover_mcp_tools: failed to open MCP session for %s/%s", engine, name)
         return [], None
     try:
+        access_mode = _access_mode_of(vault, engine, name)
         tool_defs = await discover_tool_defs(
             mcp_session,
             engine=engine,
             access_mode=access_mode,
-            connection_name=connection_name,
-            allowed_tools=allowed_tools,
-            display_name=display_name,
+            connection_name=name if disambiguate else None,
         )
     except Exception:
-        log_session_failure(logger, mcp_session, "discover_mcp_tools: tool discovery failed for %s/%s", engine, name)
+        logger.exception("discover_mcp_tools: tool discovery failed for %s/%s", engine, name)
         await mcp_session.__aexit__(None, None, None)
         return [], None
     return tool_defs, mcp_session
@@ -267,42 +191,7 @@ async def close_mcp_sessions(sessions: list[McpSession]) -> None:
         try:
             await session.__aexit__(None, None, None)
         except Exception:
-            log_session_failure(logger, session, "close_mcp_sessions: error closing an MCP session")
-
-
-@dataclass(frozen=True)
-class ServerTool:
-    """One tool a custom server offers, as the connect screen shows it."""
-
-    name: str
-    description: str
-    read_only: bool
-
-
-async def list_custom_server_tools(url: str, access_token: str | None, *, connection_name: str) -> list[ServerTool]:
-    """The tools the custom server at `url` offers, for the user to switch on.
-
-    Checks the URL and looks the host up before opening a guarded session,
-    so `McpHostUnresolved` is raised for a name that does not resolve,
-    `McpEgressBlocked` for a URL or address anton will not connect to, and
-    `McpTokenRejected` for a refused token. `read_only` is true only when the
-    server marks the tool read only. Tools discovery would leave out under
-    `connection_name` are left out here too, so the user never switches on a
-    tool that cannot register.
-    """
-    host, port = check_server_url(url)
-    await resolve_public(host, port)
-    async with McpSession(url=url, access_token=access_token, guarded=True) as mcp_session:
-        tools = await mcp_session.list_tools()
-    return [
-        ServerTool(
-            name=tool.name,
-            description=tool.description or "",
-            read_only=marked_read_only(tool),
-        )
-        for tool in tools
-        if registrable_tool_name(CUSTOM_MCP_ENGINE, tool.name, connection_name=connection_name) is not None
-    ]
+            logger.exception("close_mcp_sessions: error closing an MCP session")
 
 
 async def call_mcp_tool(engine: str, access_token: str, tool_name: str, **kwargs: Any) -> str | list[dict]:

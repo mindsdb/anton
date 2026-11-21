@@ -3,7 +3,6 @@ import io
 import json
 import os
 import sys
-import threading
 import traceback
 
 import dill
@@ -11,13 +10,8 @@ import dill
 from anton.core.backends.wire import (
     CELL_DELIM,
     CELL_FILENAME,
-    CELL_IMAGES_MARKER,
     CELL_TRACE_MARKER,
-    CLASSIFY_ENV,
-    ARTIFACTS_ROOT_ENV,
     EXPLAINABILITY_QUERIES_NAME,
-    IMAGE_MARKER,
-    IMAGE_MODEL_ENV,
     INTERNET_RESEARCH_ENV,
     MISSING_MODULE_HINT,
     RESULT_START,
@@ -64,7 +58,7 @@ except ValueError:
 _SESSION_EXCLUDE_ALWAYS = frozenset({"__builtins__", EXPLAINABILITY_QUERIES_NAME})
 
 # Helpers this module injects. They are excluded because they are rebuilt fresh each
-# boot and some (`get_llm`, `web_search`, `query_minds_data`, `call_minds_api`) close over live network
+# boot and some (`get_llm`, `web_search`, `query_minds_data`) close over live network
 # clients that must not be pickled or carried between processes.
 #
 # Excluded BY IDENTITY, not by name (`_INJECTED_HELPERS` below). Excluding by name
@@ -471,12 +465,6 @@ namespace[EXPLAINABILITY_QUERIES_NAME] = []
 # loop sets it from the cell's CELL_TRACE_MARKER line.
 _cell_trace = None
 
-# The turn's image allowance for the running cell (CELL_IMAGES_MARKER), and the
-# images generate_image() took from it. "allowed" None: not offered this cell.
-# Taken under the lock: a cell can call the helper from several threads at once.
-_cell_images = {"made": 0, "allowed": None, "spend_limit": False}
-_cell_images_lock = threading.Lock()
-
 # --- Inject get_llm() for LLM access from scratchpad code ---
 _scratchpad_model = os.environ.get("ANTON_SCRATCHPAD_MODEL", "")
 if _scratchpad_model:
@@ -623,7 +611,7 @@ if _scratchpad_model:
                 except _llm_asyncio.CancelledError:
                     pass
 
-        async def _with_fresh_provider(call, role="coding"):
+        async def _with_fresh_provider(call):
             """Await ``call(provider)`` on a provider built for this call, then close it.
 
             A provider's HTTP pool keeps each connection bound to the event
@@ -642,7 +630,7 @@ if _scratchpad_model:
             # does not reach an asyncio.run loop on a worker thread.
             trace_token = set_trace_context(_cell_trace)
             try:
-                with call_role(role):
+                with call_role("coding"):
                     return await _run_with_heartbeat(call(provider))
             finally:
                 reset_trace_context(trace_token)
@@ -922,302 +910,13 @@ if _scratchpad_model:
                 "unavailable. Answer from the connected data sources and the user's files."
             )
 
-        def _send_image_event(record):
-            with _wire_lock:
-                _real_stdout.write(IMAGE_MARKER + " " + json.dumps(record) + "\n")
-                _real_stdout.flush()
-
-        def _pad_path(value):
-            """A path argument as an absolute path, mapped like the host tool's `_image_path`:
-            `.anton/artifacts/...` under the artifacts root (a cloud pod's mount), else the workspace."""
-            from pathlib import Path as _Path
-
-            text = os.fspath(value)
-            path = _Path(text).expanduser()
-            if path.is_absolute():
-                return path
-            parts = _Path(text.replace("\\", "/")).parts
-            artifacts_root = os.environ.get(ARTIFACTS_ROOT_ENV)
-            if artifacts_root and parts[:2] == (".anton", "artifacts"):
-                return _Path(artifacts_root).joinpath(*parts[2:])
-            return _Path(_resolved_workspace() or os.getcwd()) / path
-
-        def generate_image(prompt, *, size=None, quality=None, reference_images=None, path=None):
-            """Generate one image with the configured image model, save it, return its path.
-
-            ``reference_images`` (paths of PNG, JPEG or WebP files) makes it an
-            edit. ``size`` is WIDTHxHEIGHT (1024x1024, 1536x1024, 1024x1536) or
-            "auto"; ``quality`` is "auto", "low", "medium" or "high". The image
-            is written to ``path`` (relative to the project, or absolute, such
-            as a file in an artifact's folder; a taken name gets "-2", "-3",
-            ...; the extension .png, .jpg or .webp picks the format), else as
-            an image artifact of its own in the project's artifacts folder.
-            Returns the absolute path of the file written. Raises with a message to relay
-            when the provider refuses, and before any request once the turn's
-            image allowance is used up.
-            """
-            from anton.core.llm import images as _images
-
-            if _scratchpad_provider_name not in ("openai", "openai-compatible"):
-                raise RuntimeError(
-                    "generate_image() needs a MindsHub or OpenAI connection, and this "
-                    "scratchpad's model provider has no images API."
-                )
-            if _cell_images["allowed"] is None:
-                raise RuntimeError("generate_image() is not available in this conversation.")
-            if not isinstance(prompt, str) or not prompt.strip():
-                raise ValueError("generate_image() needs a non-empty prompt")
-            size = _images.normalize_size(size)
-            quality = _images.normalize_quality(quality)
-            output_format = _images.output_format_for(str(path) if path else None)
-            if isinstance(reference_images, (str, os.PathLike)):
-                reference_images = [reference_images]
-            reference_images = list(reference_images or [])
-            if len(reference_images) > _images.MAX_REFERENCE_IMAGES:
-                raise ValueError(
-                    f"at most {_images.MAX_REFERENCE_IMAGES} reference images can be passed, "
-                    f"not {len(reference_images)}"
-                )
-            refs = [_images.load_reference_image(_pad_path(ref)) for ref in reference_images]
-            api_key = _current_llm_api_key() or _llm_provider_kwargs.get("api_key")
-            model = _images.resolve_image_model(
-                os.environ.get(IMAGE_MODEL_ENV) or os.environ.get("ANTON_IMAGE_MODEL"),
-                base_url=_llm_base_url,
-                api_key=api_key,
-                verify=_llm_ssl_verify,
-                mindshub=_images.is_mindshub_endpoint(_llm_flavor, _llm_base_url),
-            )
-            # Checked and taken just before the request, so a bad argument never
-            # uses a slot. A sent request keeps it: a refusal may still be billed.
-            with _cell_images_lock:
-                allowed = _cell_images["allowed"] or 0
-                if _cell_images["made"] >= allowed:
-                    why = (
-                        "this turn reached its spend limit" if _cell_images["spend_limit"]
-                        else "this turn has used up its images (ANTON_MAX_IMAGES_PER_TURN)"
-                    )
-                    raise RuntimeError(
-                        f"generate_image() refused: {why}, so no request was sent. Use the "
-                        "images made so far and ask the user before making more."
-                    )
-                _cell_images["made"] += 1
-            _send_image_event({"event": "sent"})
-            usage = None
-            try:
-                result = _llm_asyncio.run(
-                    _with_fresh_provider(
-                        lambda provider: provider.generate_image(
-                            model=model,
-                            prompt=prompt,
-                            size=size,
-                            quality=quality,
-                            output_format=output_format,
-                            reference_images=refs,
-                        ),
-                        role=_images.IMAGE_ROLE,
-                    )
-                )
-                usage = result.usage
-            except _images.ImageGenerationError as exc:
-                usage = exc.usage
-                raise
-            finally:
-                if usage is not None:
-                    _send_image_event({
-                        "event": "usage",
-                        "model": model,
-                        "input": usage.input_tokens,
-                        "output": usage.output_tokens,
-                        "image_input": usage.image_input_tokens,
-                        "image_output": usage.image_output_tokens,
-                    })
-            if path:
-                target = _pad_path(path)
-                saved = _images.write_new_image_file(
-                    result.data, target.parent, target.stem or "image", result.extension
-                )
-                return str(saved.resolve())
-            # An image artifact of its own, like the tool's: the artifacts
-            # folder is the one every host keeps and shows, where a cloud
-            # pod's workspace may be a copy nothing syncs back.
-            from anton.core.artifacts.store import ArtifactStore
-
-            store = ArtifactStore(str(_pad_path(".anton/artifacts")))
-            stem = _images.file_stem(None, prompt)
-            title = _images.image_title(None, prompt)
-            artifact = store.create(
-                name=title,
-                description=(("Edited image: " if refs else "Generated image: ") + prompt)[:500],
-                type="image",
-                primary=f"{stem}.{result.extension}",
-            )
-            directory = store.folder_for(artifact.slug)
-            try:
-                # The conversation and turn this cell runs for, first in the
-                # provenance, as the host's artifact tools record theirs: it is
-                # how the host claims a folder that appeared during the cell.
-                conversation = getattr(_cell_trace, "session_id", None)
-                if conversation:
-                    turn = getattr(_cell_trace, "turn_id", None)
-                    store.record_turn(
-                        artifact.slug,
-                        conversation_id=str(conversation),
-                        conversation_title=None,
-                        turn_index=turn if isinstance(turn, int) else 0,
-                        summary=f"Generated image: {title}",
-                        files_touched=[],
-                    )
-                saved = _images.write_new_image_file(result.data, directory, stem, result.extension)
-            except BaseException:
-                # No empty image artifact left behind, as the host tool does.
-                from anton.utils.nofollow import rmtree_nofollow
-
-                with contextlib.suppress(OSError, ValueError):
-                    rmtree_nofollow(store.root, directory)
-                raise
-            return str(saved.resolve())
-
         _inject_helper("get_llm", get_llm)
         _inject_helper("agentic_loop", agentic_loop)
-        _inject_helper("generate_image", generate_image)
         # A stub rather than no name: a NameError would read as a missing package.
         _inject_helper(
             "web_search",
             _web_search_off if os.environ.get(INTERNET_RESEARCH_ENV) == "off" else web_search,
         )
-
-        from anton.core.llm import jev as _jev
-        from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url
-        from anton.core.llm.tracing import JEV_CALL_ROLE
-
-        # Jev is served by the MindsHub gateway only.
-        _jev_ready = _scratchpad_provider_name in (
-            "openai", "openai-compatible"
-        ) and classify_base_url(_llm_base_url or "") == ENDPOINT_MINDSHUB
-        # One budget for the whole pad, shared by concurrent calls.
-        _jev_pacer = _jev.Pacer(_jev.CLASSIFY_PER_MINUTE)
-        _JEV_PROGRESS_INTERVAL = 10.0
-        _JEV_OFF = (
-            "classify() and classify_yes_no() need the MindsHub gateway, and this "
-            "session's model runs elsewhere. Label the texts with get_llm() instead, "
-            "many texts per generate_object call."
-        )
-
-        def _run_decisions(texts, question):
-            # list() would split a str into characters and a dict into its keys.
-            if isinstance(texts, (str, bytes, dict)):
-                raise TypeError(
-                    "texts must be a list of texts, not a single "
-                    f"{type(texts).__name__}: wrap one text in a list, such as [text]"
-                )
-            items = list(texts)
-            if any(not isinstance(item, (str, dict)) for item in items):
-                raise TypeError("each text must be a str (or a dict of fields)")
-            if not items:
-                return []
-            api_key = _current_llm_api_key() or _llm_provider_kwargs.get("api_key")
-            if not api_key:
-                raise RuntimeError("No MindsHub key is available to this scratchpad.")
-
-            async def run():
-                trace_token = set_trace_context(_cell_trace)
-                try:
-                    with call_role(JEV_CALL_ROLE):
-                        headers = _jev.detach_conversation(_llm_provider.trace_headers())
-                finally:
-                    reset_trace_context(trace_token)
-                import time
-
-                last = [time.monotonic()]
-
-                def on_progress(done, total):
-                    now = time.monotonic()
-                    if now - last[0] >= _JEV_PROGRESS_INTERVAL:
-                        last[0] = now
-                        progress(f"Classified {done}/{total}")
-
-                import httpx2
-
-                async with httpx2.AsyncClient(
-                    timeout=_jev.CLASSIFY_TIMEOUT_S, verify=_llm_ssl_verify
-                ) as client:
-                    return await _jev.decide_many(
-                        items,
-                        question,
-                        base_url=_llm_base_url,
-                        api_key=api_key,
-                        pacer=_jev_pacer,
-                        headers=headers,
-                        client=client,
-                        on_progress=on_progress,
-                    )
-
-            return _llm_asyncio.run(run())
-
-        def classify(texts, categories, *, question="Which category does this text belong to?"):
-            """Label each text with exactly one of ``categories``, using Jev.
-
-            ``texts``: a list of strings (or dicts of fields). ``categories``: a
-            list of names, or a dict of name -> description. Returns one dict per
-            text, in order: {"label", "p", "probabilities"}; on a failed item
-            "label" is None and "error" says why. Texts go out in batches of up to
-            about 200 per request, each judged on its own.
-            """
-            built = _jev.choice_question(categories, question)
-            return [_jev.choice_result(d) for d in _run_decisions(texts, built)]
-
-        def classify_yes_no(texts, question, *, yes=None, no=None):
-            """Answer one yes/no ``question`` about each text, using Jev.
-
-            ``yes`` / ``no`` optionally describe each outcome. Returns one dict per
-            text, in order: {"yes", "p_yes"}; on a failed item "yes" is None and
-            "error" says why. Batched like classify().
-            """
-            built = _jev.yes_no_question(question, yes=yes, no=no)
-            return [_jev.yes_no_result(d) for d in _run_decisions(texts, built)]
-
-        def _classify_off(*args, **kwargs):
-            raise RuntimeError(_JEV_OFF)
-
-        def _classify_turned_off(*args, **kwargs):
-            raise RuntimeError(
-                "classify() and classify_yes_no() are turned off for this session. Label the "
-                "texts with get_llm() instead, many texts per generate_object call."
-            )
-
-        if os.environ.get(CLASSIFY_ENV) == "off":
-            _classify_helper = _classify_yes_no_helper = _classify_turned_off
-        elif _jev_ready:
-            _classify_helper, _classify_yes_no_helper = classify, classify_yes_no
-        else:
-            _classify_helper = _classify_yes_no_helper = _classify_off
-
-        # Only for a pad that uses Jev: _llm_base_url exists for openai-compatible
-        # providers alone, so an Anthropic pad must not reach it.
-        if _classify_helper is classify:
-            import logging
-
-            _jev_url_prefix = f"{(_llm_base_url or '').rstrip('/')}/decisions"
-
-            class _DropDecisionRequestLogs(logging.Filter):
-                """Drop httpx2's per-request INFO line for decision calls.
-
-                The pad captures INFO logs into the cell output, where a long
-                labelling run would add one line per request.
-                """
-
-                def filter(self, record):
-                    args = record.args if isinstance(record.args, tuple) else ()
-                    return not (
-                        str(record.msg).startswith("HTTP Request")
-                        and len(args) > 1
-                        and str(args[1]).startswith(_jev_url_prefix)
-                    )
-
-            logging.getLogger("httpx2").addFilter(_DropDecisionRequestLogs())
-
-        _inject_helper("classify", _classify_helper)
-        _inject_helper("classify_yes_no", _classify_yes_no_helper)
     except Exception:
         pass  # LLM not available — not fatal (e.g. anthropic not installed)
 
@@ -1479,236 +1178,6 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_DATASOURCE_CONNECTIONS"):
         # The prompt still advertises the helper, so say on the controller's
         # stderr why the agent will meet a NameError instead of it.
         print(f"cloud datasource helper not injected: malformed connection references ({type(exc).__name__})",
-              file=sys.stderr)
-
-# --- Inject the turn-key-bound custom API helper ---
-if _cloud_turn and os.environ.get("ANTON_CLOUD_CUSTOM_API_CONNECTIONS"):
-    try:
-        import base64 as _custom_base64
-        import http.client as _custom_http
-        import ssl as _custom_ssl
-        import urllib.parse as _custom_parse
-
-        # The gateway is on the inference host this child already calls, with the
-        # same turn key. Never the ANTON_OPENAI_* fallbacks get_llm reads.
-        _custom_gateway_url = os.environ.get("OPENAI_BASE_URL", "").strip().rstrip("/")
-        _custom_turn_key = os.environ.get("OPENAI_API_KEY", "")
-        _custom_correlation_id = os.environ.get("ANTON_CLOUD_CUSTOM_API_CORRELATION_ID", "")
-        _custom_versions = {
-            int(ref["connection_id"]): int(ref["credential_version"])
-            for ref in json.loads(os.environ["ANTON_CLOUD_CUSTOM_API_CONNECTIONS"])
-            if isinstance(ref, dict)
-        }
-        # The gateway's closed vocabulary (mindshub_inference's
-        # docs/contracts/custom-api-request-v1.json). A body naming anything
-        # else is not relayed: an error code must not become a channel into the
-        # agent's context.
-        _custom_gateway_codes = frozenset({
-            "unauthorized", "gateway_disabled", "invalid_request", "invalid_connection",
-            "authorization_unavailable", "destination_forbidden", "redirect_refused",
-            "encoding_refused", "timed_out", "response_too_large", "rate_limited",
-            "upstream_unavailable",
-        })
-        # The gateway's fixed 422 details that name what to fix. Only an exact
-        # match adds a part; the detail text itself is never relayed.
-        _custom_refused_parts = {
-            "Custom API request path is not allowed.": "path",
-            "Custom API request query is not allowed.": "query",
-            "Custom API request headers is not allowed.": "headers",
-            "Custom API request may not carry the turn key.": "turn_key",
-        }
-        _custom_media_types = frozenset({
-            "application/json", "text/plain", "text/csv", "text/html", "application/xml",
-            "application/pdf", "application/octet-stream",
-        })
-        _custom_answer_keys = frozenset({
-            "protocol_version", "connection_id", "credential_version", "status", "headers",
-            "body", "body_encoding",
-        })
-        # A 1 MiB answer JSON-escaped is at most about 6 MiB.
-        _custom_read_cap = 8_388_608
-
-        def _custom_error(code, part=None):
-            """The helper's error result, with the part to fix when the gateway named one."""
-            error = {"type": "error", "error_code": code}
-            if part is not None:
-                error["part"] = part
-            return error
-
-        def _custom_query_pairs(query):
-            """``query`` as the wire's [name, value] string pairs, or None when it cannot be sent.
-
-            A dict or a list of 2-item pairs; names are text, values text or
-            numbers (sent as Python writes them), never booleans.
-            """
-            if query is None:
-                return []
-            if isinstance(query, dict):
-                items = list(query.items())
-            elif isinstance(query, (list, tuple)):
-                items = []
-                for pair in query:
-                    if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-                        return None
-                    items.append(tuple(pair))
-            else:
-                return None
-            pairs = []
-            for name, value in items:
-                if not isinstance(name, str) or isinstance(value, bool):
-                    return None
-                if isinstance(value, str):
-                    pairs.append([name, value])
-                elif isinstance(value, (int, float)):
-                    try:
-                        pairs.append([name, str(value)])
-                    except ValueError:
-                        # An int past Python's digit limit has no text form to send.
-                        return None
-                else:
-                    return None
-            return pairs
-
-        def _custom_post(payload):
-            """One POST over a verified TLS connection. http.client never follows
-            a redirect, so the bearer cannot be replayed to wherever a response
-            points; a 3xx is just a failed status to the caller."""
-            parsed = _custom_parse.urlsplit(_custom_gateway_url)
-            connection = _custom_http.HTTPSConnection(
-                parsed.hostname, parsed.port or 443, timeout=30, context=_custom_ssl.create_default_context()
-            )
-            try:
-                connection.request(
-                    "POST",
-                    "/v1/datasources/custom-api/request",
-                    body=payload,
-                    headers={
-                        "Authorization": f"Bearer {_custom_turn_key}",
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
-                    },
-                )
-                response = connection.getresponse()
-                return response.status, response.read(_custom_read_cap + 1)
-            finally:
-                connection.close()
-
-        def _custom_refusal(body):
-            """The gateway's own code (and part) from a refusal body; any other body is an outage."""
-            try:
-                error = json.loads(body.decode("utf-8")) if len(body) <= 65_536 else None
-            except (ValueError, RecursionError):
-                return _custom_error("custom_api_unavailable")
-            code = error.get("code") if isinstance(error, dict) else None
-            if not isinstance(code, str) or code not in _custom_gateway_codes:
-                return _custom_error("custom_api_unavailable")
-            detail = error.get("detail")
-            part = _custom_refused_parts.get(detail) if code == "invalid_request" and isinstance(detail, str) else None
-            return _custom_error(code, part)
-
-        def _custom_answer(body, connection_id):
-            """The result for the gateway's 200, or invalid_custom_api_response when it is not the contract's answer."""
-            invalid = _custom_error("invalid_custom_api_response")
-            try:
-                answer = json.loads(body.decode("utf-8"))
-            except (ValueError, RecursionError):
-                return invalid
-            if not isinstance(answer, dict) or set(answer) != _custom_answer_keys:
-                return invalid
-            expected = {
-                "protocol_version": 1,
-                "connection_id": connection_id,
-                "credential_version": _custom_versions[connection_id],
-            }
-            # A result that does not echo this exact binding is not this call's answer.
-            if not all(type(answer[key]) is type(value) and answer[key] == value for key, value in expected.items()):
-                return invalid
-            status, headers = answer["status"], answer["headers"]
-            body_text, encoding = answer["body"], answer["body_encoding"]
-            if type(status) is not int or not 100 <= status <= 999:
-                return invalid
-            if not isinstance(headers, dict) or set(headers) - {"content-type"}:
-                return invalid
-            if headers and (
-                not isinstance(headers["content-type"], str) or headers["content-type"] not in _custom_media_types
-            ):
-                return invalid
-            if not isinstance(body_text, str) or encoding not in ("text", "base64"):
-                return invalid
-            if encoding == "base64":
-                try:
-                    _custom_base64.b64decode(body_text, validate=True)
-                except ValueError:
-                    return invalid
-            return {
-                "type": "response",
-                "status": status,
-                "headers": dict(headers),
-                "body": body_text,
-                "body_encoding": encoding,
-            }
-
-        def call_minds_api(connection_id, path, query=None, headers=None):
-            """Call a custom API connection of this turn with one GET, through the gateway.
-
-            The gateway adds the credentials and the address the user saved;
-            this turn holds neither. Returns {'type': 'response', 'status',
-            'headers', 'body', 'body_encoding'} or {'type': 'error',
-            'error_code'[, 'part']}.
-            """
-            try:
-                if (
-                    isinstance(connection_id, bool)
-                    or not isinstance(connection_id, int)
-                    or connection_id not in _custom_versions
-                    or not isinstance(path, str)
-                    or not path.startswith("/")
-                ):
-                    return _custom_error("invalid_custom_api_request")
-                pairs = _custom_query_pairs(query)
-                if pairs is None:
-                    return _custom_error("invalid_custom_api_request")
-                if headers is None:
-                    headers = {}
-                if not isinstance(headers, dict) or not all(
-                    isinstance(name, str) and isinstance(value, str) for name, value in headers.items()
-                ):
-                    return _custom_error("invalid_custom_api_request")
-                parsed_url = _custom_parse.urlsplit(_custom_gateway_url)
-                if (
-                    parsed_url.scheme != "https"
-                    or not parsed_url.hostname
-                    or parsed_url.username is not None
-                    or parsed_url.password is not None
-                    or parsed_url.path != "/v1"
-                    or parsed_url.query
-                    or parsed_url.fragment
-                ):
-                    return _custom_error("gateway_unavailable")
-                payload = json.dumps(
-                    {
-                        "protocol_version": 1,
-                        "connection_id": connection_id,
-                        "credential_version": _custom_versions[connection_id],
-                        "correlation_id": _custom_correlation_id,
-                        "request": {"method": "GET", "path": path, "query": pairs, "headers": dict(headers)},
-                    },
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                status, body = _custom_post(payload)
-                if status != 200:
-                    return _custom_refusal(body)
-                if len(body) > _custom_read_cap:
-                    return _custom_error("response_too_large")
-                return _custom_answer(body, connection_id)
-            except (_custom_http.HTTPException, TimeoutError, ValueError, OSError):
-                return _custom_error("custom_api_unavailable")
-
-        _inject_helper("call_minds_api", call_minds_api)
-    except (KeyError, TypeError, ValueError) as exc:
-        # The prompt still advertises the helper, so say on the controller's
-        # stderr why the agent will meet a NameError instead of it.
-        print(f"cloud custom API helper not injected: malformed connection references ({type(exc).__name__})",
               file=sys.stderr)
 
 # Read-execute loop
@@ -2070,18 +1539,6 @@ while True:
     if eof:
         break
 
-    _cell_image_allowance = None
-    _cell_spend_limit = False
-    if lines and lines[0].startswith(CELL_IMAGES_MARKER + " {"):
-        try:
-            _images_line = json.loads(lines.pop(0)[len(CELL_IMAGES_MARKER):])
-            _allowed = _images_line.get("allowed")
-            _cell_spend_limit = _images_line.get("spend_limit") is True
-        except (ValueError, AttributeError):
-            _allowed = None
-        if isinstance(_allowed, int) and not isinstance(_allowed, bool):
-            _cell_image_allowance = max(0, _allowed)
-
     _cell_trace = None
     # The JSON object's "{" keeps a cell line like `__ANTON_CELL_TRACE__ = 1` code.
     if lines and lines[0].startswith(CELL_TRACE_MARKER + " {"):
@@ -2123,18 +1580,6 @@ while True:
         # re-shipped duplicate chunk, never a skipped one.
         _cell_out["shipped"] = 0
         _cell_out["buf"] = out_buf
-        with _cell_images_lock:
-            _cell_images["made"] = 0
-            _cell_images["allowed"] = _cell_image_allowance
-            _cell_images["spend_limit"] = _cell_spend_limit
-        # Bound only while the host offers it this turn; an agent's own binding of the name stays.
-        _image_helper = _INJECTED_HELPERS.get("generate_image")
-        if _image_helper is not None:
-            if _cell_image_allowance is None:
-                if namespace.get("generate_image") is _image_helper:
-                    del namespace["generate_image"]
-            else:
-                namespace.setdefault("generate_image", _image_helper)
         error = None
         # The line of its own code the cell stopped at, read from the
         # traceback rather than from the error's text, which the cell shapes.

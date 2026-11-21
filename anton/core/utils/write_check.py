@@ -1766,16 +1766,6 @@ _MAPPER_METHODS = frozenset({"apply", "map", "transform", "agg", "aggregate", "a
 _STR_METHODS = frozenset({
     "format", "strip", "lstrip", "rstrip", "replace", "upper", "lower", "decode", "encode",
 })
-# str methods that return a number or a flag about their text, which carries none of it.
-_STR_FACTS = frozenset({"count", "find", "rfind", "index", "rindex", "startswith", "endswith"})
-# str methods and re or sqlparse calls that return pieces of their text, and can't run
-# code (re.sub can, through a function replacement). Their result counts as
-# going nowhere only when it is used up where it is made: stored anywhere, a
-# later cell can't read the pieces back, so it keeps the card.
-_STR_PIECES = frozenset({
-    "split", "rsplit", "splitlines", "partition", "rpartition", "removeprefix", "removesuffix", "casefold",
-})
-_RE_PIECES = frozenset({"re.findall", "re.finditer", "re.split", "sqlparse.split"})
 # List and set methods that add an item: the item goes wherever the list goes.
 _ADDERS = frozenset({"append", "extend", "insert", "add"})
 _EXEC_CALLS = frozenset({"exec", "eval", "compile"})
@@ -7407,7 +7397,6 @@ class _Reach(IntEnum):
 
 def _reaches_a_runner(
     node: ast.AST, reader: _Reader, *, depth: int = 0, followed: set[int] | None = None, any_handle: bool = False,
-    pieces: bool = False,
 ) -> _Reach:
     """Where a statement's value can go: the furthest of its uses.
 
@@ -7426,9 +7415,8 @@ def _reaches_a_runner(
     cell = reader.cell_of(node)
     parent = cell.parents.get(node)
 
-    def on(target: ast.AST, *, made_pieces: bool = False) -> _Reach:
-        return _reaches_a_runner(target, reader, depth=depth + 1, followed=followed, any_handle=any_handle,
-                                 pieces=pieces or made_pieces)
+    def on(target: ast.AST) -> _Reach:
+        return _reaches_a_runner(target, reader, depth=depth + 1, followed=followed, any_handle=any_handle)
 
     def via(uses: Sequence[ast.AST]) -> _Reach:
         fresh = [u for u in uses if id(u) not in followed]
@@ -7509,8 +7497,7 @@ def _reaches_a_runner(
         # Storing into an entry of it reads nothing out of it.
         if node is parent.value and not isinstance(parent.ctx, (ast.Store, ast.Del)):
             return on(parent)
-        # Pieces of read text stored as a key or into an entry keep the card.
-        return _Reach.ELSEWHERE if pieces else _Reach.NOWHERE
+        return _Reach.NOWHERE
     if isinstance(parent, ast.comprehension):
         if node is not parent.iter:
             return _Reach.NOWHERE
@@ -7519,30 +7506,22 @@ def _reaches_a_runner(
             return _Reach.ELSEWHERE
         comp = cell.parents[parent]
         body = [comp.key, comp.value] if isinstance(comp, ast.DictComp) else [comp.elt]
-        # A filter reads the name too, as `if cur.execute(q)` does.
-        body += parent.ifs
-        for g in comp.generators[comp.generators.index(parent) + 1:]:
-            body += [g.iter, *g.ifs]
+        body += [g.iter for g in comp.generators[comp.generators.index(parent) + 1:]]
         return via([u for n in names for u in _loads_in(body, n)])
     if isinstance(parent, (ast.For, ast.AsyncFor)):
         names = _target_names(parent.target) if node is parent.iter else None
-        # A loop's name outlives the loop, holding a piece a later cell can't read back.
-        if names is None or pieces:
+        if names is None:
             return _Reach.ELSEWHERE
         return via([u for n in names for u in _loads_in(parent.body, n)])
     if isinstance(parent, ast.Attribute):
         if parent.attr in _ADDERS or isinstance(parent.ctx, (ast.Store, ast.Del)):
             # Adding to a list, or setting an attribute: the value's own uses
             # carry what it holds.
-            return _Reach.ELSEWHERE if pieces else _Reach.NOWHERE
+            return _Reach.NOWHERE
         call = cell.parents.get(parent)
         called = isinstance(call, ast.Call) and call.func is parent
         if parent.attr in _MAPPER_METHODS and called:
             return into(call.args[0], call) if call.args else _Reach.ELSEWHERE
-        if parent.attr in _STR_FACTS and called:
-            return _Reach.NOWHERE
-        if parent.attr in _STR_PIECES:
-            return on(call if called else parent, made_pieces=True)
         if parent.attr in _STR_METHODS or parent.attr == "join" or parent.attr in _CARRIERS:
             return on(call if called else parent)
         if called:
@@ -7575,10 +7554,8 @@ def _reaches_a_runner(
             return on(parent)
         if isinstance(func, ast.Attribute) and func.attr == "format":
             return on(parent)
-        if name in _RE_PIECES:
-            return on(parent, made_pieces=True)
         if isinstance(func, ast.Attribute) and func.attr in _ADDERS:
-            if pieces or not isinstance(func.value, ast.Name):
+            if not isinstance(func.value, ast.Name):
                 return _Reach.ELSEWHERE
             return via_names({func.value.id}, at=parent)
         if _is_harmless_call(parent, reader) or not any_handle and _executes_on_local(parent, reader):
@@ -7587,8 +7564,6 @@ def _reaches_a_runner(
             return _Reach.RUNNER if _is_statement(node, parent) else _Reach.ELSEWHERE
         # A pad function may run the parameter it gets; any other call may too.
         return max(_Reach.ELSEWHERE, via(_parameter_uses(parent, value, reader)))
-    if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.AugAssign)) and pieces:
-        return _Reach.ELSEWHERE
     if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.AugAssign)):
         targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
         # Into a name, or an entry or attribute of one such as df['sql'] when

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import mcp
-import mcp_types
 import pytest
 
 from anton.core.mcp.client import McpSession
@@ -166,68 +164,3 @@ async def test_call_tool_never_retries_a_real_task_cancellation(stub_mcp_server,
             await session.call_tool("add", {"a": 1, "b": 1})
 
     assert calls["n"] == 1  # no retry attempted
-
-
-async def test_a_guarded_session_retry_logs_no_part_of_its_url_path(caplog):
-    secret = "SECRET-PATH-7f3a"
-    error = RuntimeError(f"Client error for url 'https://mcp.example.com/{secret}/mcp'")
-
-    class _FailingClient:
-        async def call_tool(self, name, arguments):
-            raise error
-
-    session = McpSession(url=f"https://mcp.example.com/{secret}/mcp", guarded=True)
-    session._client = _FailingClient()
-
-    async def failed_reconnect():
-        raise error
-
-    session._reconnect = failed_reconnect
-    caplog.set_level("DEBUG")
-    with pytest.raises(McpTransientError):
-        await session.call_tool("add", {"a": 1})
-    assert "reconnect failed" in caplog.text
-    assert secret not in caplog.text
-    assert all(record.exc_info is None for record in caplog.records)
-
-
-def test_a_guarded_session_round_trip_log_names_only_the_host(caplog):
-    session = McpSession(url="https://mcp.example.com/SECRET-PATH-7f3a/mcp", guarded=True)
-    caplog.set_level("DEBUG")
-    session._log_round_trip("tools/list()", time.monotonic() - 1)
-    assert "host=mcp.example.com" in caplog.text
-    assert "SECRET-PATH-7f3a" not in caplog.text
-    assert caplog.records[-1].levelname == "WARNING"
-
-
-def _paged_server(page_count: int, *, endless: bool = False):
-    """A stub `mcp.Client.list_tools` that serves one tool per page."""
-    cursors_seen: list[str | None] = []
-
-    async def list_tools(self, *, cursor=None, **kwargs):
-        cursors_seen.append(cursor)
-        index = 0 if cursor is None else int(cursor)
-        last = not endless and index == page_count - 1
-        return mcp_types.ListToolsResult(
-            tools=[mcp_types.Tool(name=f"tool_{index}", input_schema={"type": "object"})],
-            next_cursor=None if last else str(index + 1),
-        )
-
-    return list_tools, cursors_seen
-
-
-async def test_list_tools_follows_the_page_cursor_to_the_last_page(stub_mcp_server, monkeypatch):
-    list_tools, cursors_seen = _paged_server(3)
-    monkeypatch.setattr(mcp.Client, "list_tools", list_tools)
-    async with McpSession(server=stub_mcp_server) as session:
-        tools = await session.list_tools()
-    assert [tool.name for tool in tools] == ["tool_0", "tool_1", "tool_2"]
-    assert cursors_seen == [None, "1", "2"]
-
-
-async def test_list_tools_stops_a_server_that_never_ends_its_pages(stub_mcp_server, monkeypatch):
-    list_tools, cursors_seen = _paged_server(0, endless=True)
-    monkeypatch.setattr(mcp.Client, "list_tools", list_tools)
-    async with McpSession(server=stub_mcp_server) as session:
-        tools = await session.list_tools()
-    assert len(tools) == len(cursors_seen) == 20

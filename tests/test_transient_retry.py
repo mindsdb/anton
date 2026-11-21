@@ -130,13 +130,6 @@ def test_velocity_429_without_a_hint_still_backs_off():
         # A spent organization budget, which lifts only when it resets or an admin raises it.
         (402, {"error": {"code": "budget_exceeded"}}),
         (402, {"code": "budget_exceeded"}),
-        # A spent subscription plan window: it lifts when the
-        # window resets or the org adds credit, and no retry budget waits it out.
-        (429, {"error": {"code": "window_allowance_exhausted"}}),
-        (429, {"code": "window_allowance_exhausted"}),
-        # A model outside the plan's tier: lifts on upgrade or credit only.
-        (403, {"error": {"code": "model_not_in_tier"}}),
-        (403, {"code": "model_not_in_tier"}),
         # OpenAI's own quota dialect.
         (429, {"error": {"code": "insufficient_quota"}}),
         (429, {"code": "insufficient_quota"}),
@@ -475,8 +468,6 @@ def _mapped_gate_denial(status, code):
     (402, "wallet_empty"),
     (429, "included_allowance_exhausted"),
     (429, "free_air_daily_spend_fuse_exceeded"),
-    (429, "window_allowance_exhausted"),
-    (403, "model_not_in_tier"),
     (402, "budget_exceeded"),
 ])
 async def test_a_gate_billing_stop_fails_the_turn_on_the_first_attempt(status, code):

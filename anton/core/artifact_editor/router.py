@@ -21,13 +21,6 @@ MindsHub, none elsewhere) the bar must not edit directly: hosts check
 :func:`route_request` answers ``agent`` / ``no_decisions_model`` without a
 call. The agent's ``edit_artifact`` does not depend on any of this.
 
-With ``allow_reply`` (ENG-4455) the question gets a third choice, ``reply``:
-a greeting, thanks or a question the artifact context already answers ("what
-does this chart show?"). The host answers it in the bar with
-:func:`reply.answer_request` instead of a full agent turn. Without it the
-question and the routes are exactly the two above, so a host that cannot
-answer in the bar never sees ``reply``.
-
 Nothing here raises.
 """
 
@@ -46,8 +39,6 @@ __all__ = [
     "ACCEPT_P",
     "CRITERIA",
     "INSTRUCTIONS",
-    "REPLY_CRITERIA",
-    "REPLY_INSTRUCTIONS",
     "RouteDecision",
     "artifact_outline",
     "decisions_available",
@@ -56,7 +47,7 @@ __all__ = [
     "route_request",
 ]
 
-Route = Literal["edit", "agent", "reply"]
+Route = Literal["edit", "agent"]
 
 # A route is taken only at or above this probability (yolocoder's threshold).
 ACCEPT_P = 0.8
@@ -110,32 +101,6 @@ CRITERIA: dict[str, str] = {
         "forecast, insight, explanation or summary of the data, a question to be answered rather than a change "
         "to make, building a different or new artifact, publishing, sharing, exporting or scheduling, or a "
         "request that is unclear."
-    ),
-}
-
-# Sent instead of INSTRUCTIONS / CRITERIA only when the host can answer in the bar (allow_reply).
-REPLY_INSTRUCTIONS = (
-    INSTRUCTIONS[: INSTRUCTIONS.index(" Choose agent when uncertain.")]
-    + " A greeting, thanks, small talk, or a question about this artifact that state.artifact is enough to "
-    "answer, needing no change to it, is a reply: answered in the bar, with nothing changed. Choose agent when "
-    "uncertain."
-)
-
-REPLY_CRITERIA: dict[str, str] = {
-    "edit": CRITERIA["edit"],
-    "agent": (
-        "Anything that needs data the artifact does not already contain (another period such as last quarter "
-        "or last year, newer or refreshed data, more rows, another source, a column or metric that is not in "
-        "its data), querying a database or datasource, data cleaning, joining, preparation or ETL, an analysis, "
-        "forecast, insight or explanation that goes beyond what state.artifact shows, a question that "
-        "state.artifact cannot answer, building a different or new artifact, publishing, sharing, exporting or "
-        "scheduling, or a request that is unclear."
-    ),
-    "reply": (
-        "A greeting, thanks or small talk, or a question about this artifact that what state.artifact shows (its "
-        "outline, data, description, recent changes and files) is enough to answer, such as what a chart or "
-        "section shows, how many slides, tabs or charts it has, or what was changed recently; it needs no change "
-        "to the artifact and no data beyond it."
     ),
 }
 
@@ -348,9 +313,7 @@ def _state(message: str, *, files: list[str], kind: str, name: str, description:
     return state
 
 
-def _questions(allow_reply: bool = False) -> dict:
-    if allow_reply:
-        return {"route": {"type": "choice", "instructions": REPLY_INSTRUCTIONS, "criteria": dict(REPLY_CRITERIA)}}
+def _questions() -> dict:
     return {"route": {"type": "choice", "instructions": INSTRUCTIONS, "criteria": dict(CRITERIA)}}
 
 
@@ -377,7 +340,6 @@ async def route_request(
     outline: str = "",
     recent_changes: list[str] | None = None,
     chat: list[dict] | None = None,
-    allow_reply: bool = False,
 ) -> RouteDecision:
     """``edit`` when Jev is sure the bar message only needs the artifact's own files; else ``agent``.
 
@@ -391,12 +353,7 @@ async def route_request(
     ``data`` / ``outline`` (see :func:`describe_artifact`); ``recent_changes``
     (the last revision summaries, newest last); ``history`` (this bar's
     messages, ``[{role, text}]``, user and assistant, the last 6) and
-    ``chat`` (the artifact's main chat, the last 4).
-
-    ``allow_reply`` (ENG-4455): also offer ``reply`` (small talk, or a
-    question the artifact context answers), for a host that answers it with
-    :func:`reply.answer_request`. Off, nothing sent or returned changes.
-    Never raises.
+    ``chat`` (the artifact's main chat, the last 4). Never raises.
     """
     started = time.monotonic()
 
@@ -422,7 +379,7 @@ async def route_request(
             base_url=_decisions_base(base_url), api_key=api_key, model=model,
             state=_state(text, files=list(files), kind=kind, name=name, description=description, data=data,
                          history=history, outline=outline, recent_changes=recent_changes, chat=chat),
-            questions=_questions(allow_reply), timeout_s=timeout_s, client=http,
+            questions=_questions(), timeout_s=timeout_s, client=http,
             headers={"User-Agent": "anton-quick-edit-router"}, retry_policy_unavailable=True,
         )
         if decision.error == "timeout":
@@ -433,7 +390,7 @@ async def route_request(
         if not isinstance(answer, dict) or answer.get("type", "choice") != "choice":
             return done("agent", 0.0, "router_error")
         choice, p = decision.choice("route")
-        if choice not in (REPLY_CRITERIA if allow_reply else CRITERIA):
+        if choice not in CRITERIA:
             return done("agent", 0.0, "router_error")
         if p >= ACCEPT_P:
             return done(choice, p, "jev")  # type: ignore[arg-type]

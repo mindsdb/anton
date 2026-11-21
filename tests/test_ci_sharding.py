@@ -148,14 +148,14 @@ def test_workflow_runs_four_isolated_shards_and_concurrent_e2e(workflow: dict) -
     assert e2e["runs-on"] == "ubuntu-latest"
     assert not e2e.get("needs")
     assert any("pytest tests/e2e/" in step.get("run", "") for step in e2e["steps"])
-    assert set(jobs["run-tests"]["needs"]) == {"unit-tests", "stub-e2e", "sandbox-packages", "windows-installer"}
+    assert set(jobs["run-tests"]["needs"]) == {"unit-tests", "stub-e2e", "windows-installer"}
     condition = str(jobs["run-tests"]["if"]).replace("${{", "").replace("}}", "").strip()
     assert condition == "always()"
 
 
 @pytest.mark.parametrize(("changed", "outcome"), [
     (None, "success"),
-    *((name, outcome) for name in ("UNIT_RESULT", "E2E_RESULT", "SANDBOX_RESULT", "WINDOWS_RESULT")
+    *((name, outcome) for name in ("UNIT_RESULT", "E2E_RESULT", "WINDOWS_RESULT")
       for outcome in ("failure", "cancelled", "skipped")),
 ])
 def test_aggregate_executes_actual_gate_for_each_job_outcome(
@@ -167,7 +167,6 @@ def test_aggregate_executes_actual_gate_for_each_job_outcome(
     assert gate["env"] == {
         "UNIT_RESULT": "${{ needs.unit-tests.result }}",
         "E2E_RESULT": "${{ needs.stub-e2e.result }}",
-        "SANDBOX_RESULT": "${{ needs.sandbox-packages.result }}",
         "WINDOWS_RESULT": "${{ needs.windows-installer.result }}",
     }
     environment = {name: "success" for name in gate["env"]}

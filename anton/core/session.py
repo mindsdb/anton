@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import contextvars
 import functools
 import hashlib
@@ -44,13 +43,6 @@ from anton.core.llm.effort import (
 )
 from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url, classify_endpoint
 from anton.core.llm.identity import DeploymentIdentity, product_lines, serving_model_lines
-from anton.core.llm.images import (
-    DEFAULT_MAX_IMAGES,
-    IMAGE_ROLE,
-    TurnImageBudget,
-    arm_turn_images,
-    disarm_turn_images,
-)
 from anton.core.llm.liveness import (
     MODEL_WAIT_PHASE,
     ModelCallTracker,
@@ -130,11 +122,10 @@ from anton.core.tools.tool_defs import (
     CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     GENERATE_ARTIFACT_TOOL,
     GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
-    GENERATE_IMAGE_TOOL,
-    GENERATE_IMAGE_TOOL_NO_PAD_HELPER,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
+    NO_INTERNET_SCRATCHPAD_TOOL,
     READ_IMAGE_TOOL,
     READ_TEXT_FILE_TOOL,
     RECALL_TOOL,
@@ -147,7 +138,6 @@ from anton.core.tools.tool_defs import (
     STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
     UPDATE_ARTIFACT_METADATA_TOOL,
-    scratchpad_tool as _scratchpad_tool_def,
     ToolDef,
 )
 from anton.core.interaction.elicit import Elicitor
@@ -1694,11 +1684,6 @@ def _render_verify_transcript(
 _EXC_UNSET = object()
 
 
-def _named_model(value: object) -> str | None:
-    """``value`` when it names a model (a non-blank string), else None."""
-    return value.strip() if isinstance(value, str) and value.strip() else None
-
-
 def _role_model(tc: TurnCost, role: str) -> str:
     """Model that ran ``role`` this turn ("" if the role never ran)."""
     slice_ = tc.by_role.get(role)
@@ -2144,24 +2129,6 @@ class ChatSession:
         # the client themselves (cowork-server) pass their settings to the
         # session, and this is how the deadline setting reaches their client.
         self._llm.model_call_idle_timeout_s = s.model_call_idle_timeout_s
-        # The image role's model, by the same route (ENG-4024). The client's
-        # own wins: `LLMClient.from_settings` already took it from settings.
-        image_model = _named_model(getattr(s, "image_model", None))
-        if image_model and not _named_model(getattr(self._llm, "image_model", None)):
-            with contextlib.suppress(AttributeError):
-                self._llm.image_model = image_model
-        max_images = getattr(s, "max_images_per_turn", DEFAULT_MAX_IMAGES)
-        # `generate_image` calls this turn, held to `max_images_per_turn`.
-        # Reset at each turn's start.
-        self._max_images_per_turn = (
-            max_images if isinstance(max_images, int) and not isinstance(max_images, bool)
-            else DEFAULT_MAX_IMAGES
-        )
-        self._images_this_turn = 0
-        # Whether `generate_image` is offered, and the pad's helper with it:
-        # None until `_settle_image_offer` decides, at each turn's start.
-        self._image_offer: bool | None = None
-        self._pad_image_offer = False
         self._self_awareness = config.self_awareness
         self._cortex = config.cortex
         self._episodic = config.episodic
@@ -2182,7 +2149,6 @@ class ChatSession:
         self._workspace = config.workspace
         self._browser_config = config.browser
         self._browser_state = None
-        self._tidy_browser = False
         self._data_vault = config.data_vault
         self._connector_usage_notes = config.connector_usage_notes
         # Kept so an artifact backend can be given the same project .env the
@@ -2354,11 +2320,6 @@ class ChatSession:
         if not inspect.iscoroutinefunction(key_supplier):
             key_supplier = None
         self._internet_research_enabled = config.internet_research_enabled
-        # classify() labels texts with Jev, which only the MindsHub gateway serves.
-        self._classify_enabled = (
-            getattr(s, "classify_jev", "on") == "on"
-            and classify_base_url(coding_conn.base_url or "") == ENDPOINT_MINDSHUB
-        )
         self._scratchpads = ScratchpadManager(
             runtime_factory=config.runtime_factory,
             coding_provider=coding_conn.provider,
@@ -2374,8 +2335,6 @@ class ChatSession:
             workspace_env_overlay=config.workspace_env_overlay,
             cell_sandbox=config.cell_sandbox,
             internet_research_enabled=config.internet_research_enabled,
-            classify_enabled=self._classify_enabled,
-            image_model=_named_model(getattr(self._llm, "image_model", None)),
         )
         # Sandboxed without live apps, nothing starts an app backend, so the
         # artifact tools and the prompt offer html-apps only.
@@ -3321,7 +3280,6 @@ class ChatSession:
             workspace_ctx = render_workspace_discovery(pin["workspace"])
 
         # Ensure the registry is populated before we extract tool prompts.
-        await self._settle_image_offer()
         self._build_tools()
         if self._cortex is not None and "read" not in self._memory_pin():
             read = self._cortex.memory_read
@@ -3353,8 +3311,6 @@ class ChatSession:
             deployment_identity=getattr(self, "_deployment_identity", None),
             fullstack_offered=getattr(self, "_fullstack_offered", True),
             internet_research=getattr(self, "_internet_research_enabled", True),
-            classify=getattr(self, "_classify_enabled", True),
-            reading_files_offered=self._reading_files_offered(),
             direct_reports=self._direct_reports_enabled(),
             proactive_dashboards=self._proactive_dashboards,
             act_first=self._act_first,
@@ -3386,10 +3342,6 @@ class ChatSession:
         "beautifulsoup4",
         "lxml",
         "pillow",
-        "pypdf",
-        "pdfplumber",
-        "pypdfium2",
-        "python-docx",
         "sympy",
         "networkx",
         "sqlalchemy",
@@ -3427,18 +3379,6 @@ class ChatSession:
         "boto3",
     }
 
-    # Every library the `reading-files` skill's code imports. Offered only where all are
-    # installed (the Web sandbox image): elsewhere the agent imports them without
-    # declaring them first, and each one costs a failed cell.
-    _READING_FILES_PACKAGES: frozenset[str] = frozenset({
-        "requests", "beautifulsoup4", "lxml", "pypdf", "pdfplumber", "pypdfium2", "python-docx", "pillow",
-    })
-
-    def _reading_files_offered(self) -> bool:
-        scratchpads = getattr(self, "_scratchpads", None)
-        installed = {p.lower() for p in (getattr(scratchpads, "available_packages", None) or [])}
-        return self._READING_FILES_PACKAGES <= installed
-
     def _build_tools(self) -> list[dict]:
         if not self.tool_registry:
             self._build_core_tools()
@@ -3468,10 +3408,7 @@ class ChatSession:
             }
             # Fail loud on a name that matches no built or deferred tool (typo /
             # unavailable here) rather than silently dropping it.
-            # `generate_image` is offered only where an images API serves it
-            # (`_settle_image_offer`), so a host may allow it unconditionally.
-            withheld = set() if getattr(self, "_image_offer", None) else {GENERATE_IMAGE_TOOL.name}
-            unknown = set(self._tool_allowlist) - built - deferred - withheld
+            unknown = set(self._tool_allowlist) - built - deferred
             if unknown:
                 raise ValueError(
                     "tool_allowlist names not registered in this session: "
@@ -3525,10 +3462,8 @@ class ChatSession:
         # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
         # .description in place would leak across every session/user sharing
         # this process instead of resetting per session.
-        scratchpad_tool = replace(_scratchpad_tool_def(
-            internet_research=getattr(self, "_internet_research_enabled", True),
-            classify=getattr(self, "_classify_enabled", True),
-        ))
+        scratchpad_tool = replace(SCRATCHPAD_TOOL if getattr(self, "_internet_research_enabled", True)
+                                  else NO_INTERNET_SCRATCHPAD_TOOL)
         pkg_list = self._scratchpads.available_packages
         if pkg_list:
             notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)
@@ -3682,11 +3617,6 @@ class ChatSession:
                 generate = route_edits_to_editor(generate)
                 self.tool_registry.register_tool(EDIT_ARTIFACT_TOOL)
             self.tool_registry.register_tool(generate)
-            # Pictures, saved as image artifacts — so also only with a
-            # workspace, and only once `_settle_image_offer` found an images
-            # API to send them to.
-            if getattr(self, "_image_offer", None):
-                self.tool_registry.register_tool(self._image_tool())
 
         # The shared browser: only when the host gave one. The credential is
         # resolved per call, so a session without one still registers it and
@@ -3695,94 +3625,6 @@ class ChatSession:
             from anton.core.browser.tool import build_browser_tool
 
             self.tool_registry.register_tool(build_browser_tool())
-
-    def _image_tool(self) -> ToolDef:
-        """`generate_image`, advertising the pad's helper only where the pad
-        can use it (`_settle_image_offer`)."""
-        return (
-            GENERATE_IMAGE_TOOL if getattr(self, "_pad_image_offer", False)
-            else GENERATE_IMAGE_TOOL_NO_PAD_HELPER
-        )
-
-    async def _settle_image_offer(self) -> None:
-        """Decide, once per turn, whether `generate_image` is offered (ENG-4024).
-
-        It needs a role on an OpenAI-API endpoint to send the call to
-        (`LLMClient.image_provider`) that serves images
-        (`_provider_offers_images`). The pad's helper goes out on the coding
-        provider, so it is offered only when that one passes the same test.
-
-        Re-checked at each turn's start (the catalogue read is cached), and the
-        registry follows: the tool is added, swapped or withdrawn.
-        """
-        if getattr(self, "_image_offer", None) is not None:
-            return
-        offered = pad_offered = False
-        try:
-            offered = await self._provider_offers_images(getattr(self._llm, "image_provider", None))
-            # The pad's helper calls the coding endpoint itself, and only the local
-            # runtime sends it the turn's allowance.
-            if offered and getattr(self._scratchpads, "pads_offer_images", False):
-                coding = getattr(self._llm, "coding_provider", None)
-                pad_offered = await self._provider_offers_images(coding, generic_ok=False)
-        except Exception:
-            logger.warning("could not decide whether to offer generate_image", exc_info=True)
-        self._image_offer = offered
-        self._pad_image_offer = pad_offered
-        if not self.tool_registry:
-            return  # `_build_core_tools` registers it on the first build
-        current = next(
-            (t for t in self.tool_registry.get_tool_defs() if t.name == GENERATE_IMAGE_TOOL.name), None,
-        )
-        if current is not None and current not in (GENERATE_IMAGE_TOOL, GENERATE_IMAGE_TOOL_NO_PAD_HELPER):
-            return  # a host's own tool of that name is left alone
-        wanted = self._image_tool() if offered and self._workspace is not None else None
-        if current is not None and current is not wanted:
-            self.tool_registry.unregister_tool(GENERATE_IMAGE_TOOL.name)
-        if wanted is not None and current is not wanted:
-            self.tool_registry.register_tool(wanted)
-
-    async def _provider_offers_images(self, provider: object, *, generic_ok: bool = True) -> bool:
-        """Whether image calls on ``provider`` can work.
-
-        - only an `OpenAIProvider` has the images API;
-        - direct OpenAI serves the images API;
-        - on MindsHub, an image model configured (settings, ANTON_IMAGE_MODEL,
-          a cloud turn's `llm["image_model"]`) or one its catalogue lists for
-          this key (read off the event loop, cached by `catalog_offers_images`);
-        - another OpenAI-compatible server is assumed to have none, unless an
-          image model is configured and ``generic_ok`` (not for the pad's helper).
-        """
-        from anton.core.llm.images import catalog_offers_images, is_mindshub_endpoint
-        from anton.core.llm.openai import OpenAIProvider
-
-        if not isinstance(provider, OpenAIProvider):
-            return False
-        configured = _named_model(getattr(self._llm, "image_model", None)) is not None
-        conn = provider.export_connection_info()
-        if is_mindshub_endpoint(conn.flavor, conn.base_url):
-            if configured:
-                return True
-            api_key = await provider.current_api_key()
-            if not conn.base_url or not api_key:
-                return False
-            return await asyncio.to_thread(
-                catalog_offers_images, conn.base_url, api_key, verify=conn.ssl_verify,
-            )
-        if conn.flavor == OpenAIProvider.FLAVOR_OPENAI:
-            return True
-        return configured and generic_ok
-
-    def _pad_image_allowance(self) -> int | None:
-        """Images the pad may still make this turn, or None when its helper is not offered."""
-        if not (getattr(self, "_image_offer", None) and getattr(self, "_pad_image_offer", False)):
-            return None
-        if self.spend_ceiling_reached():
-            return 0
-        return max(0, self._max_images_per_turn - self._images_this_turn)
-
-    def _take_pad_image(self) -> None:
-        self._images_this_turn += 1
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -3806,12 +3648,6 @@ class ChatSession:
                 # steps above raise, or the pool outlives the process.
                 try:
                     if self._browser_state is not None:
-                        # Jev may close a browser the task is done with; its tabs are noted.
-                        # A turn tidies once: after the cloud turn's own tidy
-                        # before `turn_completed`, this finds nothing to do.
-                        from anton.core.browser.tool import tidy_after_turn
-
-                        await tidy_after_turn(self)
                         await self._browser_state.aclose()
                     if self._jev_http is not None:
                         await self._jev_http.aclose()
@@ -4694,16 +4530,6 @@ class ChatSession:
             if tc.jev_checks
             else {}
         )
-        # Only on turns that made images (ENG-4024), so other turns' line
-        # stays as before. by_role already carries `image=<model>:<tokens>/<calls>`.
-        _image_log_fields = (
-            {
-                "image_input": str(tc.image_input_tokens),
-                "image_output": str(tc.image_output_tokens),
-            }
-            if tc.image_input_tokens or tc.image_output_tokens
-            else {}
-        )
         logger.info(
             # `attempt` alongside `turn`: `turn_index` is a history position,
             # so two attempts of one turn used to produce two indistinguishable
@@ -4717,7 +4543,7 @@ class ChatSession:
             "verifier_failure=%s verifier_error_type=%s tokens_total=%d "
             "input=%d output=%d cache_read=%d cache_creation=%d "
             "llm_calls=%d rounds=%d continuations=%d peak_context=%d duration_ms=%d "
-            "by_role=%s %s%s%s",
+            "by_role=%s %s%s",
             self._session_id, turn_index, tc.attempt_id, tc.ended_by,
             str(tc.verification_skipped).lower(),
             tc.grace_granted or "-", tc.grace_tokens,
@@ -4737,7 +4563,6 @@ class ChatSession:
             # not depend on it.
             " ".join(f"{k}={v}" for k, v in _root_cause_fields.items()),
             "".join(f" {k}={v}" for k, v in _jev_fields.items()),
-            "".join(f" {k}={v}" for k, v in _image_log_fields.items()),
         )
 
         # Script traffic never reaches the analytics sink (ENG-1692).
@@ -4902,15 +4727,6 @@ class ChatSession:
                 router_model=_role_model(tc, "router"),
                 router_tokens=_role_tokens(tc, "router"),
                 router_calls=_role_calls(tc, "router"),
-                # Image role (ENG-4024): `generate_image` calls. `image_tokens`
-                # is text plus image tokens; the turn-wide image components
-                # below say how much of the turn was pictures, the part that
-                # bills at image rates.
-                image_model=_role_model(tc, "image"),
-                image_tokens=_role_tokens(tc, "image"),
-                image_calls=_role_calls(tc, "image"),
-                image_input_tokens=str(tc.image_input_tokens),
-                image_output_tokens=str(tc.image_output_tokens),
                 # Should always be 0. Emitted so the per-role sum reconciles
                 # with tokens_total for ANY role a caller passes — `TurnCost.add`
                 # folds anything outside `EVENT_ROLES` into this bucket, so a
@@ -5513,9 +5329,15 @@ class ChatSession:
         # own role: it runs on Jev, not on any of the session's model slots.
         with call_role(JEV_CALL_ROLE):
             headers = provider.trace_headers()
-        # Kept out of the conversation's session, so a refused check does not
-        # mark the conversation failed.
-        headers = _jev.detach_conversation(headers)
+        # Kept out of the conversation's session: the console marks a conversation
+        # failed when any call in it fails, and a refused check is one the turn
+        # recovers from. The conversation rides in the metadata instead, so the
+        # check can still be joined to it.
+        conversation_id = headers.pop("Langfuse-Session-Id", None)
+        if conversation_id and "Langfuse-Metadata" in headers:
+            metadata = json.loads(headers["Langfuse-Metadata"])
+            metadata["conversation_id"] = conversation_id
+            headers["Langfuse-Metadata"] = json.dumps(metadata)
         if self._jev_http is None:
             # Same TLS setting as the provider, e.g. behind an intercepting proxy.
             self._jev_http = httpx.AsyncClient(timeout=self._jev_timeout_s, verify=info.ssl_verify is not False)
@@ -6329,9 +6151,6 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
-        self._images_this_turn = 0
-        # Re-decided at this turn's start (`_settle_image_offer`).
-        self._image_offer = None
         self._artifacts_touched_complete = True
         self._page_checks = {}
         self._geography_requirements = {}
@@ -6527,14 +6346,6 @@ class ChatSession:
         _turn_calls = ModelCallTracker()
         self.model_calls = _turn_calls
         _calls_token = arm_turn_tracker(_turn_calls)
-        # The pad's generate_image() shares the turn's image cap and books its
-        # calls in these books (`LocalScratchpadRuntime` reads it per cell).
-        _images_token = arm_turn_images(TurnImageBudget(
-            allowance=self._pad_image_allowance,
-            take=self._take_pad_image,
-            record_usage=functools.partial(_turn_cost_books.add, IMAGE_ROLE),
-            spend_limited=self.spend_ceiling_reached,
-        ))
 
         _turn_exc: BaseException | None = None
         _turn_raised = False
@@ -7087,8 +6898,6 @@ class ChatSession:
                 # Cross-context finalizer of an abandoned turn: the ContextVar
                 # copy dies with that task, and the newer turn keeps its own.
                 pass
-            with contextlib.suppress(ValueError):
-                disarm_turn_images(_images_token)
             if self._active_explainability is not None:
                 self._active_explainability.finalize(
                     "".join(assistant_text_parts)[:2000]
@@ -7100,16 +6909,6 @@ class ChatSession:
             # guard passes the books this turn opened so a late finalizer
             # can't close a newer turn's.
             self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
-            # The browser is tidied (by the cloud turn, else close()) only after
-            # a turn that completed and used it; a cancelled, failed, paused or
-            # limit-stopped one leaves it as it is.
-            browser = self._browser_state
-            self._tidy_browser = bool(
-                browser is not None and browser.used and not _turn_raised
-                and _turn_cost_books.ended_by == "completed"
-            )
-            if browser is not None:
-                browser.used = False
             if _turn_raised and usage_log_enabled():
                 # A turn that raised starts no end-of-turn work, so it is done now.
                 log_background_done(_turn_trace)
@@ -7337,7 +7136,6 @@ class ChatSession:
         self, user_message: str = ""
     ) -> AsyncIterator[StreamEvent]:
         """Stream one LLM call, handle tool loops, yield all events."""
-        await self._settle_image_offer()
         tools = self._build_tools()
         system = await self._build_system_prompt(user_message)
         self._compacted_this_turn = False
@@ -8022,16 +7820,6 @@ class ChatSession:
                                     "Do not repeat it. Here is the content for your reference:\n\n"
                                     + result_text
                                 )
-                            elif (
-                                tc.name == "generate_image"
-                                and tool_ok is True
-                                and isinstance(result_text, str)
-                            ):
-                                # The saved image's JSON (its project-relative
-                                # `path`, size, model, usage), so a host shows
-                                # the picture inline (ENG-4024). Only on
-                                # success: a failure has no picture to show.
-                                yield StreamToolResult(name=tc.name, content=result_text, id=tc.id)
                     except Exception as exc:
                         # A raise is a definitive failure verdict (ENG-1276).
                         result_text = f"Tool '{tc.name}' failed: {exc}"

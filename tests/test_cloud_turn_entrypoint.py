@@ -18,7 +18,6 @@ from anton.cloud_turn.__main__ import _clip_result_content, stream_turn
 from anton.core.tools.connector_draft import ConnectorDraftBox, parse_connector_draft
 from anton.core.llm.provider import (
     AllowanceExhaustedError,
-    BudgetExceededError,
     FreeServingPausedError,
     LLMResponse,
     StreamComplete,
@@ -31,8 +30,6 @@ from anton.core.llm.provider import (
     StreamToolUseStart,
     StreamTurnEnded,
     WalletEmptyError,
-    WindowAllowanceExhaustedError,
-    ModelNotInTierError,
 )
 
 
@@ -435,9 +432,6 @@ def _mapped_gate_denial(status, code):
     (429, "included_allowance_exhausted", "AllowanceExhaustedError"),
     (429, "free_air_daily_spend_fuse_exceeded", "FreeServingPausedError"),
     (402, "budget_exceeded", "BudgetExceededError"),
-    # cowork-server's _REMOTE_TYPE_MAPPINGS keys on these exact names.
-    (429, "window_allowance_exhausted", "WindowAllowanceExhaustedError"),
-    (403, "model_not_in_tier", "ModelNotInTierError"),
 ])
 def test_a_billing_stop_names_its_limit_on_the_wire(status, code, type_name):
     """A hosted turn's host reads the failure's kind from the `TypeName:`
@@ -450,10 +444,11 @@ def test_a_billing_stop_names_its_limit_on_the_wire(status, code, type_name):
     assert error.startswith(f"{type_name}: ")
     # The whole curated message fits under the wire cap, billing link included.
     assert not error.endswith("…")
-    assert error.endswith({
-        "budget_exceeded": "https://console.mindshub.ai/settings/organization/billing?tab=budgets&from=budget_denial.",
-        "window_allowance_exhausted": "to continue now, or wait for it to reset.",
-    }.get(code, "https://console.mindshub.ai/settings/organization/billing to continue."))
+    assert error.endswith(
+        "https://console.mindshub.ai/settings/organization/billing?tab=budgets."
+        if code == "budget_exceeded"
+        else "Add credits at https://console.mindshub.ai/settings/organization/billing to continue."
+    )
 
 
 def test_an_admin_model_restriction_names_itself_on_the_wire():
@@ -484,7 +479,6 @@ _RESET_AT_NORMALIZED = "2026-09-26T00:00:00+00:00"
 @pytest.mark.parametrize("error_type,reason", [
     (FreeServingPausedError, "free_air_daily_spend_fuse_exceeded"),
     (AllowanceExhaustedError, "included_allowance_exhausted"),
-    (WindowAllowanceExhaustedError, "window_allowance_exhausted"),
 ])
 def test_a_billing_stop_carries_its_reset_instant_on_the_wire(error_type, reason):
     """The `error` string has no room for when the limit lifts, so the reset
@@ -497,100 +491,6 @@ def test_a_billing_stop_carries_its_reset_instant_on_the_wire(error_type, reason
         "error": f"{error_type.__name__}: denied",
         "reset_at": _RESET_AT_NORMALIZED,
     }]
-
-
-def test_a_budget_stop_carries_its_scope_on_the_wire():
-    """The host words the card by whose budget is spent, so the scope rides the frame as `budget_scope`."""
-    events = _drive(_FakeSession(raise_on_stream=_mapped_denial(
-        status=402, body={"code": "budget_exceeded", "budget_scope": "workspace"},
-    )))
-    assert len(events) == 1
-    assert events[0]["kind"] == "turn_failed"
-    assert events[0]["budget_scope"] == "workspace"
-    assert events[0]["error"].startswith("BudgetExceededError: Server returned 402: this workspace's")
-
-
-def test_a_budget_stop_carries_its_period_on_the_wire():
-    events = _drive(_FakeSession(raise_on_stream=_mapped_denial(
-        status=402, body={"code": "budget_exceeded", "budget_scope": "team", "budget_period": "year"},
-    )))
-    assert events[0]["budget_scope"] == "team"
-    assert events[0]["budget_period"] == "year"
-    assert "your team's yearly MindsHub spending budget" in events[0]["error"]
-
-
-def test_a_per_model_budget_stop_carries_its_model_on_the_wire():
-    events = _drive(_FakeSession(raise_on_stream=_mapped_denial(
-        status=402,
-        body={"code": "budget_exceeded", "budget_scope": "team", "budget_period": "day", "budget_model": "haiku-4-5"},
-    )))
-    assert events[0]["budget_model"] == "haiku-4-5"
-    assert "your team's daily MindsHub spending budget for haiku-4-5" in events[0]["error"]
-
-
-def test_an_all_models_budget_stop_leaves_the_model_off():
-    events = _drive(_FakeSession(raise_on_stream=_mapped_denial(
-        status=402, body={"code": "budget_exceeded", "budget_scope": "team", "budget_period": "year"},
-    )))
-    assert "budget_model" not in events[0]
-
-
-@pytest.mark.parametrize("window", ["5h", "7d"])
-def test_a_plan_window_stop_carries_its_window_on_the_wire(window):
-    """The host names the spent window on the card, so it rides the
-    frame as `window` beside `reset_at`, the keys cowork-server's producer reads."""
-    stop = WindowAllowanceExhaustedError(
-        "denied", reason="window_allowance_exhausted", status_code=429,
-        reset_at=_RESET_AT, window=window,
-    )
-    events = _drive(_FakeSession(raise_on_stream=stop))
-    assert events == [{
-        "kind": "turn_failed",
-        "error": "WindowAllowanceExhaustedError: denied",
-        "reset_at": _RESET_AT_NORMALIZED,
-        "window": window,
-    }]
-
-
-def test_a_mapped_plan_window_stop_carries_its_window_on_the_wire():
-    events = _drive(_FakeSession(raise_on_stream=_mapped_denial(
-        status=429, body={"code": "window_allowance_exhausted", "window": "7d"},
-    )))
-    assert events[0]["window"] == "7d"
-    assert events[0]["error"].startswith(
-        "WindowAllowanceExhaustedError: Server returned 429: your MindsHub plan's weekly allowance"
-    )
-
-
-def test_a_model_tier_stop_carries_its_required_tier_on_the_wire():
-    """The host names the tier that covers the model, so it rides the frame as `required_tier`."""
-    events = _drive(_FakeSession(raise_on_stream=_mapped_denial(
-        status=403, body={"code": "model_not_in_tier", "required_tier": "pro"},
-    )))
-    assert len(events) == 1
-    assert events[0]["kind"] == "turn_failed"
-    assert events[0]["required_tier"] == "pro"
-    assert "reset_at" not in events[0]
-    assert events[0]["error"].startswith(
-        "ModelNotInTierError: Server returned 403: your MindsHub plan does not cover this model; it needs Pro."
-    )
-
-
-@pytest.mark.parametrize("stop", [
-    pytest.param(WindowAllowanceExhaustedError(
-        "denied", reason="window_allowance_exhausted", status_code=429), id="window"),
-    pytest.param(ModelNotInTierError(
-        "denied", reason="model_not_in_tier", status_code=403), id="tier"),
-])
-def test_a_plan_stop_without_its_field_leaves_the_key_off(stop):
-    events = _drive(_FakeSession(raise_on_stream=stop))
-    assert events == [{"kind": "turn_failed", "error": f"{type(stop).__name__}: denied"}]
-
-
-def test_a_budget_stop_without_a_scope_leaves_the_key_off():
-    stop = BudgetExceededError("denied", reason="budget_exceeded", status_code=402)
-    events = _drive(_FakeSession(raise_on_stream=stop))
-    assert events == [{"kind": "turn_failed", "error": "BudgetExceededError: denied"}]
 
 
 class _ResetLookalike(RuntimeError):
