@@ -301,6 +301,9 @@ class CallWrite(BaseModel):
     call: str
     line: int
     runs: str = ""
+    # The script the change sits in, when the step writes a script and runs
+    # it and the check read the script's text (`_same_step_script`).
+    script: str = ""
 
 
 class FileChange(BaseModel):
@@ -323,6 +326,8 @@ class FileChange(BaseModel):
     # statement it runs, as the card quotes a SQL write. A `to_sql` reads
     # "to_sql into <table>".
     statements: tuple[SqlWrite, ...] = ()
+    # The script the change sits in, as `CallWrite.script`.
+    script: str = ""
 
 
 class HttpWrite(BaseModel):
@@ -343,6 +348,8 @@ class HttpWrite(BaseModel):
     method_code: str | None = None
     # The same for the whole address, when no part of it is written out.
     url_code: str | None = None
+    # The script the request sits in, as `CallWrite.script`.
+    script: str = ""
 
 
 _HTTP_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
@@ -442,6 +449,13 @@ class CellWrites(BaseModel):
     writes_startup_hook: bool = False
     # Why it is `unchecked`, where the check can say: at most `_CAUSES_SHOWN`.
     causes: tuple[UncheckedCause, ...] = ()
+    # The scripts the step writes and runs whose text the check read, as the
+    # card names them (`_same_step_script`); and the step's code with that
+    # text in place of each run of the file, which the pad runs in place of
+    # the step's own code, so what runs is what the check read. None when
+    # the step runs as written.
+    scripts: tuple[str, ...] = ()
+    run_code: str | None = None
 
     @property
     def held_files(self) -> tuple[FileChange, ...]:
@@ -2675,7 +2689,8 @@ class _Cell:
         self, tree: ast.Module, code: str, index: int, *, host_line: int | None = None, launched: bool = False,
         host: int | None = None, shared: bool = True, namespace: str | None = None,
         order: tuple[int, ...] | None = None, inherits: bool = False, surely_run: bool = True,
-        parent_order: tuple[int, ...] | None = None,
+        parent_order: tuple[int, ...] | None = None, folder: str | None = None, search: tuple[str, ...] = (),
+        script: str = "",
     ) -> None:
         # Literal getattr and import lookups read as plain names, and the
         # plain names that now stand for a literal import (`_read_lookups_plainly`).
@@ -2711,6 +2726,14 @@ class _Cell:
         # For code a cell hands `python -c`, and the code that code runs: the
         # Python it runs in has its working folder on `sys.path`.
         self.launched = launched
+        # For a script a step writes and runs (`_same_step_script`), and the
+        # code it runs: the folder a `cwd=` runs it in, which its relative
+        # paths start from (`_cwds_of`), else None for the pad's; the
+        # folders under the project an import may reach beside the working
+        # folder (`_launch_entries`); and the script as the card names it.
+        self.folder = folder
+        self.search = search
+        self.script = script
         # The cell's code as written, and its lines.
         self.code = code
         self.lines = code.splitlines()
@@ -3466,9 +3489,12 @@ class _Cell:
         none gives `_exec_cells` nothing to read at its own top level."""
         return self.signs.names_dash_c or any(
             (_spelled_exec(c.func) or _last_name(c.func) in _STRING_RUNNER_NAMES) and any(
-                _literal_source(a) is not None or isinstance(a, ast.Call)
+                _literal_source(a) is not None or isinstance(a, (ast.Call, ast.Name))
                 for a in (*c.args, *(k.value for k in c.keywords))
             )
+            # A script the cell writes and runs (`_same_step_script`).
+            or _last_name(c.func) in _SCRIPT_RUN_NAMES and bool(c.args)
+            and isinstance(c.args[0], (ast.List, ast.Tuple))
             for c in self.calls
         )
 
@@ -4346,10 +4372,15 @@ class _Reader:
         self, cells: list[_Cell], *, current: _Cell, project_root: Path | None = None,
         errored: frozenset[int] = frozenset(), errored_paths: Literal["any", "unknown"] = "any",
         stopped_early: frozenset[int] = frozenset(), stopped_at: Mapping[int, int] | None = None,
-        tainted_contexts: frozenset[str] = frozenset(),
+        tainted_contexts: frozenset[str] = frozenset(), swaps: bool = False,
     ) -> None:
         self.cells = cells
         self.current = current
+        # Whether the pad runs the code the check hands it in place of a
+        # cell's own (`CellWrites.run_code`), so the check may read a script
+        # a step writes and runs as the text the pad will run
+        # (`_same_step_script`).
+        self.swaps = swaps
         # What each name holds where a node reads it, by the name, the node's
         # id and `partly_run`, read once per check (`bindings_of`).
         self._bindings_read: dict[tuple[str, int, bool], tuple[_Binding, ...]] = {}
@@ -4514,6 +4545,18 @@ class _Reader:
 
     def cell_of(self, node: ast.AST) -> _Cell:
         return self._cells_by_node.get(node, self.current)
+
+    @cached_property
+    def runners_rebound(self) -> bool:
+        """Whether a cell of the conversation, or literal code one runs, may
+        have changed what a run of a script calls (`_RUNNER_REBINDS`)."""
+        return any(_RUNNER_REBINDS.search(cell.code) for cell in self.cells)
+
+    @cached_property
+    def path_set(self) -> bool:
+        """Whether a cell of the conversation, or literal code one runs, may
+        set `PATH`, which picks the program a bare `python` names."""
+        return any(_PATH_SETTING.search(cell.code) for cell in self.cells)
 
     def function_named(self, node: ast.Name) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
         """The def a call to the name `node` reaches by the function table:
@@ -6778,6 +6821,24 @@ def _join(a: str, b: str) -> str:
     return a.rstrip("/") + "/" + b
 
 
+def _launch_entries(cell: _Cell) -> frozenset[str]:
+    """The folders under the project that a Python process `cell` runs in
+    may import from (`_Cell.launched`): its working folder, which `-c` puts
+    on `sys.path`, read as the project's, and for a script a step writes and
+    runs, its `cwd=` folder and its own folder too (`_Cell.search`)."""
+    return frozenset({"", *cell.search})
+
+
+def _cwds_of(cell: _Cell, reader: _Reader) -> list[str] | _Unknown:
+    """The folders code of `cell` may run in: the pad's (`_Reader.cwds`),
+    or for a script a step runs with `cwd=` (`_Cell.folder`), that folder
+    from each of them."""
+    cwds = reader.cwds
+    if cell.folder is None or isinstance(cwds, _Unknown):
+        return cwds
+    return list(dict.fromkeys(posixpath.normpath(_join(c, cell.folder)) for c in cwds))
+
+
 def _call_arguments(
     func: Function, call: ast.Call | None, *, call_cell: _Cell, func_cell: _Cell, bound: ast.AST | None = None,
 ) -> dict[str, _Arg | None]:
@@ -8205,7 +8266,7 @@ def _call_findings(
         code = cell.source(node)
         if report is None:
             write = CallWrite(via=via, call=scrub_output(code), line=cell.host_line or getattr(node, "lineno", 0),
-                              runs=scrub_output("\n".join(dict.fromkeys(bindings))))
+                              runs=scrub_output("\n".join(dict.fromkeys(bindings))), script=cell.script)
         else:
             write = CallWrite(via=via, call=report.call, line=report.line,
                               runs=scrub_output("\n".join(dict.fromkeys((*bindings, code)))))
@@ -8633,6 +8694,8 @@ def _made(*, reader: _Reader) -> _Made:
             if target is None:
                 continue
             got = reader.paths(target, cell=cell)
+            if cell.folder is not None and not isinstance(got, _Unknown):
+                got = [_join(cell.folder, g) for g in got]
             if not keeps:
                 created += [] if isinstance(got, _Unknown) else got
             elif isinstance(got, _Unknown) or isinstance(kept, _Unknown):
@@ -8986,7 +9049,8 @@ class _FileFinder:
         self, got: list[str] | _Unknown, *, cwds: Sequence[str] | _Unknown | None = None, files_only: bool = False,
         existing_files: bool = False,
     ) -> _Targets:
-        return _locate(got, self.snapshots, cwds=self.reader.cwds if cwds is None else cwds, files_only=files_only,
+        return _locate(got, self.snapshots, cwds=_cwds_of(self.cell, self.reader) if cwds is None else cwds,
+                       files_only=files_only,
                        existing_files=existing_files, made=self.reader.made, disk=self.reader.disk)
 
     def line(self, node: ast.AST) -> int:
@@ -9003,6 +9067,7 @@ class _FileFinder:
         self.out.append(FileChange(
             action=action, paths=targets.paths, whole_project=targets.whole_project,
             whole_shared=targets.whole_shared, call=call, line=self.line(node), held=held, statements=statements,
+            script="" if self.report is not None else self.cell.script,
         ))
 
     def walk(self, root: ast.AST) -> None:
@@ -9339,7 +9404,7 @@ def _run_folders(call: ast.Call, reader: _Reader, cell: _Cell) -> Sequence[str] 
     each folder the pad's code may run in (`_Reader.cwds`), joined with the
     `cwd=` the call gives, if any; unknown where the check can't place one."""
     cwd = _keyword(call, "cwd")
-    cwds = reader.cwds
+    cwds = _cwds_of(cell, reader)
     if cwd is None or isinstance(cwds, _Unknown):
         return cwds
     got = reader.paths(cwd, cell=cell)
@@ -10521,16 +10586,24 @@ class _Launch:
     syncs: bool = False
     installs: bool = False
     starts_python: bool = False
+    # The script a step writes and runs (`_same_step_script`), whose text is
+    # this launch's one source.
+    script: _Script | None = None
 
     @classmethod
     def joined(cls, launches: Sequence[_Launch]) -> _Launch:
-        """What `launches`, the commands of one call or script, launch together."""
+        """What `launches`, the commands of one call or script, launch
+        together. A script a step writes and runs, launched beside other
+        commands, is code the check can't read."""
+        if len(launches) > 1 and any(launch.script for launch in launches):
+            return cls(unread=True)
         return cls(
             unread=any(launch.unread for launch in launches),
             sources=tuple(source for launch in launches for source in launch.sources),
             syncs=any(launch.syncs for launch in launches),
             installs=any(launch.installs for launch in launches),
             starts_python=any(launch.starts_python for launch in launches),
+            script=launches[0].script if launches else None,
         )
 
     def pointed(self, points: bool) -> _Launch:
@@ -10544,6 +10617,423 @@ class _Launch:
 _POPEN_ARGS_FUNCS = frozenset({
     "subprocess.Popen", "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output",
 })
+
+
+# The calls that run a program from a list or tuple of its words given
+# first, which the pad can hand `-c` and a script's text (`_same_step_script`).
+_SCRIPT_LAUNCHERS = frozenset({
+    "subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen",
+})
+# Their last names, which a cell's signs read before the imports place them
+# (`_Cell.hands_literal_code`).
+_SCRIPT_RUN_NAMES = frozenset(name.rpartition(".")[2] for name in _SCRIPT_LAUNCHERS)
+# The keywords such a call may give and still run the text the check read:
+# how it takes the output, the exit code and the wait, and `cwd=`, read as
+# the script's folder. Any other, such as `env=`, `shell=` or `executable=`,
+# leaves the script unread.
+_SCRIPT_RUN_KEYWORDS = frozenset({
+    "capture_output", "text", "check", "encoding", "errors", "timeout", "stdout", "stderr", "universal_newlines",
+    "cwd",
+})
+# The keywords a write of a script's text may give.
+_SCRIPT_WRITE_KEYWORDS = frozenset({"encoding", "errors", "newline"})
+# The modes `open` writes a script's whole text in.
+_SCRIPT_WRITE_MODES = frozenset({"w", "wt", "x", "xt"})
+# The statements a script's write, its run or its text's binding may sit in
+# at a step's top level (`_top_index`).
+_SCRIPT_STATEMENTS = (ast.Expr, ast.Assign, ast.AnnAssign, ast.AugAssign)
+# The most UTF-8 bytes of a script's text the check reads in place of its
+# file: the pad hands it to `python -c` as one argument, and a Windows
+# command line holds 32,767 characters in all, quoting included.
+_SCRIPT_TEXT_LIMIT = 24_000
+# A script that may start Python through multiprocessing, whose children
+# import the main script again, or that changes folder (`chdir`, `fchdir`),
+# after which its relative paths and the check's part ways, stays unread. So
+# does a script Python runs with `-c` that reads `__file__`: the pad sets
+# none, so that no child finds the file to run again. The signs are read in
+# the text and in each string literal, which joins `"multi" "processing"`.
+_SCRIPT_UNREAD_SIGNS = {
+    "source": re.compile(r"multiprocessing|concurrent|chdir"),
+    "argv": re.compile(r"multiprocessing|concurrent|chdir|__file__"),
+}
+# Code in a conversation's cells that may change what a run of a script
+# calls: a launcher, `sys.executable`, `compile` or `exec` rebound by
+# assignment or `setattr`, a module or a builtin replaced, or `PATH`
+# changed, which picks the program a bare `python` names. A script run
+# after any of them stays unread.
+_RUNNER_REBINDS = re.compile(
+    r"\.\s*(?:run|call|check_call|check_output|Popen|executable|compile|exec)\s*=(?!=)"
+    r"|setattr\s*\(|delattr\s*\(|sys\s*\.\s*modules|__builtins__|\bbuiltins\b"
+)
+# Code that may set `PATH`, which picks the program a bare `python` names.
+_PATH_SETTING = re.compile(
+    r"""['"]PATH['"]|putenv|environ\s*\.\s*(?:update|setdefault|__setitem__)|environ\s*\[[^\]]*\]\s*=(?!=)"""
+)
+# What a step may make that sends a folder elsewhere: a link. A `cwd=`
+# folder is read only in a step with none.
+_LINK_SIGNS = re.compile(r"link")
+# The words a bare Python program is named by (`_same_step_script`).
+_BARE_PYTHON = re.compile(r"python(?:3(?:\.\d+)?)?")
+# What the pad hands `python -c` before a script's text, which comes as the
+# next word, with the script's path after it: it takes the text out of
+# `sys.argv`, so `sys.argv` is what running the file gives, and runs the
+# text under the script's name. `sys.path` keeps the working folder, as
+# `-c` gives it and the check reads it (`_launch_entries`), and nothing
+# names the file, so no child process runs the file from disk.
+_SCRIPT_PRELUDE = (
+    "def _anton_run():\n"
+    "    import sys\n"
+    "    globals().pop('_anton_run')\n"
+    "    text = sys.argv.pop(1)\n"
+    "    del sys.argv[0]\n"
+    "    return compile(text, sys.argv[0], 'exec')\n"
+    "exec(_anton_run())\n"
+)
+
+
+@dataclass(frozen=True)
+class _Script:
+    """A Python script a step writes from a literal and runs in the same
+    step, read as the text the pad runs in place of the file
+    (`_same_step_script`, `_exec_script`): its `text`; the folder a `cwd=`
+    runs it in (`_Cell.folder`); the folders under the project an import in
+    it may reach (`_Cell.search`); the script as the card names it; and how
+    the pad runs the text: `-c` and the text before the script's word `node`
+    in the program's words (`argv`), or the text in place of the code `node`
+    (`source`)."""
+
+    text: str
+    folder: str | None
+    search: tuple[str, ...]
+    name: str
+    node: ast.AST
+    kind: Literal["argv", "source"]
+
+
+def _same_step_script(call: ast.Call, name: str, reader: _Reader) -> _Script | None:
+    """The script `call`, a run of the program `name` (`_SCRIPT_LAUNCHERS`),
+    runs when its words are Python and a script's path, as in
+    `subprocess.run([sys.executable, str(path)])`, and the step wrote that
+    path from a literal before it (`_written_text`). The pad then hands
+    Python `-c` and that text in place of the file (`CellWrites.run_code`),
+    so the text the check reads is the text that runs. Only on a pad that
+    does (`_Reader.swaps`), for a run at a conversation cell's top level
+    in the pad's own folder, by `sys.executable` or a bare `python`, with
+    the keywords `_SCRIPT_RUN_KEYWORDS` names, and in a conversation where
+    nothing may have changed what the run calls (`_Reader.runners_rebound`).
+    `cwd=` must be a plain folder of the project (`_plain_folder`) in a step
+    that makes no link. None for any other call, which runs code the check
+    can't read."""
+    if not reader.swaps or name not in _SCRIPT_LAUNCHERS or reader.cwds != ["."] or reader.points_python:
+        return None
+    cell = reader.cell_of(call)
+    at = _top_index(call, cell) if _conversation_cell(cell) else None
+    if at is None or len(call.args) != 1 or not isinstance(call.args[0], (ast.List, ast.Tuple)):
+        return None
+    if any(keyword.arg not in _SCRIPT_RUN_KEYWORDS for keyword in call.keywords):
+        return None
+    words = call.args[0].elts
+    if len(words) != 2 or any(isinstance(word, ast.Starred) for word in words) or reader.runners_rebound:
+        return None
+    program = words[0]
+    bare = (isinstance(program, ast.Constant) and isinstance(program.value, str)
+            and _BARE_PYTHON.fullmatch(program.value) is not None)
+    if not (reader.dotted(program) == "sys.executable" or bare and not reader.path_set):
+        return None
+    paths = reader.paths(words[1], cell=cell)
+    if isinstance(paths, _Unknown) or len(paths) != 1 or paths[0].startswith("-"):
+        return None
+    folder: str | None = None
+    cwd = _keyword(call, "cwd")
+    if cwd is not None:
+        folders = reader.paths(cwd, cell=cell)
+        if isinstance(folders, _Unknown) or len(folders) != 1 or _LINK_SIGNS.search(cell.code):
+            return None
+        folder = posixpath.normpath(folders[0])
+        if not _plain_folder(folder, reader):
+            return None
+    path = posixpath.normpath(_join(folder or ".", paths[0]))
+    own = _in_project(posixpath.dirname(path) or ".", reader)
+    if own is None:
+        return None
+    search = tuple(dict.fromkeys(f for f in (own, _in_project(folder, reader) if folder else "") if f))
+    text = _written_text(path, before=at, cell=cell, reader=reader)
+    if text is not None and folder is not None and _LINK_SIGNS.search(text):
+        return None
+    return _checked_script(text, folder=folder, search=search, name=_script_name(path, reader), node=words[1],
+                           kind="argv")
+
+
+def _conversation_cell(cell: _Cell) -> bool:
+    """Whether `cell` is one of the conversation's own cells, whose code the
+    pad runs as `CellWrites.run_code` gave it, not literal code one runs."""
+    return cell.host == cell.index and not cell.launched
+
+
+def _plain_folder(folder: str, reader: _Reader) -> bool:
+    """Whether `folder` lies in the project with no link and no other
+    spelling of a name on the way: each part that exists on disk now is a
+    folder of that exact name, not a link, so the check's paths name the
+    files the run reaches. A part that doesn't exist yet is one the step
+    makes, in a step that makes no link."""
+    root = reader.project_root
+    relative = _in_project(folder, reader)
+    if root is None or relative is None:
+        return False
+    at = Path(root)
+    for part in (p for p in relative.split("/") if p):
+        child = at / part
+        try:
+            if not os.path.lexists(child):
+                return True
+            if child.is_symlink() or not child.is_dir() or part not in os.listdir(at):
+                return False
+        except OSError:
+            return False
+        at = child
+    return True
+
+
+def _exec_script(source: ast.AST, reader: _Reader) -> _Script | None:
+    """The script whose text `source`, the code a call hands exec() or
+    compile(), runs: a name the step binds once at its top level to a
+    literal (`_bound_text`), as `script` in `exec(compile(script, str(path),
+    "exec"))`, or a read of a path the step wrote from a literal before it
+    (`_written_text`), as in `exec(compile(path.read_text(), ...))`. The pad
+    runs the text in place of the name or the read (`CellWrites.run_code`).
+    Only on a pad that does (`_Reader.swaps`) and at the step's top level;
+    None for any other code."""
+    if not reader.swaps or reader.runners_rebound:
+        return None
+    cell = reader.cell_of(source)
+    at = _top_index(source, cell) if _conversation_cell(cell) else None
+    if at is None:
+        return None
+    if isinstance(source, ast.Name):
+        return _checked_script(_bound_text(source, cell=cell, reader=reader), folder=None, search=(),
+                               name=_compiled_name(source, cell=cell, reader=reader), node=source, kind="source")
+    read = _read_path(source, reader)
+    if read is None or reader.cwds != ["."] or reader.points_python:
+        return None
+    paths = reader.paths(read, cell=cell)
+    if isinstance(paths, _Unknown) or len(paths) != 1:
+        return None
+    path = posixpath.normpath(paths[0])
+    return _checked_script(_written_text(path, before=at, cell=cell, reader=reader), folder=None, search=(),
+                           name=_script_name(path, reader), node=source, kind="source")
+
+
+def _checked_script(
+    text: str | None, *, folder: str | None, search: tuple[str, ...], name: str, node: ast.AST,
+    kind: Literal["argv", "source"],
+) -> _Script | None:
+    """The script of `text`, when the check reads it in place of its file:
+    one that parses, with no NUL, within `_SCRIPT_TEXT_LIMIT` bytes, and
+    with no sign `_SCRIPT_UNREAD_SIGNS` names for how it runs in its text or
+    its string literals. None for any other text, or none."""
+    signs = _SCRIPT_UNREAD_SIGNS[kind]
+    if text is None or "\x00" in text or signs.search(text):
+        return None
+    try:
+        size = len(text.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+    tree = _parse_ran(text) if size <= _SCRIPT_TEXT_LIMIT else None
+    if tree is None or any(
+        isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))
+        and signs.search(node.value if isinstance(node.value, str) else node.value.decode("latin-1"))
+        for node in ast.walk(tree)
+    ):
+        return None
+    return _Script(text=text, folder=folder, search=search, name=name, node=node, kind=kind)
+
+
+def _top_index(node: ast.AST, cell: _Cell) -> int | None:
+    """The place among `cell`'s top-level statements of the one `node` sits
+    in, when that is a plain statement (`_SCRIPT_STATEMENTS`) and nothing
+    between them defers or repeats it, as a def, a lambda or a
+    comprehension does; else None."""
+    child, parent = node, cell.parents.get(node)
+    while parent is not None and parent is not cell.tree:
+        if isinstance(parent, (ast.Lambda, ast.comprehension, ast.ListComp, ast.SetComp, ast.DictComp,
+                               ast.GeneratorExp)):
+            return None
+        child, parent = parent, cell.parents.get(parent)
+    if parent is not cell.tree or not isinstance(child, _SCRIPT_STATEMENTS):
+        return None
+    return cell.tree.body.index(child)
+
+
+def _bound_text(node: ast.AST, *, cell: _Cell, reader: _Reader) -> str | None:
+    """The text of `node`: a str literal, or a name `cell` binds once at its
+    top level, before `node`, to one."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if not isinstance(node, ast.Name):
+        return None
+    found = reader.bindings_of(node.id, node=node)
+    if len(found) != 1 or found[0].how != "value":
+        return None
+    value = found[0].value
+    if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+        return None
+    if reader.cell_of(value) is not cell or _top_index(value, cell) is None:
+        return None
+    return value.value
+
+
+def _written_text(path: str, *, before: int, cell: _Cell, reader: _Reader) -> str | None:
+    """The text the last write to `path` among `cell`'s top-level statements
+    before the `before`-th writes, when that write writes a literal whole
+    (`_literal_write`); None when it doesn't, when the check can't place a
+    write between, or when none does."""
+    for statement in reversed(cell.tree.body[:before]):
+        written = _literal_write(statement, cell=cell, reader=reader)
+        if written is not None and written[0] == path:
+            return written[1]
+        for node in ast.walk(statement):
+            if not isinstance(node, ast.Call):
+                continue
+            target = _written_target(node, reader, cell)
+            if target is None:
+                continue
+            got = reader.paths(target, cell=cell)
+            if isinstance(got, _Unknown) or path in {posixpath.normpath(g) for g in got}:
+                return None
+    return None
+
+
+def _literal_write(statement: ast.stmt, *, cell: _Cell, reader: _Reader) -> tuple[str, str] | None:
+    """The path and the text `statement` writes whole, when it writes a
+    literal (`_bound_text`) to one path the check places: through
+    `Path.write_text`, or `open` in a mode that writes it new and one
+    `write` in its with. None for any other statement."""
+    if isinstance(statement, _SCRIPT_STATEMENTS) and isinstance(statement.value, ast.Call):
+        call = statement.value
+        if not (isinstance(call.func, ast.Attribute) and call.func.attr == "write_text" and len(call.args) == 1
+                and all(keyword.arg in _SCRIPT_WRITE_KEYWORDS for keyword in call.keywords)):
+            return None
+        target, content = call.func.value, call.args[0]
+    elif isinstance(statement, ast.With) and len(statement.items) == 1 and len(statement.body) == 1:
+        item, body = statement.items[0], statement.body[0]
+        opened = item.context_expr
+        if not (isinstance(opened, ast.Call) and reader.dotted(opened.func) in ("open", "io.open")
+                and isinstance(item.optional_vars, ast.Name) and 1 <= len(opened.args) <= 2
+                and all(keyword.arg in (*_SCRIPT_WRITE_KEYWORDS, "mode") for keyword in opened.keywords)):
+            return None
+        mode = opened.args[1] if len(opened.args) > 1 else _keyword(opened, "mode")
+        if not (isinstance(mode, ast.Constant) and mode.value in _SCRIPT_WRITE_MODES):
+            return None
+        write = body.value if isinstance(body, ast.Expr) else None
+        if not (isinstance(write, ast.Call) and isinstance(write.func, ast.Attribute) and write.func.attr == "write"
+                and isinstance(write.func.value, ast.Name) and write.func.value.id == item.optional_vars.id
+                and len(write.args) == 1 and not write.keywords):
+            return None
+        target, content = opened.args[0], write.args[0]
+    else:
+        return None
+    text = _bound_text(content, cell=cell, reader=reader)
+    paths = reader.paths(target, cell=cell)
+    if text is None or isinstance(paths, _Unknown) or len(paths) != 1:
+        return None
+    return posixpath.normpath(paths[0]), text
+
+
+def _read_path(node: ast.AST, reader: _Reader) -> ast.AST | None:
+    """The path `node` reads a whole text from: `path.read_text()`, or
+    `open(path).read()` in a mode that reads text. None for anything else."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and not node.args):
+        return None
+    if node.func.attr == "read_text" and all(k.arg in ("encoding", "errors") for k in node.keywords):
+        return node.func.value
+    opened = node.func.value
+    if node.func.attr != "read" or node.keywords or not (
+        isinstance(opened, ast.Call) and reader.dotted(opened.func) in ("open", "io.open")
+        and 1 <= len(opened.args) <= 2 and all(k.arg in ("encoding", "errors", "mode") for k in opened.keywords)
+    ):
+        return None
+    mode = opened.args[1] if len(opened.args) > 1 else _keyword(opened, "mode")
+    if mode is not None and not (isinstance(mode, ast.Constant) and mode.value in ("r", "rt")):
+        return None
+    return opened.args[0]
+
+
+def _compiled_name(source: ast.Name, *, cell: _Cell, reader: _Reader) -> str:
+    """The script a name's text is compiled as, for the card: the file name
+    `compile(source, <path>, ...)` gives, where the check places it; else ""."""
+    call = cell.parents.get(source)
+    if not (isinstance(call, ast.Call) and len(call.args) > 1 and call.args[0] is source):
+        return ""
+    paths = reader.paths(call.args[1], cell=cell)
+    return "" if isinstance(paths, _Unknown) or len(paths) != 1 else _script_name(posixpath.normpath(paths[0]), reader)
+
+
+def _in_project(path: str, reader: _Reader) -> str | None:
+    """`path`, a folder, relative to the project ("" for the project
+    itself); None when it lies outside it or the check can't place it."""
+    if not os.path.isabs(path):
+        relative = posixpath.normpath(path)
+        if relative == ".":
+            return ""
+        return None if relative == ".." or relative.startswith("../") else relative
+    root = reader.project_root
+    if root is None:
+        return None
+    for base in dict.fromkeys((str(root), os.path.realpath(root))):
+        if path == base:
+            return ""
+        if path.startswith(base.rstrip("/") + "/"):
+            return posixpath.normpath(path[len(base.rstrip("/")) + 1:])
+    return None
+
+
+def _script_name(path: str, reader: _Reader) -> str:
+    """A script's path as the card names it: relative to the project where
+    it lies inside it, scrubbed."""
+    folder = _in_project(posixpath.dirname(path) or ".", reader)
+    shown = path if folder is None else posixpath.join(folder, posixpath.basename(path))
+    return scrub_output(shown)
+
+
+def _step_scripts(cell: _Cell, reader: _Reader) -> list[_Script]:
+    """The scripts `cell` writes and runs whose text the check reads in
+    place of their files (`_same_step_script`, `_exec_script`)."""
+    out: list[_Script] = []
+    for call in cell.calls:
+        if _last_name(call.func) in _SCRIPT_RUN_NAMES:
+            name = reader.dotted(call.func)
+            if name not in _SCRIPT_LAUNCHERS:
+                name = reader.module_member(call.func) or ""
+            script = _same_step_script(call, name, reader)
+        else:
+            builtin = reader.exec_builtin(call.func) if _spelled_exec(call.func) else None
+            source = _exec_source(call, builtin) if builtin else None
+            script = None if source is None or _literal_source(source) is not None else _exec_script(source, reader)
+        if script is not None:
+            out.append(script)
+    return out
+
+
+def _run_code(code: str, scripts: Sequence[_Script]) -> str | None:
+    """`code` as the pad runs it: with each script's text where the step
+    runs its file (`_Script.kind`), on the line it was on, so every line
+    keeps its number. None when the result doesn't parse."""
+    data = heal_surrogate_source(code).encode("utf-8")
+    starts = [0]
+    for line in data.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    edits: list[tuple[int, int, str]] = []
+    for script in scripts:
+        node = script.node
+        start = starts[node.lineno - 1] + node.col_offset
+        if script.kind == "argv":
+            edits.append((start, start, f"'-c', {_SCRIPT_PRELUDE!r}, {script.text!r}, "))
+        else:
+            edits.append((start, starts[node.end_lineno - 1] + node.end_col_offset, repr(script.text)))
+    for start, end, new in sorted(edits, reverse=True):
+        data = data[:start] + new.encode("utf-8") + data[end:]
+    out = data.decode("utf-8")
+    return out if _parse_ran(out) is not None else None
 
 
 def _python_launch(call: ast.Call, reader: _Reader) -> _Launch | None:
@@ -10571,6 +11061,9 @@ def _python_launch(call: ast.Call, reader: _Reader) -> _Launch | None:
         name = reader.module_member(call.func) or ""
         if name not in _LAUNCHERS:
             return None
+    script = _same_step_script(call, name, reader)
+    if script is not None:
+        return _Launch(sources=(script.text,), starts_python=True, script=script)
     commands = _shell_commands(call, name, reader)
     index = _SPREAD_ARGV_FUNCS.get(name, _LIST_ARGV_FUNCS.get(name, 0))
     program = call.args[index - 1] if 0 < index <= len(call.args) else _keyword(call, "executable")
@@ -10600,7 +11093,7 @@ def _python_launch(call: ast.Call, reader: _Reader) -> _Launch | None:
     # Another folder or environment, as `cwd=` and `env=` give, the pad's
     # own after a cell changes into another folder, or one a cell set a
     # setting in that changes what Python imports (`_Reader.points_python`).
-    moved = (_keyword(call, "cwd") is not None or env is not None or reader.cwds != ["."]
+    moved = (_keyword(call, "cwd") is not None or env is not None or _cwds_of(reader.cell_of(call), reader) != ["."]
              or reader.points_python)
     launch = _Launch.joined([
         _script_launch(c, depth=0, stdin=stdin, moved=moved) if isinstance(c, str)
@@ -10620,7 +11113,7 @@ def _loop_launch(call: ast.Call, reader: _Reader, *, kind: _LoopLaunch) -> _Laun
     read as a command (`_command_launch`); `subprocess_shell` takes a shell
     command after it, read as a script (`_script_launch`). The pad's own
     folder or a setting that changes what Python imports makes it `moved`."""
-    moved = reader.cwds != ["."] or reader.points_python
+    moved = _cwds_of(reader.cell_of(call), reader) != ["."] or reader.points_python
     if kind == "exec":
         words = [_command_word(w, reader) for w in call.args[1:]]
         return _command_launch(words, depth=0, stdin=None, moved=moved) if words else _Launch()
@@ -11454,6 +11947,7 @@ def _http_findings(
                 run_time_parts=url_code is None and _NUMBERED_HOLE.search(url) is not None,
                 method_code=_scrub_code_or_none(reader.hole_code(method)),
                 url_code=_scrub_code_or_none(url_code),
+                script="" if report else cell.script,
             )
             for method in held
         ]
@@ -11710,6 +12204,11 @@ class _ExecCellKey(NamedTuple):
     inherits: bool
     surely_run: bool
     parent_order: tuple[int, ...]
+    # For a script a step writes and runs, and the code it runs in turn:
+    # `_Cell.folder`, `_Cell.search` and `_Cell.script`.
+    folder: str | None = None
+    search: tuple[str, ...] = ()
+    script: str = ""
 
 
 class _ExecCells:
@@ -11957,6 +12456,7 @@ class _ExecReading:
                     continue
                 builtin = self.exec_named(node.func)
                 launch: _Launch | None = None
+                source: ast.AST | None = None
                 if builtin:
                     source = _exec_source(node, builtin)
                     given: Sequence[ast.AST] = () if source is None else (source,)
@@ -11965,8 +12465,13 @@ class _ExecReading:
                     given = () if runner is None else runner.sources
                     launch = None if runner is not None else _python_launch(node, reader)
                 texts = [t for t in map(_literal_source, given) if t is not None]
+                # A script the step writes and runs, read as the text the pad runs.
+                script = None if launch is None else launch.script
                 if launch is not None:
                     texts = list(launch.sources)
+                elif source is not None and not texts:
+                    script = _exec_script(source, reader)
+                    texts = [] if script is None else [script.text]
                 elif not builtin and len(texts) > 1:
                     # A runner's setup and statement run in one namespace.
                     texts = ["\n".join(texts)]
@@ -11991,7 +12496,10 @@ class _ExecReading:
                         namespace=place.namespace if code.cell.shared else code.cell.namespace,
                         inherits=(place.shared or place.reads_host) and not code.cell.shared,
                         surely_run=sure and code.cell.runs_surely(node),
-                        parent_order=code.cell.order)
+                        parent_order=code.cell.order,
+                        folder=script.folder if script is not None and script.kind == "argv" else code.cell.folder,
+                        search=script.search if script is not None and script.kind == "argv" else code.cell.search,
+                        script=script.name if script is not None else code.cell.script)
                     # Literal code an earlier cell runs doesn't change, so its
                     # parsed cell is kept across checks; the checked cell's own
                     # changes each cell, so it is built fresh.
@@ -12127,7 +12635,8 @@ def _exec_cell(key: _ExecCellKey) -> _Cell | None:
         return None
     return _Cell(tree, key.text, next(_EXEC_INDEXES), host_line=key.host_line, launched=key.launched,
                  host=key.host, shared=key.shared, namespace=key.namespace, order=key.order, inherits=key.inherits,
-                 surely_run=key.surely_run, parent_order=key.parent_order)
+                 surely_run=key.surely_run, parent_order=key.parent_order, folder=key.folder, search=key.search,
+                 script=key.script)
 
 
 def _unread_exec_at(node: ast.AST, reader: _Reader, cell: _Cell, *, read: _ExecRead) -> ast.AST | None:
@@ -12553,7 +13062,7 @@ def _written_modules(reader: _Reader, cells: Sequence[_Cell]) -> _WrittenModules
                 got = ["."] if dest is None else reader.paths(dest, cell=cell)
                 unpacks.append(reader.position(call))
                 trees_in_packages = trees_in_packages or dest is not None and _writes_site_packages(dest, reader) or (
-                    not isinstance(got, _Unknown) and _lands_in_packages(got, reader.cwds)
+                    not isinstance(got, _Unknown) and _lands_in_packages(got, _cwds_of(cell, reader))
                 )
                 if isinstance(got, _Unknown):
                     unplaced = unpacked_anywhere = hooks_anywhere = True
@@ -13068,7 +13577,7 @@ class _Modules:
         entries = self.path_entries
         if entries is None or self._anywhere:
             return self._in_folders(top)
-        return self._reachable(top, entries | ({""} if cell.launched else set()))
+        return self._reachable(top, entries | (_launch_entries(cell) if cell.launched else frozenset()))
 
     def any_unread(self, cells: Sequence[_Cell]) -> bool:
         """Whether an import in one of `cells`, by a statement or a literal
@@ -13208,7 +13717,7 @@ class _Modules:
                 if not (reader.dotted(node) in _SYS_PATH_CHANGES or reader.module_member(node) in _SYS_PATH_CHANGES):
                     continue
                 added = _path_added(node, cell)
-                if added is None or reader.cwds != ["."] or project is None:
+                if added is None or _cwds_of(cell, reader) != ["."] or project is None:
                     return None
                 got = reader.paths(added, cell=cell)
                 if isinstance(got, _Unknown) or any(_TEMP_PATH in p or _unreadable_text(p) for p in got):
@@ -13269,7 +13778,8 @@ class _Modules:
         return any(
             not folder or not entry or entry == folder
             or entry.startswith(f"{folder}/") or folder.startswith(f"{entry}/")
-            for folder in folders if folder is not None for entry in (*entries, *([""] if cell.launched else []))
+            for folder in folders if folder is not None
+            for entry in (*entries, *(_launch_entries(cell) if cell.launched else ()))
         )
 
     def _reachable(self, top: str, entries: AbstractSet[str]) -> bool:
@@ -13644,7 +14154,7 @@ def _adds_unread_site(call: ast.Call, reader: _Reader, cell: _Cell, *, modules: 
     target = _target_arg(call, keywords=("sitedir",))
     project = modules.project
     got = reader.paths(target, cell=cell) if target is not None else _UNKNOWN
-    if isinstance(got, _Unknown) or project is None or reader.cwds != ["."]:
+    if isinstance(got, _Unknown) or project is None or _cwds_of(cell, reader) != ["."]:
         return True
     for path in got:
         rel = None if _TEMP_PATH in path or _unreadable_text(path) else _relative(path, project)
@@ -14249,7 +14759,7 @@ def _hook_write(call: ast.Call, reader: _Reader, cell: _Cell) -> _HookWrite:
                      for path in [f"{folder.rstrip('/')}/{name}"] if _is_startup_hook(path)]
         if not hooks or all(path.endswith(".pth") for path in hooks) and _runs_no_pth_line(call, cell):
             return _NO_HOOK
-        return _UNPLACED_HOOK if site else _placed_hooks(hooks, reader.cwds)
+        return _UNPLACED_HOOK if site else _placed_hooks(hooks, _cwds_of(cell, reader))
     name = (reader.module_member(call.func) or reader.dotted(call.func)) if last in _LAUNCH_NAMES else None
     if name not in _LAUNCHERS:
         return _NO_HOOK
@@ -16187,6 +16697,7 @@ def find_cell_writes(
     earlier: Sequence[EarlierCell],
     snapshots: Sequence[ProjectSnapshot],
     http_rules: Sequence[HttpWriteRule] = (),
+    swaps: bool = False,
 ) -> CellWrites:
     """What `code` would change, read against the conversation's `earlier` cells.
 
@@ -16230,12 +16741,20 @@ def find_cell_writes(
     the same way and refuses it before any of it runs. After a cell that
     ended its process, the pad starts a new one before it compiles the
     cell, so it is read as a cell that runs no code of its own.
+
+    With `swaps`, the pad runs `CellWrites.run_code` in place of the cell's
+    own code, so a script a step writes from a literal and runs in the same
+    step is read as its text (`_same_step_script`, `_exec_script`), and
+    `run_code` hands that text to the run in place of the file. Not after
+    an earlier step ran code the check couldn't read, which may have
+    changed what runs the script, nor where the text can't be put in place:
+    the cell is then read as without `swaps`.
     """
     try:
         tree = _parse(code)
     except (SyntaxError, ValueError):
         if earlier and earlier[-1].ended_process:
-            return find_cell_writes(code="", earlier=earlier, snapshots=snapshots, http_rules=http_rules)
+            return find_cell_writes(code="", earlier=earlier, snapshots=snapshots, http_rules=http_rules, swaps=swaps)
         return CellWrites()
     except (RecursionError, MemoryError):
         # Too deep for this Python's parser, and the pad may run another Python (remote backend): hold it.
@@ -16261,7 +16780,7 @@ def find_cell_writes(
     project = next((s for s in snapshots if s.label == "project"), None)
     project_root = project.root if project is not None else None
     reader = _Reader(cells, current=current, project_root=project_root, stopped_early=frozenset(errored),
-                     stopped_at=stopped_at)
+                     stopped_at=stopped_at, swaps=swaps)
     # A literal exec in an earlier cell is read as more cells, placed right
     # after the cell that ran it, so a later call to what it defined is read.
     # Then the literal code the cell runs through exec() and its kin is read
@@ -16287,7 +16806,7 @@ def find_cell_writes(
             return old
         new = _Reader([*old.cells, *read.cells], current=current, project_root=project_root,
                       stopped_early=frozenset(errored), stopped_at=stopped_at,
-                      tainted_contexts=old.tainted_contexts | tainted)
+                      tainted_contexts=old.tainted_contexts | tainted, swaps=swaps)
         new.stopped = old.stopped
         new.made = old.made
         return new
@@ -16336,6 +16855,16 @@ def find_cell_writes(
         if not more:
             break
         reader = with_cells(reader, _ExecRead.empty(), tainted=more)
+    scripts = _step_scripts(current, reader) if swaps else []
+    run_code = _run_code(code, scripts) if scripts else None
+    if swaps and (scripts and run_code is None or first_unread is not None and any(
+        _step_scripts(cell, reader) for cell in conversation if cell.index > first_unread.host
+    )):
+        # Code a step ran that the check couldn't read may have changed what
+        # runs a script a later step wrote, as by rebinding `subprocess.run`
+        # or `compile`, and that later step then ran as written; or the text
+        # can't go in place of the file.
+        return find_cell_writes(code=code, earlier=earlier, snapshots=snapshots, http_rules=http_rules)
     inputs = _ReadInputs(
         current=current, ran=tuple(ran), literal_code=literal_code, defined=defined, modules=modules,
         snapshots=tuple(snapshots), owned=owned, http_rules=tuple(http_rules),
@@ -16355,7 +16884,7 @@ def find_cell_writes(
         # `_PATH_LIMIT` paths for one value it gives up, and the first read
         # stands alone.
         wide = _Reader(reader.cells, current=current, project_root=project_root, errored=frozenset(errored),
-                       tainted_contexts=reader.tainted_contexts)
+                       tainted_contexts=reader.tainted_contexts, swaps=swaps)
         wide.made = reader.made
         maybe = _CellRead(wide, inputs=inputs, files_only=True)
         maybe.run()
@@ -16387,7 +16916,12 @@ def find_cell_writes(
             isinstance(node, ast.Call) and _hook_write(node, reader, reader.cell_of(node)).runs_at_start
             for node in runs
         ),
+        scripts=tuple(dict.fromkeys(script.name for script in scripts if script.name)),
     )
+    if not writes.unchecked:
+        # A step the check read whole runs the text it read. One it couldn't
+        # runs as written, on the Approve that showed its code.
+        writes = writes.model_copy(update={"run_code": run_code})
     # The reasons only explain the card, so an error building them loses them, not what the check found.
     try:
         causes = [UncheckedCause(kind="runs", code=_quoted(node, reader)) for node in runs]

@@ -12,6 +12,7 @@ import errno
 import logging
 import os
 import re
+import shutil
 import time
 import warnings
 from collections.abc import Iterable, Sequence
@@ -492,13 +493,25 @@ class _UnreadCase(BaseModel):
     card: Literal["unchecked", "read", "none"]
     earlier: list[str | _EarlierRow] = []
     files: dict[str, str] = {}
+    # The pad runs the code the check hands it in place of the step's own
+    # (`find_cell_writes`, `swaps`), as a local pad does.
+    swaps: bool = False
     empty_project: bool = False
     kinds: list[str] = []
     not_kinds: list[str] = []
 
-    def earlier_cells(self) -> list[EarlierCell]:
-        """The row's earlier cells, oldest first."""
-        return [EarlierCell(code=cell) if isinstance(cell, str) else cell for cell in self.earlier]
+    def earlier_cells(self, project: Path) -> list[EarlierCell]:
+        """The row's earlier cells, oldest first, with `<project>` the project folder."""
+        return [
+            EarlierCell(code=_in_project(cell, project)) if isinstance(cell, str)
+            else cell.model_copy(update={"code": _in_project(cell.code, project)})
+            for cell in self.earlier
+        ]
+
+
+def _in_project(code: str, project: Path) -> str:
+    """`code` with `<project>` the project folder's absolute path."""
+    return code.replace("<project>", str(project))
 
 
 _UNREAD_CODE = yaml.safe_load(
@@ -520,8 +533,8 @@ def test_cells_that_run_code_the_check_cant_read(case: "_UnreadCase", tmp_path, 
     monkeypatch.chdir(tmp_path)
     snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
     writes = find_cell_writes(
-        code=case.code, earlier=case.earlier_cells(), snapshots=(snap,),
-        http_rules=parse_http_write_rules(_UNREAD_CODE_RULE))
+        code=_in_project(case.code, tmp_path), earlier=case.earlier_cells(tmp_path), snapshots=(snap,),
+        http_rules=parse_http_write_rules(_UNREAD_CODE_RULE), swaps=case.swaps)
     if case.card == "none":
         assert not writes.needs_approval()
     elif case.card == "unchecked":
@@ -4388,3 +4401,193 @@ def test_the_write_rule_matcher_is_exported() -> None:
     from anton.core.utils import write_check
 
     assert "http_write_rule_matches" in write_check.__all__
+
+
+# A step that writes a script from a literal and runs it, as an agent asked to
+# "write and run a script" does. `{run}` is the line that runs it.
+_SAVED_SCRIPT = (
+    "from pathlib import Path\nimport subprocess, sys\n"
+    "script = '''{body}'''\n"
+    "path = Path('job.py')\npath.write_text(script)\n"
+    "{run}\n"
+)
+_PRINTS = "import sys\nprint('ran', sys.argv[0])"
+
+
+def _script_writes(tmp_path: Path, monkeypatch, code: str, *, swaps: bool = True) -> CellWrites:
+    (tmp_path / "notes.txt").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    return find_cell_writes(code=code, earlier=(), snapshots=(snap,), swaps=swaps)
+
+
+def _run_step(code: str, folder: Path) -> str:
+    """What a step prints when the pad runs `code` in `folder`."""
+    import contextlib
+    import io
+
+    out = io.StringIO()
+    cwd = os.getcwd()
+    os.chdir(folder)
+    try:
+        with contextlib.redirect_stdout(out):
+            exec(compile(code, "<cell>", "exec"), {"__name__": "__main__"})
+    finally:
+        os.chdir(cwd)
+    return out.getvalue()
+
+
+@pytest.mark.parametrize("run", [
+    "r = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)\nprint(r.stdout, end='')",
+    "r = subprocess.run(['python', 'job.py'], capture_output=True, text=True)\nprint(r.stdout, end='')",
+    "exec(compile(path.read_text(), str(path), 'exec'))",
+    "exec(compile(script, str(path), 'exec'))",
+], ids=["sys-executable", "python-word", "exec-read", "exec-name"])
+def test_a_saved_script_runs_as_the_text_the_check_read_and_every_line_keeps_its_number(tmp_path, monkeypatch, run):
+    """The step runs with no card, and the pad runs `run_code`: Python gets
+    `-c` and the script's text in place of the file, or exec() the text in
+    place of the name or the read, on the same line. It prints what running
+    the file prints."""
+    if "'python'" in run and not shutil.which("python"):
+        pytest.skip("no `python` on PATH")
+    code = _SAVED_SCRIPT.format(body=_PRINTS, run=run)
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert not writes.needs_approval()
+    assert writes.scripts == ("job.py",)
+    assert writes.run_code is not None
+    assert len(writes.run_code.splitlines()) == len(code.splitlines())
+    assert _run_step(writes.run_code, tmp_path) == _run_step(code, tmp_path)
+
+
+def test_a_swapped_script_sees_its_argv_name_and_folder_as_running_the_file_does(tmp_path, monkeypatch):
+    """`sys.argv`, `__name__` and the working folder are the ones running the
+    file gives, in a `cwd=` folder too."""
+    spy = "import os, sys\nprint(sys.argv, __name__, os.getcwd())"
+    out = tmp_path / "out"
+    out.mkdir()
+    for run in ("r = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)",
+                f"r = subprocess.run([sys.executable, {str(out / 'job.py')!r}], cwd={str(out)!r}, "
+                "capture_output=True, text=True)"):
+        code = _SAVED_SCRIPT.format(body=spy, run=run + "\nprint(r.stdout, r.stderr)")
+        if "cwd=" in run:
+            code = code.replace("Path('job.py')", f"Path({str(out / 'job.py')!r})")
+        writes = _script_writes(tmp_path, monkeypatch, code)
+        assert writes.run_code is not None, run
+        assert _run_step(writes.run_code, tmp_path) == _run_step(code, tmp_path)
+
+
+def test_a_script_python_runs_that_reads_its_own_file_stays_unread(tmp_path, monkeypatch):
+    """The pad runs the text with `-c`, which names no file, so a script
+    that reads `__file__` keeps "can't be checked" and runs as written; so
+    does one that may start multiprocessing children, spelled in pieces too,
+    or change folder."""
+    run = "subprocess.run([sys.executable, str(path)])"
+    for body in ("from pathlib import Path\nprint(Path(__file__).parent)",
+                 "m = __import__('multi' 'processing')\nprint(m)",
+                 "import os\nos.fchdir(os.open('.', os.O_RDONLY))"):
+        writes = _script_writes(tmp_path, monkeypatch, _SAVED_SCRIPT.format(body=body, run=run))
+        assert writes.unchecked and writes.run_code is None, body
+
+
+def test_a_swapped_run_runs_the_checked_text_while_another_writer_changes_the_file(tmp_path, monkeypatch):
+    """What runs is what the check read: a writer outside the step that keeps
+    rewriting the script never changes what the run prints."""
+    import threading
+
+    run = "r = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)\nprint(r.stdout, end='')"
+    code = _SAVED_SCRIPT.format(body="print('checked')", run=run)
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert writes.run_code is not None
+    stop = threading.Event()
+
+    def rewrite() -> None:
+        while not stop.is_set():
+            (tmp_path / "job.py").write_text("print('raced')")
+
+    racer = threading.Thread(target=rewrite)
+    racer.start()
+    try:
+        outs = {_run_step(writes.run_code, tmp_path) for _ in range(5)}
+    finally:
+        stop.set()
+        racer.join()
+    assert outs == {"checked\n"}
+
+
+def test_a_script_past_the_size_limit_stays_unread(tmp_path, monkeypatch):
+    """The pad hands the text to `python -c` as one argument, which a Windows
+    command line caps, so a longer script keeps "can't be checked"."""
+    run = "subprocess.run([sys.executable, str(path)])"
+    short = _SAVED_SCRIPT.format(body="x = 1\n" * 100, run=run)
+    long = _SAVED_SCRIPT.format(body="x = 1\n" * 5000, run=run)
+    assert not _script_writes(tmp_path, monkeypatch, short).needs_approval()
+    writes = _script_writes(tmp_path, monkeypatch, long)
+    assert writes.unchecked and writes.run_code is None
+
+
+def test_a_saved_script_keeps_its_card_on_a_pad_that_runs_the_step_as_written(tmp_path, monkeypatch):
+    """Without `swaps`, as on a remote pad, the file runs as it is on disk,
+    so the check can't vouch for its text."""
+    code = _SAVED_SCRIPT.format(body=_PRINTS, run="subprocess.run([sys.executable, str(path)])")
+    writes = _script_writes(tmp_path, monkeypatch, code, swaps=False)
+    assert writes.unchecked and writes.run_code is None and writes.scripts == ()
+
+
+def test_a_saved_script_after_unread_code_in_an_earlier_step_keeps_its_card(tmp_path, monkeypatch):
+    """Code an earlier step ran that the check couldn't read may have rebound
+    what runs the script, so the step holds and runs as written."""
+    code = _SAVED_SCRIPT.format(body=_PRINTS, run="subprocess.run([sys.executable, str(path)])")
+    (tmp_path / "notes.txt").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    writes = find_cell_writes(code=code, earlier=_earlier(["import subprocess\nexec(open('x.txt').read())"]),
+                              snapshots=(snap,), swaps=True)
+    assert writes.unchecked and writes.run_code is None
+
+
+def test_the_card_names_the_saved_script_and_quotes_the_line_that_makes_the_change(tmp_path, monkeypatch):
+    code = _SAVED_SCRIPT.format(body="import os\nos.remove('notes.txt')",
+                                run="subprocess.run([sys.executable, str(path)])")
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert writes.kinds() == ("delete",) and not writes.unchecked
+    card = _card_prompt(writes, code)
+    assert ("This step saves the script `job.py` and runs it. The check read the script, so this card "
+            "shows what it would change.") in card
+    assert "This step would delete:\n\n```\nnotes.txt\n```" in card
+    assert "It's this line in `job.py`:\n\n```\nos.remove('notes.txt')\n```" in card
+    assert "can't be checked" not in card
+
+
+def test_a_refused_step_whose_card_no_one_answered_tells_the_user_to_ask_again():
+    writes = CellWrites(unchecked=True)
+    timed_out = _refusal(writes, "timeout").content
+    assert "no one approved it in time so it didn't run" in timed_out
+    assert "they can ask again when they can answer the approval card" in timed_out
+    assert "needs their approval" not in timed_out
+    assert "that it needs their approval" in _refusal(writes, "cancelled").content
+
+
+def test_a_saved_script_run_in_a_linked_folder_stays_unread(tmp_path, monkeypatch):
+    """A `cwd=` folder reached through a link puts the script's relative
+    paths elsewhere than their spelling says, so the run stays unread; a
+    plain folder of the same name is read, and its delete is held."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "notes.txt").write_text("x")
+    (tmp_path / "link").symlink_to(tmp_path / "sub", target_is_directory=True)
+    body = "import os\nos.remove('notes.txt')"
+    for folder, kinds in (("link", ("unchecked",)), ("sub", ("delete",))):
+        code = _SAVED_SCRIPT.format(body=body, run=f"subprocess.run([sys.executable, 'job.py'], cwd='{folder}')")
+        code = code.replace("Path('job.py')", f"Path('{folder}/job.py')")
+        writes = _script_writes(tmp_path, monkeypatch, code)
+        assert writes.kinds() == kinds, folder
+
+
+def test_a_saved_script_run_in_a_folder_spelled_in_another_case_stays_unread(tmp_path, monkeypatch):
+    (tmp_path / "sub").mkdir()
+    if not (tmp_path / "SUB").exists():
+        pytest.skip("the file system tells names apart by case")
+    (tmp_path / "sub" / "notes.txt").write_text("x")
+    code = _SAVED_SCRIPT.format(body="import os\nos.remove('notes.txt')",
+                                run="subprocess.run([sys.executable, 'job.py'], cwd='SUB')")
+    writes = _script_writes(tmp_path, monkeypatch, code.replace("Path('job.py')", "Path('SUB/job.py')"))
+    assert writes.unchecked and writes.run_code is None

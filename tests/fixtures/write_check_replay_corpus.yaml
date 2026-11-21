@@ -6299,3 +6299,207 @@ chats:
   - id: X2.4
     code: print(open(out).read())
     real_write: false
+- name: R01 write and run a script
+  style: script
+  files:
+    notes.txt: |
+      keep me
+  cells:
+  - id: R01.0
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''def is_prime(n):
+          if n < 2:
+              return False
+          return all(n % d for d in range(2, int(n ** 0.5) + 1))
+
+      primes = [n for n in range(2, 100) if is_prime(n)][:20]
+      print(*primes)
+      '''
+      path = Path('first_20_primes.py')
+      path.write_text(script)
+      result = subprocess.run([sys.executable, str(path)], capture_output=True, text=True, check=True)
+      print(result.stdout, end='')
+    real_write: false
+    why: saves a script that only prints and runs it with Python
+    pair: r01-script
+    role: free
+  - id: R01.1
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import os
+      os.remove('notes.txt')
+      print('removed')
+      '''
+      path = Path('cleanup.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: true
+    why: saves a script that deletes notes.txt, which the project held, and runs it
+    pair: r01-script
+    role: hold
+  - id: R01.2
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      out_dir = Path('{ROOT}/charts')
+      out_dir.mkdir(exist_ok=True)
+      script_path = out_dir / 'build_chart.py'
+      script = '''import matplotlib
+      matplotlib.use("Agg")
+      import matplotlib.pyplot as plt
+      plt.bar(["a", "b", "c"], [3, 7, 5])
+      plt.savefig("chart.png")
+      '''
+      script_path.write_text(script)
+      run = subprocess.run([sys.executable, str(script_path)], cwd=out_dir, capture_output=True, text=True)
+      print(run.returncode)
+    real_write: false
+    why: saves a chart script into a new folder and runs it there with cwd=
+    pair: r01-script
+    role: free
+  - id: R01.3
+    code: |-
+      from pathlib import Path
+
+      script = '''a, b = 0, 1
+      for _ in range(30):
+          a, b = b, a + b
+      print(a)
+      '''
+      path = Path('fibonacci_30.py')
+      path.write_text(script)
+      namespace = {}
+      exec(compile(script, str(path), 'exec'), namespace)
+    real_write: false
+    why: saves a script and execs the literal it saved
+- name: R02 write and run a script that writes
+  style: script
+  files:
+    data/orders.csv: |
+      order_id,site,qty
+      1,S01,3
+  cells:
+  - id: R02.0
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import requests
+      requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+      '''
+      Path('job.py').write_text(script)
+      subprocess.run(['python', 'job.py'], check=True)
+    real_write: true
+    why: saves a script that POSTs to the listed host and runs it with python job.py
+    pair: r02-script
+    role: hold
+  - id: R02.1
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import os, psycopg2
+      conn = psycopg2.connect(host=os.environ["DS_POSTGRES_QA__HOST"])
+      conn.cursor().execute("UPDATE suppliers SET lead_time_days = 21 WHERE supplier_id = 'S005'")
+      conn.commit()
+      '''
+      path = Path('fix_lead_time.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: true
+    why: saves a script that runs a SQL write and runs it
+    pair: r02-script
+    role: hold
+  - id: R02.2
+    code: |-
+      from pathlib import Path
+
+      script = '''import os
+      os.remove("data/orders.csv")
+      '''
+      path = Path('tidy.py')
+      path.write_text(script)
+      exec(compile(path.read_text(), str(path), 'exec'))
+    real_write: true
+    why: saves a script that deletes data/orders.csv and execs what it saved
+  - id: R02.3
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import requests
+      orders = requests.get("https://erp.example.test/api/orders", timeout=10).json()
+      print(len(orders))
+      '''
+      path = Path('count_orders.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: false
+    why: saves a script that only reads the listed host and runs it
+    pair: r02-script
+    role: free
+- name: R03 scripts the check can't read
+  style: script
+  cells:
+  - id: R03.0
+    code: |-
+      from pathlib import Path
+      Path('job.py').write_text("print('later')")
+    real_write: false
+    why: saves a script without running it
+  - id: R03.1
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, 'job.py'], check=True)
+    real_write: false
+    why: runs a script an earlier step saved, whose text may have changed since
+    runs_unread: true
+  - id: R03.2
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import multiprocessing
+      with multiprocessing.get_context("spawn").Pool(2) as pool:
+          print(pool.map(abs, [-1, -2]))
+      '''
+      path = Path('pool.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: false
+    why: a spawned child runs the script's file again from disk
+    runs_unread: true
+- name: R04 scripts nested or run after a rebinding
+  style: script
+  files:
+    notes.txt: |
+      keep me
+  cells:
+  - id: R04.0
+    code: |-
+      exec('from pathlib import Path\nimport subprocess, sys\ndef w():\n    Path(\'inner.py\').write_text("import os\\nos.remove(\'notes.txt\')")\ninner = "print(\'inner ok\')"\nPath(\'inner.py\').write_text(inner)\nw()\nsubprocess.run([sys.executable, \'inner.py\'])\n')
+    real_write: true
+    why: literal code that writes a script, rewrites it to delete notes.txt and runs the file
+    runs_unread: true
+  - id: R04.1
+    code: |-
+      import subprocess, os
+      subprocess.run = lambda *a, **k: os.remove('notes.txt')
+    real_write: false
+    why: rebinds subprocess.run to a delete, without calling it
+  - id: R04.2
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print('hello from job')'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    real_write: true
+    why: runs a saved script through the rebound subprocess.run, which deletes notes.txt

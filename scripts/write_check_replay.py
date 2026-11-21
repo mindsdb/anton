@@ -11,7 +11,9 @@ every turn end, and a check that raises counts as a card, since the product
 asks when it can't clear a cell.
 
 The tree may be any anton commit: the replay reads `find_cell_writes`'
-signature and calls the `earlier=` form or the older `earlier_code=` one. It
+signature and calls the `earlier=` form or the older `earlier_code=` one,
+with `swaps` where it takes it, as a local pad runs the code the check
+hands it in place of a cell's own. It
 imports the write check from `--tree` only. It exits 2 when it refuses to
 score: Python imported the write check from anywhere else, it can't import
 one under `--tree`, or two scorecards replayed different corpora.
@@ -241,6 +243,10 @@ class WriteCheck:
         if code_root and "code_root" not in params:
             _refuse("--code-root needs a tree whose find_cell_writes takes code_root")
         self.code_root = code_root
+        # A local pad runs the code the check hands it in place of the cell's
+        # own, so a tree that can read a script a cell writes and runs that
+        # way does.
+        self.swaps = "swaps" in params
         self.earlier_fields = set(getattr(wc, "EarlierCell").model_fields) if self.signature == "earlier" else set()
 
     def check(self, *, code: str, earlier: list[dict], snapshot, rules, root: Path):
@@ -252,6 +258,8 @@ class WriteCheck:
         kwargs = {"code": code, "earlier": cells, "snapshots": (snapshot,), "http_rules": rules}
         if self.code_root:
             kwargs["code_root"] = root
+        if self.swaps:
+            kwargs["swaps"] = True
         return self.wc.find_cell_writes(**kwargs)
 
 

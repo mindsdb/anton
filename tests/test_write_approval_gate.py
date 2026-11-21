@@ -1788,3 +1788,87 @@ def test_every_cell_that_never_ran_says_so_first():
     from anton.core.utils.write_check import CellWrites
 
     assert _refusal(CellWrites(unchecked=True), "cancelled").content.startswith("Not run: ")
+
+
+# ── A script the step writes and runs ─────────────────────────────────────
+#
+# Asked to "write and run a script", agents save the script from a literal
+# and run the file in the same step. A local pad runs the code the check hands
+# it in place of the step's own, with the script's text in place of the file,
+# so the check reads the text and a script that writes nothing needs no card.
+
+_SAVED = (
+    "from pathlib import Path\nimport subprocess, sys\n"
+    "script = '''{body}'''\n"
+    "path = Path('job.py')\npath.write_text(script)\n"
+    "subprocess.run([sys.executable, str(path)], check=True)\n"
+)
+
+
+async def test_a_local_pad_runs_a_saved_script_as_the_text_the_check_read_with_no_card(project):
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    pad = _runtime(project)
+    code = _SAVED.format(body="print(sum(range(10)))")
+    assert await _hold()(session, pad=pad, code=code) is None
+    assert elicitor.asked == 0
+    ran = pad.code_to_run(code)
+    assert ran != code and "'-c', " in ran and "print(sum(range(10)))" in ran
+    assert len(ran.splitlines()) == len(code.splitlines())
+    # Handed over once: a later run of the same code runs as written.
+    assert pad.code_to_run(code) == code
+
+
+async def test_a_saved_script_keeps_its_card_on_a_pad_that_runs_the_step_as_written(project):
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    code = _SAVED.format(body="print(sum(range(10)))")
+    outcome = await _hold()(session, pad=_Pad(), code=code)
+    assert outcome is not None and outcome.reason == "write_not_approved"
+    assert elicitor.asked == 1
+    assert "This step can't be checked before it runs." in elicitor.prompts[0]
+
+
+@pytest.mark.parametrize("answer", [APPROVE, CANCEL], ids=["approve", "cancel"])
+async def test_a_delete_in_a_saved_script_waits_on_its_card_which_names_the_script(project, answer):
+    (project / "notes.txt").write_text("x")
+    elicitor = _AnswersAtOnce(answer=answer)
+    session = await _gated_session(project, elicitor=elicitor)
+    pad = _runtime(project)
+    code = _SAVED.format(body="import os\nos.remove('notes.txt')")
+    outcome = await _hold()(session, pad=pad, code=code)
+    assert elicitor.asked == 1
+    prompt = elicitor.prompts[0]
+    assert "This step saves the script `job.py` and runs it." in prompt
+    assert "This step would delete:\n\n```\nnotes.txt\n```" in prompt
+    assert "It's this line in `job.py`:\n\n```\nos.remove('notes.txt')\n```" in prompt
+    assert "can't be checked" not in prompt
+    if answer == APPROVE:
+        assert outcome is None
+        assert "'-c', " in pad.code_to_run(code), "the approved step runs the text the card showed"
+    else:
+        assert outcome is not None and outcome.reason == "write_not_approved"
+
+
+async def test_a_saved_script_the_turn_runs_reaches_the_pad_as_the_checked_text(project):
+    """Through a whole turn: no card, and the pad gets the step with the
+    script's text in place of its file."""
+    from anton.core.backends.base import ScratchpadRuntime
+
+    class _SwappingPad(_Pad):
+        runs_checked_code = True
+        _pending_run = None
+        expect_run = ScratchpadRuntime.expect_run
+        code_to_run = ScratchpadRuntime.code_to_run
+
+        async def execute_streaming(self, code: str, **kwargs: object):
+            async for cell in super().execute_streaming(self.code_to_run(code), **kwargs):
+                yield cell
+
+    code = _SAVED.format(body="print('primes', [2, 3, 5, 7])")
+    harness = _session(project, code)
+    pad = _SwappingPad()
+    harness.session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+    seen = await _run(harness=harness, answers=[])
+    assert seen.cards == []
+    assert len(pad.ran) == 1 and pad.ran[0] != code and "'-c', " in pad.ran[0]

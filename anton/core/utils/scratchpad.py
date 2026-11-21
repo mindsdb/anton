@@ -87,6 +87,22 @@ _WHY = {
 }
 
 
+# What the refusal tells the model to tell the user. The card of an approval
+# no one gave in time is closed and can't be approved any more, so the user
+# asks again when they can answer it.
+_ASK_AGAIN = (
+    "Tell the user what the step would change, that no one approved it in time so it didn't run, and that "
+    "they can ask again when they can answer the approval card."
+)
+_NEXT: dict[RefusalCause, str] = {
+    "cancelled": "Tell the user what the step would change and that it needs their approval.",
+    "timeout": _ASK_AGAIN,
+    "unavailable": "Tell the user what the step would change and that it needs their approval.",
+    "error": "Tell the user what the step would change and that it needs their approval.",
+    "unanswered_earlier": _ASK_AGAIN,
+}
+
+
 def refusal_why(cause: RefusalCause) -> str:
     """Why a card didn't approve, in the words the gate's refusal uses."""
     return _WHY[cause]
@@ -307,6 +323,8 @@ def _file_lines(change: FileChange, *, also: bool = False) -> list[str]:
         lines += [f"{lead}:", "", _fence("\n".join(_shown_path(p) for p in change.paths)), ""]
     if not (wholes or change.paths):
         lines += [f"{lead} a file or folder it picks when it runs, in this code:", "", _fence(change.call), ""]
+    elif change.script:
+        lines += [f"It's this line in {_code_span(change.script)}:", "", _fence(change.call), ""]
     return lines
 
 
@@ -330,6 +348,8 @@ def _request_lines(request: HttpWrite) -> list[str]:
         lines = [f"This step would send {method} to:", "", _fence(_shown_path(request.url)), "", _fence(request.call), ""]
     if request.method_code is not None:
         lines += [f"The code decides the request's method when it runs{_run_time_from(request.method_code)}.", ""]
+    if request.script:
+        lines += [f"It's in {_code_span(request.script)}.", ""]
     return lines
 
 
@@ -339,6 +359,8 @@ def _card_prompt(writes: CellWrites, code: str = "") -> str:
     code go in fences, so Cowork's Markdown shows them as written. A step the
     check can't read also shows its `code`, so the person can judge it."""
     lines = ["**Approve this change?**", ""]
+    if writes.scripts and not writes.unchecked:
+        lines += [_scripts_line(writes.scripts), ""]
     if writes.sql:
         lines += ["This step would change data in a connected source:", ""]
         for write in writes.sql:
@@ -349,6 +371,8 @@ def _card_prompt(writes: CellWrites, code: str = "") -> str:
         lines += [f"This step would {_CALL_VIA[call.via]}:", "", _fence(call.call), ""]
         if call.runs and call.runs != call.call:
             lines += ["That call runs:", "", _fence(call.runs), ""]
+        if call.script:
+            lines += [f"It's in {_code_span(call.script)}.", ""]
     for change in writes.held_files:
         lines += _file_lines(change)
     # An append, or an overwrite of a file the agent owns, raises no card on
@@ -377,6 +401,17 @@ def _card_prompt(writes: CellWrites, code: str = "") -> str:
             lines += ["The step's code:", "", shown, ""]
     lines.append("It runs only if you approve. Cancel, Skip or no answer stops it.")
     return "\n".join(lines)
+
+
+def _scripts_line(scripts: tuple[str, ...]) -> str:
+    """The card's line for the scripts a step saves and runs whose text the
+    check read (`CellWrites.scripts`)."""
+    if len(scripts) == 1:
+        return (f"This step saves the script {_code_span(scripts[0])} and runs it. The check read the script, "
+                "so this card shows what it would change.")
+    names = ", ".join(_code_span(s) for s in scripts[:-1]) + f" and {_code_span(scripts[-1])}"
+    return (f"This step saves the scripts {names} and runs them. The check read the scripts, "
+            "so this card shows what they would change.")
 
 
 _WHOLE_STEP_CAUSES = {
@@ -415,8 +450,7 @@ def _refusal(writes: CellWrites, cause: RefusalCause) -> ToolOutcome:
             f"Not run: this step would {_summary(writes)}. That needs the user's approval, "
             f"and {_WHY[cause]}. Nothing in this cell ran. The user didn't approve this "
             "change, so it must not be made another way: don't rewrite the cell, build the "
-            "statement, path or URL at run time, or use another tool for it. Tell the user what "
-            "the step would change and that it needs their approval."
+            f"statement, path or URL at run time, or use another tool for it. {_NEXT[cause]}"
         ),
         ok=True,
         reason="write_not_approved",
@@ -551,6 +585,10 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     `write_approval_unchecked` lets a cell held only because the check
     can't read all of it run (`_unchecked_hold_dropped`).
     """
+    # Drop code to run that an earlier check left for a cell that never ran.
+    expect = getattr(pad, "expect_run", None)
+    if callable(expect):
+        expect(code, None)
     gate = getattr(session, "_write_gate", None)
     if not isinstance(gate, WriteGate):
         return None
@@ -579,12 +617,17 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
             earlier = (*earlier[:-1], earlier[-1].model_copy(update={"ended_process": True}))
         writes = await asyncio.to_thread(
             find_cell_writes, code=code, earlier=earlier, snapshots=gate.snapshots, http_rules=gate.http_rules,
+            swaps=getattr(pad, "runs_checked_code", False) is True,
         )
     except Exception as exc:
         # The type only, as for a failed question.
         logger.warning("write approval: the check failed (%s)", type(exc).__name__)
         # `stopped`: a check that read nothing can't clear the cell, whatever the setting.
         writes = CellWrites(unchecked=True, stopped=True, causes=(UncheckedCause(kind="failed"),))
+    # The pad runs the script text the check read in place of its file,
+    # whether the cell runs with no card or on an Approve.
+    if callable(expect):
+        expect(code, writes.run_code)
     if gate.relayed_hosts and writes.http:
         # The write relay holds a request to a host it relays and raises its
         # own card through approve_held_write, so a second card here would
