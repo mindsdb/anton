@@ -70,8 +70,28 @@ LAUNCH_DIRS = ("static",)
 MAX_LAUNCH_FILES = 500
 MAX_LAUNCH_FILE_BYTES = 8 * 1024 * 1024
 MAX_LAUNCH_TOTAL_BYTES = 64 * 1024 * 1024
-# The slot's rule for a `DS_*` name it puts in the app's environment.
-ENV_NAME = re.compile(r"^DS_[A-Z0-9_]+__[A-Z0-9][A-Z0-9_]*$")
+# The slot's rules for the env a launch sends, kept as the slot program keeps
+# them: it refuses the whole launch for one break, so a connection that would
+# break one is left out here instead.
+#
+# A `DS_*` name is DS_<ENGINE>_<NAME>__<FIELD>: DS_, then only A-Z, 0-9 and _,
+# with a "__" that starts after the fourth character and comes before a letter
+# or digit. `env_name_is_valid` checks that in two linear passes. One pattern
+# with two runs split at "__" backtracks over every "__" of a long name, and
+# the field comes from the saved connection.
+ENV_NAME_CHARS = re.compile(r"DS_[A-Z0-9_]+")
+ENV_NAME_FIELD = re.compile(r"__[A-Z0-9]")
+MAX_ENV_NAMES = 128
+MAX_ENV_VALUE_CHARS = 16 * 1024
+# Linux's exec fails with E2BIG on any one environment string over
+# MAX_ARG_STRLEN, 131,072 bytes with its NUL, and on all of them together past
+# a quarter of the stack limit. A launch keeps each name=value and its NUL
+# within the first, and the whole env within 1 MiB.
+MAX_ENV_STRING_BYTES = 128 * 1024
+MAX_ENV_TOTAL_BYTES = 1024 * 1024
+# A surrogate code point, which a JSON \ud800 escape carries alone: UTF-8 has
+# no form for it, so exec can't pass it to the app.
+SURROGATE = re.compile("[\ud800-\udfff]")
 
 # How long anton waits on a slot: a status read, the restart a reset starts
 # (the slot program exits no sooner than 10 seconds after its boot), a
@@ -90,7 +110,7 @@ MAX_PROBE_PATH_LENGTH = 512
 _SLOT_ADDRESS = re.compile(r"^http://[A-Za-z0-9.-]+:(?P<port>\d{1,5})$")
 
 ConnectionKind = Literal["db", "http-read", "http-write"]
-MissingReason = Literal["not_approved", "not_saved", "other_host", "field_names"]
+MissingReason = Literal["not_approved", "not_saved", "other_host", "field_names", "field_values", "too_large"]
 SlotState = Literal["empty", "running", "exited"]
 SlotStopReason = Literal["idle", "max_time", "app_exited", "reset", "terminated"]
 # What a launch card approves, in card order. The `files` hash is no part of it.
@@ -101,6 +121,8 @@ MISSING_REASON_TEXT: dict[MissingReason, str] = {
     "not_saved": "no saved connection by that engine and name",
     "other_host": "saved with a host other than the approved one",
     "field_names": "saved with a field name a live app can't receive (only letters, digits and _)",
+    "field_values": "saved with a value a live app can't receive (over 16 KiB, or holding a NUL or a lone surrogate)",
+    "too_large": "too large for a live app's environment (a field of 128 KiB or more, or over 128 fields or 1 MiB in all)",
 }
 
 
@@ -676,12 +698,27 @@ def _db_points_at(env: dict[str, str], prefix: str, approved: ApprovedConnection
         return False
 
 
+def env_name_is_valid(name: str) -> bool:
+    """Whether the slot takes `name` as a `DS_*` name, in time linear in its length."""
+    return ENV_NAME_CHARS.fullmatch(name) is not None and ENV_NAME_FIELD.search(name, 4) is not None
+
+
+def _env_value_is_valid(value: str) -> bool:
+    return len(value) <= MAX_ENV_VALUE_CHARS and "\0" not in value and SURROGATE.search(value) is None
+
+
+def _env_string_bytes(name: str, value: str) -> int:
+    """`name=value`'s size without its NUL. A valid name is ASCII, so its length is its size."""
+    return len(name) + 1 + len(value.encode())
+
+
 def resolve_connections(
     vault, datasources: Sequence[DatasourceRef], approved: ApprovedConnections, *, slug: str
 ) -> ResolvedConnections:
     """The `DS_*` a launch sends: for each declared connection that the
-    operator approved and the person saved pointing at the approved host.
-    Every other declared connection is named in `missing`.
+    operator approved, the person saved pointing at the approved host, and
+    the slot would take, in declared order until the env is full. Every other
+    declared connection is named in `missing`.
 
     Resolved per connection with `build_datasource_env`, the resolver both
     in-process launch paths use, so a slot gets exactly what the local
@@ -699,8 +736,7 @@ def resolve_connections(
         if not env:
             resolved.missing.append(_missing(ref, "not_saved"))
             continue
-        if any(not ENV_NAME.fullmatch(name) for name in env):
-            # The slot refuses the whole launch for one such name.
+        if not all(env_name_is_valid(name) for name in env):
             resolved.missing.append(_missing(ref, "field_names"))
             continue
         if entry.kind == "db":
@@ -719,7 +755,17 @@ def resolve_connections(
                 resolved.missing.append(_missing(ref, "other_host"))
                 continue
             env = rewritten
-        resolved.env.update(env)
+        # Checked on what the slot would get: the relay's URL replaces the saved one.
+        if not all(_env_value_is_valid(value) for value in env.values()):
+            resolved.missing.append(_missing(ref, "field_values"))
+            continue
+        sent = {**resolved.env, **env}
+        if (any(_env_string_bytes(name, value) + 1 > MAX_ENV_STRING_BYTES for name, value in env.items())
+                or len(sent) > MAX_ENV_NAMES
+                or sum(_env_string_bytes(name, value) for name, value in sent.items()) > MAX_ENV_TOTAL_BYTES):
+            resolved.missing.append(_missing(ref, "too_large"))
+            continue
+        resolved.env = sent
         resolved.granted.append(
             GrantedConnection(
                 slot=SlotConnection(
@@ -875,7 +921,7 @@ def missing_clause(missing: Sequence[MissingConnection]) -> str:
     if not missing:
         return ""
     named = ", ".join(f"`{m.engine}/{m.name}` ({MISSING_REASON_TEXT[m.reason]})" for m in missing)
-    return f" Not passed to the app: {named}. Ask the person to add or rename the connection, or their operator to approve it."
+    return f" Not passed to the app: {named}. Ask the person to add, rename or fix the connection, or their operator to approve it."
 
 
 class LiveAppLaunchResult(BaseModel):
