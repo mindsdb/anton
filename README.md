@@ -260,6 +260,8 @@ A decision model picks the browser's steps: Jev on the session's MindsHub connec
 
 Hosts that enable live apps can set `ANTON_LIVE_APPS_PER_PERSON` from zero through their configured slot count. Empty uses the slot count; zero refuses launches and leaves running apps alone. At the cap, or when every slot is full, the person chooses one of their own apps to replace. Cancel, Skip and unanswered cards leave the apps running.
 
+A launch sends a connection's `DS_*` values only when the slot would take them, and names every connection it leaves out, with the reason and never a value. A slot refuses the whole launch for a name that isn't `DS_<ENGINE>_<NAME>__<FIELD>` in A-Z, 0-9 and `_`, a value over 16 KiB or holding a NUL or a lone surrogate, a `name=value` of 128 KiB or more, an env over 128 names or 1 MiB, or more than 32 connections. anton checks each connection against those limits in declared order, in time linear in the names' length, so a connection that would break one is left out and the others still go. It also leaves out a connection whose `DS_*` names an earlier one already sends, such as `postgres/prod_db` after `postgres/prod-db`, so two connections' values never mix.
+
 `LiveAppHost` must implement a deployment-wide `launch_lock`, plus `slots_full` and `slots_available` hooks for durable notices. The lock must coordinate every server worker. Approval cards wait outside it; final ownership checks, slot changes and launch recording happen inside it. A notice invites refused people to try again and reserves no capacity.
 
 ## Model-call deadline
