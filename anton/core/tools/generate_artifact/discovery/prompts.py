@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
 from anton.core.llm.prompts import ANTON_NOTE
+from anton.core.utils.scratchpad import WriteGate
 
 from ..attachments import render_for_gathering
-from ..prompts import KNOWN_DATA_HEADER, datasources_or_none, with_project_rules
+from ..prompts import KNOWN_DATA_HEADER, READ_ONLY_CELLS, datasources_or_none, with_project_rules
 from .state import PrdState
 
 
@@ -243,16 +244,22 @@ _WHEN_TO_ASK = (
 )
 
 
-def _gathering_instruction(act_first: bool, *, static_completion: bool = False) -> str:
+def _gathering_instruction(act_first: bool, *, static_completion: bool = False, read_only: bool = False) -> str:
+    """The gathering step's instruction. `read_only` is true when write
+    approval is on, so the write gate refuses a builder cell that would need
+    the user's approval (`hold_unapproved_write`): the act-first text then
+    says so, and lets an html-app's rows under the known data stand in for
+    a fetch."""
     if act_first:
+        fetch = (
+            READ_ONLY_CELLS + " For an `html-app` whose rows or values are already under `"
+            + KNOWN_DATA_HEADER + "`, record `verified_by: \"known_data\"` for that source instead of "
+            "fetching it again. Otherwise, fetch"
+        ) if read_only else "Fetch"
         return (
             "Gather the evidence needed to build the ORIGINAL user request. Use the connected "
             "source's documented API and credentials from the catalog. Reuse an existing "
-            "scratchpad when present. Your cells only read: a cell that would change data, or "
-            "files outside the artifact folder, does not run. For an `html-app` whose rows or "
-            "values are already under `" + KNOWN_DATA_HEADER + "`, record "
-            "`verified_by: \"known_data\"` for that source instead of fetching it again. "
-            "Fetch ALL records/fields needed for the views, not just a "
+            "scratchpad when present. " + fetch + " ALL records/fields needed for the views, not just a "
             "schema sample or head(). Compute exact requested aggregates with Python. Save the "
             "complete relevant rows and exact calculated figures as canonical observed-data.json "
             "in the artifact folder, with units, filters and time scope; print only a short "
@@ -308,17 +315,22 @@ def _redraw_suffix(act_first: bool) -> str:
     return (_REDRAW_CORRECTION_ACT_FIRST if act_first else _REDRAW_CORRECTION) + _REDRAW_RESTATE
 
 
-def _step_instructions(act_first: bool = False, *, static_completion: bool = False) -> dict[str, str]:
+def _step_instructions(
+    act_first: bool = False, *, static_completion: bool = False, read_only: bool = False,
+) -> dict[str, str]:
     """Built lazily so the instruction texts stay in the modules that own
     them — brief.py and prd.py — rather than being copied here. `act_first`
     picks the variants for the no-confirmation flow; they live in step
-    messages, so the cached prefix is the same in both modes."""
+    messages, so the cached prefix is the same in both modes. `read_only`
+    goes to the gathering instruction (`_gathering_instruction`)."""
     from .brief import draft_brief_instruction
     from .prd import _WRITE_PRD_INSTRUCTION
     from . import sub_tools
 
     return {
-        sub_tools.STEP_GATHERING: _gathering_instruction(act_first, static_completion=static_completion),
+        sub_tools.STEP_GATHERING: _gathering_instruction(
+            act_first, static_completion=static_completion, read_only=read_only,
+        ),
         sub_tools.STEP_DRAFT_BRIEF: draft_brief_instruction(act_first),
         sub_tools.STEP_REDRAW_BRIEF: draft_brief_instruction(act_first) + _redraw_suffix(act_first),
         sub_tools.STEP_WRITE_PRD: _WRITE_PRD_INSTRUCTION,
@@ -349,7 +361,11 @@ def step_message(step: str, state: PrdState, *, extra: str = "") -> str:
             f"{gathering_question_budget(state.session, act_first=state.act_first)}\n"
         )
     from .. import static_gathering
-    body = _step_instructions(state.act_first, static_completion=static_gathering.enabled(state))[step]
+    body = _step_instructions(
+        state.act_first, static_completion=static_gathering.enabled(state),
+        # Write approval on: the write gate refuses a builder cell that would need a card.
+        read_only=isinstance(getattr(state.session, "_write_gate", None), WriteGate),
+    )[step]
     # No history to continue → the step is handed the restored material
     # instead. The redraw suffix in particular refers to a correction that is
     # only "above" when there is a conversation above.

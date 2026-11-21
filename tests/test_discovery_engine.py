@@ -719,6 +719,26 @@ async def test_gathering_finishes_after_a_read_only_refusal(monkeypatch):
     assert scratchpad.await_args.kwargs == {"origin": "page_builder"}
 
 
+async def test_on_the_last_round_a_finish_after_a_refused_step_stands(monkeypatch):
+    """No response follows the last round, so a finish beside the refused
+    step there completes gathering with its `known_data` marks, rather than
+    losing both. Before the last round the same response still waits."""
+    from anton.core.tools.generate_artifact.state import SkippedStep
+
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad",
+                        AsyncMock(return_value=_read_only_refusal()))
+    monkeypatch.setattr(engine, "MAX_ROUNDS", 2)
+    same_response = _finish().tool_calls[0]
+    batch = _response(tool_calls=[_builder_exec(), same_response])
+    session = _session_with_plan_sequence(batch, batch)
+    state = _state(session, known_data=_SITES)
+    await engine.run_gathering_loop(state)
+    assert state.messages[2]["content"][1]["content"].startswith("Not finished:"), "round 1 of 2 waits"
+    assert state.messages[4]["content"][1]["content"] == "ok", "round 2 of 2 finishes"
+    assert state.gathering_complete and (state.unverified_sources, state.known_data_verified) == ([], ["sites"])
+    assert state.skipped_steps == [SkippedStep(description="Load the sites", change=_CHANGE)] * 2
+
+
 async def test_a_refused_step_without_the_data_leaves_the_source_for_the_data_loop(monkeypatch):
     monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad",
                         AsyncMock(return_value=_read_only_refusal()))

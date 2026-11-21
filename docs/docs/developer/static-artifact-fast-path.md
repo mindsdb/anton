@@ -31,7 +31,10 @@ keeps the normal static and browser checks. It has three parts:
    writes a fresh, credential-free `observed-data.json`.
 2. If discovery settles on `html-app`, the writer builds the page. The host embeds the
    handoff verbatim at `window.ARTIFACT_DATA`; the model writes only presentation code.
-   An edit without a new handoff keeps the page's previous data.
+   The host binds only a handoff this call's discovery wrote, never an earlier build's.
+   An edit without a new handoff keeps the page's previous data, unless discovery verified
+   its sources from the rows the agent passed in `known_data`. Then the page binds none of
+   the earlier data, and the writer builds the page from those rows.
 3. The page goes through `verify_frontend` and the browser check with the session's sandbox
    policy, screenshot setting and the previous page for comparison. A page that still fails
    the browser check after one repair ends as `BrowserCheckFailed`, like the normal pipeline.

@@ -246,7 +246,9 @@ class BrowserCheckFailed:
     it comes from the last build's own check: an earlier build's browser
     fields on `GenState` can name a page a later build deleted.
     `comparison` is that check's comparison with the page as the turn found
-    it, when there was one.
+    it, when there was one. `warnings` holds the line that names the steps
+    the page builder skipped, when it skipped any
+    (`orchestrator.with_skipped_steps`).
     """
 
     page: str
@@ -255,6 +257,7 @@ class BrowserCheckFailed:
     screenshot: "RenderScreenshot | None"
     error: str
     comparison: "Comparison | None" = None
+    warnings: tuple[str, ...] = ()
 
 
 # ── FSM state ────────────────────────────────────────────────────────────────
@@ -497,9 +500,13 @@ class GenState:
     # arrives as a repeat call carrying it. Not persisted.
     question_unanswered: bool = False
     # The steps the write gate refused, in every builder loop of this run,
-    # because the page builder only reads. The result names them. Not
-    # persisted.
+    # because the page builder only reads. The result names them. Saved in
+    # the checkpoint, so a call that continues the run names them too.
     skipped_steps: list[SkippedStep] = field(default_factory=list)
+    # The fast path's `observed-data.json` (`static_gathering.fingerprint`)
+    # before its gathering ran, so `fast_static.run` binds only a hand-off
+    # that gathering wrote. None when there was no file, or no gathering ran.
+    handoff_before: "tuple | None" = None
     # Installed by the entry point. None on the bench harness and in unit
     # tests that construct a state directly, so every read goes through
     # `winding_down()`.

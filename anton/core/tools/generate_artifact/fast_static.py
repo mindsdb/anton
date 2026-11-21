@@ -192,6 +192,8 @@ async def prepare(state):
             "When schema exploration, a decision or a user answer is still needed, inspect "
             "it first and use the ordinary gathering loop."
         )
+    # `run` binds only a hand-off this gathering wrote.
+    state.handoff_before = static_gathering.fingerprint(state.artifact_path)
     await run_gathering_loop(state)
     final_type = state.final_artifact_type or state.artifact_type
     if final_type != "html-app" or not state.gathering_complete or state.unverified_sources:
@@ -210,7 +212,7 @@ async def prepare(state):
 async def run(state):
     from anton.core.tools.tool_handlers import render_screenshots_refused
 
-    from . import component_page, observed_data, places
+    from . import component_page, observed_data, places, static_gathering
     from .orchestrator import _cell_sandbox
     from .state import BrowserCheckFailed
 
@@ -224,21 +226,30 @@ async def run(state):
         return "Error: the primary page must be inside the artifact folder."
     existing = _existing_page(state, previous)
     handoff = None
-    try:
-        handoff = observed_data.read_handoff(state.artifact_path)
-        state.internal_files.append("observed-data.json")
-        if observed_data.credential_bearing(handoff):
-            handoff = None
-            (state.artifact_path / "observed-data.json").unlink(missing_ok=True)
-            state.verify_warnings.append("The structured source handoff contained credentials and was deleted, not embedded.")
-    except FileNotFoundError:
-        pass
-    except (OSError, ValueError, RecursionError):
-        state.verify_warnings.append("The structured source handoff could not be read; only observed tool output was used.")
-    bound_data, contract = observed_data.collect(handoff, existing)
+    # An earlier build's hand-off holds that build's data, not this one's.
+    if static_gathering.fingerprint(state.artifact_path) != state.handoff_before:
+        try:
+            handoff = observed_data.read_handoff(state.artifact_path)
+            state.internal_files.append("observed-data.json")
+            if observed_data.credential_bearing(handoff):
+                handoff = None
+                (state.artifact_path / "observed-data.json").unlink(missing_ok=True)
+                state.verify_warnings.append("The structured source handoff contained credentials and was deleted, not embedded.")
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, RecursionError):
+            state.verify_warnings.append("The structured source handoff could not be read; only observed tool output was used.")
+    # A source the gathering verified by the caller's known data ran no cell
+    # (`_complete_gathering`), so the data the existing page binds is the
+    # previous build's: the edit binds none of it, and the writer builds the
+    # page from the caller's rows.
+    from_known_data = bool(state.known_data_verified)
+    replaced = from_known_data and bool(observed_data.previous_data(existing))
+    bound_data, contract = observed_data.collect(handoff, "" if from_known_data else existing)
+    if bound_data or replaced:
+        existing = observed_data.strip_binding(existing)
     if bound_data:
         evidence = contract + "\n" + places.CONTRACT
-        existing = observed_data.strip_binding(existing)
     # The component program reads window.ARTIFACT_DATA, so it needs bound data.
     components = bool(bound_data)
     existing_html = existing
@@ -284,6 +295,12 @@ async def run(state):
             "For a map, window.ARTIFACT_PLACES[name] gives {lat, lon, name, country} for a place "
             "name exactly as in the data (a record's town and region joined as \"town, region\"), "
             "when it has one known match; list the names it lacks instead of guessing positions."
+        )
+    if replaced:
+        system += (
+            "\nThe existing page read the previous build's data from window.ARTIFACT_DATA. This edit "
+            "replaces that data with the caller-provided data, and the host inserts no "
+            "window.ARTIFACT_DATA: embed the caller-provided data in the page and build every view from it."
         )
     component_system = component_page.SYSTEM + (
         "\nEach chart has a Data button exposing its actual plotted values in a readable "

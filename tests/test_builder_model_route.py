@@ -313,7 +313,7 @@ async def test_the_data_loops_llm_call_events_name_the_model_each_call_asked_for
     state.gathering_complete = True
     state.unverified_sources = ["parts table"]
 
-    async def fetched(_state, _required_text=""):
+    async def fetched(*, state, required_text=""):
         from anton.core.tools.generate_artifact.state import FetchOutcome
 
         return FetchOutcome("pulled a sample", True)

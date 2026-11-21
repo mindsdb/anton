@@ -1806,8 +1806,15 @@ def test_every_cell_that_never_ran_says_so_first():
 # Everything that lets a chat cell run with no card lets a builder cell run.
 
 READ_ONLY = "write_refused_read_only"
-READ_ONLY_NEXT = ("Continue from the data already gathered or available from the chat, or finish and name the "
-                  "data you couldn't get.")
+READ_ONLY_NEXT = ("Continue from the data already gathered or available from the chat, and name any data you "
+                  "couldn't get when you finish.")
+# The builder's reset or removal of a scratchpad, refused whatever the setting.
+PAD_REFUSED = ToolOutcome(
+    content="Not run: the page builder doesn't reset or remove a scratchpad. It works in the chat's scratchpads, "
+            "and that would clear the conversation's earlier cells or a scratchpad the chat uses. Keep working in "
+            "the scratchpad as it is.",
+    ok=True, reason=READ_ONLY,
+)
 REWRITE_FORBIDDEN = "Don't rewrite or retry this step another way"
 READABLE_REREAD = "You may read the same data again in code that doesn't call into that earlier code."
 
@@ -2015,12 +2022,7 @@ async def test_the_builder_resets_and_removes_no_scratchpad(project, action):
     session._scratchpads.remove = AsyncMock(return_value="removed")
     try:
         outcome = await handle_scratchpad(session, {"action": action, "name": "main"}, origin="page_builder")
-        assert outcome == ToolOutcome(
-            content="Not run: the page builder only reads data, so it doesn't reset or remove a scratchpad. "
-                    "That would clear the conversation's earlier cells or a scratchpad the chat uses. Keep "
-                    "working in the scratchpad as it is.",
-            ok=True, reason=READ_ONLY,
-        )
+        assert outcome == PAD_REFUSED
         pad.reset.assert_not_awaited()
         session._scratchpads.remove.assert_not_awaited()
         for shown, text in (("view", "cells"), ("dump", "notebook")):
@@ -2031,6 +2033,37 @@ async def test_the_builder_resets_and_removes_no_scratchpad(project, action):
                                                 origin="page_builder")
         assert installed == "Installed polars."
         pad.install_packages.assert_awaited_once_with(["polars"])
+        chat = await handle_scratchpad(session, {"action": action, "name": "main"})
+        assert chat in ("Scratchpad 'main' reset. All state cleared.", "removed")
+    finally:
+        await session.close()
+
+
+@pytest.mark.parametrize("action", ["reset", "remove"])
+async def test_the_builder_resets_and_removes_no_scratchpad_with_write_approval_off(project, caplog, action):
+    """The builder works in the chat's scratchpads on every host, so the
+    refusal holds with no write gate on the session too, and it writes the
+    decision line a refused builder cell writes. The chat's own reset and
+    removal still go through."""
+    from anton.core.tools.tool_handlers import handle_scratchpad
+
+    harness = _session(project, write_approval=False)
+    session = harness.session
+    pad = MagicMock(reset=AsyncMock(), close=AsyncMock())
+    session._scratchpads.pads["main"] = pad
+    session._scratchpads.remove = AsyncMock(return_value="removed")
+    try:
+        assert session._write_gate is None
+        with caplog.at_level(logging.WARNING, logger=GATE_LOG):
+            outcome = await handle_scratchpad(session, {"action": action, "name": "main"}, origin="page_builder")
+        assert outcome == PAD_REFUSED
+        pad.reset.assert_not_awaited()
+        session._scratchpads.remove.assert_not_awaited()
+        records = [r for r in caplog.records if r.name == GATE_LOG and r.levelno == logging.WARNING]
+        assert [r.msg for r in records] == ["write approval: %s"]
+        assert json.loads(records[0].args[0]) == {
+            "kinds": [action], "count": 1, "status": "refused_read_only", "origin": "page_builder",
+        }
         chat = await handle_scratchpad(session, {"action": action, "name": "main"})
         assert chat in ("Scratchpad 'main' reset. All state cleared.", "removed")
     finally:

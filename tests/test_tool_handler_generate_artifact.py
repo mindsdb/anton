@@ -159,7 +159,10 @@ async def test_missing_data_tells_the_agent_what_to_ask_the_user_for(tmp_path: P
     assert payload["message"].startswith("Error: the data this artifact needs is not available.")
     assert "no connection holds the sites. Looked in: rest-gw." in payload["message"]
     assert "do NOT build the artifact yourself" in out
-    assert "pass the data in `known_data`" in out
+    assert payload["message"].endswith(
+        "Once they do, call generate_artifact again: the reason's last line says whether data passed in "
+        "`known_data` can stand in for it."
+    ), "the stop's own last line says whether `known_data` helps, by the artifact's type"
     assert "artifact generation failed" not in out
     assert "ask how they want to proceed" not in out
 
@@ -167,11 +170,15 @@ async def test_missing_data_tells_the_agent_what_to_ask_the_user_for(tmp_path: P
 async def test_steps_skipped_read_only_get_their_own_text(tmp_path: Path, monkeypatch):
     """The page builder only reads, and the steps that would have read the
     data needed the user's approval: the agent hears which steps were
-    skipped and why, that it may build from the data in the chat, and that
-    it must not make the change itself unasked. Not "the data is missing"."""
+    skipped, that they may be why the data isn't there, and that it must
+    not run them itself unasked. The stop's last line says whether
+    `known_data` can stand in; the agent may still ask for the source. Not
+    "the data is missing"."""
     slug = _make_artifact(tmp_path)
     reason = ("steps skipped read-only: sites are missing.\nSkipped steps:\n"
-              "- Update the sites (it would change data in a connected source)")
+              "- Update the sites (it would change data in a connected source)\n"
+              "Data passed in `known_data` can't stand in for these reads: this artifact's backend reads its "
+              "data at run time, so tell the user which data the page builder couldn't read.")
 
     async def fake_generate(**kw):
         return reason
@@ -181,14 +188,17 @@ async def test_steps_skipped_read_only_get_their_own_text(tmp_path: Path, monkey
                                                          "agent_understanding": "an app"})
     message = json.loads(outcome.content)["message"]
     assert message == (
-        "Error: the page builder couldn't get the data this artifact needs. It only reads data, and the steps "
-        "below would have needed the user's approval, so it skipped them.\n\n"
+        "Error: the page builder couldn't get the data this artifact needs. It only reads data, so it skipped "
+        "the steps below, which would have needed the user's approval, and they may be why the data isn't "
+        "there.\n\n"
         + reason + "\n\n"
-        "IMPORTANT: do NOT build the artifact yourself (no write_file / scratchpad fallback), and don't make the "
-        "skipped changes yourself unless the user asks for them. If the data the artifact needs is already in "
-        "this chat, call generate_artifact again and pass it in `known_data`, naming the scratchpad and cell it "
-        "lives in. Otherwise tell the user which data the page builder couldn't get, and why."
+        "IMPORTANT: do NOT build the artifact yourself (no write_file / scratchpad fallback), and don't run "
+        "these steps yourself unless the user asked for them. The reason's last line says whether data passed "
+        "in `known_data` can stand in for these reads. Where it can't, or the data isn't in this chat, tell the "
+        "user which data the page builder couldn't get, and why, and ask them to connect the source or provide "
+        "the data."
     )
+    assert "pass it in `known_data`" not in message, "a full-stack app's stop offers no `known_data`"
     assert "is not available" not in message and "artifact generation failed" not in message
 
 
@@ -1174,6 +1184,88 @@ async def test_a_page_that_failed_its_browser_check_comes_back_to_repair(tmp_pat
         "If the page still fails, tell the user it failed its browser check, and do not call it or any "
         "view in it browser-verified, tested or working."
     )
+
+
+@pytest.mark.parametrize("used", [0, 2], ids=["cells left", "no cells left"])
+async def test_a_page_left_for_a_browser_repair_names_the_steps_the_builder_skipped(
+    tmp_path: Path, monkeypatch, used
+):
+    """The run's skipped steps ride on the repair result as `warnings`, and
+    the instruction says to name them, with repair cells left or none."""
+    from dataclasses import replace
+
+    from anton.core.tools import tool_handlers
+
+    slug = _make_artifact(tmp_path, type="html-app")
+    warning = ("The page builder only reads data, so it skipped these steps, which would have needed the user's "
+               "approval: Update the sites (it would change data in a connected source). Don't run these steps "
+               "yourself unless the user asked for them.")
+
+    async def fake_generate(**kw):
+        return replace(_browser_check_failed(), warnings=(warning,))
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    session = _session(tmp_path)
+    session._render_screenshots_refused = True
+    session._repair_cells = {tool_handlers.PageKey(slug, "dashboard.html"): used}
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "build it", "agent_understanding": "a page"})
+
+    body = json.loads(result.content)
+    assert body["warnings"] == [warning]
+    assert body["instruction"].endswith(" " + tool_handlers._SKIPPED_STEPS_INSTRUCTION)
+    assert tool_handlers._SKIPPED_STEPS_INSTRUCTION == (
+        "`warnings` names the steps the page builder skipped: tell the user in one sentence which ones.")
+
+
+async def test_a_page_left_for_a_browser_repair_with_no_skipped_step_carries_no_warnings(tmp_path: Path, monkeypatch):
+    slug = _make_artifact(tmp_path, type="html-app")
+
+    async def fake_generate(**kw):
+        return _browser_check_failed()
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    session = _session(tmp_path)
+    session._render_screenshots_refused = True
+    _, result = await _collect_raw(session, {"slug": slug, "user_request": "build it", "agent_understanding": "a page"})
+    body = json.loads(result.content)
+    assert "warnings" not in body and "page builder skipped" not in body["instruction"]
+
+
+async def test_a_run_that_crashes_after_a_skipped_step_still_names_it(tmp_path: Path, monkeypatch, decline_fast_path):
+    """With write approval on, the page writer's cell is refused, then the
+    provider fails on the writer's next call. The run crashes, and the text
+    the agent gets still names the step the builder skipped."""
+    from unittest.mock import Mock
+
+    from anton.core.tools.generate_artifact import engine
+    from anton.core.tools.generate_artifact.discovery import checkpoint as cp
+    from tests.test_artifact_orchestrator import _refusing_scratchpad, _writer_model
+    from tests.test_artifact_orchestrator import _session as _run_session
+
+    slug = _make_artifact(tmp_path, type="html-app")
+    cp.save(tmp_path / "artifacts" / slug, cp.DiscoveryCheckpoint(
+        request_fingerprint=cp.request_fingerprint("map the sites"),
+        pipeline_stage=cp.STAGE_SPEC_WRITTEN, artifact_type="html-app",
+    ))
+    run_session = _run_session()
+    run_session._scratchpads.agent_pads = Mock(return_value=set())
+    run_session.spend_ceiling_reached = Mock(return_value=False)
+    refused = _refusing_scratchpad(monkeypatch=monkeypatch)
+    _writer_model(session=run_session, writes="index.html")
+    run_session._llm.code_stream = Mock(side_effect=RuntimeError("provider down"))
+
+    async def generate(**kw):
+        # The real run, on a session that carries the model and the scratchpads.
+        return await engine.generate(**{**kw, "session": run_session})
+
+    monkeypatch.setattr(gen_pkg, "generate", generate)
+    _, result = await _collect_raw(
+        _session(tmp_path), {"slug": slug, "user_request": "map the sites", "agent_understanding": "a map of the sites"},
+    )
+    assert refused.await_count == 1
+    assert (result.ok, result.reason) == (False, "RuntimeError")
+    assert ("generator crashed: provider down\nSkipped steps:\n"
+            "- Load the sites (it would run code the check couldn't read)") in json.loads(result.content)["message"]
 
 
 @pytest.mark.parametrize("used,left", [(1, 1), (2, 0)])

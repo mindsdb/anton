@@ -37,10 +37,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The reason a page-builder step carries when it did not run because the
-# page builder only reads: an exec the write check would have held for a
-# card (`hold_unapproved_write`), or a reset or removal of a scratchpad
-# (`handle_scratchpad`).
+# The reason a page-builder step carries when it did not run: an exec the
+# write check would have held for a card, refused because the page builder
+# only reads (`hold_unapproved_write`), or a reset or removal of a
+# scratchpad, refused whatever the setting (`handle_scratchpad`).
 WRITE_REFUSED_READ_ONLY = "write_refused_read_only"
 # Reasons a scratchpad exec result carries when its cell never ran, so a
 # caller that records executed cells can tell them from a cell that did
@@ -86,7 +86,8 @@ CardOrigin = Literal["chat", "page_builder"]
 # ended while its card waited, so no refusal went back to the model;
 # "not_held_unchecked" when `write_approval_unchecked` let it run with no card;
 # "refused_read_only" when a page-builder cell would have needed a card and
-# was refused with none.
+# was refused with none, or the page builder's reset or removal of a
+# scratchpad was refused (`log_builder_pad_refusal`).
 DecisionStatus = RefusalCause | Literal["approved", "not_held", "not_held_unchecked", "stopped", "refused_read_only"]
 
 _WHY = {
@@ -484,7 +485,7 @@ def _read_only_refusal(*, writes: CellWrites) -> ReadOnlyRefusal:
         content=(
             f"Not run: the page builder only reads data, and this step would {change}, which needs the "
             f"user's approval. Nothing in this cell ran. {next_step} Continue from the data already "
-            "gathered or available from the chat, or finish and name the data you couldn't get."
+            "gathered or available from the chat, and name any data you couldn't get when you finish."
         ),
         # ok=True: as for a refused card, a refusal is no tool failure.
         ok=True,
@@ -594,12 +595,25 @@ def _log_decision(
     else:
         kinds, count = writes.kinds(), len(writes.sql) + len(writes.calls) + len(writes.held_files) + len(writes.http)
     causes = tuple(dict.fromkeys(c.kind for c in writes.causes)) if mode is not None else ()
-    decision = WriteApprovalDecision(kinds=kinds, count=count, status=status, origin=origin, mode=mode,
-                                     causes=causes)
-    # WARNING: hosts log at WARNING by default, and this line is the record of
-    # a held write. `origin` shows on every line; `mode` and `causes` only on
-    # a "not_held_unchecked" line.
+    _write_decision_line(decision=WriteApprovalDecision(
+        kinds=kinds, count=count, status=status, origin=origin, mode=mode, causes=causes,
+    ))
+
+
+def _write_decision_line(*, decision: WriteApprovalDecision) -> None:
+    """Log one decision. WARNING: hosts log at WARNING by default, and this
+    line is the record of a held write. `origin` shows on every line; `mode`
+    and `causes` only on a "not_held_unchecked" line."""
     logger.warning("write approval: %s", decision.model_dump_json(exclude_defaults=True))
+
+
+def log_builder_pad_refusal(*, action: str) -> None:
+    """Log a page-builder reset or removal of a scratchpad, which
+    `handle_scratchpad` refuses whatever the write approval setting, on the
+    line a refused page-builder cell gets (`_log_decision`)."""
+    _write_decision_line(decision=WriteApprovalDecision(
+        kinds=(action,), count=1, status="refused_read_only", origin="page_builder",
+    ))
 
 
 def _unchecked_hold_dropped(writes: CellWrites, mode: UncheckedMode) -> bool:

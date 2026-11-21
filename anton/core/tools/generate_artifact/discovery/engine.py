@@ -203,7 +203,8 @@ async def run_gathering_loop(state: "PrdState") -> None:
         finished = False
         batch_failed = False
         # A step the page builder's read-only rule refused: not a failure to
-        # fix, but completion waits for the next response.
+        # fix, but completion waits for the next response, unless this round
+        # is the last.
         batch_refused = False
         for call_index, tc in enumerate(response.tool_calls):
             if tc.parse_error:
@@ -229,10 +230,13 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 continue
 
             if name == "finish_gathering":
-                if batch_failed or batch_refused or call_index != len(response.tool_calls) - 1:
+                # The last round has no next response to finish in, so there a
+                # finish after a refused step stands, with the data it has.
+                wait_for_next = batch_refused and round_idx < MAX_ROUNDS - 1
+                if batch_failed or wait_for_next or call_index != len(response.tool_calls) - 1:
                     if batch_failed:
                         reason = "A source execution in this batch failed; inspect and fix it before finishing."
-                    elif batch_refused:
+                    elif wait_for_next:
                         reason = "Not finished: " + _REFUSED_IN_BATCH
                     else:
                         reason = "finish_gathering must follow all source tool calls in the batch."
