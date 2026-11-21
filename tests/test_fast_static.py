@@ -457,3 +457,42 @@ async def test_only_a_hand_off_this_gathering_wrote_is_bound(tmp_path, monkeypat
     assert bound == ({observed_data.identity(fresh): fresh} if writes else {})
     assert not any('"qty":3' in call["messages"][0]["content"] for call in calls), (
         "the earlier build's data reaches no writer")
+
+
+async def test_an_edit_whose_gathering_marks_nothing_keeps_the_pages_data(tmp_path, monkeypatch):
+    """An edit that passes known data inherits the earlier build's
+    `known_data` marks and its finished gathering from the checkpoint. This
+    call's gathering then answers in text and marks nothing: the marks are
+    the earlier build's, so the edit keeps the data the page binds."""
+    from anton.core.tools.generate_artifact import component_page, observed_data
+    from anton.core.tools.generate_artifact.discovery import engine
+
+    bound = {"sites": [{"site": "Toronto", "qty": 3}]}
+    page = ('<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width"></head>'
+            '<body>Toronto 3</body></html>')
+    (tmp_path / "index.html").write_text(observed_data.bind(page, {observed_data.identity(bound): bound}))
+
+    async def gather(received):
+        # A text reply: no tool call, so nothing completes or marks a source.
+        received.gathering_notes = "The page already has its data."
+
+    calls = []
+
+    async def stream(**kwargs):
+        calls.append(kwargs)
+        components = kwargs["system"].startswith(component_page.SYSTEM)
+        yield StreamComplete(LLMResponse(content=component_page.FALLBACK if components else page))
+
+    monkeypatch.setattr(engine, "run_gathering_loop", gather)
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(_llm=SimpleNamespace(code_stream=stream), history=[]),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="sites", act_first=True,
+                     agent_understanding="Make the header blue", known_data="site,qty\nToronto,3")
+    # What `engine._restore` brings back from the earlier build's checkpoint.
+    state.gathering_complete, state.final_artifact_type = True, "html-app"
+    state.known_data_verified = ["sites"]
+    assert await fast_static.prepare(state)
+    assert state.known_data_verified == []
+    assert (await fast_static.run(state))["status"] == "generated"
+    assert observed_data.previous_data((tmp_path / "index.html").read_text()) == {observed_data.identity(bound): bound}
+    assert not any("replaces that data with the caller-provided data" in call["system"] for call in calls)

@@ -192,8 +192,10 @@ async def prepare(state):
             "When schema exploration, a decision or a user answer is still needed, inspect "
             "it first and use the ordinary gathering loop."
         )
-    # `run` binds only a hand-off this gathering wrote.
+    # `run` binds only a hand-off this gathering wrote, and reads only this
+    # gathering's `known_data` marks, not ones restored from the checkpoint.
     state.handoff_before = static_gathering.fingerprint(state.artifact_path)
+    state.known_data_verified = []
     await run_gathering_loop(state)
     final_type = state.final_artifact_type or state.artifact_type
     if final_type != "html-app" or not state.gathering_complete or state.unverified_sources:
