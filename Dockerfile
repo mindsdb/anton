@@ -4,8 +4,8 @@
 # `/usr/local/bin/scratchpad-boot.sh` (single cell) inside a gVisor pod running as UID 1000.
 FROM python:3.12-slim
 
-# uv is required at RUNTIME: scratchpad_boot shells out to `uv pip install` for missing packages
-# via ANTON_UV_PATH=/usr/local/bin/uv, so uv must be present at exactly that path.
+# uv is required at RUNTIME: each pad's venv is created and installed into with it, through
+# ANTON_UV_PATH=/usr/local/bin/uv, so uv must be present at exactly that path.
 COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /usr/local/bin/uv
 
 # The version, supplied by the caller because hatch-vcs cannot derive it here:
@@ -21,7 +21,10 @@ COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /usr/local/bin/uv
 # downstream.
 ARG ANTON_VERSION
 
+# PYTHONNOUSERSITE: the runtime user's home is writable by cell code, so Python
+# must not load startup files from its user site-packages.
 ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONNOUSERSITE=1 \
     PYTHONUNBUFFERED=1 \
     SETUPTOOLS_SCM_PRETEND_VERSION=${ANTON_VERSION} \
     VIRTUAL_ENV=/opt/anton-venv \
@@ -31,8 +34,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY . /app
 
-# Install anton into a venv owned by UID 1000 so the non-root runtime can also `uv pip install`
-# missing packages at turn time. `uv sync --locked` installs the exact versions
+# Install anton into a root-owned venv. Cell code runs as UID 1000, the same user as the
+# agent process, so a venv it could write would let a cell change the code the agent
+# loads. Packages a pad installs go into that pad's own venv. `uv sync --locked` installs the exact versions
 # from uv.lock; a bare `uv pip install .` re-resolves at build time, which is
 # what silently pulled anthropic 1.x (httpx2) into pods while the lockfile
 # still pinned 0.x. The scratchpad group includes the cloud SDK in the same
@@ -60,8 +64,7 @@ RUN test -n "$SETUPTOOLS_SCM_PRETEND_VERSION" \
     && uv venv "$VIRTUAL_ENV" \
     && UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --locked --no-dev --group scratchpad --no-cache \
     && python -m compileall -q -j 0 -x '/(test|tests|idle_test)/' \
-         /usr/local/lib/python3.12 "$VIRTUAL_ENV" /app/anton \
-    && chown -R 1000:1000 "$VIRTUAL_ENV"
+         /usr/local/lib/python3.12 "$VIRTUAL_ENV" /app/anton
 
 # scratchpad-boot.sh: the single-cell entrypoint the controller execs (reads code + delimiter on stdin).
 RUN printf '#!/bin/sh\nexec python -m anton.core.backends.scratchpad_boot\n' \

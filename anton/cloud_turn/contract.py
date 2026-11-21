@@ -139,7 +139,13 @@ Events written back on stdout (JSONL):
       `error` is "TypeName: message", so a consumer reads the failure's kind
       off the class name. A MindsHub billing stop that knows when its limit
       lifts adds `"reset_at": "<ISO-8601 instant with a UTC offset>"`; every
-      other failure omits the key.
+      other failure omits the key. A spent-budget stop whose gateway named the
+      budget adds `"budget_scope": "<org|workspace|api_key|team|user|all_members|...>"`
+      the same way, `"budget_period": "<day|month|year>"` when it named one, and
+      `"budget_model": "<alias>"` for a budget on one model. A spent plan
+      window (`WindowAllowanceExhaustedError`) adds `"window": "<5h|7d>"` when
+      the gateway named it, and a model outside the plan's tier
+      (`ModelNotInTierError`) adds `"required_tier": "<plus|pro|...>"` likewise.
 
 The tool/round step kinds the controller relays unchanged as `turn_step` are
 not spelled out above: `tool_start`, `tool_end`, `tool_result`, `compacted`,
@@ -151,6 +157,8 @@ rendered as an agent message; the pod sends it only when the request set
 `tool_messages`.
 A request with `jev_decisions` set to false never asks Jev, MindsHub's
 decision model, whether the agent finished: the organization opted out.
+A request with `jev_classify` set to false gives the agent no scratchpad
+classify() or classify_yes_no(), which label texts with Jev.
 A request with `ui_locale` (a tag in `anton.core.llm.ui_locale.UI_LOCALE_NAMES`:
 en, es, pt-BR, de, fr, it, ja, ko, zh-CN) tells the agent which
 language the user's app is set to (ENG-4149); absent or unsupported adds nothing.
@@ -197,7 +205,15 @@ logger = logging.getLogger(__name__)
 
 TURN_PROTOCOL_VERSION = 1
 DATASOURCE_PROTOCOL_VERSION = 1
+CUSTOM_API_PROTOCOL_VERSION = 1
 MAX_DATASOURCE_CONNECTIONS = 100
+#: The most custom API connections one turn carries; cowork-server holds the
+#: same cap.
+MAX_CUSTOM_API_CONNECTIONS = 25
+#: The connector id rule anton's draft parser applies, and auth's longest
+#: connection name: a block outside them did not come from those writers.
+_CUSTOM_CONNECTOR_ID = re.compile(r"[a-z][a-z0-9_]{1,40}")
+_CUSTOM_NAME_MAX = 128
 _REQUIRED_REF_KEYS = frozenset({"connection_id", "credential_version"})
 # Names only, for the prompt. cowork-server's queue check allows the same two.
 _OPTIONAL_REF_KEYS = frozenset({"label", "engine"})
@@ -284,6 +300,88 @@ def _parse_datasource_block(value: object) -> DatasourceBlockV1 | None:
             )
         )
     return DatasourceBlockV1(DATASOURCE_PROTOCOL_VERSION, tuple(refs))
+
+
+@dataclass(frozen=True)
+class CustomApiConnectionRefV1:
+    """One custom API connection the turn may call: auth's id and the member's own names, never a value."""
+
+    connection_id: int
+    connector_id: str
+    name: str
+    credential_version: int
+
+
+@dataclass(frozen=True)
+class CustomApiBlockV1:
+    """The member's custom API connections for this turn, by auth id and with their own names."""
+
+    protocol_version: int
+    connections: tuple[CustomApiConnectionRefV1, ...]
+
+
+def _positive_int(value: object) -> bool:
+    """Whether ``value`` is an int of 1 or more, booleans excluded."""
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 1
+
+
+def _custom_api_connection(connection: object) -> CustomApiConnectionRefV1 | None:
+    """One connection reference, or None when it is not exactly the producer's shape."""
+    if not isinstance(connection, dict) or set(connection) != {
+        "connection_id", "connector_id", "name", "credential_version",
+    }:
+        return None
+    if (
+        not _positive_int(connection["connection_id"])
+        or not _positive_int(connection["credential_version"])
+        or not isinstance(connection["connector_id"], str)
+        or not _CUSTOM_CONNECTOR_ID.fullmatch(connection["connector_id"])
+        or not isinstance(connection["name"], str)
+        or not connection["name"]
+        or len(connection["name"]) > _CUSTOM_NAME_MAX
+    ):
+        return None
+    return CustomApiConnectionRefV1(
+        connection["connection_id"], connection["connector_id"], connection["name"], connection["credential_version"],
+    )
+
+
+def _custom_api_refs(value: object) -> tuple[CustomApiConnectionRefV1, ...] | str:
+    """The block's connection refs, or a fixed phrase that names why ``value`` is not a version 1 block."""
+    if not isinstance(value, dict):
+        return "not an object"
+    if set(value) != {"protocol_version", "connections"}:
+        return "missing or unsupported top-level keys"
+    if not _is_version(value["protocol_version"], CUSTOM_API_PROTOCOL_VERSION):
+        return "unsupported protocol version"
+    connections = value["connections"]
+    if not isinstance(connections, list) or not connections or len(connections) > MAX_CUSTOM_API_CONNECTIONS:
+        return "invalid connection list"
+    refs = [_custom_api_connection(connection) for connection in connections]
+    if None in refs or len({ref.connection_id for ref in refs}) != len(refs):
+        return "invalid connection reference"
+    return tuple(refs)
+
+
+def _parse_custom_api_block(value: object, conversation_id: str) -> CustomApiBlockV1 | None:
+    """Parse the optional ``custom_api`` block, or drop it.
+
+    Input: the raw block and the request's conversation id. Output: the parsed block,
+    or None when it is absent or unusable. A rejected block logs one line naming the
+    reason and the conversation id, never a value, and the turn goes on exactly as if
+    the block were absent. No other side effects.
+    """
+    if value is None:
+        return None
+    refs = _custom_api_refs(value)
+    if isinstance(refs, str):
+        logger.warning(
+            "custom_api block dropped: %s",
+            refs,
+            extra={"event": "custom_api_dropped", "reason": refs, "conversation_id": conversation_id},
+        )
+        return None
+    return CustomApiBlockV1(CUSTOM_API_PROTOCOL_VERSION, refs)
 
 
 def _usable_label(value: object) -> str | None:
@@ -443,9 +541,10 @@ class TurnRequestV1:
     #: DB-authoritative ordered history ({"role","content"} dicts). The pod never
     #: loads its own history; cowork-server owns persistence.
     history: list = field(default_factory=list)
-    #: Optional per-turn LLM credential set by cowork ({"provider","api_key","base_url"}).
+    #: Optional per-turn LLM credential set by cowork ({"provider","api_key","base_url"},
+    #: optionally "coding_model" and "image_model" — the user's image model, ENG-4024).
     #: MVP: always MindsHub (provider="minds-cloud"). None falls back to env settings.
-    llm: dict | None = None
+    llm: dict | None = field(default=None, repr=False)
     #: Optional memory cowork resolved for this tenant: {"global": {slot: text},
     #: "project": {...}}, slot in profile|rules|lessons. Read-only in the pod.
     memory: dict | None = None
@@ -480,12 +579,15 @@ class TurnRequestV1:
     #: {"turn_key": str, "connections": [{"engine", "name"}, ...]}. Absent or
     #: empty means no connectors for this turn — see cloud_turn/session.py's
     #: build_cloud_chat_session, which is the only place this is read.
-    oauth: dict | None = None
+    oauth: dict | None = field(default=None, repr=False)
     #: Optional verified datasource references: IDs and immutable versions, each with
     #: an optional ``label`` (the user's name for it) and ``engine`` (auth's connector
     #: id), which only the prompt reads. No capability or password crosses; the
     #: gateway is on the `llm` base URL's host.
     datasource: DatasourceBlockV1 | None = None
+    #: Optional custom API connections of the member, by auth id: ``{"protocol_version": 1,
+    #: "connections": [...]}``. No value. An unusable block reads as absent.
+    custom_api: CustomApiBlockV1 | None = None
     #: Optional ISO 8601 creation time of the conversation, as cowork-server
     #: resolved it. The pod is new every turn and cannot derive this: history
     #: rows carry no timestamps. Without it the session dates the conversation
@@ -508,6 +610,9 @@ class TurnRequestV1:
     #: controller that does not forward the field changes nothing; anything
     #: else turns it off, since a malformed opt-out must not read as consent.
     jev_decisions: bool = True
+    #: Whether the agent's scratchpad may label texts with Jev through
+    #: classify() and classify_yes_no(). Read like `jev_decisions`.
+    jev_classify: bool = True
     #: The language the user's app is set to, a tag in
     #: `anton.core.llm.ui_locale.UI_LOCALE_NAMES` (en, es, pt-BR, de, fr, it,
     #: ja, ko, zh-CN), which cowork-server read from the app's
@@ -522,7 +627,8 @@ class TurnRequestV1:
     preview_checks: bool = False
     #: Per-engine connector data cowork-server resolved for this turn:
     #: {engine: {"usage_notes": str}}. Rendered only for engines the turn's
-    #: vault connects. Absent when no connected engine has notes.
+    #: vault connects and, apart and as data, for the connector ids of the
+    #: ``custom_api`` block. Absent when no connected engine has notes.
     connectors: dict | None = None
     #: Whether this turn may build connector templates with
     #: `create_connector_draft`, sent back on the `connector` event. Anything
@@ -533,10 +639,13 @@ class TurnRequestV1:
     #: Absent, null, blank, or non-string keeps the configured default.
     reasoning_effort: str | None = None
     #: The MindsHub browser router, when cowork-server turned the browser on for
-    #: this turn: {"base_url", "profile", "project"?}, read by
-    #: BrowserConfig.from_dict. The pod reaches the router with this turn's
+    #: this turn: {"base_url", "profile", "project"?, "decisions_proxy"?}, read
+    #: by BrowserConfig.from_dict. The pod reaches the router with this turn's
     #: `llm` key. A block with a `token`, or with any address but the https
     #: router, is refused. Absent or malformed means no browser tool this turn.
+    #: `decisions_proxy` ({"url", "model"}, no key) is cowork-server's route
+    #: to the organization's own decision model, which the pod calls with the
+    #: same `llm` key.
     browser: BrowserConfig | None = None
     #: The tenant's per-task limits cowork-server resolved: any of
     #: ``max_tool_rounds``, ``max_continuations``, ``max_turn_tokens``,
@@ -571,6 +680,7 @@ class TurnRequestV1:
             # Same defensive isinstance check as trace, for the same reason.
             oauth=d.get("oauth") if isinstance(d.get("oauth"), dict) else None,
             datasource=_parse_datasource_block(d.get("datasource")),
+            custom_api=_parse_custom_api_block(d.get("custom_api"), str(d["conversation_id"])),
             # The controller always sends the key and sends None when
             # cowork-server could not resolve it, so the guard does real work.
             started_at=(
@@ -579,6 +689,7 @@ class TurnRequestV1:
             interactive=d.get("interactive") is True,
             tool_messages=d.get("tool_messages") is True,
             jev_decisions=d.get("jev_decisions", True) is True,
+            jev_classify=d.get("jev_classify", True) is True,
             ui_locale=d.get("ui_locale") if isinstance(d.get("ui_locale"), str) else None,
             preview_checks=d.get("preview_checks") is True,
             # Same defensive isinstance check as oauth/trace.

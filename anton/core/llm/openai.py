@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import openai
 from contextlib import aclosing
@@ -51,6 +51,9 @@ from .provider import (
     raise_on_empty_response,
     ensure_replayable_tool_call,
 )
+
+if TYPE_CHECKING:
+    from .images import GeneratedImage, ReferenceImage
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +265,8 @@ def _raise_for_status_error(exc: "openai.APIStatusError", model: str) -> NoRetur
         the generic message, never the plan copy.
       - 402/429 with an M3 gate billing code (``wallet_empty`` /
         ``included_allowance_exhausted`` / ``free_air_daily_spend_fuse_exceeded`` /
-        ``budget_exceeded``, body or X-MindsHub-Reason header) → the matching TokenLimitExceeded
+        ``budget_exceeded`` / ``window_allowance_exhausted``, body or X-MindsHub-Reason
+        header), and a 403 ``model_not_in_tier`` → the matching TokenLimitExceeded
         subclass from ``mindshub_billing_stop`` (ENG-1169). Code-exact: BYOK
         402s stay generic.
       - 403 with the gateway's ``model_restricted`` deny detail
@@ -1181,6 +1185,44 @@ class OpenAIProvider(LLMProvider):
     def trace_headers(self) -> dict[str, str]:
         """The Langfuse headers this provider's own requests would carry now; empty outside a turn."""
         return self._build_trace_headers() or {}
+
+    async def generate_image(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        size: str | None = None,
+        quality: str | None = None,
+        output_format: str | None = None,
+        reference_images: tuple["ReferenceImage", ...] | list["ReferenceImage"] = (),
+    ) -> "GeneratedImage":
+        """One image from the OpenAI images API on this provider's endpoint and key.
+
+        A generation, or an edit when ``reference_images`` is not empty. The
+        reading of the reply, its usage and its errors lives in
+        `anton.core.llm.images`, shared with the scratchpad helper. Raises
+        ImageGenerationError, or ProviderAuthError on a 401.
+        """
+        from .images import ImageGenerationError, request_image
+
+        try:
+            result = await request_image(
+                self._client,
+                model=model,
+                prompt=prompt,
+                size=size,
+                quality=quality,
+                output_format=output_format,
+                reference_images=reference_images,
+                extra_headers=self._build_trace_headers(),
+            )
+        except ImageGenerationError as exc:
+            # A billed reply without a usable image is still counted.
+            if exc.usage is not None:
+                self.log_usage(model=model, usage=exc.usage, served_model=None)
+            raise
+        self.log_usage(model=model, usage=result.usage, served_model=None)
+        return result
 
     def native_web_tools(self) -> set[str]:
         # BYOK OpenAI exposes web_search via Responses API (which covers fetch

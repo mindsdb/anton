@@ -151,9 +151,6 @@ no_write_carded:
   - D04.7  # D04 page path from artifact metadata
   - D05.2  # D05 document build with skill helper
   - D05.3  # D05 document build with skill helper
-  - E01.0  # E01 pdf guide text export
-  - E02.4  # E02 planner log
-  - E04.0  # E04 large seed sql file
   - G01.3  # G01 ddl string then function
   - G01.6  # G01 ddl string then function
   - G05.1  # G05 p rebound after module
@@ -220,7 +217,6 @@ no_write_carded:
   - P02.1  # P02 helper module: walk the folder after it
   - P05.2  # P05 DDL text printed
   - P07.2  # P07 page written through a path, read after a restart
-  - P09.0  # P09 big text file read and counted
   - T15.2  # T15 restart free re-derives the path
   - T18.1  # T18 plotly html export and to_sql through helper
 

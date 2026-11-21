@@ -63,15 +63,18 @@ class CoreSettings(BaseSettings):
     # and every BYOK setup, uses the LLM verifier as before. "off" is the kill switch.
     verifier_jev: Literal["on", "off"] = "on"
     verifier_jev_model: str = "jev-1.13.0"
+    # "off": the scratchpad's classify() and classify_yes_no() are not offered,
+    # and the prompt leaves them out. They also need the coding model on MindsHub.
+    classify_jev: Literal["on", "off"] = "on"
     verifier_jev_timeout_s: float = 2.0
     # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
     verifier_jev_min_p: float = 0.8
     # The `browser` tool. Where the browser is comes only from the host
     # (ChatSessionConfig.browser), never from settings. These tune the tool:
-    # how much Jev steers it ("on" takes its confident steps, "shadow" only
-    # records its picks against the model's, "off" never asks), the bar a Jev
-    # step must clear, Jev's time limit, and the most steps one `run` takes.
-    browser_jev: Literal["on", "shadow", "off"] = "shadow"
+    # whether Jev steers it ("on" takes its confident steps, "off" never asks;
+    # the retired "shadow" reads as off), the bar a Jev step must clear, Jev's
+    # time limit, and the most steps one `run` takes.
+    browser_jev: Literal["on", "off", "shadow"] = "on"
     browser_jev_min_p: float = 0.8
     browser_jev_timeout_s: float = 4.0
     browser_max_steps: int = 15
@@ -129,7 +132,8 @@ class CoreSettings(BaseSettings):
     # (`write_hold.held_by_relay`). A bad entry is skipped with a WARNING.
     write_relay_hosts: str = ""
     # Per-turn spend ceiling in RAW tokens — input + output + cache_read +
-    # cache_creation, i.e. `TurnCost.total_tokens` (ENG-1286). 0 disables it.
+    # cache_creation, plus an image call's image tokens, i.e.
+    # `TurnCost.total_tokens` (ENG-1286). 0 disables it.
     #
     # RAW is deliberate, and the instinct to discount cache reads here is wrong:
     # they bill at ~a tenth, but they draw the user's included-token allowance at
@@ -147,6 +151,10 @@ class CoreSettings(BaseSettings):
     # sets it from the request, since a web turn otherwise meets the hosting
     # side's hard cut-off with no summary.
     max_turn_seconds: int = 0
+    # Images one turn may make (ANTON_MAX_IMAGES_PER_TURN), the `generate_image`
+    # tool and the scratchpad's `generate_image()` together; a call past it is
+    # refused before any request is sent.
+    max_images_per_turn: int = 8
     context_pressure_threshold: float = 0.7
     max_consecutive_errors: int = 5
     resilience_nudge_at: int = 2

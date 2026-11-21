@@ -28,6 +28,8 @@ from anton.core.llm.openai import OpenAIProvider
 from anton.core.llm.provider import (
     AllowanceExhaustedError,
     FreeServingPausedError,
+    ModelNotInTierError,
+    WindowAllowanceExhaustedError,
     ModelRestrictedError,
     StreamComplete,
     StreamTextDelta,
@@ -271,6 +273,8 @@ async def test_e2e_openai_midstream_allowance_denial_is_token_limit():
     ("wallet_empty", WalletEmptyError),
     ("included_allowance_exhausted", AllowanceExhaustedError),
     ("free_air_daily_spend_fuse_exceeded", FreeServingPausedError),
+    ("window_allowance_exhausted", WindowAllowanceExhaustedError),
+    ("model_not_in_tier", ModelNotInTierError),
 ])
 async def test_e2e_openai_midstream_billing_code_raises_its_own_type(code, cls):
     """The real SDK's SSE parser, one frame per gate code. The fuse frame used

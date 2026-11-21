@@ -37,6 +37,7 @@ from anton.core.browser.models import (
     SitesAnswer,
     TabAnswer,
     TabsAnswer,
+    WaitFor,
 )
 from anton.core.browser.page import PAGE_TEXT_HEADING, format_page, human_check
 
@@ -152,6 +153,11 @@ def test_the_control_fixture_tells_done_by_the_person_from_any_other_agent_recor
     handed = Control.model_validate(controls["handed to the person"].body)
     done = SessionInfo.model_validate(controls["done by the person"].body).control
     assert (handed.holder, handed.by) == ("human", "agent")
+    assert handed.watching is False
+    # A host that doesn't say it watches isn't taken to watch.
+    unsaid = {k: v for k, v in controls["handed to the person"].body.items() if k != "watching"}
+    assert Control.model_validate(unsaid).watching is False
+    assert Control.model_validate(controls["handed to the person, watching"].body).watching is True
     assert (done.holder, done.by) == ("agent", "person") and done.seq > handed.seq
     assert (fresh.holder, fresh.by) == ("agent", "agent") and fresh.seq < handed.seq
     assert SessionInfo.model_validate(controls["a session before a page loads"].body).url is None
@@ -259,6 +265,12 @@ async def _every_client_call(client: BrowserClient) -> None:
 REQUESTS = {
     ("sessions", "open a session"): lambda c: c.open_session(session_id=PROFILE, url="https://shop.example.test/"),
     ("control", "hand to the person"): lambda c: c.hand_to_person(session_id=PROFILE, reason="Please sign in to Example Shop"),
+    ("control", "hand to the person, waiting for a box they check"): lambda c: c.hand_to_person(
+        session_id=PROFILE, reason="Check the unaccompanied-minor policy box", wait_for=WaitFor(element=12, state="checked"),
+    ),
+    ("control", "hand to the person, waiting for the page to change"): lambda c: c.hand_to_person(
+        session_id=PROFILE, reason="Please sign in to Example Shop", wait_for=WaitFor(page="changes"),
+    ),
     ("tabs", "open a tab"): lambda c: c.new_tab(session_id=PROFILE, url="https://docs.example.test/"),
     ("sites", "note a site"): lambda c: c.note_site(session_id=PROFILE, site="github.com", account_hint="ada"),
     ("saved_tabs", "save a tab"): lambda c: c.save_tab(
@@ -301,6 +313,22 @@ def test_every_accepted_request_is_one_the_client_sends():
         assert browser_tool._step_body({"step": step}) == _load("action").examples[name].body, name
 
 
+def test_every_wait_for_the_hosts_take_reads_as_the_model_the_client_sends():
+    waits = [e.body["wait_for"] for _, _, e in _examples("request") if "wait_for" in e.body]
+    assert len(waits) == 2
+    for body in waits:
+        assert WaitFor.model_validate(body, strict=True).model_dump(exclude_none=True) == body
+
+
+@pytest.mark.parametrize("body", [
+    {"element": 12}, {"state": "checked"}, {"element": 12, "state": "checked", "page": "changes"}, {"page": "loads"},
+    {"element": 12, "state": "checked", "value": "x"}, {},
+])
+def test_a_wait_for_is_one_element_and_its_state_or_the_page_and_never_a_value(body):
+    with pytest.raises(ValidationError):
+        WaitFor.model_validate(body)
+
+
 def test_the_client_never_sends_a_refused_request():
     refused = [e.body for _, _, e in _examples("request") if e.refused]
     assert refused == [{"holder": "agent", "reason": ""}]
@@ -325,6 +353,7 @@ ERROR_REASONS = {
     "password_field": "browser_secret_field",
     "bad_request": "browser_bad_input",
     "tab_not_found": "browser_error",
+    "tab_limit": "browser_error",
     "human_in_control": "browser_human_in_control",
     "stale_element": "browser_stale_element",
     "page_blocked": "browser_page_blocked",

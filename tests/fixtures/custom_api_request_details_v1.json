@@ -1,0 +1,6 @@
+{
+  "path": "Custom API request path is not allowed.",
+  "query": "Custom API request query is not allowed.",
+  "headers": "Custom API request headers is not allowed.",
+  "turn_key": "Custom API request may not carry the turn key."
+}
