@@ -9,8 +9,10 @@ from anton.cloud_turn.contract import (
     ARTIFACTS_TOUCHED_KEY,
     MAX_ARTIFACTS_TOUCHED,
     DatasourceBlockV1,
+    HostToolSpecV1,
     TurnRequestV1,
     TurnSkillEntry,
+    parse_host_tools,
     parse_turn_skills,
 )
 
@@ -418,3 +420,100 @@ def test_no_limits_block_logs_nothing(caplog):
         assert _limits_request(...).limits == {}
         assert _limits_request(None).limits == {}
     assert caplog.records == []
+
+
+# ── host tools ───────────────────────────────────────────────────────
+
+
+def _host_tool(**over):
+    entry = {"name": "edit_note", "description": "Edit a note.", "input_schema": {"type": "object"},
+             "prompt": "Notes are edited with edit_note.", "timeout_s": 30}
+    entry.update(over)
+    return entry
+
+
+def _host_tools_request(value):
+    body = {"protocol_version": 1, "conversation_id": "conv-7", "input": "hi"}
+    if value is not ...:
+        body["host_tools"] = value
+    return TurnRequestV1.from_json(json.dumps(body))
+
+
+def test_a_host_tool_entry_parses_whole():
+    assert _host_tools_request([_host_tool()]).host_tools == (
+        HostToolSpecV1(name="edit_note", description="Edit a note.", input_schema={"type": "object"},
+                       prompt="Notes are edited with edit_note.", timeout_s=30),
+    )
+
+
+@pytest.mark.parametrize("over", [{}, {"prompt": None, "timeout_s": None}, {"prompt": "", "timeout_s": None}])
+def test_prompt_and_timeout_are_optional(over):
+    entry = _host_tool(**over)
+    if not over:
+        del entry["prompt"], entry["timeout_s"]
+    [spec] = _host_tools_request([entry]).host_tools
+    assert spec.prompt is None
+    assert spec.timeout_s == 60
+
+
+def test_a_request_without_host_tools_has_none_and_logs_nothing(caplog):
+    """The controller always sends the key, null when cowork-server did not send the block."""
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
+        assert _host_tools_request(...).host_tools == ()
+        assert _host_tools_request(None).host_tools == ()
+        assert _host_tools_request([]).host_tools == ()
+    assert caplog.records == []
+    assert TurnRequestV1(protocol_version=1, conversation_id="c", input="hi").host_tools == ()
+
+
+@pytest.mark.parametrize("name", ["a", "edit_note", "a" + "b" * 63, "x9_"])
+def test_host_tool_names_that_pass(name):
+    assert [s.name for s in parse_host_tools([_host_tool(name=name)], "c")] == [name]
+
+
+@pytest.mark.parametrize("bad,reason", [
+    ("not an object", "entry_not_an_object"),
+    (_host_tool(name="Edit"), "invalid_name"),
+    (_host_tool(name="1edit"), "invalid_name"),
+    (_host_tool(name="a" * 65), "invalid_name"),
+    (_host_tool(name="edit_note\n"), "invalid_name"),
+    (_host_tool(name=7), "invalid_name"),
+    (_host_tool(description=""), "invalid_description"),
+    (_host_tool(description="  "), "invalid_description"),
+    (_host_tool(description=None), "invalid_description"),
+    (_host_tool(input_schema=[]), "invalid_input_schema"),
+    (_host_tool(input_schema={}), "invalid_input_schema"),
+    (_host_tool(input_schema={"type": "array"}), "invalid_input_schema"),
+    (_host_tool(prompt=3), "invalid_prompt"),
+    (_host_tool(timeout_s=0), "invalid_timeout"),
+    (_host_tool(timeout_s=121), "invalid_timeout"),
+    (_host_tool(timeout_s=True), "invalid_timeout"),
+    (_host_tool(timeout_s=30.0), "invalid_timeout"),
+    (_host_tool(timeout_s="30"), "invalid_timeout"),
+])
+def test_a_malformed_entry_is_dropped_and_logged_while_the_rest_stay(bad, reason, caplog, monkeypatch):
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
+        request = _host_tools_request([bad, _host_tool(name="read_note")])
+    assert [s.name for s in request.host_tools] == ["read_note"]
+    [line] = _pod_log_lines(caplog)
+    assert line["event"] == "host_tool_dropped"
+    assert line["reason"] == reason
+    assert line["conversation_id"] == "conv-7"
+
+
+def test_a_repeated_name_keeps_the_first_entry(caplog):
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
+        specs = parse_host_tools([_host_tool(), _host_tool(description="Second.")], "c")
+    assert [s.description for s in specs] == ["Edit a note."]
+    [record] = caplog.records
+    assert record.reason == "duplicate_name"
+
+
+def test_a_host_tools_block_that_is_not_a_list_is_dropped_and_logged(caplog, monkeypatch):
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
+        assert _host_tools_request({"edit_note": _host_tool()}).host_tools == ()
+    [line] = _pod_log_lines(caplog)
+    assert line["reason"] == "host_tools_not_a_list"
+    assert line["conversation_id"] == "conv-7"

@@ -1,4 +1,4 @@
-"""Answer, addon and check_result lines on the cloud turn's stdin.
+"""Answer, addon, check_result and host tool lines on the cloud turn's stdin.
 
 The controller writes the TurnRequestV1 line first, then one line per answer
 the user gives to an interactive turn's question, and one line per message the
@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 from collections.abc import Callable, Iterator
 from typing import BinaryIO
@@ -151,6 +152,46 @@ def parse_check_result_line(raw: bytes) -> dict | None:
     return {"check_id": check_id, "body": clean}
 
 
+HOST_TOOL_LINE_KINDS = ("host_tool_progress", "host_tool_result")
+_HOST_CALL_ID = re.compile(r"htool:[0-9a-f]{32}")
+MAX_HOST_PROGRESS_CHARS = 500
+#: The highest part number the controller's entry id rule allows (six digits).
+MAX_HOST_RESULT_SEQ = 999_999
+
+
+def parse_host_tool_line(raw: bytes) -> dict | None:
+    """A host_tool_progress or host_tool_result line in *raw*, normalized, or None (``cloud_turn/host_tools.py``).
+
+    Progress keeps ``call_id`` and ``text`` (non-empty, at most 500
+    characters); a progress line has no ``n`` key of its own. A result part
+    keeps ``call_id``, ``seq``, ``last``, ``ok`` and ``text``. Both keep
+    ``kind``. ``entry_id`` is the controller's dedupe key, is not needed here
+    and is neither required nor checked.
+    """
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get("kind") not in HOST_TOOL_LINE_KINDS:
+        return None
+    call_id = body.get("call_id")
+    if not (isinstance(call_id, str) and _HOST_CALL_ID.fullmatch(call_id)):
+        return None
+    text = body.get("text")
+    if not isinstance(text, str):
+        return None
+    if body["kind"] == "host_tool_progress":
+        if not text or len(text) > MAX_HOST_PROGRESS_CHARS:
+            return None
+        return {"kind": "host_tool_progress", "call_id": call_id, "text": text}
+    seq, last, ok = body.get("seq"), body.get("last"), body.get("ok")
+    if isinstance(seq, bool) or not isinstance(seq, int) or not 0 <= seq <= MAX_HOST_RESULT_SEQ:
+        return None
+    if not isinstance(last, bool) or not isinstance(ok, bool):
+        return None
+    return {"kind": "host_tool_result", "call_id": call_id, "seq": seq, "last": last, "ok": ok, "text": text}
+
+
 def start_answer_reader(
     stream: BinaryIO,
     loop: asyncio.AbstractEventLoop,
@@ -158,12 +199,14 @@ def start_answer_reader(
     deliver_addon: Callable[[dict], None] | None = None,
     deliver_check: Callable[[dict], None] | None = None,
     on_close: Callable[[], None] | None = None,
+    deliver_host_tool: Callable[[dict], None] | None = None,
 ) -> threading.Thread:
     """Read stdin lines until EOF and hand each valid one to its handler on *loop*.
 
     Answer lines go to *deliver*, addon and addon_withdraw lines to
-    *deliver_addon*, check_result lines to *deliver_check*. A malformed line,
-    a line of any other kind, and a line whose handler is None are logged and
+    *deliver_addon*, check_result lines to *deliver_check*, host_tool_progress
+    and host_tool_result lines to *deliver_host_tool*. A malformed line, a
+    line of any other kind, and a line whose handler is None are logged and
     skipped. *on_close* runs on *loop* once stdin reaches EOF.
     """
 
@@ -177,6 +220,9 @@ def start_answer_reader(
             if line is None:
                 line = parse_check_result_line(raw)
                 handler = deliver_check
+            if line is None:
+                line = parse_host_tool_line(raw)
+                handler = deliver_host_tool
             if line is None or handler is None:
                 # No content in the log: the line may carry what the user typed.
                 logger.warning("cloud turn: ignored a stdin line it does not take (%d bytes)", len(raw))
