@@ -164,6 +164,34 @@ async def test_missing_data_tells_the_agent_what_to_ask_the_user_for(tmp_path: P
     assert "ask how they want to proceed" not in out
 
 
+async def test_steps_skipped_read_only_get_their_own_text(tmp_path: Path, monkeypatch):
+    """The page builder only reads, and the steps that would have read the
+    data needed the user's approval: the agent hears which steps were
+    skipped and why, that it may build from the data in the chat, and that
+    it must not make the change itself unasked. Not "the data is missing"."""
+    slug = _make_artifact(tmp_path)
+    reason = ("steps skipped read-only: sites are missing.\nSkipped steps:\n"
+              "- Update the sites (it would change data in a connected source)")
+
+    async def fake_generate(**kw):
+        return reason
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    _, outcome = await _collect_raw(_session(tmp_path), {"slug": slug, "user_request": "build it",
+                                                         "agent_understanding": "an app"})
+    message = json.loads(outcome.content)["message"]
+    assert message == (
+        "Error: the page builder couldn't get the data this artifact needs. It only reads data, and the steps "
+        "below would have needed the user's approval, so it skipped them.\n\n"
+        + reason + "\n\n"
+        "IMPORTANT: do NOT build the artifact yourself (no write_file / scratchpad fallback), and don't make the "
+        "skipped changes yourself unless the user asks for them. If the data the artifact needs is already in "
+        "this chat, call generate_artifact again and pass it in `known_data`, naming the scratchpad and cell it "
+        "lives in. Otherwise tell the user which data the page builder couldn't get, and why."
+    )
+    assert "is not available" not in message and "artifact generation failed" not in message
+
+
 async def test_generator_crash_is_wrapped(tmp_path: Path, monkeypatch):
     slug = _make_artifact(tmp_path)
 

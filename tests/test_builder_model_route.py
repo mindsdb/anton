@@ -314,7 +314,9 @@ async def test_the_data_loops_llm_call_events_name_the_model_each_call_asked_for
     state.unverified_sources = ["parts table"]
 
     async def fetched(_state, _required_text=""):
-        return "pulled a sample", True
+        from anton.core.tools.generate_artifact.state import FetchOutcome
+
+        return FetchOutcome("pulled a sample", True)
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fetched)
     with model_route(ModelRoute(BUILDER, "medium")):

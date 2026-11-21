@@ -148,7 +148,7 @@ async def test_both_exec_paths_keep_the_turns_copies_before_their_snapshot(servi
         _record_cell_explainability=lambda **kw: None,
     )
 
-    async def prepared(session, tc_input):
+    async def prepared(session, tc_input, *, origin):
         return pad, tc_input["code"], "edit", "", 5
 
     monkeypatch.setattr(tool_handlers, "prepare_scratchpad_exec", prepared)

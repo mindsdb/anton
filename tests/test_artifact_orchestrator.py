@@ -13,8 +13,8 @@ from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.state import (
-    BrowserCheck, BrowserCheckFailed, FetchVerdict, GenState, RequiredData, RequiredDataItem,
-    VerifyResult,
+    BrowserCheck, BrowserCheckFailed, FetchOutcome, FetchVerdict, GenState, RequiredData, RequiredDataItem,
+    SkippedStep, VerifyResult,
 )
 from anton.utils.datasources import DATASOURCES_HEADER
 
@@ -108,7 +108,7 @@ async def test_data_phase_exits_after_one_successful_fetch(tmp_path: Path, monke
     )
 
     async def fake_fetch(state, required_text=""):
-        return "pulled a sample", True
+        return FetchOutcome("pulled a sample", True)
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
     err = await orchestrator._data_phase(st)
@@ -133,7 +133,7 @@ async def test_fetch_data_sample_appends_exec_code(tmp_path: Path, monkeypatch):
         }
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
-    notes, ok = await orchestrator._fetch_data_sample(st)
+    notes, ok, _ = await orchestrator._fetch_data_sample(st)
     assert notes.startswith("pulled 100 rows")
     assert "### Code executed while fetching" in notes
     assert "df = q('select 1')" in notes
@@ -842,7 +842,7 @@ async def test_data_phase_still_fetches_when_a_source_is_unverified(
 
     async def fake_fetch(state, required_text=""):
         fetched["n"] += 1
-        return "pulled totals", True
+        return FetchOutcome("pulled totals", True)
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -1736,7 +1736,7 @@ async def test_an_empty_list_is_rejected_when_nothing_vouches_for_the_sources(
 
     async def fake_fetch(state, required_text=""):
         got["text"] = required_text
-        return "pulled sites", True
+        return FetchOutcome("pulled sites", True)
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -1806,7 +1806,7 @@ async def test_a_repeat_call_builds_from_the_known_data_it_brings(
 
     async def fake_fetch(state, required_text=""):
         fetched.append(required_text)
-        return "pulled sites", True
+        return FetchOutcome("pulled sites", True)
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -1828,7 +1828,7 @@ async def test_the_fetch_gets_the_full_list_define_wrote(tmp_path: Path, monkeyp
 
     async def fake_fetch(state, required_text=""):
         got["text"] = required_text
-        return "pulled orders", True
+        return FetchOutcome("pulled orders", True)
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -1916,7 +1916,7 @@ async def test_a_fetch_without_a_cell_that_succeeded_is_not_data(tmp_path: Path,
         return loop_result
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
-    notes, ok = await orchestrator._fetch_data_sample(_state(tmp_path))
+    notes, ok, _ = await orchestrator._fetch_data_sample(_state(tmp_path))
     assert ok is False
     if isinstance(loop_result, dict):
         assert "(the fetch step ran no cell that succeeded)" in notes
@@ -1933,7 +1933,7 @@ async def test_one_cell_that_succeeded_makes_the_fetch_count(tmp_path: Path, mon
         }
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
-    notes, ok = await orchestrator._fetch_data_sample(_state(tmp_path))
+    notes, ok, _ = await orchestrator._fetch_data_sample(_state(tmp_path))
     assert ok is True
     assert "Scratchpad `pad` (failed):" in notes
     assert "(the fetch step ran no cell that succeeded)" not in notes
@@ -1957,7 +1957,7 @@ async def test_failed_fetches_keep_the_sources_unverified_until_the_loop_gives_u
 
     async def fake_fetch(state, required_text=""):
         fetched.append(state.data_notes)
-        return "(data fetch step reported: 401)", False
+        return FetchOutcome("(data fetch step reported: 401)", False)
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -1985,7 +1985,7 @@ async def test_a_no_with_a_connection_gets_one_forced_fetch_then_names_where_it_
 
     async def fake_fetch(state, required_text=""):
         fetched.append(required_text)
-        return "listed the endpoints, no sites", True
+        return FetchOutcome("listed the endpoints, no sites", True)
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -2009,7 +2009,7 @@ async def test_a_forced_fetch_that_finds_the_data_lets_the_build_go_on(tmp_path:
     ])
 
     async def fake_fetch(state, required_text=""):
-        return "read 13 sites from rest-gw", True
+        return FetchOutcome("read 13 sites from rest-gw", True)
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -2081,7 +2081,7 @@ async def test_no_forced_fetch_when_no_iteration_is_left_to_judge_it(tmp_path: P
 
     async def fake_fetch(state, required_text=""):
         fetched.append(required_text)
-        return "(data fetch step reported: 500)", False
+        return FetchOutcome("(data fetch step reported: 500)", False)
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -2105,7 +2105,7 @@ async def test_a_rejected_empty_list_does_not_become_the_users_reason(tmp_path: 
     )
 
     async def fake_fetch(state, required_text=""):
-        return "(data fetch step reported: 500)", False
+        return FetchOutcome("(data fetch step reported: 500)", False)
 
     monkeypatch.setattr(orchestrator, "_fetch_data_sample", fake_fetch)
 
@@ -2147,3 +2147,103 @@ async def test_known_data_is_scrubbed_before_any_step_sees_it(tmp_path: Path, mo
     )
     assert "Toronto,43.7" in seen["known_data"]
     assert secret not in seen["known_data"]
+
+
+# ── The page builder only reads ──────────────────────────────────────────────
+#
+# A builder step that would need the user's approval is refused with no card
+# and recorded as a skipped step. The data loop stops once a fetch's every
+# cell was refused, and the result names each skipped step.
+
+_UPDATE_STEP = SkippedStep(description="Update the sites", change="change data in a connected source")
+
+
+def _sites_missing(st: GenState, *, possible: bool = True) -> None:
+    st.gathering_complete = False
+    st.declared_sources = ["sites"]
+    st.unverified_sources = ["sites"]
+    st.session._llm.generate_object = AsyncMock(
+        side_effect=lambda schema_class, **kw: (
+            RequiredData(items=[_SITES_ITEM], reasoning="sites are missing")
+            if schema_class is RequiredData
+            else FetchVerdict(possible=possible, reasoning="rest-gw has them" if possible else "no source has them")
+        )
+    )
+
+
+async def test_the_data_loop_stops_after_one_fetch_whose_cells_were_all_refused(tmp_path: Path, monkeypatch):
+    st = _state(tmp_path)
+    _sites_missing(st)
+    loops = []
+
+    async def fake_run_loop(**kw):
+        loops.append(kw["node_label"])
+        return {"files_written": [], "rounds_used": 1, "summary": "refused", "scratchpad_execs": [],
+                "skipped_steps": [_UPDATE_STEP], "finished": True}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    err = await orchestrator._data_phase(st)
+    assert loops == ["fetch_data_sample"], "one fetch, not DATA_LOOP_MAX"
+    assert st.session._llm.generate_object.await_count == 2
+    assert err == ("steps skipped read-only: sites are missing.\nSkipped steps:\n"
+                   "- Update the sites (it would change data in a connected source)")
+    assert st.error == err and st.skipped_steps == [_UPDATE_STEP]
+    assert [o for o, _ in _outcomes(st, "fetch_data_sample")] == ["refused_read_only"]
+
+
+async def test_a_fetch_with_a_cell_that_ran_is_not_all_refused(tmp_path: Path, monkeypatch):
+    """A cell that ran and failed beside a refused one: the next iteration
+    may still read the data another way, so the loop goes on."""
+    st = _state(tmp_path)
+    _sites_missing(st)
+
+    async def fake_run_loop(**kw):
+        return {"files_written": [], "rounds_used": 1, "summary": "tried",
+                "scratchpad_execs": [{"name": "pad", "code": "get('/sites')", "output": "401", "ok": False}],
+                "skipped_steps": [_UPDATE_STEP], "finished": True}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_run_loop)
+    err = await orchestrator._data_phase(st)
+    assert st.data_iterations == orchestrator.DATA_LOOP_MAX
+    assert [o for o, _ in _outcomes(st, "fetch_data_sample")] == ["fail"] * orchestrator.DATA_LOOP_MAX
+    assert err.startswith("steps skipped read-only: the data loop did not converge"), (
+        "a skipped step may be why the data isn't there, so the result names it")
+    assert err.endswith("Skipped steps:\n- Update the sites (it would change data in a connected source)")
+
+
+async def test_missing_data_with_no_skipped_step_keeps_the_not_enough_data_text(tmp_path: Path):
+    st = _state(tmp_path)
+    _sites_missing(st, possible=False)
+    err = await orchestrator._data_phase(st)
+    assert err == "not enough data: no source has them"
+
+
+async def test_a_skipped_gathering_step_names_itself_when_the_data_loop_finds_nothing(tmp_path: Path):
+    st = _state(tmp_path)
+    _sites_missing(st, possible=False)
+    st.skipped_steps.append(SkippedStep(description="", change="run code the check couldn't read"))
+    err = await orchestrator._data_phase(st)
+    assert err == ("steps skipped read-only: no source has them.\nSkipped steps:\n"
+                   "- a step that would run code the check couldn't read")
+
+
+def test_the_result_names_the_skipped_steps_once_each(tmp_path: Path):
+    st = _state(tmp_path)
+    st.verify_warnings = ["frontend: a chart has no title"]
+    assert orchestrator._result_shell(st)["warnings"] == ["frontend: a chart has no title"]
+    st.skipped_steps += [_UPDATE_STEP, _UPDATE_STEP, SkippedStep(description="", change="overwrite `a.csv`")]
+    assert orchestrator._result_shell(st)["warnings"] == [
+        "frontend: a chart has no title",
+        "The page builder only reads data, so it skipped these steps, which would have needed the user's "
+        "approval: Update the sites (it would change data in a connected source); a step that would overwrite "
+        "`a.csv`. The page uses the data it could read. Don't make these changes yourself unless the user asks "
+        "for them.",
+    ]
+    assert st.verify_warnings == ["frontend: a chart has no title"], "the line goes on the result only"
+
+
+async def test_each_generation_loop_adds_its_skipped_steps_to_the_run(tmp_path: Path):
+    st = _state(tmp_path)
+    assert orchestrator._add_skipped_steps(state=st, result="generator crashed") == []
+    added = orchestrator._add_skipped_steps(state=st, result={"skipped_steps": [_UPDATE_STEP]})
+    assert added == [_UPDATE_STEP] and st.skipped_steps == [_UPDATE_STEP]

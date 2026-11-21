@@ -20,6 +20,8 @@ from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.utils.scratchpad import (
     SCRATCHPAD_ACTIONS,
+    WRITE_REFUSED_READ_ONLY,
+    CardOrigin,
     scratchpad_action,
     prepare_scratchpad_exec,
     format_cell_result,
@@ -1880,6 +1882,27 @@ def _data_unavailable(reason: str) -> str:
     )
 
 
+def _data_skipped_read_only(*, reason: str) -> str:
+    """Report a run whose data step stopped after the page builder skipped
+    steps that would have needed the user's approval, naming each one.
+
+    Apart from `_data_unavailable` on purpose: the data may well be there.
+    The builder only reads, so it didn't run those steps, and the agent is
+    told how to build from the data the chat has, or what to tell the user,
+    rather than to ask for a source to be connected.
+    """
+    return (
+        "Error: the page builder couldn't get the data this artifact needs. It only reads data, and the "
+        "steps below would have needed the user's approval, so it skipped them.\n\n"
+        f"{reason}\n\n"
+        "IMPORTANT: do NOT build the artifact yourself (no write_file / scratchpad fallback), and don't make "
+        "the skipped changes yourself unless the user asks for them. If the data the artifact needs is "
+        "already in this chat, call generate_artifact again and pass it in `known_data`, naming the "
+        "scratchpad and cell it lives in. Otherwise tell the user which data the page builder couldn't get, "
+        "and why."
+    )
+
+
 async def _drain_progress(queue):
     """Yield ToolProgress markers, staying silent while a question is open.
 
@@ -2378,15 +2401,17 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
         yield await _browser_check_failed_outcome(session, store=store, slug=slug, folder=folder, result=result)
         return
     if isinstance(result, str):
-        from anton.core.tools.generate_artifact.state import NOT_ENOUGH_DATA_PREFIX
+        from anton.core.tools.generate_artifact.state import NOT_ENOUGH_DATA_PREFIX, SKIPPED_READ_ONLY_PREFIX
 
         # A failed run still worked inside the artifact folder on its way to
         # failing, so the turn touched the artifact.
         _track_artifact(session, store, slug, summary="Generated artifact files")
-        content = (
-            _data_unavailable(result) if result.startswith(NOT_ENOUGH_DATA_PREFIX)
-            else _generation_failed(result)
-        )
+        if result.startswith(NOT_ENOUGH_DATA_PREFIX):
+            content = _data_unavailable(result)
+        elif result.startswith(SKIPPED_READ_ONLY_PREFIX):
+            content = _data_skipped_read_only(reason=result)
+        else:
+            content = _generation_failed(result)
         yield ToolOutcome(
             content=_with_put_back(failure_context(content), restored), ok=False, reason="pipeline"
         )
@@ -2713,7 +2738,7 @@ async def handle_memorize(
 
 
 async def handle_scratchpad(
-    session: ChatSession, tc_input: dict
+    session: ChatSession, tc_input: dict, *, origin: CardOrigin = "chat"
 ) -> str | ToolOutcome:
     """Dispatch a scratchpad tool call by action.
 
@@ -2721,6 +2746,13 @@ async def handle_scratchpad(
     failure verdict, so the error streak doesn't re-classify the result by
     reading it (ENG-1276). The other actions still return plain strings
     (legacy substring classification).
+
+    `origin` says whose step it is. The tool registry calls this with the
+    chat's; only the page builder's loops pass "page_builder", and nothing
+    reads it from `tc_input`. The page builder only reads: the write gate
+    refuses its exec where a chat cell would get a card
+    (`hold_unapproved_write`), and it neither resets nor removes a
+    scratchpad.
     """
     action = scratchpad_action(tc_input)
     name = tc_input.get("name", "")
@@ -2752,7 +2784,7 @@ async def handle_scratchpad(
         # path (ChatSession.turn_stream) also calls — so they fire on both
         # paths. A str return is a message the call should not run past
         # (empty code, single-scratchpad challenge, or install failure).
-        result = await prepare_scratchpad_exec(session, tc_input)
+        result = await prepare_scratchpad_exec(session, tc_input, origin=origin)
         if isinstance(result, ToolOutcome):
             return result
         pad, code, description, estimated_time, estimated_seconds = result
@@ -2824,6 +2856,19 @@ async def handle_scratchpad(
         # a successful view of a failed cell as a fresh tool failure
         # (ENG-1276 false positive).
         return ToolOutcome(content=pad.view(), ok=True)
+
+    elif action in ("reset", "remove") and origin == "page_builder":
+        # A reset clears a pad the chat's data lives in, along with the
+        # earlier cells the write check reads; a removal drops the pad.
+        return ToolOutcome(
+            content=(
+                "Not run: the page builder only reads data, so it doesn't reset or remove a scratchpad. "
+                "That would clear the conversation's earlier cells or a scratchpad the chat uses. Keep "
+                "working in the scratchpad as it is."
+            ),
+            ok=True,
+            reason=WRITE_REFUSED_READ_ONLY,
+        )
 
     elif action == "reset":
         pad = session._scratchpads.pads.get(name)

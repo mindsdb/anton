@@ -148,6 +148,83 @@ async def test_run_loop_records_no_cell_that_never_ran(tmp_path: Path, monkeypat
     assert result["scratchpad_execs"] == [
         {"name": "pad", "code": "print(df.head())", "output": "cell 2 ok: 100 rows", "ok": True}
     ]
+    assert result["skipped_steps"] == [], "a chat card's refusal is no read-only refusal"
+
+
+def _read_only_refusal(change: str):
+    from anton.core.utils.scratchpad import WRITE_REFUSED_READ_ONLY, ReadOnlyRefusal
+
+    return ReadOnlyRefusal(content=f"Not run: the page builder only reads data, and this step would {change}",
+                           ok=True, reason=WRITE_REFUSED_READ_ONLY, change=change)
+
+
+async def test_run_loop_records_the_steps_it_skipped_read_only(tmp_path: Path, monkeypatch):
+    """The page builder only reads: a step the gate refused that way is
+    recorded with its description and what it would change, so the result
+    can name it, and it is no data-access code that ran. A refused reset
+    skips no data."""
+    import anton.core.tools.tool_handlers as tool_handlers
+    from anton.core.tools.generate_artifact.state import SkippedStep
+    from anton.core.tools.registry import ToolOutcome
+    from anton.core.utils.scratchpad import WRITE_REFUSED_READ_ONLY
+
+    reset = ToolOutcome(content="Not run: the page builder only reads data", ok=True, reason=WRITE_REFUSED_READ_ONLY)
+    monkeypatch.setattr(tool_handlers, "handle_scratchpad", AsyncMock(side_effect=[
+        _read_only_refusal("change data in a connected source"), reset,
+        _read_only_refusal("overwrite `report.pdf`"), "cell ok",
+    ]))
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(_resp([
+        ToolCall(id="1", name="scratchpad", input={"action": "exec", "name": "pad", "code": "update()",
+                                                   "one_line_description": "Update the suppliers"}),
+        ToolCall(id="2", name="scratchpad", input={"action": "reset", "name": "pad"}),
+        ToolCall(id="3", name="scratchpad", input={"action": "exec", "name": "pad", "code": "save()"}),
+        ToolCall(id="4", name="scratchpad", input={"action": "exec", "name": "pad", "code": "read()"}),
+        ToolCall(id="9", name="finish", input={"summary": "done"}),
+    ]))
+    result = await _run_loop(session=session, system="s", kickoff="k", artifact_path=tmp_path,
+                             require_files=False, node_label="fetch_data_sample")
+    assert result["skipped_steps"] == [
+        SkippedStep(description="Update the suppliers", change="change data in a connected source"),
+        SkippedStep(description="", change="overwrite `report.pdf`"),
+    ]
+    assert [e["code"] for e in result["scratchpad_execs"]] == ["read()"]
+    assert [c.kwargs for c in tool_handlers.handle_scratchpad.await_args_list] == [{"origin": "page_builder"}] * 4
+
+
+async def test_every_run_loop_result_carries_the_skipped_steps(tmp_path: Path, monkeypatch):
+    """A loop that ends without `finish`, runs out of rounds or out of
+    budget still says which steps it skipped read-only."""
+    from types import SimpleNamespace
+
+    import anton.core.tools.generate_artifact.engine as engine_mod
+    import anton.core.tools.tool_handlers as tool_handlers
+    from anton.core.tools.generate_artifact.spend import WIND_DOWN_ROUNDS
+
+    monkeypatch.setattr(tool_handlers, "handle_scratchpad",
+                        AsyncMock(return_value=_read_only_refusal("change data in a connected source")))
+    exec_call = _resp([ToolCall(id="1", name="scratchpad", input={"action": "exec", "name": "pad", "code": "x"})])
+    prose = LLMResponse(content="that is all", tool_calls=[], usage=Usage(input_tokens=1, output_tokens=1),
+                        stop_reason="end_turn")
+    session = AsyncMock()
+    session._llm.plan_stream = _stream_mock(exec_call)
+    session._llm.code_stream = _stream_mock(prose)
+    stopped = await _run_loop(session=session, system="s", kickoff="k", artifact_path=tmp_path,
+                              require_files=False, node_label="fetch_data_sample")
+    assert (stopped["finished"], len(stopped["skipped_steps"])) == (False, 1)
+
+    monkeypatch.setattr(engine_mod, "MAX_ROUNDS", 2)
+    session._llm.code_stream = _stream_mock(exec_call)
+    exhausted = await _run_loop(session=session, system="s", kickoff="k", artifact_path=tmp_path,
+                                require_files=False, node_label="fetch_data_sample")
+    assert (exhausted["finished"], len(exhausted["skipped_steps"])) == (False, 2)
+
+    # Each wind-down round runs its cell; the one after them stops the loop.
+    monkeypatch.setattr(engine_mod, "MAX_ROUNDS", WIND_DOWN_ROUNDS + 2)
+    over = await _run_loop(session=session, system="s", kickoff="k", artifact_path=tmp_path,
+                           require_files=False, node_label="fetch_data_sample",
+                           spend=SimpleNamespace(should_wind_down=lambda: True))
+    assert (over.get("over_budget"), len(over["skipped_steps"])) == (True, WIND_DOWN_ROUNDS)
 
 
 async def test_run_loop_records_a_cell_that_left_out_action(tmp_path: Path, monkeypatch):

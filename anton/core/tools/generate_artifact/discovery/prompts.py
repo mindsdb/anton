@@ -248,7 +248,11 @@ def _gathering_instruction(act_first: bool, *, static_completion: bool = False) 
         return (
             "Gather the evidence needed to build the ORIGINAL user request. Use the connected "
             "source's documented API and credentials from the catalog. Reuse an existing "
-            "scratchpad when present. Fetch ALL records/fields needed for the views, not just a "
+            "scratchpad when present. Your cells only read: a cell that would change data, or "
+            "files outside the artifact folder, does not run. For an `html-app` whose rows or "
+            "values are already under `" + KNOWN_DATA_HEADER + "`, record "
+            "`verified_by: \"known_data\"` for that source instead of fetching it again. "
+            "Fetch ALL records/fields needed for the views, not just a "
             "schema sample or head(). Compute exact requested aggregates with Python. Save the "
             "complete relevant rows and exact calculated figures as canonical observed-data.json "
             "in the artifact folder, with units, filters and time scope; print only a short "

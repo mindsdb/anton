@@ -36,7 +36,7 @@ from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 from . import sub_tools
 from .debug_trace import NullTrace
 from .spend import WIND_DOWN_ROUNDS
-from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY, BrowserCheckFailed
+from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY, BrowserCheckFailed, SkippedStep
 from .streaming import _call_with_stream_retry, _drain_stream
 from .verifiers import normalise_api_path
 from .prompts import (
@@ -925,7 +925,10 @@ async def _run_loop(
     the next-step instruction in the same turn. Each trigger fires at most once.
 
     Returns a result dict ``{files_written, rounds_used, summary,
-    scratchpad_execs}`` on success, or a plain error string on failure.
+    scratchpad_execs, skipped_steps}`` on success, or a plain error string
+    on failure. ``skipped_steps`` lists the steps the write gate refused
+    because the page builder only reads (`sub_tools.skipped_step`), on
+    every dict the loop returns.
     ``scratchpad_execs`` records every scratchpad ``exec`` the loop ran —
     ``{name, code, output, ok}`` per call (``ok`` False for a cell the
     runtime reported as failed), leaving out a cell that never ran
@@ -959,6 +962,7 @@ async def _run_loop(
 
     files_written: list[str] = []
     scratchpad_execs: list[dict] = []
+    skipped_steps: list[SkippedStep] = []
     finished_summary: str | None = None
     injected: set[str] = set()
     closing_rounds_left = WIND_DOWN_ROUNDS
@@ -976,6 +980,7 @@ async def _run_loop(
                     "rounds_used": round_idx,
                     "summary": finished_summary or "",
                     "scratchpad_execs": scratchpad_execs,
+                    "skipped_steps": skipped_steps,
                     "finished": False,
                     "over_budget": True,
                 }
@@ -1126,6 +1131,7 @@ async def _run_loop(
                     "rounds_used": round_idx + 1,
                     "summary": tail[:300],
                     "scratchpad_execs": scratchpad_execs,
+                    "skipped_steps": skipped_steps,
                     "finished": False,
                 }
             return (
@@ -1183,12 +1189,17 @@ async def _run_loop(
                 # saved secret in a read file reaches the builder as its marker.
                 result_blocks.append(sub_tools.tool_result(tc.id, scrub_credentials(outcome.content)))
             elif name == "scratchpad":
-                # Full scratchpad access: the sub-generator pulls or rebuilds
-                # the data described in the brief's `## Data` section. Lazy
-                # import avoids a tool_handlers <-> generate_artifact cycle.
+                # The sub-generator pulls or rebuilds the data described in
+                # the brief's `## Data` section. The page builder only reads:
+                # the write gate refuses, with no card, a cell that would need
+                # one, and the loop records it as a skipped step. Lazy import
+                # avoids a tool_handlers <-> generate_artifact cycle.
                 from anton.core.tools.tool_handlers import handle_scratchpad
 
-                outcome = await handle_scratchpad(session, inp)
+                outcome = await handle_scratchpad(session, inp, origin="page_builder")
+                skipped = sub_tools.skipped_step(outcome=outcome, inp=inp)
+                if skipped is not None:
+                    skipped_steps.append(skipped)
                 content = sub_tools.unwrap_outcome(outcome)
                 # A cell that never ran, such as a write the user didn't
                 # approve, is no data-access code for later steps to reuse.
@@ -1251,6 +1262,7 @@ async def _run_loop(
             "rounds_used": MAX_ROUNDS,
             "summary": f"(round budget {MAX_ROUNDS} exhausted before finish was called)",
             "scratchpad_execs": scratchpad_execs,
+            "skipped_steps": skipped_steps,
             "finished": False,
         }
 
@@ -1262,5 +1274,6 @@ async def _run_loop(
         "rounds_used": round_idx + 1,
         "summary": finished_summary,
         "scratchpad_execs": scratchpad_execs,
+        "skipped_steps": skipped_steps,
         "finished": True,
     }

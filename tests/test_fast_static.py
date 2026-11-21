@@ -314,3 +314,44 @@ async def test_discovery_gets_the_general_analysis_rules(tmp_path, monkeypatch):
 
     monkeypatch.setattr(engine, "run_gathering_loop", gather)
     assert await fast_static.prepare(state)
+
+
+@pytest.mark.parametrize("known_data, prepared", [
+    ("site,qty\nToronto,4\nAustin,7", True),
+    ("", False),
+], ids=["completes-from-known-data", "falls-back"])
+async def test_a_read_only_refusal_completes_or_falls_back_without_looping(tmp_path, monkeypatch, known_data,
+                                                                            prepared):
+    """Act first: the builder's exec with one-call completion is refused
+    because the page builder only reads. The next round finishes: from the
+    rows the chat passed as known data, or, without them, by handing back to
+    the normal pipeline, whose data loop then stops on the skipped step. Two
+    model calls, not one per round up to the cap."""
+    from unittest.mock import AsyncMock
+
+    from anton.core.llm.provider import ToolCall, Usage
+    from anton.core.utils.scratchpad import WRITE_REFUSED_READ_ONLY, ReadOnlyRefusal
+    from tests.streaming_llm import StreamingLLM
+
+    refusal = ReadOnlyRefusal(content="Not run: the page builder only reads data", ok=True,
+                              reason=WRITE_REFUSED_READ_ONLY, change="change data in a connected source")
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", AsyncMock(return_value=refusal))
+    usage = Usage(input_tokens=1, output_tokens=1)
+    rounds = iter([
+        LLMResponse(content="", usage=usage, tool_calls=[ToolCall(id="read", name="scratchpad", input={
+            "action": "exec", "name": "main", "code": "save_sites()", "one_line_description": "Save the sites",
+            "complete_static_artifact": {"summary": "sites", "data_sources": ["sites"]}})]),
+        LLMResponse(content="", usage=usage, tool_calls=[ToolCall(id="done", name="finish_gathering", input={
+            "artifact_type": "html-app", "summary": "sites", "data_sources": ["sites"],
+            "data_findings": [{"source": "sites", "verified_by": "known_data"}]})]),
+    ])
+    model = AsyncMock(side_effect=lambda **kwargs: next(rounds))
+    session = SimpleNamespace(history=[], _llm=StreamingLLM(plan=model, code=model), question_count=0,
+                              elicitor=None, emit=AsyncMock())
+    state = GenState(session=session, artifact_type="html-app", artifact_path=tmp_path, slug="sites",
+                     user_request="Map the sites", agent_understanding="A map of the sites", act_first=True,
+                     known_data=known_data)
+    assert await fast_static.prepare(state) is prepared
+    assert model.await_count == 2
+    assert [step.description for step in state.skipped_steps] == ["Save the sites"]
+    assert state.gathering_complete is prepared

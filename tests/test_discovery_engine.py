@@ -264,8 +264,9 @@ async def test_finish_gathering_keeps_a_valid_type_that_differs_from_the_registe
 
 
 async def test_scratchpad_call_is_dispatched_to_the_real_handler(monkeypatch):
-    async def fake_handle_scratchpad(session, inp):
+    async def fake_handle_scratchpad(session, inp, *, origin):
         assert inp == {"action": "view", "name": "s"}
+        assert origin == "page_builder", "the gathering loop runs the page builder's steps"
         return "cell 1: ..."
 
     monkeypatch.setattr(
@@ -427,7 +428,7 @@ async def test_ask_user_dispatch_logs_a_node_with_the_answer(monkeypatch):
 
 
 async def test_scratchpad_dispatch_logs_input_and_output(monkeypatch):
-    async def fake_handle_scratchpad(session, inp):
+    async def fake_handle_scratchpad(session, inp, *, origin):
         return "cell 1: ..."
 
     monkeypatch.setattr(
@@ -551,7 +552,7 @@ async def test_only_cells_that_ran_are_recorded_for_the_data_notes(monkeypatch):
         "plain string result",
     ])
 
-    async def fake_handle_scratchpad(session, inp):
+    async def fake_handle_scratchpad(session, inp, *, origin):
         return next(outcomes)
 
     monkeypatch.setattr(
@@ -583,7 +584,7 @@ async def test_a_cell_that_left_out_action_is_recorded_and_verifies_its_source(m
     the data notes, and the source it ran against counts as verified."""
     from anton.core.tools.registry import ToolOutcome
 
-    async def fake_handle_scratchpad(session, inp):
+    async def fake_handle_scratchpad(session, inp, *, origin):
         return ToolOutcome(content="[output] 504 rows", ok=True)
 
     monkeypatch.setattr(
@@ -669,3 +670,83 @@ async def test_a_web_call_is_refused_when_the_session_has_internet_research_off(
     fetch.assert_not_awaited()
     assert state.web_calls == []
     assert any("internet research is turned off" in str(m.get("content")) for m in state.messages)
+
+
+# ── The page builder only reads ───────────────────────────────────────────
+#
+# The write gate refuses, with no card, a builder step that would need one.
+# The gathering loop records it as a skipped step and can still finish from
+# the data it has.
+
+_CHANGE = "change data in a connected source"
+
+
+def _read_only_refusal():
+    from anton.core.utils.scratchpad import WRITE_REFUSED_READ_ONLY, ReadOnlyRefusal
+
+    return ReadOnlyRefusal(
+        content=f"Not run: the page builder only reads data, and this step would {_CHANGE}, which needs the "
+                "user's approval. Nothing in this cell ran.",
+        ok=True, reason=WRITE_REFUSED_READ_ONLY, change=_CHANGE,
+    )
+
+
+def _builder_exec(id="exec", **extra):
+    return _tc("scratchpad", {"action": "exec", "name": "main", "code": "load_sites()",
+                              "one_line_description": "Load the sites", **extra}, id=id)
+
+
+async def test_gathering_finishes_after_a_read_only_refusal(monkeypatch):
+    """The refused step blocks a finish in the same response, with words
+    that don't ask for a fix, and the next round finishes from the known
+    data. The step is recorded as skipped, not as a cell that ran."""
+    from anton.core.tools.generate_artifact.state import SkippedStep
+
+    scratchpad = AsyncMock(return_value=_read_only_refusal())
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", scratchpad)
+    same_response = _finish().tool_calls[0]
+    session = _session_with_plan_sequence(_response(tool_calls=[_builder_exec(), same_response]), _finish())
+    state = _state(session, known_data=_SITES)
+    await engine.run_gathering_loop(state)
+    rejected = state.messages[2]["content"][1]["content"]
+    assert rejected.startswith("Not finished: a step in this response did not run because the page builder only "
+                               "reads data, and it won't run if sent again.")
+    assert "fix" not in rejected
+    assert state.gathering_complete and session._llm.code.call_count == 1
+    assert (state.unverified_sources, state.known_data_verified) == ([], ["sites"])
+    assert state.scratchpad_execs == []
+    assert state.skipped_steps == [SkippedStep(description="Load the sites", change=_CHANGE)]
+    assert scratchpad.await_args.kwargs == {"origin": "page_builder"}
+
+
+async def test_a_refused_step_without_the_data_leaves_the_source_for_the_data_loop(monkeypatch):
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad",
+                        AsyncMock(return_value=_read_only_refusal()))
+    session = _session_with_plan_sequence(_response(tool_calls=[_builder_exec()]), _finish(mark=""))
+    state = _state(session)
+    await engine.run_gathering_loop(state)
+    assert state.gathering_complete and state.unverified_sources == ["sites"]
+    assert len(state.skipped_steps) == 1
+
+
+async def test_a_refused_static_completion_does_not_ask_for_a_successful_exec(tmp_path, monkeypatch):
+    """Act first, one-call static completion: the refused exec leaves
+    collection open with words that tell the model the step won't run, not
+    that it needs a successful exec, and the next round finishes."""
+    monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad",
+                        AsyncMock(return_value=_read_only_refusal()))
+    completion = {"summary": "sites", "data_sources": ["sites"]}
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_builder_exec(complete_static_artifact=completion)]), _finish(),
+    )
+    state = _state(session, artifact_path=tmp_path, act_first=True, known_data=_SITES)
+    await engine.run_gathering_loop(state)
+    result = state.messages[2]["content"][0]["content"]
+    assert result.startswith(_read_only_refusal().content)
+    assert result.endswith("\nCollection remains open: a step in this response did not run because the page "
+                           "builder only reads data, and it won't run if sent again. Read its result, then call "
+                           "finish_gathering on its own with the data already gathered or available from the "
+                           "chat, or name the data you couldn't get.")
+    assert "Completion requires a successful exec" not in result
+    assert state.gathering_complete and session._llm.code.call_count == 1
+    assert state.unverified_sources == []
