@@ -53,7 +53,7 @@ from anton.core.mcp.access import AccessMode
 from anton.core.mcp.client import McpSession, log_session_failure
 from anton.core.mcp.egress import check_server_url, resolve_public
 from anton.core.mcp.errors import McpEgressBlocked
-from anton.core.mcp.names import registrable_tool_name
+from anton.core.mcp.names import CUSTOM_MCP_ENGINE, registrable_tool_name
 from anton.core.mcp.registry import discover_tool_defs, marked_read_only
 from anton.core.mcp.servers import mcp_server_url
 
@@ -62,10 +62,6 @@ if TYPE_CHECKING:
     from anton.core.tools.tool_defs import ToolDef
 
 logger = logging.getLogger(__name__)
-
-#: Engine of every connection to an MCP server a user added by URL. Its
-#: record carries `_server_url`, `_allowed_tools` (a JSON list) and `_label`.
-CUSTOM_MCP_ENGINE = "custom_mcp"
 
 
 def _method_of(vault: "DataVault", engine: str, name: str) -> str | None:
