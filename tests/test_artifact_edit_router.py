@@ -457,6 +457,18 @@ def test_without_a_mindshub_provider_there_is_no_decisions_model(settings_env, e
     assert not decisions_available(settings) and decisions_config(settings) is None
 
 
+def test_a_third_party_provider_beside_a_signed_in_mindshub_gets_no_decisions(settings_env):
+    # Signed in to staging MindsHub once, now on a third-party OpenAI-compatible
+    # endpoint: the leftover sign-in never sends the text to MindsHub, and the
+    # third party never receives it as a decisions request.
+    from anton.core.artifact_editor.router import decisions_available
+
+    settings = settings_env(ANTON_PLANNING_PROVIDER="openai-compatible", ANTON_CODING_PROVIDER="openai-compatible",
+                            ANTON_OPENAI_BASE_URL="https://llm.example.com/v1", ANTON_OPENAI_API_KEY="k",
+                            ANTON_MINDS_URL="https://api.staging.mindshub.ai", ANTON_MINDS_API_KEY="k-hub")
+    assert not decisions_available(settings)
+
+
 def test_an_explicit_model_never_borrows_a_leftover_mindshub_key(settings_env):
     from anton.core.artifact_editor.router import decisions_available
 

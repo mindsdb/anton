@@ -577,7 +577,6 @@ def _host(url: str | None) -> str:
         return ""
 
 
-MINDSHUB_API_HOST = "api.mindshub.ai"
 # The legacy MindsHub host, which serves no decisions: asking it would only
 # cost each message a failed call before the agent takes it.
 _LEGACY_HOST = "mdb.ai"
