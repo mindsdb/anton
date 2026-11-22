@@ -578,6 +578,9 @@ def _host(url: str | None) -> str:
 
 
 MINDSHUB_API_HOST = "api.mindshub.ai"
+# The legacy MindsHub host, which serves no decisions: asking it would only
+# cost each message a failed call before the agent takes it.
+_LEGACY_HOST = "mdb.ai"
 
 
 def _provider(settings) -> str:
@@ -592,12 +595,23 @@ def _v1(url: str) -> str:
 def _active_mindshub(settings) -> tuple[str, str] | None:
     """``(base_url ending in /v1, api_key)`` when the configured LLM provider itself is MindsHub, else None.
 
-    Only the active (planning) provider's own config counts: ``minds-cloud``
-    (its ``minds_url`` / ``minds_api_key``), or ``openai-compatible`` whose
-    base URL host is exactly api.mindshub.ai (its ``openai_base_url`` /
-    ``openai_api_key``; AntonSettings reads ``minds-cloud`` this way). A
-    MindsHub key or URL left over beside an Anthropic or OpenAI provider is
-    never used.
+    Only the active (planning) provider's own config counts, and decisions go
+    to the MindsHub the person is signed in to (ENG-4591):
+
+    * ``minds-cloud``: its ``minds_url`` / ``minds_api_key``, whatever the
+      host. That URL is the person's MindsHub by definition: prod, staging, a
+      PR environment or a hosted deployment's own address. Only the legacy
+      mdb.ai, which serves no decisions, is left out.
+    * ``openai-compatible``: its ``openai_base_url`` / ``openai_api_key`` when
+      that is the signed-in MindsHub's address (AntonSettings derives it from
+      ``minds_url``), or the host is MindsHub's (mindshub.ai or a subdomain,
+      matched by ``is_mindshub_host``, so a look-alike such as
+      api.mindshub.ai.example.com never counts). Any other URL there could be
+      a third party, which must not receive the request's text.
+
+    A MindsHub key or URL left over beside an Anthropic or OpenAI provider is
+    never used. A host that doesn't answer costs one failed call; the router
+    then hands the message to the agent.
     """
     provider = _provider(settings)
     if provider == "minds-cloud":
@@ -606,8 +620,19 @@ def _active_mindshub(settings) -> tuple[str, str] | None:
         url, key = getattr(settings, "openai_base_url", None), getattr(settings, "openai_api_key", None)
     else:
         return None
-    if not url or not key or _host(url) != MINDSHUB_API_HOST:
+    if not url or not key:
         return None
+    host = _host(url)
+    if not host or host == _LEGACY_HOST or host.endswith("." + _LEGACY_HOST):
+        return None
+    if provider == "openai-compatible":
+        from anton.core.llm.provider import is_mindshub_host
+
+        # AntonSettings turns a MindsHub sign-in into this provider on the
+        # same address (_derive_openai_from_minds): that counts as signed in.
+        signed_in = host == _host(getattr(settings, "minds_url", None))
+        if not (signed_in or is_mindshub_host(host)):
+            return None
     return _v1(url), str(key)
 
 
