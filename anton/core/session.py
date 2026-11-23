@@ -7651,6 +7651,7 @@ class ChatSession:
                 _cancel_ev = getattr(self, "_cancel_event", None)
                 if (
                     len(llm_response.tool_calls) > 1
+                    and len({tc.id for tc in llm_response.tool_calls}) == len(llm_response.tool_calls)
                     and self._unanswered_question is None
                     and not self._time_limit_reached()
                     and not (_cancel_ev is not None and _cancel_ev.is_set())

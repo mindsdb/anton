@@ -3522,7 +3522,21 @@ async def handle_read_text_file(
     return await asyncio.to_thread(_read_text_file, session, raw.strip(), tc_input, display_root)
 
 
-_SECRET_DOT_DIRS = frozenset({".anton", ".cowork", ".git", ".ssh", ".aws", ".gnupg"})
+_SECRET_DOT_DIRS = frozenset(
+    {
+        ".anton",
+        ".cowork",
+        ".git",
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".kube",
+        ".docker",
+        ".azure",
+        ".gcloud",
+        ".config",
+    }
+)
 _SECRET_FILENAMES = frozenset(
     {
         ".netrc",
@@ -3530,6 +3544,9 @@ _SECRET_FILENAMES = frozenset(
         ".pypirc",
         ".git-credentials",
         ".pgpass",
+        ".envrc",
+        ".bash_history",
+        ".zsh_history",
         "credentials.json",
         "secrets.json",
         ".published.json",

@@ -530,3 +530,95 @@ def test_parallel_read_only_batching_order_and_concurrency(tmp_path):
         assert "a.txt:1:alpha" in str(result_blocks[2]["content"])
 
     asyncio.run(_run())
+
+
+def test_artifact_prompts_and_tool_never_hijack_user_specified_paths():
+    from anton.core.llm.prompts import ARTIFACTS_PROMPT
+    from anton.core.llm.static_artifact_prompt import ARTIFACTS, STATIC_ARTIFACTS
+    from anton.core.tools.tool_defs import CREATE_ARTIFACT_TOOL, STATIC_CREATE_ARTIFACT_TOOL
+
+    for text in (ARTIFACTS, STATIC_ARTIFACTS, ARTIFACTS_PROMPT):
+        head = text[:550].lower()
+        assert "specific workspace or filesystem path" in head
+        assert "never call" in head
+    for tool in (CREATE_ARTIFACT_TOOL, STATIC_CREATE_ARTIFACT_TOOL):
+        head = tool.description[:400].lower()
+        assert "no user-specified file path" in head
+
+
+def test_head_tail_stdout_truncation_and_orphan_scrub_safety(monkeypatch):
+    from anton.core.backends import local as local_mod
+    from anton.core.backends.base import Cell
+    from anton.core.backends.local import _clip_stdout
+    from anton.core.backends.wire import (
+        HEAD_OUTPUT,
+        MAX_OUTPUT,
+        STDOUT_SCRUB_MARGIN,
+        TAIL_OUTPUT,
+        TRUNCATION_PREFIX,
+    )
+    from anton.core.utils.scratchpad import format_cell_result
+
+    # format_cell_result keeps both head and tail on long output
+    body = "HEAD_MARKER\n" + ("x" * 15_000) + "\nTAIL_SUMMARY: 3 failed, 12 passed"
+    formatted = format_cell_result(Cell(code="x", stdout=body, stderr="", error=None))
+    assert formatted.count(TRUNCATION_PREFIX) == 1
+    assert "HEAD_MARKER" in formatted and "TAIL_SUMMARY: 3 failed, 12 passed" in formatted
+
+    # Giant >4,096-char orphaned access_token fails closed on single-line and preserves tail on multi-line
+    big_tok = "S" * 5_500
+    full_single = ("A" * 20_000) + f'"access_token": "{big_tok}"' + ("B" * 3_532)
+    clipped_single = _clip_stdout(
+        full_single[: HEAD_OUTPUT + STDOUT_SCRUB_MARGIN],
+        total=len(full_single),
+        cwd_note="Note: cwd changed",
+        raw_tail=full_single[-(TAIL_OUTPUT + STDOUT_SCRUB_MARGIN) :],
+    )
+    assert "S" * 50 not in clipped_single and "Note: cwd changed" in clipped_single
+
+    full_big = (
+        ("A" * 20_000)
+        + f'"access_token": "{big_tok}"\nline1\nline2\nline3\n'
+        + ("B" * 3_500)
+        + "\nEND_OK"
+    )
+    clipped_big = _clip_stdout(
+        full_big[: HEAD_OUTPUT + STDOUT_SCRUB_MARGIN],
+        total=len(full_big),
+        cwd_note="Note: cwd changed",
+        raw_tail=full_big[-(TAIL_OUTPUT + STDOUT_SCRUB_MARGIN) :],
+    )
+    assert "S" * 50 not in clipped_big and "END_OK" in clipped_big
+
+    # total <= len(raw): full stdout scrubbed with no cut edges -> no leak or duplication
+    full_mid = ("A" * 1_000) + f'"access_token": "{big_tok}"' + ("B" * 3_532)
+    assert MAX_OUTPUT < len(full_mid) <= HEAD_OUTPUT + STDOUT_SCRUB_MARGIN
+    clipped_mid = _clip_stdout(
+        full_mid, total=len(full_mid), cwd_note="", raw_tail=full_mid[-(TAIL_OUTPUT + STDOUT_SCRUB_MARGIN) :]
+    )
+    assert "S" * 50 not in clipped_mid and TRUNCATION_PREFIX not in clipped_mid
+
+    # Multi-line orphaned key + short-secret expansion inside raw_tail left margin
+    orig_scrub = local_mod.scrub_output
+    monkeypatch.setattr(
+        local_mod,
+        "scrub_output",
+        lambda s: orig_scrub(s.replace("TINY", "[REDACTED_SHORT_SECRET_VALUE_EXPANSION_0000]")),
+    )
+    exp_full = (
+        ("H" * 20_000)
+        + '"access_token": "'
+        + ("Q" * 100)
+        + ("TINY" * 50)
+        + ("Z" * 4_300)
+        + '"\nline_a\nline_b\nline_c\n'
+        + ("C" * 3_500)
+        + "\nEXP_END"
+    )
+    clipped_exp = _clip_stdout(
+        exp_full[: HEAD_OUTPUT + STDOUT_SCRUB_MARGIN],
+        total=len(exp_full),
+        cwd_note="",
+        raw_tail=exp_full[-(TAIL_OUTPUT + STDOUT_SCRUB_MARGIN) :],
+    )
+    assert "Z" * 100 not in clipped_exp and "EXP_END" in clipped_exp

@@ -41,7 +41,11 @@ IMAGE_MARKER = "__ANTON_IMAGE__"
 ARTIFACTS_ROOT_ENV = "ANTON_SCRATCHPAD_ARTIFACTS_ROOT"
 # A cell's stdout limit, and how much more the worker sends for the parent to
 # scrub before it cuts, so a secret across the limit can still match whole.
+# Head + tail preserves both initial context and trailing test/build summaries
+# within the same 10,000-char budget.
 MAX_OUTPUT = 10_000
+HEAD_OUTPUT = 6_000
+TAIL_OUTPUT = 4_000
 STDOUT_SCRUB_MARGIN = 4_096
 
 
@@ -54,6 +58,14 @@ def truncation_note(total: int) -> str:
     print the rest in slices; this points it at the tool that returns files whole."""
     return (f"{TRUNCATION_PREFIX}{total} chars total) Printed output stops at {MAX_OUTPUT:,} characters: "
             "read text files with read_text_file (end_line=-1 returns a whole file), or print only the part you need.")
+
+
+def format_truncated_stdout(head: str, tail: str, total: int) -> str:
+    """Join a clipped head, the standard truncation note, and optional tail."""
+    note = truncation_note(total)
+    if tail:
+        return f"{head}{note}\n\n--- tail (last {len(tail)} chars) ---\n{tail}"
+    return f"{head}{note}"
 
 
 # Dead: the worker no longer auto-installs on a missing import, so nothing

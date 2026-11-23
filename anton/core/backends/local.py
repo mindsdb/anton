@@ -31,6 +31,7 @@ from anton.core.backends.wire import (
     CELL_IMAGES_MARKER,
     CELL_TRACE_MARKER,
     ARTIFACTS_ROOT_ENV,
+    HEAD_OUTPUT,
     HEARTBEAT_MARKER,
     IMAGE_MARKER,
     IMAGE_MODEL_ENV,
@@ -39,6 +40,8 @@ from anton.core.backends.wire import (
     CLASSIFY_ENV,
     INTERNET_RESEARCH_ENV,
     MAX_OUTPUT,
+    TAIL_OUTPUT,
+    format_truncated_stdout,
     truncation_note,
     NOTHING_KEPT,
     PROGRESS_MARKER,
@@ -277,25 +280,51 @@ def _replace_ds_env(env: dict[str, str], *, ds_env: dict[str, str]) -> None:
     env.update(ds_env)
 
 
-def _clip_stdout(raw: str, total: int, cwd_note: str) -> str:
-    """Scrub a cell's stdout, cut it to `MAX_OUTPUT`, then append the cwd note.
+def _clip_stdout(
+    raw: str, total: int, cwd_note: str, raw_tail: str | None = None
+) -> str:
+    """Scrub a cell's stdout, cut it to `MAX_OUTPUT` (head + optional tail), then append cwd note.
 
-    When `total` is longer, the worker cut `raw` at `MAX_OUTPUT +
-    STDOUT_SCRUB_MARGIN`, which can split a secret the scrub then cannot match.
-    That piece is in the last margin, or the longest exact-match secret if
-    longer, of the scrubbed text; measured from the end because the scrub
-    changes lengths, so it goes.
+    When `total <= len(raw)`, `raw` already contains the entire uncut stdout, so
+    `scrub_output(raw)` has zero cut edges and `raw_tail` is ignored.
+    When `total > len(raw)`, the worker cut `raw` on the right and (optionally)
+    `raw_tail` on the left. We trim `unsafe_edge` off each cut edge AFTER scrubbing
+    and apply Anton's left-edge defenses (`exact_secret_suffix_at_start` +
+    `_without_orphan_region`) to the left-cut tail so orphaned values cannot leak.
     """
     text = scrub_output(raw)
     if total > MAX_OUTPUT:
-        keep = MAX_OUTPUT
-        if total > len(raw):
-            unsafe_tail = max(STDOUT_SCRUB_MARGIN, longest_exact_secret())
-            keep = min(keep, max(len(text) - unsafe_tail, 0))
-        if keep:
-            text = text[:keep] + truncation_note(total)
+        if total <= len(raw):
+            # Full output was scrubbed intact with no cut edges.
+            if len(text) > MAX_OUTPUT:
+                if raw_tail is not None:
+                    text = format_truncated_stdout(
+                        text[:HEAD_OUTPUT], text[-TAIL_OUTPUT:], total
+                    )
+                else:
+                    text = text[:MAX_OUTPUT] + truncation_note(total)
         else:
-            text = f"... (output withheld: it could not be scrubbed safely, {total} chars total)"
+            unsafe_edge = max(STDOUT_SCRUB_MARGIN, longest_exact_secret())
+            head_limit = HEAD_OUTPUT if raw_tail is not None else MAX_OUTPUT
+            keep_head = min(head_limit, max(len(text) - unsafe_edge, 0))
+            if keep_head:
+                tail_part = ""
+                if raw_tail:
+                    tail_text = scrub_output(raw_tail)
+                    if total > len(raw_tail):
+                        left_drop = unsafe_edge + max(len(tail_text) - len(raw_tail), 0)
+                        safe_tail = tail_text[left_drop:] if len(tail_text) > left_drop else ""
+                        if safe_tail:
+                            safe_tail = safe_tail[exact_secret_suffix_at_start(safe_tail) :]
+                            safe_tail = _without_orphan_region(safe_tail)
+                    else:
+                        safe_tail = tail_text
+                    max_tail = min(TAIL_OUTPUT, max(total - keep_head, 0))
+                    if max_tail > 0 and safe_tail:
+                        tail_part = safe_tail[-max_tail:]
+                text = format_truncated_stdout(text[:keep_head], tail_part, total)
+            else:
+                text = f"... (output withheld: it could not be scrubbed safely, {total} chars total)"
     if cwd_note:
         text += ("\n" if text and not text.endswith("\n") else "") + cwd_note
     return text
@@ -1816,6 +1845,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 result_data["stdout_head"],
                 result_data["stdout_total"],
                 result_data.get("cwd_note", ""),
+                raw_tail=result_data.get("stdout_tail"),
             )
         cell = Cell(
             code=code,

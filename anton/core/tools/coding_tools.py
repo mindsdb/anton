@@ -99,13 +99,24 @@ def is_protected_secret_path(resolved: Path) -> bool:
     parts = resolved.parts
     lower_parts = tuple(p.lower() for p in parts)
 
-    # Block ~/.ssh, ~/.aws, ~/.gnupg, and credential rc files
-    for sensitive_dir in (".ssh", ".aws", ".gnupg"):
+    # Block ~/.ssh, ~/.aws, ~/.gnupg, cloud/CLI credential dirs, and credential rc files
+    for sensitive_dir in (".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".gcloud", ".config"):
         if sensitive_dir in lower_parts:
             return True
 
     name = resolved.name.lower()
-    if name in (".netrc", ".npmrc", ".pypirc", "credentials.json", ".published.json"):
+    if name in (
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        ".git-credentials",
+        ".pgpass",
+        ".envrc",
+        ".bash_history",
+        ".zsh_history",
+        "credentials.json",
+        ".published.json",
+    ):
         return True
 
     # Block Anton/Cowork secret files and vaults (including .cowork-* variants)

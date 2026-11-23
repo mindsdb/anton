@@ -1718,8 +1718,10 @@ _real_stdin = sys.stdin
 import threading
 
 from anton.core.backends.wire import (
+    HEAD_OUTPUT,
     HEARTBEAT_MARKER,
     MAX_OUTPUT,
+    TAIL_OUTPUT,
     truncation_note,
     PROGRESS_MARKER,
     STDOUT_CHUNK_MARKER,
@@ -2235,7 +2237,8 @@ while True:
     if len(stdout_full) > MAX_OUTPUT:
         # For LocalScratchpadRuntime, which scrubs before it cuts. Only for cut
         # output: every reader of this result gets it, and "stdout" is unchanged.
-        result["stdout_head"] = stdout_full[: MAX_OUTPUT + STDOUT_SCRUB_MARGIN]
+        result["stdout_head"] = stdout_full[: HEAD_OUTPUT + STDOUT_SCRUB_MARGIN]
+        result["stdout_tail"] = stdout_full[-(TAIL_OUTPUT + STDOUT_SCRUB_MARGIN):]
         result["stdout_total"] = len(stdout_full)
         result["cwd_note"] = cwd_note
     with _wire_lock:
