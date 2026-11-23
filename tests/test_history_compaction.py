@@ -482,7 +482,7 @@ class TestProactiveAbsoluteTokenCeiling:
     def test_non_int_compaction_max_tokens_falls_back_to_default(self):
         from anton.core.settings import CoreSettings
 
-        assert CoreSettings().context_compaction_max_tokens == 80_000
+        assert CoreSettings().context_compaction_max_tokens == 65_000
 
         mock_settings = MagicMock()
         mock_settings.context_pressure_threshold = 0.7
@@ -501,12 +501,12 @@ class TestProactiveAbsoluteTokenCeiling:
         mock_settings.cell_total_max = 3600
         mock_settings.cell_install_timeout = 120
         mock_settings.cell_keep_recent = 5
-        # MagicMock attribute (unconfigured) must fall back to 80_000
+        # MagicMock attribute (unconfigured) must fall back to 65_000
         session = ChatSession(ChatSessionConfig(
             llm_client=make_mock_llm(),
             settings=mock_settings,
         ))
-        assert session._context_compaction_max_tokens == 80_000
+        assert session._context_compaction_max_tokens == 65_000
 
         # Bool must also be rejected (isinstance(True, int) is True in Python)
         mock_settings.context_compaction_max_tokens = True
@@ -514,7 +514,7 @@ class TestProactiveAbsoluteTokenCeiling:
             llm_client=make_mock_llm(),
             settings=mock_settings,
         ))
-        assert session_bool._context_compaction_max_tokens == 80_000
+        assert session_bool._context_compaction_max_tokens == 65_000
 
     async def test_benign_early_turn_skip_does_not_disable_later_compaction(self):
         """A benign skip on round 0 (len(history) < 6) at >=100k tokens must
@@ -670,3 +670,114 @@ class TestProactiveAbsoluteTokenCeiling:
         assert mock_llm2.summarize.await_count == 1
         assert not any(isinstance(e, StreamContextCompacted) for e in events2)
         assert session2._compaction_failed_this_turn is True
+
+    async def test_compaction_summary_includes_anti_loop_directive(self):
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Remaining\nFinish X"))
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm,
+            initial_history=_alternating_history(10, "x" * 100),
+        ))
+        ok = await session._summarize_history()
+        assert ok is True
+        first_msg = session._history[0]["content"]
+        assert "Do not repeat approaches already recorded under Completed or Blocked" in first_msg
+
+    def test_strategy_pivot_checkpoints_fire_once_and_respect_guards(self):
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+
+        # Non-milestone round does not fire.
+        results: list[dict] = []
+        session._turn_tool_rounds = 24
+        assert session._maybe_append_strategy_pivot_checkpoint(results) is False
+        assert results == []
+
+        # Milestone rounds 25, 50, 80 fire exactly once each.
+        for r in (25, 50, 80):
+            results = []
+            session._turn_tool_rounds = r
+            assert session._maybe_append_strategy_pivot_checkpoint(results) is True
+            assert len(results) == 1
+            assert results[0]["type"] == "text"
+            assert f"Checkpoint (round {r})" in results[0]["text"]
+            # Second invocation at same round (e.g. after retry) must not duplicate.
+            assert session._maybe_append_strategy_pivot_checkpoint(results) is False
+            assert len(results) == 1
+
+        # Skipped when an unanswered user question ends the turn.
+        session._pivot_checkpoints_fired.clear()
+        session._unanswered_question = "Which file?"
+        session._turn_tool_rounds = 25
+        results = []
+        assert session._maybe_append_strategy_pivot_checkpoint(results) is False
+        assert results == []
+
+        # Skipped when round_cap is reached on the milestone round itself.
+        session._unanswered_question = None
+        session._max_tool_rounds = 25
+        results = []
+        assert session._maybe_append_strategy_pivot_checkpoint(results) is False
+        assert results == []
+
+    async def test_strategy_pivot_checkpoint_not_duplicated_after_stream_drop_retry(self):
+        """A mid-turn stream drop after round 25 must keep `_pivot_checkpoints_fired`
+        intact across `_stream_and_handle_tools` re-entry."""
+        from anton.core.llm.provider import (
+            StreamComplete,
+            ToolCall,
+            TransientProviderError,
+        )
+
+        light = Usage(input_tokens=1_000, output_tokens=50, context_pressure=0.01)
+        drop = TransientProviderError(
+            "Lost connection mid-response",
+            provider="OpenAI",
+            code="connection_error",
+            session_backoff=True,
+        )
+        step = 0
+
+        async def _plan_stream(**kwargs):
+            nonlocal step
+            step += 1
+            if step <= 25:
+                yield StreamComplete(
+                    response=LLMResponse(
+                        content="",
+                        tool_calls=[ToolCall(id=f"tc_{step}", name="no_such_tool", input={})],
+                        usage=light,
+                        stop_reason="tool_use",
+                    )
+                )
+            elif step == 26:
+                raise drop
+            elif step == 27:
+                yield StreamComplete(
+                    response=LLMResponse(
+                        content="",
+                        tool_calls=[ToolCall(id="tc_26", name="no_such_tool", input={})],
+                        usage=light,
+                        stop_reason="tool_use",
+                    )
+                )
+            else:
+                yield StreamComplete(
+                    response=LLMResponse(content="done", usage=light, stop_reason="end_turn")
+                )
+
+        mock_llm = make_mock_llm()
+        mock_llm.plan_stream = _plan_stream
+        mock_llm.plan = AsyncMock(return_value=_summarize_response("STATUS: COMPLETE — done"))
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm))
+        session._backoff_sleep = AsyncMock(return_value=False)
+
+        _ = [e async for e in session.turn_stream("go")]
+        checkpoints = [
+            b["text"]
+            for m in session._history
+            if m.get("role") == "user" and isinstance(m.get("content"), list)
+            for b in m["content"]
+            if b.get("type") == "text" and "Checkpoint (round 25)" in b.get("text", "")
+        ]
+        assert len(checkpoints) == 1
+        assert session._pivot_checkpoints_fired == {25}

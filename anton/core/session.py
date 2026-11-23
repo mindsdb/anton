@@ -276,6 +276,34 @@ _TRUNCATION_FAILURE_NOTICE = (
     "effort in Settings also helps."
 )
 
+# Mid-turn strategy-pivot checkpoints injected inline alongside tool results at
+# milestone tool-round counts. Unlike `resilience_nudge_at` (which only fires on
+# consecutive `ok=False` tool errors), these catch "green-exit, non-converging"
+# edit/test loops and long spinning turns with zero extra LLM calls and zero
+# prefix-cache invalidation.
+_STRATEGY_PIVOT_CHECKPOINTS: dict[int, str] = {
+    25: (
+        f"{ANTON_NOTE} Checkpoint (round 25): pause and reassess before making another "
+        "incremental edit. If recent checks are not converging, re-read the exact "
+        "requirements and actual failure output from first principles, question your "
+        "current assumptions, and switch to a simpler or fundamentally different approach."
+    ),
+    50: (
+        f"{ANTON_NOTE} Checkpoint (round 50): you have spent 50 tool rounds on this turn. "
+        "Audit whether your current approach is genuinely converging on a verified solution. "
+        "If you are stuck tweaking the same failure, step back to the root cause or switch "
+        "strategy; if your solution already passes verification, finish cleanly rather than "
+        "over-iterating."
+    ),
+    80: (
+        f"{ANTON_NOTE} Checkpoint (round 80): you have spent 80 tool rounds on this turn. "
+        "Consolidate and run a decisive clean verification — either fix the single confirmed "
+        "root cause or stop spinning on a non-converging path and report your best verified "
+        "state cleanly."
+    ),
+}
+
+
 logger = logging.getLogger(__name__)
 
 #: The legacy substring verdict, for handlers that never declared a `ToolOutcome`
@@ -2077,6 +2105,10 @@ class ChatSession:
         # count spans verifier continuations and provider-error retries alike.
         # Reset per turn in turn_stream.
         self._turn_tool_rounds = 0
+        # Strategy-pivot milestone rounds already emitted in this turn; reset
+        # per turn in `_turn_stream_inner` so stream-drop retries never
+        # duplicate a checkpoint.
+        self._pivot_checkpoints_fired: set[int] = set()
         # Verifier-forced continuations this turn has run, against
         # `max_continuations`. Per turn for the same reason: a retry must
         # not hand out a fresh set. Reset per turn in turn_stream.
@@ -2137,11 +2169,11 @@ class ChatSession:
         else:
             self._verifier_latch = _VerifierLatch()
         self._context_pressure_threshold = s.context_pressure_threshold
-        raw_compaction_cap = getattr(s, "context_compaction_max_tokens", 80_000)
+        raw_compaction_cap = getattr(s, "context_compaction_max_tokens", 65_000)
         self._context_compaction_max_tokens = (
             raw_compaction_cap
             if isinstance(raw_compaction_cap, int) and not isinstance(raw_compaction_cap, bool)
-            else 80_000
+            else 65_000
         )
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -4162,7 +4194,8 @@ class ChatSession:
             "Compacted record of earlier conversation, for REFERENCE ONLY — not a new "
             "request. The most recent user message takes priority; if the user changed "
             "direction, narrowed scope, or cancelled something, follow that and do NOT "
-            "resume superseded work described below.\n\n"
+            "resume superseded work described below. Do not repeat approaches already "
+            "recorded under Completed or Blocked; focus directly on Remaining.\n\n"
             f"{summary}"
         )
         summary_msg = {"role": "user", "content": summary_body}
@@ -5962,6 +5995,27 @@ class ChatSession:
             })
         return len(lessons)
 
+    def _maybe_append_strategy_pivot_checkpoint(self, tool_results: list[dict]) -> bool:
+        """Append a one-time strategy-pivot checkpoint at milestone tool rounds.
+
+        Piggy-backs as a text block inside `tool_results` (same zero-cache-bust
+        mechanism as `_acc_maybe_nudge`), skipped when the turn is about to
+        pause on an unanswered user question or has already reached its round cap.
+        """
+        if self._unanswered_question is not None:
+            return False
+        round_no = self._turn_tool_rounds
+        checkpoint_text = _STRATEGY_PIVOT_CHECKPOINTS.get(round_no)
+        if checkpoint_text is None or round_no in self._pivot_checkpoints_fired:
+            return False
+        if self._max_tool_rounds > 0:
+            effective_round_cap = self._max_tool_rounds + self._round_cap_continued_rounds
+            if round_no >= effective_round_cap:
+                return False
+        self._pivot_checkpoints_fired.add(round_no)
+        tool_results.append({"type": "text", "text": checkpoint_text})
+        return True
+
     def _track_memory_write(self, task: asyncio.Task) -> None:
         """Register fire-and-forget memory encoding so a host that tears down at
         end of turn can await it instead of guessing at a settling delay."""
@@ -6546,6 +6600,7 @@ class ChatSession:
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
         self._turn_tool_rounds = 0
+        self._pivot_checkpoints_fired = set()
         self._compacted_this_turn = False
         self._last_compaction_round = -1
         self._compaction_failed_this_turn = False
@@ -8309,6 +8364,7 @@ class ChatSession:
                 # fire, the lesson text appears inline alongside tool_results
                 # so the LLM sees the alarm before its next decision.
                 self._acc_maybe_nudge(tool_results)
+                self._maybe_append_strategy_pivot_checkpoint(tool_results)
 
                 # Only on turns with MCP tools: without them the scratchpad is
                 # the only way to the data, and the notice points at tools the
