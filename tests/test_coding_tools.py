@@ -909,3 +909,113 @@ def test_edit_file_compact_diff_cap_and_scrub_before_truncate():
             assert "+3/-2 lines; total 4 lines" in str(res4.content), res4.content
 
     asyncio.run(_run())
+
+
+def test_edit_file_smart_mismatch_hint_and_scrubbing():
+    from anton.utils.datasources import (
+        _DS_KNOWN_VARS,
+        _DS_SECRET_VARS,
+        _reset_registered_ds_vars,
+        set_ds_env_values,
+    )
+
+    async def _run():
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            sess = _make_session(root)
+
+            # 1. Distinctive anchor skips trivial leading `{` / blank lines that
+            # appear earlier in the file and centers context on the real target.
+            src = (
+                "func helper() {\n"
+                "    return 1\n"
+                "}\n"
+                + "".join(f"// filler line {i}\n" for i in range(15))
+                + "func computeScore() {\n"
+                "    total := accumulateWeightedMetrics(items, threshold)\n"
+                "    return total + 1\n"
+                "}\n"
+            )
+            f1 = root / "score.go"
+            f1.write_text(src, encoding="utf-8")
+            miss1 = await handle_edit_file(
+                sess,
+                {
+                    "path": "score.go",
+                    "old_string": "\n{\n    total := accumulateWeightedMetrics(items, threshold)\n    return total + 999\n}",
+                    "new_string": "replacement",
+                },
+            )
+            assert not miss1.ok and miss1.reason == "old_string_not_found"
+            out1 = str(miss1.content)
+            assert "accumulateWeightedMetrics" in out1
+            assert "return total + 1" in out1
+
+            # 2. Whitespace/indentation mismatch is explicitly diagnosed.
+            f2 = root / "indent.py"
+            f2.write_text(
+                "def outer():\n"
+                "    if ready:\n"
+                "        result = compute_final_value(alpha, beta)\n"
+                "        return result\n",
+                encoding="utf-8",
+            )
+            miss2 = await handle_edit_file(
+                sess,
+                {
+                    "path": "indent.py",
+                    "old_string": "  if ready:\n    result = compute_final_value(alpha, beta)\n    return result",
+                    "new_string": "    return 0",
+                },
+            )
+            assert not miss2.ok and miss2.reason == "old_string_not_found"
+            out2 = str(miss2.content)
+            assert "different whitespace/indentation" in out2
+            assert "compute_final_value" in out2
+
+            # 3. Single-line (straddling 200-char line cap) and multi-line secrets
+            # (registered DS_* PEM + two-line Bearer) are scrubbed BEFORE slicing.
+            tok = "sk-proj-MISMATCHBOUNDARYSECRET1234567890abcdefGHIJKLM"
+            pem_secret = (
+                "-----BEGIN PRIVATE KEY-----\n"
+                "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwMISMATCHPEMSECRET\n"
+                "-----END PRIVATE KEY-----"
+            )
+            bearer_tok = "eyJhbGciOiJSUzI1NiJ9.MISMATCHBEARERPAYLOAD9876543210"
+            prev_ds = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
+            try:
+                _DS_SECRET_VARS.add("DS_SF_PROD__PRIVATE_KEY")
+                _DS_KNOWN_VARS.add("DS_SF_PROD__PRIVATE_KEY")
+                set_ds_env_values({"DS_SF_PROD__PRIVATE_KEY": pem_secret})
+
+                f3 = root / "secret_ctx.txt"
+                f3.write_text(
+                    f"{pem_secret}\n"
+                    f"Authorization: Bearer\n{bearer_tok}\n"
+                    f"anchor_token_here = {'z' * 170} {tok}\n"
+                    "tail_line_value = 42\n",
+                    encoding="utf-8",
+                )
+                miss3 = await handle_edit_file(
+                    sess,
+                    {
+                        "path": "secret_ctx.txt",
+                        "old_string": "anchor_token_here\ntail_line_value = 999\n",
+                        "new_string": "ok",
+                    },
+                )
+                assert not miss3.ok and miss3.reason == "old_string_not_found"
+                out3 = str(miss3.content)
+                assert "MISMATCHBOUNDARY" not in out3
+                assert "sk-proj-MISMATCH" not in out3
+                assert "MISMATCHPEMSECRET" not in out3
+                assert "MISMATCHBEARERPAYLOAD" not in out3
+                assert "tail_line_value = 42" in out3
+            finally:
+                _reset_registered_ds_vars()
+                for k in list(os.environ):
+                    if k.startswith("DS_"):
+                        del os.environ[k]
+                os.environ.update(prev_ds)
+
+    asyncio.run(_run())
