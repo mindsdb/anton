@@ -226,8 +226,9 @@ class ChatSystemPromptBuilder:
                 "instead of writing OCR or vision scripts."
             )
         lines.append(
-            "- Start incrementally: inspect workspace files and environment with a quick inspection "
-            "call before planning or deriving full solutions."
+            "- Work incrementally: start with a quick inspection call before planning, "
+            "and iterate in tight edit-and-run cycles (testing small prototypes or checks "
+            "directly rather than deriving large implementations or long calculations all at once in thought)."
         )
         return "\nCODING & WORKSPACE TOOLS:\n" + "\n".join(lines) + "\n"
 

@@ -53,6 +53,11 @@ MAX_GREP_OUTPUT_CHARS = 12_000
 MAX_GREP_LINE_CHARS = 400
 DEFAULT_GREP_RESULTS = 80
 
+# Cap edit_file diff echo so large edits don't redundantly double context size
+# (the model already has its exact old_string/new_string in the preceding tool_use).
+MAX_EDIT_DIFF_LINES = 24
+MAX_EDIT_DIFF_CHARS = 1_200
+
 DEFAULT_FIND_RESULTS = 200
 SKIP_WALK_DIRS = frozenset({
     ".git",
@@ -684,21 +689,57 @@ async def handle_edit_file(session: "ChatSession", tc_input: dict) -> ToolOutcom
         except OSError as exc:
             return ToolOutcome(content=f"Error writing {raw_path}: {exc}", ok=False, reason="write_failed")
 
-        diff_lines = list(
+        orig_lines = original.splitlines()
+        new_lines = working.splitlines()
+        raw_diff = list(
             difflib.unified_diff(
-                original.splitlines(),
-                working.splitlines(),
+                orig_lines,
+                new_lines,
                 fromfile=f"a/{raw_path}",
                 tofile=f"b/{raw_path}",
-                n=2,
+                n=1,
                 lineterm="",
             )
         )
-        diff_text = scrub_output("\n".join(diff_lines[:120]))
-        if len(diff_lines) > 120:
-            diff_text += f"\n... ({len(diff_lines) - 120} more diff lines)"
+        # File headers (`--- a/...`, `+++ b/...`) are strictly indices 0 and 1;
+        # counting from index 2 onward keeps lines starting with `--` or `++`
+        # (e.g. SQL comments, YAML `---`, C++ `++i`) counted accurately.
+        body_diff = raw_diff[2:] if len(raw_diff) >= 2 else raw_diff
+        added = sum(1 for ln in body_diff if ln.startswith("+"))
+        removed = sum(1 for ln in body_diff if ln.startswith("-"))
+
+        # Scrub raw file contents BEFORE building the preview diff so multi-line
+        # secrets (e.g. PEM private keys or `Bearer\n<token>`) are not split by
+        # unified-diff `+`/`-`/` ` line prefixes, then scrub the rendered diff
+        # for header/path safety BEFORE capping lines and characters.
+        scrubbed_orig = scrub_output(original)
+        scrubbed_new = scrub_output(working)
+        if scrubbed_orig != original or scrubbed_new != working:
+            preview_diff = list(
+                difflib.unified_diff(
+                    scrubbed_orig.splitlines(),
+                    scrubbed_new.splitlines(),
+                    fromfile=f"a/{raw_path}",
+                    tofile=f"b/{raw_path}",
+                    n=1,
+                    lineterm="",
+                )
+            )
+        else:
+            preview_diff = raw_diff
+        scrubbed_lines = scrub_output("\n".join(preview_diff)).splitlines()
+        diff_text = "\n".join(scrubbed_lines[:MAX_EDIT_DIFF_LINES])
+        truncated = len(scrubbed_lines) > MAX_EDIT_DIFF_LINES
+        if len(diff_text) > MAX_EDIT_DIFF_CHARS:
+            diff_text = diff_text[:MAX_EDIT_DIFF_CHARS].rstrip()
+            truncated = True
+        if truncated:
+            diff_text += f"\n... (diff preview capped; +{added}/-{removed} lines applied)"
         return ToolOutcome(
-            content=f"Edited {raw_path} ({total_replaced} replacement{'s' if total_replaced != 1 else ''}).\n{diff_text}",
+            content=(
+                f"Edited {raw_path} ({total_replaced} replacement{'s' if total_replaced != 1 else ''}, "
+                f"+{added}/-{removed} lines; total {len(new_lines)} lines).\n{diff_text}"
+            ),
             ok=True,
         )
 

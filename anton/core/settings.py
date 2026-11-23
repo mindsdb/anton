@@ -159,9 +159,9 @@ class CoreSettings(BaseSettings):
     # Absolute input-context ceiling (in tokens) above which proactive
     # compaction runs even when `context_pressure` is still low on very
     # large-window models (e.g. 1M-token windows where 0.7x = 700k+ tokens).
-    # Long tool loops past ~100k tokens multiply repeated prompt cost and
+    # Long tool loops past ~80k tokens multiply repeated prompt cost and
     # degrade recall long before hitting a 1M window. 0 disables the ceiling.
-    context_compaction_max_tokens: int = 100_000
+    context_compaction_max_tokens: int = 80_000
     max_consecutive_errors: int = 5
     resilience_nudge_at: int = 2
     token_status_cache_ttl: float = 60.0

@@ -810,3 +810,102 @@ def test_read_image_pre_stat_size_cap_and_non_image_precedence():
             assert not out_fake.ok and out_fake.reason == "not_an_image"
 
     asyncio.run(_run())
+
+
+def test_edit_file_compact_diff_cap_and_scrub_before_truncate():
+    from anton.utils.datasources import (
+        _DS_KNOWN_VARS,
+        _DS_SECRET_VARS,
+        _reset_registered_ds_vars,
+        set_ds_env_values,
+    )
+
+    async def _run():
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            sess = _make_session(root)
+
+            # 1. Large edit caps preview and reports exact line deltas
+            f = root / "big.py"
+            f.write_text("header = 1\nbody = 'old'\nfooter = 2\n", encoding="utf-8")
+            huge_block = "\n".join(f"line_{i} = {'x' * 50}" for i in range(60))
+            res = await handle_edit_file(
+                sess,
+                {"path": "big.py", "old_string": "body = 'old'", "new_string": huge_block},
+            )
+            assert res.ok, res.content
+            text = str(res.content)
+            assert "+60/-1 lines; total 62 lines" in text
+            assert "diff preview capped" in text
+            assert len(text) < 1_600
+
+            # 2. Single-line secret straddling the 1,200-char boundary is scrubbed
+            # BEFORE truncation so zero secret prefix leaks across the cut.
+            secret_tok = "sk-proj-BOUNDARYSECRET1234567890abcdefghijKLMNOPQRST"
+            pad = "a" * 1080
+            f2 = root / "boundary.txt"
+            f2.write_text("start\nPLACEHOLDER\nend\n", encoding="utf-8")
+            res2 = await handle_edit_file(
+                sess,
+                {
+                    "path": "boundary.txt",
+                    "old_string": "PLACEHOLDER",
+                    "new_string": f"{pad} {secret_tok}",
+                },
+            )
+            assert res2.ok, res2.content
+            out2 = str(res2.content)
+            assert "sk-proj-BOUNDARY" not in out2
+            assert "BOUNDARYSECRET" not in out2
+
+            # 3. Multi-line secrets (registered DS_* PEM key + two-line Bearer)
+            # are scrubbed from raw contents BEFORE unified_diff adds `+`/`-` prefixes.
+            pem_secret = (
+                "-----BEGIN PRIVATE KEY-----\n"
+                "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwMULTILINESECRET\n"
+                "-----END PRIVATE KEY-----"
+            )
+            bearer_tok = "eyJhbGciOiJSUzI1NiJ9.MULTILINEBEARERPAYLOAD9876543210"
+            prev_ds = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
+            try:
+                _DS_SECRET_VARS.add("DS_SF_PROD__PRIVATE_KEY")
+                _DS_KNOWN_VARS.add("DS_SF_PROD__PRIVATE_KEY")
+                set_ds_env_values({"DS_SF_PROD__PRIVATE_KEY": pem_secret})
+
+                f3 = root / "creds_note.txt"
+                f3.write_text("config:\nSLOT\n", encoding="utf-8")
+                res3 = await handle_edit_file(
+                    sess,
+                    {
+                        "path": "creds_note.txt",
+                        "old_string": "SLOT",
+                        "new_string": f"{pem_secret}\nAuthorization: Bearer\n{bearer_tok}",
+                    },
+                )
+                assert res3.ok, res3.content
+                out3 = str(res3.content)
+                assert "MULTILINESECRET" not in out3
+                assert "MULTILINEBEARERPAYLOAD" not in out3
+            finally:
+                _reset_registered_ds_vars()
+                for k in list(os.environ):
+                    if k.startswith("DS_"):
+                        del os.environ[k]
+                os.environ.update(prev_ds)
+
+            # 4. Lines starting with `--` or `++` (SQL comments, YAML `---`, C++ `++i`)
+            # are counted accurately (header filtering uses index slicing, not prefix).
+            f4 = root / "query.sql"
+            f4.write_text("-- old comment\n--- old yaml sep\nSELECT 1;\n", encoding="utf-8")
+            res4 = await handle_edit_file(
+                sess,
+                {
+                    "path": "query.sql",
+                    "old_string": "-- old comment\n--- old yaml sep",
+                    "new_string": "++count;\n--- new yaml sep\n-- new comment",
+                },
+            )
+            assert res4.ok, res4.content
+            assert "+3/-2 lines; total 4 lines" in str(res4.content), res4.content
+
+    asyncio.run(_run())

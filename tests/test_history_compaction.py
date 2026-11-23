@@ -480,6 +480,10 @@ class TestProactiveAbsoluteTokenCeiling:
         assert session._last_compaction_round == 0
 
     def test_non_int_compaction_max_tokens_falls_back_to_default(self):
+        from anton.core.settings import CoreSettings
+
+        assert CoreSettings().context_compaction_max_tokens == 80_000
+
         mock_settings = MagicMock()
         mock_settings.context_pressure_threshold = 0.7
         mock_settings.max_consecutive_errors = 5
@@ -497,12 +501,12 @@ class TestProactiveAbsoluteTokenCeiling:
         mock_settings.cell_total_max = 3600
         mock_settings.cell_install_timeout = 120
         mock_settings.cell_keep_recent = 5
-        # MagicMock attribute (unconfigured) must fall back to 100_000
+        # MagicMock attribute (unconfigured) must fall back to 80_000
         session = ChatSession(ChatSessionConfig(
             llm_client=make_mock_llm(),
             settings=mock_settings,
         ))
-        assert session._context_compaction_max_tokens == 100_000
+        assert session._context_compaction_max_tokens == 80_000
 
         # Bool must also be rejected (isinstance(True, int) is True in Python)
         mock_settings.context_compaction_max_tokens = True
@@ -510,7 +514,7 @@ class TestProactiveAbsoluteTokenCeiling:
             llm_client=make_mock_llm(),
             settings=mock_settings,
         ))
-        assert session_bool._context_compaction_max_tokens == 100_000
+        assert session_bool._context_compaction_max_tokens == 80_000
 
     async def test_benign_early_turn_skip_does_not_disable_later_compaction(self):
         """A benign skip on round 0 (len(history) < 6) at >=100k tokens must

@@ -2137,11 +2137,11 @@ class ChatSession:
         else:
             self._verifier_latch = _VerifierLatch()
         self._context_pressure_threshold = s.context_pressure_threshold
-        raw_compaction_cap = getattr(s, "context_compaction_max_tokens", 100_000)
+        raw_compaction_cap = getattr(s, "context_compaction_max_tokens", 80_000)
         self._context_compaction_max_tokens = (
             raw_compaction_cap
             if isinstance(raw_compaction_cap, int) and not isinstance(raw_compaction_cap, bool)
-            else 100_000
+            else 80_000
         )
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
