@@ -79,7 +79,7 @@ jobs:
       # Publish the bytes verify-wheel actually tested, not a rebuild of the
       # same source — a second build verifies equivalence, not the artifact.
       - name: Download the verified distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: verified-dist
           path: dist
@@ -106,7 +106,7 @@ jobs:
     steps:
       - name: Mint a release-train App token for cowork-server
         id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
