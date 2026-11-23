@@ -236,6 +236,8 @@ def _apply_workspace_overlay(env: dict[str, str], overlay: dict[str, str] | None
 
     Ordinary keys are only-if-unset, as ``apply_env_to_process`` was, so a
     project .env can neither replace PATH nor a key this process already holds.
+    On a filtered pad, ``_overlay_where_the_filter_drops_the_parent`` later
+    replaces the held keys whose value the filter drops.
     The per-turn cloud state is the exception: whatever a previous cloud
     runtime left in the parent environment is dropped first and the overlay's
     values replace it, so a stale correlation id or connection set never reaches a pad.
@@ -1400,9 +1402,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         # Only the keys the .env set are judged as .env keys. A held key the
         # filter keeps stays the server's, so naming it in the .env must not
         # carry that value past the allowlist; one the filter drops takes the .env value.
+        # One value for both steps: the replacement must judge a name as the filter will.
+        host_basics = policy is None
         if filtered:
             overlaid += _overlay_where_the_filter_drops_the_parent(
-                env, overlay, overlaid, host_basics=policy is None
+                env, overlay, overlaid, host_basics=host_basics
             )
         if policy is not None:
             env = policy.child_env(env, overlay_keys=overlaid)
@@ -1411,7 +1415,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 env,
                 overlay_keys=overlaid,
                 ds_env=self._scratchpad_ds_env or {},
-                host_basics=True,
+                host_basics=host_basics,
             )
 
         async def spawn() -> asyncio.subprocess.Process:

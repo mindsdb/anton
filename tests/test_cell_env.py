@@ -161,7 +161,8 @@ async def test_a_dotenv_name_the_filter_drops_from_the_server_reaches_the_cell_w
 
 
 async def test_a_dotenv_value_never_configures_the_pad_in_place_of_the_servers(tmp_path, planted, monkeypatch):
-    """The pad reads the artifacts root before the filter; the .env must not repoint it."""
+    """Regression guard: passes before the change too. The pad reads the
+    artifacts root before the filter; the .env must not repoint it."""
     server_root = str(tmp_path / "server-artifacts")
     monkeypatch.setenv("ANTON_CLOUD_ARTIFACTS_ROOT", server_root)
 
@@ -171,6 +172,17 @@ async def test_a_dotenv_value_never_configures_the_pad_in_place_of_the_servers(t
     )
 
     assert report["hashes"]["ANTON_SCRATCHPAD_ARTIFACTS_ROOT"] == _sha(server_root)
+
+
+async def test_a_dotenv_never_replaces_a_host_folder_name_the_cell_keeps_from_the_server(
+    tmp_path, planted, monkeypatch
+):
+    """The .env deny list doesn't name APPDATA; the filter keeping it is what holds."""
+    monkeypatch.setenv("APPDATA", str(tmp_path / "server-appdata"))
+
+    report = await _report(tmp_path, workspace_env_overlay={"APPDATA": str(tmp_path / "project-appdata")})
+
+    assert report["hashes"]["APPDATA"] == _sha(str(tmp_path / "server-appdata"))
 
 
 def _windows_child(parent: dict[str, str], dotenv: dict[str, str]) -> dict[str, str]:
