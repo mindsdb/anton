@@ -18,7 +18,9 @@ from .prompts import (
     NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT,
     NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
     NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
+    NO_CLASSIFY_CHAT_SYSTEM_PROMPT,
     NO_INTERNET_CHAT_SYSTEM_PROMPT,
+    NO_INTERNET_NO_CLASSIFY_CHAT_SYSTEM_PROMPT,
     STATIC_ARTIFACTS_PROMPT,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
@@ -97,6 +99,7 @@ class ChatSystemPromptBuilder:
         fullstack_offered: bool = True,
         direct_reports: bool = True,
         internet_research: bool = True,
+        reading_files_offered: bool = True,
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
@@ -108,6 +111,8 @@ class ChatSystemPromptBuilder:
         whose line offers the fullstack types the tools leave out.
         ``internet_research`` False leaves out `public-data-sources`, a
         catalog of internet endpoints the session must not use.
+        ``reading_files_offered`` False leaves out `reading-files`, whose code
+        imports libraries this interpreter does not have.
         """
         if skill_store is None:
             return ""
@@ -142,6 +147,8 @@ class ChatSystemPromptBuilder:
             if not label or (not fullstack_offered and label == "build-fullstack-backend"):
                 continue
             if not internet_research and label == "public-data-sources":
+                continue
+            if not reading_files_offered and label == "reading-files":
                 continue
             if when:
                 lines.append(f"- `{label}` — {when}")
@@ -191,6 +198,8 @@ class ChatSystemPromptBuilder:
         fullstack_offered: bool = True,
         direct_reports: bool = True,
         internet_research: bool = True,
+        classify: bool = True,
+        reading_files_offered: bool = True,
         ui_locale_context: str = "",
     ) -> str:
         """``fullstack_offered`` False (`live_app_slots.fullstack_offered`)
@@ -199,9 +208,10 @@ class ChatSystemPromptBuilder:
         backend. ``internet_research`` False
         (`ChatSessionConfig.internet_research_enabled`) swaps the internet
         guidance for "use the connected data only" and leaves out the
-        public-data-sources skill's line. ``ui_locale_context`` is the
-        language line (`anton.core.llm.ui_locale.ui_locale_line`); empty adds
-        nothing."""
+        public-data-sources skill's line. ``classify`` False leaves out the
+        scratchpad's classify() and classify_yes_no(). ``ui_locale_context`` is
+        the language line (`anton.core.llm.ui_locale.ui_locale_line`); empty
+        adds nothing."""
         direct_generation = any(getattr(tool, "name", "") == "generate_artifact"
                                 and "name" in tool.input_schema.get("properties", {})
                                 for tool in tool_defs or [])
@@ -247,7 +257,11 @@ class ChatSystemPromptBuilder:
             configured_block=system_prompt_context.runtime_context,
             product_block=list(product_lines) if product_lines else None,
         )
-        chat_prompt = CHAT_SYSTEM_PROMPT if internet_research else NO_INTERNET_CHAT_SYSTEM_PROMPT
+        if internet_research:
+            chat_prompt = CHAT_SYSTEM_PROMPT if classify else NO_CLASSIFY_CHAT_SYSTEM_PROMPT
+        else:
+            chat_prompt = (NO_INTERNET_CHAT_SYSTEM_PROMPT if classify
+                           else NO_INTERNET_NO_CLASSIFY_CHAT_SYSTEM_PROMPT)
         prompt += chat_prompt.format(
             # PRODUCT carries the configured name. An explicit deployment must
             # not also introduce itself as Anton in the prompt's opening line.
@@ -285,6 +299,7 @@ class ChatSystemPromptBuilder:
         procedural_memory = self._build_procedural_memory_section(
             skill_store, direct_generation=direct_generation, fullstack_offered=fullstack_offered,
             direct_reports=direct_reports, internet_research=internet_research,
+            reading_files_offered=reading_files_offered,
         )
         if procedural_memory:
             prompt += procedural_memory

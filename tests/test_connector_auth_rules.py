@@ -17,10 +17,17 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.tools.connector_auth_rules import AuthRuleError, parse_auth, query_collides, query_names, render
+from anton.core.tools.connector_auth_rules import (
+    AuthRuleError,
+    parse_auth,
+    query_collides,
+    query_names,
+    render,
+    without_missing,
+)
 
 _MODULE = Path(__file__).resolve().parents[1] / "anton" / "core" / "tools" / "connector_auth_rules.py"
-_MODULE_SHA256 = "a74acd12e07e275effa6e9dbf0aac6c5b0eeba69aeaf05fbf0372978dcc22873"
+_MODULE_SHA256 = "e6d4db34127c0ca1565ec4a3f21f3ae57075d0c27a122e378aa10c4eb248b75d"
 #: Copies to update, and the hash their tests pin, whenever the module changes.
 _COPIES = (
     "auth: auth/datavault/connector_auth_rules.py",
@@ -48,7 +55,7 @@ def test_the_module_hash_is_pinned_so_its_copies_are_resynced():
 
 
 _CASES = Path(__file__).parent / "fixtures" / "auth_section_cases.json"
-_CASES_SHA256 = "a5ad27ce4ef1239d5f2f2110b8cfabcd34aa2cde5cc2535b2ce7b3a920e1e9a0"
+_CASES_SHA256 = "c541a8e0b516371a71c683b910a5146e0cc4c8de5e4456ec5088ea5d1336ed76"
 #: Rewrites the case list after a rule change; copy the result to every service that carries the module.
 _REGENERATE = (
     "uv run python -c \"from tests.test_connector_auth_rules import _CASES, _cases_text; "
@@ -116,6 +123,61 @@ _PARSE_INPUTS = [
     (_KEY, {"headers": {"X-Api-Key": "{api_key}"}}),
     (_KEY, {"type": "oauth"}),
 ]
+_OPT_KEY = [["api_key", True]]
+_OPT_ACCOUNT = [["api_key", True], ["account", False]]
+_OPT_BASIC = [["email", True], ["password", True]]
+_BEARER = {"type": "header", "headers": {"Authorization": "Bearer {api_key}"}}
+_LITERAL = {"type": "header", "headers": {"Notion-Version": "2022-06-28"}}
+#: (fields, auth, optional names, stored) for parse_auth with the optional rules; a case
+#: records ``optional`` and ``stored`` only when set, so the cases above keep their shape.
+_PARSE_OPTIONAL_INPUTS = [
+    (_OPT_KEY, _BEARER, ["api_key"], False),
+    (_OPT_KEY, _QUERY, ["api_key"], False),
+    (_OPT_ACCOUNT, {"type": "header", "headers": {"Authorization": "Bearer {api_key}", "X-Account": "{account}"}}, ["api_key"], False),
+    (_OPT_ACCOUNT, {"type": "header", "headers": {"Authorization": "Bearer {api_key}.{account}"}}, ["api_key"], False),
+    ([["api_key", True], ["token", True]], {"type": "query", "params": {"k": "{api_key}{token}"}}, ["api_key"], False),
+    (_OPT_ACCOUNT, _BEARER, ["account"], False),
+    (_OPT_KEY, _BEARER, ["missing"], False),
+    ([["email", True], ["password", True]], {"type": "basic", "username": "{email}", "password": "{password}"}, ["password"], False),
+    ([["email", True], ["password", True]], {"type": "basic", "username": "{email}", "password": "{password}"}, ["email"], False),
+    ([["email", False], ["password", True]], {"type": "basic", "username": "{email}", "password": "{password}"}, ["password"], False),
+    ([["user", True], ["password", True], ["tail", True]], {"type": "basic", "username": "{user}", "password": "{password}{tail}"}, ["password"], False),
+    (_OPT_KEY, {"type": "none"}, [], False),
+    ([], {"type": "none"}, [], True),
+    (_OPT_KEY, {"type": "none"}, [], True),
+    ([["base", False]], {"type": "none", "headers": {}}, [], True),
+    ([], _LITERAL, [], True),
+    ([], {"type": "query", "params": {"format": "json"}}, [], True),
+    (_OPT_KEY, _LITERAL, [], True),
+    ([["account", False]], {"type": "header", "headers": {"X-Account": "{account}"}}, [], True),
+    ([], {"type": "basic", "username": "{email}", "password": ""}, [], True),
+    ([["email", False]], {"type": "basic", "username": "{email}", "password": ""}, [], True),
+    ([], {"type": "oauth"}, [], True),
+    (_KEY, _LITERAL, [], False),
+    (_OPT_KEY, _BEARER, [], True),
+    ([["email", True]], {"type": "basic", "username": "{email}", "password": ""}, [], True),
+    (_OPT_ACCOUNT, {"type": "header", "headers": {"Authorization": "Bearer {api_key}", "X-Account": "{account}"}}, ["api_key"], True),
+]
+#: (auth, held names, optional names) for without_missing.
+_WITHOUT_MISSING_INPUTS = [
+    (_BEARER, ["api_key"], ["api_key"]),
+    (_BEARER, [], ["api_key"]),
+    (_BEARER, [], []),
+    (_QUERY, [], ["api_key"]),
+    ({"type": "header", "headers": {"Authorization": "Bearer {api_key}", "Notion-Version": "2022-06-28"}}, [], ["api_key"]),
+    ({"type": "query", "params": {"access_key": "{api_key}", "format": "json"}}, [], ["api_key"]),
+    ({"type": "header", "headers": {"Authorization": "Bearer {api_key}", "X-Account": "{account}"}}, ["account"], ["api_key"]),
+    ({"type": "header", "headers": {"Authorization": "Bearer {api_key}", "X-Account": "{account}"}}, ["api_key"], ["api_key"]),
+    ({"type": "header", "headers": {"Authorization": "Bearer {api_key}", "X-Account": "{account}"}}, ["api_key"], ["api_key", "account"]),
+    ({"type": "basic", "username": "{email}", "password": "{password}"}, ["email"], ["password"]),
+    ({"type": "basic", "username": "{email}", "password": "{password}"}, ["email", "password"], ["password"]),
+    ({"type": "basic", "username": "{email}", "password": "{password}"}, ["password"], ["password"]),
+    ({"type": "basic", "username": "{email}", "password": "{password}"}, ["email"], []),
+    ({"type": "none"}, [], []),
+    ({"type": "oauth"}, [], []),
+    ({"type": "basic", "username": "{email}", "password": "{password}"}, ["password"], ["email", "password"]),
+    ({"type": "header", "headers": {"A": "{acct}-{api_key}"}}, ["acct"], ["api_key"]),
+]
 #: (auth, values) pairs for render.
 _RENDER_INPUTS = [
     ({"type": "header", "headers": {"Authorization": "Bearer {token}", "Notion-Version": "2022-06-28"}}, {"token": "t0"}),
@@ -128,6 +190,8 @@ _RENDER_INPUTS = [
     ({"type": "query", "params": {"access_key": "{api_key}"}}, {"api_key": "k0\x85"}),
     ({"type": "header", "headers": {"X-Api-Key": "{api_key}"}}, {"api_key": "k0 "}),
     ({"type": "oauth"}, {}),
+    ({"type": "none"}, {}),
+    ({"type": "none"}, {"api_key": "k0"}),
 ]
 #: Raw query strings for query_names.
 _QUERY_NAME_INPUTS = ["a=1&access_key=2", "a=1;access_key=2", "access%5Fkey=2&b", "access+key=2", ""]
@@ -152,12 +216,33 @@ def _outcome(call) -> dict:
         return {"accepted": False, "error": str(e)}
 
 
+def _parse_optional_case(fields: list, auth: object, optional: list[str], stored: bool) -> dict:
+    """One parse_auth case run with the optional and stored rules, recording only what is set."""
+    kwargs: dict = {}
+    case: dict = {"fields": fields, "auth": auth}
+    if optional:
+        kwargs["optional"] = frozenset(optional)
+        case["optional"] = optional
+    if stored:
+        kwargs["stored"] = True
+        case["stored"] = True
+    return {**case, **_outcome(lambda: parse_auth(auth, [tuple(x) for x in fields], **kwargs))}
+
+
 def _build_cases() -> dict[str, list[dict]]:
     """Run every input through the module with no secret detector, as each copy will."""
     return {
         "parse_auth": [
             {"fields": fields, "auth": auth, **_outcome(lambda f=fields, a=auth: parse_auth(a, [tuple(x) for x in f]))}
             for fields, auth in _PARSE_INPUTS
+        ]
+        + [_parse_optional_case(fields, auth, optional, stored) for fields, auth, optional, stored in _PARSE_OPTIONAL_INPUTS],
+        "without_missing": [
+            {
+                "auth": auth, "held": held, "optional": optional,
+                **_outcome(lambda a=auth, h=held, o=optional: without_missing(a, h, o)),
+            }
+            for auth, held, optional in _WITHOUT_MISSING_INPUTS
         ],
         "render": [
             {"auth": auth, "values": values, **_outcome(lambda a=auth, v=values: list(render(a, v)))}
@@ -188,6 +273,11 @@ def test_the_auth_section_cases_cover_both_outcomes_for_each_function():
         outcomes = {c["accepted"] for c in cases["parse_auth"] if isinstance(c["auth"], dict) and c["auth"].get("type") == kind}
         assert outcomes == {True, False}
     assert {c["accepted"] for c in cases["render"]} == {True, False}
+    assert {c["accepted"] for c in cases["without_missing"]} == {True, False}
+    stored = [c for c in cases["parse_auth"] if c.get("stored")]
+    assert {c["accepted"] for c in stored} == {True, False}
+    optional = [c for c in cases["parse_auth"] if c.get("optional")]
+    assert {c["accepted"] for c in optional} == {True, False}
     assert {c["collides"] for c in cases["query_collides"]} == {True, False}
 
 
@@ -270,3 +360,180 @@ def test_the_module_loads_with_the_standard_library_alone():
     loaded = json.loads(result.stdout)
     top_level = {name.split(".")[0] for name in loaded}
     assert top_level <= set(sys.stdlib_module_names) | {"connector_auth_rules"}
+
+
+def _stored(auth, fields, **kwargs):
+    return parse_auth(auth, [tuple(x) for x in fields], stored=True, **kwargs)
+
+
+def test_an_optional_key_placed_alone_is_accepted_in_a_template():
+    assert parse_auth(_BEARER, [("api_key", True)], optional=frozenset({"api_key"})) == _BEARER
+
+
+def test_a_template_with_no_optional_field_behaves_as_before():
+    assert parse_auth(_BEARER, [("api_key", True)], optional=frozenset()) == _BEARER
+    with pytest.raises(AuthRuleError, match="must place a secret field"):
+        parse_auth(_LITERAL, [])
+
+
+def test_an_optional_field_must_be_a_declared_secret_field():
+    with pytest.raises(AuthRuleError, match="optional field must be a secret"):
+        parse_auth(_BEARER, [("api_key", True), ("account", False)], optional=frozenset({"account"}))
+    with pytest.raises(AuthRuleError, match="optional field must be a secret"):
+        parse_auth(_BEARER, [("api_key", True)], optional=frozenset({"missing"}))
+
+
+def test_an_optional_field_sharing_a_header_or_parameter_is_refused():
+    shared = {"type": "header", "headers": {"Authorization": "Bearer {api_key}.{account}"}}
+    with pytest.raises(AuthRuleError, match=r"auth\.headers\[0\] places an optional field with another"):
+        parse_auth(shared, [("api_key", True), ("account", False)], optional=frozenset({"api_key"}))
+    query = {"type": "query", "params": {"k": "{api_key}{token}"}}
+    with pytest.raises(AuthRuleError, match=r"auth\.params\[0\] places an optional field with another"):
+        parse_auth(query, [("api_key", True), ("token", True)], optional=frozenset({"api_key"}))
+
+
+def test_a_basic_username_may_not_be_optional():
+    auth = {"type": "basic", "username": "{email}", "password": "{password}"}
+    with pytest.raises(AuthRuleError, match="only the password may be optional"):
+        parse_auth(auth, [("email", True), ("password", True)], optional=frozenset({"email"}))
+
+
+def test_a_basic_password_is_optional_only_as_the_whole_password_beside_a_required_secret_username():
+    auth = {"type": "basic", "username": "{email}", "password": "{password}"}
+    fields = [("email", True), ("password", True)]
+    assert parse_auth(auth, fields, optional=frozenset({"password"})) == auth
+    wrapped = {"type": "basic", "username": "{user}", "password": "{password}{tail}"}
+    with pytest.raises(AuthRuleError, match="only the optional field"):
+        parse_auth(wrapped, [("user", True), ("password", True), ("tail", True)], optional=frozenset({"password"}))
+    with pytest.raises(AuthRuleError, match="needs a username that places a required secret"):
+        parse_auth(auth, [("email", False), ("password", True)], optional=frozenset({"password"}))
+
+
+def test_a_template_may_not_be_none_and_the_type_list_never_offers_it():
+    with pytest.raises(AuthRuleError, match=r"must be one of: basic, header, query\.$"):
+        parse_auth({"type": "none"}, [])
+
+
+def test_a_stored_section_may_be_none_when_the_connection_holds_no_field_it_places():
+    assert _stored({"type": "none"}, []) == {"type": "none"}
+
+
+def test_a_stored_none_that_leaves_out_a_held_field_is_refused():
+    with pytest.raises(AuthRuleError, match="must place every field"):
+        _stored({"type": "none"}, [["api_key", True]])
+
+
+def test_a_stored_none_holds_no_other_key():
+    with pytest.raises(AuthRuleError, match="key that is not allowed"):
+        _stored({"type": "none", "headers": {}}, [])
+
+
+def test_a_stored_section_need_not_place_a_secret_or_any_field():
+    assert _stored(_LITERAL, []) == _LITERAL
+    account = {"type": "header", "headers": {"X-Account": "{account}"}}
+    assert _stored(account, [["account", False]]) == account
+
+
+def test_a_stored_section_must_still_place_every_held_field():
+    with pytest.raises(AuthRuleError, match="must place every field"):
+        _stored(_LITERAL, [["api_key", True]])
+
+
+def test_stored_mode_still_refuses_an_unknown_type():
+    with pytest.raises(AuthRuleError, match="auth.type must be one of"):
+        _stored({"type": "oauth"}, [])
+
+
+def test_render_of_none_sends_nothing_even_when_values_exist():
+    assert render({"type": "none"}, {"api_key": "k0"}) == ({}, [])
+
+
+def test_without_missing_keeps_a_section_whose_fields_are_all_held():
+    assert without_missing(_BEARER, ["api_key"], ["api_key"]) == _BEARER
+
+
+def test_without_missing_drops_the_header_of_a_skipped_field():
+    auth = {"type": "header", "headers": {"Authorization": "Bearer {api_key}", "X-Account": "{account}"}}
+
+    assert without_missing(auth, ["account"], ["api_key"]) == {"type": "header", "headers": {"X-Account": "{account}"}}
+
+
+def test_without_missing_drops_the_parameter_of_a_skipped_field_and_keeps_a_literal_one():
+    auth = {"type": "query", "params": {"access_key": "{api_key}", "format": "json"}}
+
+    assert without_missing(auth, [], ["api_key"]) == {"type": "query", "params": {"format": "json"}}
+
+
+def test_without_missing_keeps_a_literal_header_beside_a_dropped_one():
+    auth = {"type": "header", "headers": {"Authorization": "Bearer {api_key}", "Notion-Version": "2022-06-28"}}
+
+    assert without_missing(auth, [], ["api_key"]) == _LITERAL
+
+
+def test_without_missing_gives_none_when_nothing_is_left_to_send():
+    assert without_missing(_BEARER, [], ["api_key"]) == {"type": "none"}
+    assert without_missing(_QUERY, [], ["api_key"]) == {"type": "none"}
+
+
+def test_without_missing_empties_a_skipped_basic_password():
+    auth = {"type": "basic", "username": "{email}", "password": "{password}"}
+
+    assert without_missing(auth, ["email"], ["password"]) == {"type": "basic", "username": "{email}", "password": ""}
+
+
+def test_without_missing_refuses_a_missing_field_that_is_not_optional():
+    with pytest.raises(AuthRuleError, match="not optional"):
+        without_missing(_BEARER, [], [])
+    basic = {"type": "basic", "username": "{email}", "password": "{password}"}
+    with pytest.raises(AuthRuleError, match="not optional"):
+        without_missing(basic, ["password"], ["password"])
+
+
+def test_without_missing_does_not_change_its_input():
+    auth = {"type": "header", "headers": {"Authorization": "Bearer {api_key}", "Notion-Version": "2022-06-28"}}
+
+    without_missing(auth, [], ["api_key"])
+
+    assert auth["headers"]["Authorization"] == "Bearer {api_key}"
+
+
+def test_what_without_missing_gives_is_a_valid_stored_section():
+    auth = {"type": "header", "headers": {"Authorization": "Bearer {api_key}", "X-Account": "{account}"}}
+    fields = [("api_key", True), ("account", False)]
+    for held in (["account"], ["api_key", "account"]):
+        reduced = without_missing(auth, held, ["api_key"])
+        assert parse_auth(reduced, [f for f in fields if f[0] in held], stored=True) == reduced
+
+
+def test_a_stored_basic_section_must_place_a_secret_field():
+    auth = {"type": "basic", "username": "{email}", "password": ""}
+    with pytest.raises(AuthRuleError, match="must place a secret field"):
+        _stored(auth, [["email", False]])
+    assert _stored(auth, [["email", True]]) == auth
+
+
+def test_a_stored_type_error_lists_none_and_a_template_one_does_not():
+    with pytest.raises(AuthRuleError, match="basic, header, none, query"):
+        _stored({"type": "oauth"}, [])
+    with pytest.raises(AuthRuleError) as exc:
+        parse_auth({"type": "oauth"}, [])
+    assert "none" not in str(exc.value)
+
+
+def test_a_stored_keyed_section_still_parses():
+    assert _stored(_BEARER, [["api_key", True]]) == _BEARER
+
+
+def test_without_missing_refuses_a_missing_username_even_when_the_password_is_held():
+    auth = {"type": "basic", "username": "{email}", "password": "{password}"}
+    with pytest.raises(AuthRuleError, match="not optional"):
+        without_missing(auth, ["password"], ["email", "password"])
+
+
+@pytest.mark.parametrize("auth,held,optional", [
+    ({"type": "header", "headers": {"A": "{acct}-{api_key}"}}, ["acct"], ["api_key"]),
+    ({"type": "query", "params": {"a": "{acct}{api_key}"}}, ["acct"], ["api_key"]),
+])
+def test_without_missing_refuses_to_drop_a_placement_that_also_places_a_held_field(auth, held, optional):
+    with pytest.raises(AuthRuleError, match="also places a field the connection holds"):
+        without_missing(auth, held, optional)

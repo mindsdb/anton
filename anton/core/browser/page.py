@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
 
@@ -10,7 +11,9 @@ from anton.core.browser.models import Element, Page
 #: Jev picks a target from at most this many elements: a choice over hundreds
 #: of options is past what one question should carry.
 SHORTLIST_SIZE = 40
-_WORD = re.compile(r"[a-z0-9]{3,}")
+#: Words of three letters or more, and any number: a calendar's "27" counts.
+_WORD = re.compile(r"[a-z]{3,}|\d{1,4}")
+_ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 
 #: The heading over a page's text. Page text, element names and values come
 #: from the website, so the model reads them as data, never as instructions.
@@ -27,11 +30,16 @@ _CHECK_TEXT = (
     ("recaptcha", ("i'm not a robot", "i am not a robot")),
     ("hcaptcha", ("i am human",)),
 )
+# A full-page check names itself in the element list. A reCAPTCHA or hCaptcha
+# frame is matched by name only from a host that sends no `challenges`: one
+# that does already reports the visible ones and leaves out invisible checks,
+# such as reCAPTCHA v3's on-screen badge.
 _CHECK_ELEMENTS = (
     ("cloudflare", "cloudflare security challenge"),
-    ("recaptcha", "recaptcha"),
-    ("hcaptcha", "hcaptcha"),
 )
+#: A reCAPTCHA or hCaptcha widget's name.
+CAPTCHA_NAME = re.compile(r"\b(re)?captcha\b|\bhcaptcha\b", re.I)
+_FRAME_ROLES = ("frame", "iframe")
 _CHECK_NAMES = {"cloudflare": "Cloudflare", "recaptcha": "reCAPTCHA", "hcaptcha": "hCaptcha"}
 _ANY_CHECK = "a security check"
 
@@ -43,7 +51,8 @@ def human_check(page: Page) -> str:
     The host's ``challenges`` come first: they name check frames the person
     can see, such as a Turnstile widget embedded in an ordinary page, which
     the element list shows only as a frame. Then the URL, element names and
-    text of a full-page check.
+    text of a full-page check, and, from a host that sends no ``challenges``,
+    an on-screen reCAPTCHA or hCaptcha frame.
     """
     if page.challenges:
         return _CHECK_NAMES.get(page.challenges[0].kind, _ANY_CHECK)
@@ -56,6 +65,9 @@ def human_check(page: Page) -> str:
     for kind, needle in _CHECK_ELEMENTS:
         if needle in names:
             return _CHECK_NAMES[kind]
+    for el in page.elements if page.challenges is None else ():
+        if el.role.lower() in _FRAME_ROLES and not el.offscreen and CAPTCHA_NAME.search(el.name):
+            return _CHECK_NAMES["hcaptcha" if "hcaptcha" in el.name.lower() else "recaptcha"]
     for kind, phrases in _CHECK_TEXT:
         if any(phrase in text or phrase in title for phrase in phrases):
             return _CHECK_NAMES[kind]
@@ -68,6 +80,10 @@ def element_line(el: Element, *, values: bool = True) -> str:
     """One ``[17] button "Add to Cart"`` line. ``values=False`` leaves out what
     is in the field, for a reader that needs only the page's shape."""
     line = f"[{el.id}] {el.role} {json.dumps(el.name, ensure_ascii=False)}"
+    if el.context:
+        line += f" in {json.dumps(el.context, ensure_ascii=False)}"
+    if el.in_dialog:
+        line += " (in the open dialog)"
     if values and el.value:
         line += f" value={json.dumps(el.value, ensure_ascii=False)}"
     if el.checked is not None:
@@ -107,22 +123,50 @@ def signature(page: Page) -> str:
     return "|".join(parts)
 
 
-def shortlist(elements: list[Element], goal: str, inputs: dict | None = None, size: int = SHORTLIST_SIZE) -> list[Element]:
-    """The elements most likely to matter for the goal, best first.
+def _words(text: str) -> set[str]:
+    """A text's words, with each ISO date also as the day, month and weekday a
+    date picker shows ("2026-11-27": 27, november, nov, friday, fri)."""
+    text = text.lower()
+    # A date's own digits would match the wrong day: its month's number.
+    words = set(_WORD.findall(_ISO_DATE.sub(" ", text)))
+    for year, month, day in _ISO_DATE.findall(text):
+        try:
+            when = datetime.date(int(year), int(month), int(day))
+        except ValueError:
+            continue
+        words |= {str(when.day), year, when.strftime("%B").lower(), when.strftime("%b").lower(),
+                  when.strftime("%A").lower(), when.strftime("%a").lower()}
+    return words
 
-    Ranked by shared words with the goal and the input names, then on-screen
-    before off-screen, then page order. Disabled elements are dropped: there
-    is nothing to do with them.
-    """
-    words = set(_WORD.findall(goal.lower()))
-    for key in inputs or {}:
-        words |= set(_WORD.findall(str(key).lower()))
+
+def candidates(elements: list[Element]) -> list[Element]:
+    """The elements a step could act on: enabled ones, and with a dialog open
+    only the dialog's, since the step is about it."""
+    usable = [el for el in elements if not el.disabled]
+    if any(el.in_dialog for el in usable):
+        usable = [el for el in usable if el.in_dialog]
+    return usable
+
+
+def rank(elements: list[Element], goal: str, inputs: dict | None = None) -> list[Element]:
+    """``elements`` best first for the goal: by words shared with the goal and
+    the inputs (names and values, a date also as its day, month and weekday),
+    counting each element's name twice and its containers' names once; then
+    on-screen before off-screen, then page order."""
+    words = _words(goal)
+    for key, value in (inputs or {}).items():
+        words |= _words(f"{key} {value}")
 
     def score(item: tuple[int, Element]) -> tuple:
         index, el = item
-        name = f"{el.name} {el.role}".lower()
-        overlap = len(words & set(_WORD.findall(name)))
-        return (-overlap, el.offscreen, index)
+        own = _words(f"{el.name} {el.role}")
+        around = _words(el.context)
+        return (-(2 * len(words & own) + len(words & around)), el.offscreen, index)
 
-    usable = [(i, el) for i, el in enumerate(elements) if not el.disabled]
-    return [el for _, el in sorted(usable, key=score)[:size]]
+    return [el for _, el in sorted(enumerate(elements), key=score)]
+
+
+def shortlist(elements: list[Element], goal: str, inputs: dict | None = None, size: int = SHORTLIST_SIZE) -> list[Element]:
+    """The ``size`` elements most likely to matter for the goal, best first
+    (``candidates``, then ``rank``)."""
+    return rank(candidates(elements), goal, inputs)[:size]

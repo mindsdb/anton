@@ -12,7 +12,10 @@ import pytest
 from anton.core.artifact_editor.router import (
     ACCEPT_P,
     CRITERIA,
+    INSTRUCTIONS,
     MAX_MESSAGE_CHARS,
+    REPLY_CRITERIA,
+    REPLY_INSTRUCTIONS,
     RouteDecision,
     describe_artifact,
     route_request,
@@ -245,6 +248,56 @@ async def test_outline_recent_changes_and_chat_reach_jev_clipped():
     assert "state.artifact.outline" in instructions and "recent_changes" in instructions
 
 
+# ── the reply route (ENG-4455) ────────────────────────────────────────
+
+
+async def test_without_allow_reply_the_question_is_exactly_the_two_route_one():
+    default, off = FakeJev(answer("edit", 0.9)), FakeJev(answer("edit", 0.9))
+    kw = {"name": "Sales", "outline": "title: Sales", "recent_changes": ["Quick edit: navy heading"]}
+    await route(default, "hi", **kw)
+    await route(off, "hi", allow_reply=False, **kw)
+
+    # allow_reply=False sends the very same bytes as a caller that does not know the keyword.
+    assert off.requests[0].content == default.requests[0].content
+    question = off.body()["questions"]["route"]
+    assert question == {"type": "choice", "instructions": INSTRUCTIONS, "criteria": CRITERIA}
+    assert set(question["criteria"]) == {"edit", "agent"}
+    assert "reply" not in json.dumps(off.body()["questions"]).lower()
+
+
+async def test_without_allow_reply_a_reply_answer_is_never_returned():
+    decision = await route(FakeJev(answer("reply", 0.99)), "hi")
+    assert (decision.route, decision.reason) == ("agent", "router_error")
+
+
+async def test_with_allow_reply_the_reply_criterion_is_sent():
+    jev = FakeJev(answer("agent", 0.9))
+    await route(jev, "what does this chart show?", allow_reply=True)
+    question = jev.body()["questions"]["route"]
+    assert question["instructions"] == REPLY_INSTRUCTIONS
+    assert question["criteria"] == REPLY_CRITERIA and set(question["criteria"]) == {"edit", "agent", "reply"}
+    assert question["criteria"]["edit"] == CRITERIA["edit"]
+    assert REPLY_INSTRUCTIONS.endswith("Choose agent when uncertain.")
+
+
+async def test_with_allow_reply_a_confident_reply_is_routed_to_the_reply():
+    decision = await route(FakeJev(answer("reply", 0.93)), "what does this chart show?", allow_reply=True)
+    assert (decision.route, decision.reason) == ("reply", "jev")
+    assert decision.confidence == pytest.approx(0.93)
+    decision = await route(FakeJev(answer("reply", ACCEPT_P)), "hi", allow_reply=True)
+    assert decision.route == "reply"
+
+
+async def test_with_allow_reply_an_uncertain_reply_goes_to_the_agent():
+    decision = await route(FakeJev(answer("reply", 0.7)), "how many slides?", allow_reply=True)
+    assert (decision.route, decision.reason) == ("agent", "uncertain")
+
+
+async def test_with_allow_reply_edit_and_agent_still_route_as_before():
+    assert (await route(FakeJev(answer("edit", 0.95)), allow_reply=True)).route == "edit"
+    assert (await route(FakeJev(answer("agent", 0.95)), "add last quarter", allow_reply=True)).route == "agent"
+
+
 def test_the_outline_shows_what_the_page_contains():
     from anton.core.artifact_editor.router import artifact_outline
 
@@ -347,6 +400,32 @@ def test_openai_compatible_on_api_mindshub_is_available(settings_env):
     assert decisions_config(settings) == ("https://api.mindshub.ai/v1", "k-oc", "jev-1.13.0")
 
 
+@pytest.mark.parametrize("url", [
+    "https://api.staging.mindshub.ai",
+    "https://api-pr-auth-1.dev.mindshub.ai",
+    # A hosted deployment reaching MindsHub at an address of its own.
+    "http://minds.minds.svc.cluster.local",
+])
+def test_decisions_go_to_the_mindshub_the_person_is_signed_in_to(settings_env, url):
+    # Signed in to staging (or a PR env, or a hosted deployment's own
+    # address), decisions go there, as on prod: the quick-edit bar edits
+    # directly wherever it's tested (ENG-4591).
+    from anton.core.artifact_editor.router import decisions_available, decisions_config
+
+    settings = settings_env(**mindshub(ANTON_MINDS_URL=url))
+    assert settings.decisions_model == "jev-1.13.0"
+    assert decisions_available(settings)
+    assert decisions_config(settings) == (f"{url}/v1", "k-hub", "jev-1.13.0")
+
+
+def test_openai_compatible_on_staging_mindshub_is_available(settings_env):
+    from anton.core.artifact_editor.router import decisions_config
+
+    settings = settings_env(ANTON_PLANNING_PROVIDER="openai-compatible", ANTON_CODING_PROVIDER="openai-compatible",
+                            ANTON_OPENAI_BASE_URL="https://api.staging.mindshub.ai/v1", ANTON_OPENAI_API_KEY="k-oc")
+    assert decisions_config(settings) == ("https://api.staging.mindshub.ai/v1", "k-oc", "jev-1.13.0")
+
+
 LEFTOVER_HUB = {"ANTON_MINDS_URL": "https://api.mindshub.ai", "ANTON_MINDS_API_KEY": "k-leftover"}
 
 
@@ -360,11 +439,12 @@ LEFTOVER_HUB = {"ANTON_MINDS_URL": "https://api.mindshub.ai", "ANTON_MINDS_API_K
     {"ANTON_PLANNING_PROVIDER": "anthropic", "ANTON_ANTHROPIC_API_KEY": "k", "ANTON_MINDS_API_KEY": "k-leftover"},
     {"ANTON_PLANNING_PROVIDER": "openai-compatible", "ANTON_CODING_PROVIDER": "openai-compatible",
      "ANTON_OPENAI_BASE_URL": "https://llm.example.com/v1", "ANTON_OPENAI_API_KEY": "k", **LEFTOVER_HUB},
-    # Only the exact api.mindshub.ai host counts.
+    # An OpenAI-compatible URL counts only on MindsHub's own domain: a
+    # look-alike never does.
     {"ANTON_PLANNING_PROVIDER": "openai-compatible", "ANTON_CODING_PROVIDER": "openai-compatible",
      "ANTON_OPENAI_BASE_URL": "https://api.mindshub.ai.example.com/v1", "ANTON_OPENAI_API_KEY": "k"},
     {"ANTON_PLANNING_PROVIDER": "openai-compatible", "ANTON_CODING_PROVIDER": "openai-compatible",
-     "ANTON_OPENAI_BASE_URL": "https://staging.mindshub.ai/v1", "ANTON_OPENAI_API_KEY": "k"},
+     "ANTON_OPENAI_BASE_URL": "https://evilmindshub.ai/v1", "ANTON_OPENAI_API_KEY": "k"},
     # minds-cloud on the legacy mdb.ai host serves no decisions.
     {"ANTON_PLANNING_PROVIDER": "minds-cloud", "ANTON_CODING_PROVIDER": "minds-cloud",
      "ANTON_MINDS_URL": "https://mdb.ai", "ANTON_MINDS_API_KEY": "k"},
@@ -375,6 +455,18 @@ def test_without_a_mindshub_provider_there_is_no_decisions_model(settings_env, e
     settings = settings_env(**env)
     assert settings.decisions_model is None
     assert not decisions_available(settings) and decisions_config(settings) is None
+
+
+def test_a_third_party_provider_beside_a_signed_in_mindshub_gets_no_decisions(settings_env):
+    # Signed in to staging MindsHub once, now on a third-party OpenAI-compatible
+    # endpoint: the leftover sign-in never sends the text to MindsHub, and the
+    # third party never receives it as a decisions request.
+    from anton.core.artifact_editor.router import decisions_available
+
+    settings = settings_env(ANTON_PLANNING_PROVIDER="openai-compatible", ANTON_CODING_PROVIDER="openai-compatible",
+                            ANTON_OPENAI_BASE_URL="https://llm.example.com/v1", ANTON_OPENAI_API_KEY="k",
+                            ANTON_MINDS_URL="https://api.staging.mindshub.ai", ANTON_MINDS_API_KEY="k-hub")
+    assert not decisions_available(settings)
 
 
 def test_an_explicit_model_never_borrows_a_leftover_mindshub_key(settings_env):

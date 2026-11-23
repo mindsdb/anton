@@ -3,6 +3,7 @@ from anton.core.tools.tool_handlers import (
     handle_ask_user,
     handle_create_artifact,
     handle_generate_artifact,
+    handle_generate_image,
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
@@ -82,13 +83,20 @@ SCRATCHPAD_TOOL = ToolDef(
         "agentic_loop(system=..., user_message=..., tools=[...], handle_tool=fn) "
         "runs a tool-call loop where the LLM reasons and calls your tools iteratively. "
         "handle_tool(name, inputs) -> str is a plain sync function.\n"
+        "classify(texts, categories) labels each text with one of the categories and "
+        "returns [{'label', 'p', 'probabilities'}, ...]; classify_yes_no(texts, question) "
+        "returns [{'yes', 'p_yes'}, ...]. Use them, not get_llm(), to classify texts. "
+        "They run on a dedicated decision model, thousands of texts a minute; describe each "
+        "category rather than passing bare names. Take their labels as the result; re-check "
+        "only borderline texts (p below about 0.9), not the whole set.\n"
         "web_search(query) routes a natural-language query (e.g. 'latest SpaceX IPO "
         "news') through the configured LLM's native web search and returns the "
         "model's narrative answer with source links, as a string.\n"
         "sample(var) inspects any variable with type-aware formatting — DataFrames get "
         "shape/dtypes/head, dicts get keys/values, lists get length/items. "
         "Defaults to 'preview' mode (compact); use sample(var, mode='full') for complete dump.\n"
-        "get_llm, agentic_loop, web_search, sample, and progress are already available "
+        "get_llm, agentic_loop, classify, classify_yes_no, web_search, sample, and progress "
+        "are already available "
         "as globals in the scratchpad — do not import them.\n"
         "All .anton/.env secrets are available as environment variables (os.environ).\n"
         "Never print a credential or a token endpoint's response: keep the token in a "
@@ -141,9 +149,35 @@ SCRATCHPAD_TOOL = ToolDef(
 NO_INTERNET_SCRATCHPAD_TOOL = replace(SCRATCHPAD_TOOL, description=cut_spans(
     SCRATCHPAD_TOOL.description,
     ("web_search(query) routes", "sample(var) inspects", ""),
-    ("get_llm, agentic_loop, web_search, sample, and progress", " are already", "get_llm, agentic_loop, sample, and progress"),
+    (
+        "get_llm, agentic_loop, classify, classify_yes_no, web_search, sample, and progress",
+        " are already",
+        "get_llm, agentic_loop, classify, classify_yes_no, sample, and progress",
+    ),
 ))
 
+
+
+def _without_classify(tool: ToolDef) -> ToolDef:
+    """``tool`` with classify() and classify_yes_no() left out of its description."""
+    text = tool.description
+    start = text.index("classify(texts, categories) labels each text")
+    end = text.index("\n", text.index("not the whole set.", start)) + 1
+    text = text[:start] + text[end:]
+    if text.count("classify, classify_yes_no, ") != 1:
+        raise ValueError("the scratchpad globals list no longer names classify()")
+    return replace(tool, description=text.replace("classify, classify_yes_no, ", ""))
+
+
+NO_CLASSIFY_SCRATCHPAD_TOOL = _without_classify(SCRATCHPAD_TOOL)
+NO_INTERNET_NO_CLASSIFY_SCRATCHPAD_TOOL = _without_classify(NO_INTERNET_SCRATCHPAD_TOOL)
+
+
+def scratchpad_tool(*, internet_research: bool = True, classify: bool = True) -> ToolDef:
+    """The scratchpad tool for a session with or without internet research and classify()."""
+    if internet_research:
+        return SCRATCHPAD_TOOL if classify else NO_CLASSIFY_SCRATCHPAD_TOOL
+    return NO_INTERNET_SCRATCHPAD_TOOL if classify else NO_INTERNET_NO_CLASSIFY_SCRATCHPAD_TOOL
 
 MEMORIZE_TOOL = ToolDef(
     name="memorize",
@@ -490,8 +524,9 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
         "attached or pasted for this artifact, exactly as the conversation "
         "shows them. Data files (csv, json, xlsx, ...) are read by the "
         "pipeline's own data step; images and other assets are copied into "
-        "the artifact and referenced by name. Only files the user provided "
-        "— never a path you guessed or a file you produced.\n\n"
+        "the artifact and referenced by name. Only files the user provided, or "
+        "images `generate_image` made — never a path you guessed or another "
+        "file you produced.\n\n"
         "Returns a `status`:\n"
         '- `generated` — done. `files_written` are the artifact\'s own files '
         "(report those), `internal_files` are generation inputs like "
@@ -583,10 +618,11 @@ GENERATE_ARTIFACT_TOOL = ToolDef(
                     "(`.cowork/files/<uuid>/<name>`, `.anton/uploads/...`). "
                     "Data files are read by the pipeline; images and other "
                     "assets are copied into the artifact and referenced by "
-                    "name. Only files the user actually provided: a path "
-                    "outside the workspace, or under a dot-directory such "
-                    "as `.anton/`, is refused unless it is one of those "
-                    "upload locations."
+                    "name. Only files the user actually provided, or images "
+                    "`generate_image` saved: a path outside the workspace, "
+                    "or under a dot-directory such as `.anton/`, is refused "
+                    "unless it is one of those upload locations or a file "
+                    "of an artifact."
                 ),
             },
         },
@@ -822,6 +858,112 @@ READ_IMAGE_TOOL = ToolDef(
         "required": ["file_path"],
     },
     handler=handle_read_image,
+)
+
+
+_IMAGES_PROMPT_HEAD = (
+    "IMAGES:\n"
+    "- When the user wants a picture — an illustration, a photo, a hero or banner image, "
+    "slide or page images, an icon or a logo concept — make a real one with "
+    "`generate_image`. Never fake it by drawing with matplotlib, PIL, SVG, HTML canvas or "
+    "CSS shapes, and never say you cannot make images. Charts, plots and diagrams of data "
+    "are still drawn with code.\n"
+    "- To change an image (the user's upload, or one you made), pass its path in "
+    "`reference_images` and say what to change and what to keep.\n"
+    "- A picture the user asked for on its own: `generate_image` registers it as an "
+    "`image` artifact itself, so do not call `create_artifact` for it. The picture is not "
+    "in your context: describe it from your prompt, or `read_image` its `absolute_path` "
+    "if you must check it.\n"
+    "- A picture for an artifact (a slide, a document, an app page): an artifact reads "
+    "only files inside its own folder, so save the image there by passing `filename` as a "
+    "path in that folder — `.anton/artifacts/<slug>/hero.png`, or under `static/` for a "
+    "fullstack app — and reference it from the artifact by its path inside the folder. "
+    "For a page `generate_artifact` builds, pass the image's `absolute_path` in its "
+    "`attachments` instead; for a single-file HTML page you write, embed it as a "
+    "`data:` URI.\n"
+)
+# The scratchpad's generate_image(), offered only where it can work (see
+# GENERATE_IMAGE_TOOL_NO_PAD_HELPER).
+_IMAGES_PROMPT_PAD_HELPER = (
+    "- For several images that are parts of one piece of work (a deck's slide images), "
+    "call `generate_image(prompt, size=None, quality=None, reference_images=None, "
+    "path=None)` in the scratchpad instead — a global there, do not import it. It saves "
+    "each image to `path` (relative to the project, or absolute, such as a file in the "
+    "folder `create_artifact` returned), else as an image artifact of its own, returns "
+    "the saved file's absolute path, and counts against the turn's image limit.\n"
+)
+_IMAGES_PROMPT_TAIL = (
+    "- Each image costs the user money: make the images asked for, not unrequested "
+    "variations."
+)
+
+
+GENERATE_IMAGE_TOOL = ToolDef(
+    name="generate_image",
+    description=(
+        "Make a real image from a text prompt: an illustration, a photo-like picture, a hero "
+        "or banner image, a slide or page image, an icon or a logo concept. Pass "
+        "`reference_images` to edit images or work from them instead (the user's upload, or "
+        "an image you made). One image per call.\n\n"
+        "Write the prompt as a full description: the subject, composition, style, lighting "
+        "and colors, any text that must appear in the image, and what to avoid. For an edit, "
+        "say what to change and what to keep.\n\n"
+        "The image is saved as a new `image` artifact, or where `filename` says. Returns JSON "
+        "with `status: generated`, `path` (relative to the project), `absolute_path`, "
+        "`artifact_slug`, `width`, `height`, `mime_type`, `model` and `usage` — never the "
+        "image itself. On failure it returns a message to "
+        "relay to the user: a safety refusal, a rate limit, no credits, a provider error. A "
+        "turn may make a limited number of images; the tool says when that is reached."
+    ),
+    prompt=_IMAGES_PROMPT_HEAD + _IMAGES_PROMPT_PAD_HELPER + _IMAGES_PROMPT_TAIL,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "What the image shows, in full; for an edit, what to change and what to keep.",
+            },
+            "reference_images": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Images to edit or work from: PNG, JPEG or WebP paths, absolute or "
+                    "relative to the project. Given, the call is an edit."
+                ),
+            },
+            "size": {
+                "type": "string",
+                "description": (
+                    "WIDTHxHEIGHT: 1024x1024 (square), 1536x1024 (landscape), 1024x1536 "
+                    "(portrait), or auto (the default) to let the model choose."
+                ),
+            },
+            "quality": {
+                "type": "string",
+                "enum": ["auto", "low", "medium", "high"],
+                "description": "low is fastest and cheapest, for drafts; high for final, detailed work. Default auto.",
+            },
+            "filename": {
+                "type": "string",
+                "description": (
+                    "A file name, such as 'hero-banner.png', saves the image as a new image "
+                    "artifact. A path relative to the project saves it there instead: in an "
+                    "artifact's folder ('.anton/artifacts/<slug>/hero.png') to use it in that "
+                    "artifact, or elsewhere in the project ('images/fox.png'). A taken name "
+                    "gets -2, -3, ...; nothing is overwritten. The extension picks the format: "
+                    ".png (the default), .jpg or .webp."
+                ),
+            },
+        },
+        "required": ["prompt"],
+    },
+    handler=handle_generate_image,
+)
+
+# Where the scratchpad's model provider has no images API (an Anthropic coding
+# model), its generate_image() only raises, so the prompt does not offer it.
+GENERATE_IMAGE_TOOL_NO_PAD_HELPER = replace(
+    GENERATE_IMAGE_TOOL, prompt=_IMAGES_PROMPT_HEAD + _IMAGES_PROMPT_TAIL
 )
 
 

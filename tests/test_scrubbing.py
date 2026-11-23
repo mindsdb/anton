@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from anton.core.datasources.data_vault import _slug_env_prefix
+from anton.core.datasources.data_vault import LocalDataVault, _slug_env_prefix
 from anton.core.session import _scrub_user_input
 from anton.tools import SCRUBBED_VALUE_RE
 from anton.utils import datasources
@@ -25,6 +25,7 @@ from anton.utils.datasources import (
     exact_secret_prefix_at_end,
     exact_secret_suffix_at_start,
     longest_exact_secret,
+    restore_namespaced_env,
     scrub_credentials,
     scrub_output,
     set_ds_env_values,
@@ -1628,3 +1629,96 @@ class TestTheNoVaultScopeFollowsAmbientChanges:
         monkeypatch.setenv("DS_CUSTOM_THING__TOKEN", "new-secret-value")
         begin_ds_turn_scope()
         assert "new-secret-value" not in scrub_credentials("tok new-secret-value")
+
+
+# A form-saved database record: the form stores the login as `username`,
+# while the engine definitions name it `user`.
+_FORM_USERNAME = "analyst_reader_long"
+_FORM_PASSWORD = "Hx7-quartz-Lamp-2291"
+_FORM_HOST_FIELDS = {"host": "db.example.com", "port": "5432", "database": "sales"}
+_FORM_RECORDS = {
+    "postgres": {**_FORM_HOST_FIELDS, "ssl_enabled": "true"},
+    "mysql": {**_FORM_HOST_FIELDS, "use_ssl": "false"},
+    "mariadb": {**_FORM_HOST_FIELDS, "use_ssl": "false"},
+    "mssql": {**_FORM_HOST_FIELDS, "encrypt": "true", "trust_server_certificate": "false"},
+    "redshift": {**_FORM_HOST_FIELDS, "ssl": "true"},
+    "snowflake": {"account_identifier": "xy12345.eu-west-1", "warehouse": "compute_wh", "database": "sales"},
+}
+# The form names a host engine's connection host-database-username; snowflake
+# has no host, so its save takes a random name.
+_FORM_NAMES = {engine: "db-example-com-sales-analyst_reader_long" for engine in _FORM_RECORDS}
+_FORM_NAMES["snowflake"] = "snowflake-3f9a1c"
+
+
+class TestFormSavedDatabaseUsername:
+    """A database connection saved through the form keeps its username readable:
+    in the connection's var names, in auth errors, and in values holding it."""
+
+    def _save(self, tmp_path, engine: str, *, secure_keys: tuple[str, ...] | None = ("password",), **extra: str) -> str:
+        """Save a form-shaped record for `engine`, rebuild the registries, return its var prefix."""
+        vault = LocalDataVault(tmp_path / "vault")
+        fields = {
+            **_FORM_RECORDS[engine],
+            "username": _FORM_USERNAME,
+            "password": _FORM_PASSWORD,
+            "_connector_id": engine,
+            "_method": "host-port",
+            **extra,
+        }
+        vault.save(engine, _FORM_NAMES[engine], fields, secure_keys=None if secure_keys is None else list(secure_keys))
+        restore_namespaced_env(vault)
+        return _slug_env_prefix(engine, _FORM_NAMES[engine])
+
+    @pytest.mark.parametrize("engine", sorted(_FORM_RECORDS))
+    def test_username_stays_readable_in_var_names_and_auth_errors(self, tmp_path, engine):
+        prefix = self._save(tmp_path, engine)
+        text = f'os.environ["{prefix}__USERNAME"] failed: login failed for user "{_FORM_USERNAME}"'
+
+        assert scrub_credentials(text) == text
+
+    def test_legacy_record_without_secure_keys_keeps_username_readable(self, tmp_path):
+        prefix = self._save(tmp_path, "postgres", secure_keys=None)
+        text = f'{prefix}__USERNAME: password authentication failed for user "{_FORM_USERNAME}"'
+
+        assert scrub_credentials(text) == text
+
+    def test_password_stays_hidden_even_when_it_contains_the_username(self, tmp_path):
+        password = f"{_FORM_USERNAME}-Pw-9931"
+        prefix = self._save(tmp_path, "postgres", password=password)
+
+        result = scrub_credentials(f"user {_FORM_USERNAME} password {password}")
+
+        assert password not in result
+        assert f"[{prefix}__PASSWORD]" in result
+        assert f"user {_FORM_USERNAME}" in result
+
+    def test_stray_connection_uri_from_another_method_stays_hidden(self, tmp_path):
+        uri = "postgres://svc_reader:Other-Long-Pw-77@db.internal:5432/sales"
+        prefix = self._save(tmp_path, "postgres", connection_uri=uri)
+
+        result = scrub_credentials(f"could not connect to {uri}")
+
+        assert "Other-Long-Pw-77" not in result
+        assert f"[{prefix}__CONNECTION_URI]" in result
+
+    def test_username_listed_in_secure_keys_stays_hidden(self, tmp_path):
+        prefix = self._save(tmp_path, "postgres", secure_keys=("password", "username"))
+
+        result = scrub_credentials(f'failed for user "{_FORM_USERNAME}"')
+
+        assert _FORM_USERNAME not in result
+        assert f"[{prefix}__USERNAME]" in result
+
+    def test_engine_without_a_user_field_keeps_a_stored_username_hidden(self, tmp_path):
+        vault = LocalDataVault(tmp_path / "vault")
+        vault.save(
+            "bigquery", "analytics",
+            {"project_id": "acme-analytics", "username": _FORM_USERNAME, "service_account_json": "{}"},
+            secure_keys=["service_account_json"],
+        )
+        restore_namespaced_env(vault)
+
+        result = scrub_credentials(f"running as {_FORM_USERNAME}")
+
+        assert _FORM_USERNAME not in result
+        assert "[DS_BIGQUERY_ANALYTICS__USERNAME]" in result
