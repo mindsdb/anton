@@ -223,7 +223,7 @@ class ChatSystemPromptBuilder:
         return "\nCODING & WORKSPACE TOOLS:\n" + "\n".join(lines) + "\n"
 
     @staticmethod
-    def _tool_offers_fullstack(tool_defs: list[Any] | None) -> bool:
+    def _tool_offers_fullstack(tool_defs: list["ToolDef"] | None) -> bool:
         """True when ``tool_defs`` is omitted or exposes any tool capable of creating/launching fullstack apps."""
         if tool_defs is None:
             return True
