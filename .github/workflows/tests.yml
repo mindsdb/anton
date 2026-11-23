@@ -80,7 +80,7 @@ jobs:
 
   windows-installer:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -90,6 +90,8 @@ jobs:
         run: uv python install 3.12
       - name: Check PowerShell release installation
         run: uv run --locked --group dev pytest tests/test_release_installers.py -k powershell -v
+      - name: Check a cell's environment on Windows
+        run: uv run --locked --group dev pytest tests/test_agent_env.py tests/test_cell_env.py -v -rs
 
   # Preserve the required check name, and fail even if a dependency was skipped.
   run-tests:
