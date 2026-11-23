@@ -367,3 +367,79 @@ def test_the_judged_reply_survives_a_thread_longer_than_the_convo_budget():
     out = _render_verify_transcript(history)
     assert reply in out
     assert "chars elided" not in out
+
+
+def test_tool_use_summary_shows_scrubbed_targets_and_wider_default_tool_cap():
+    import os
+    from anton.utils.datasources import (
+        _DS_KNOWN_VARS,
+        _DS_SECRET_VARS,
+        _reset_registered_ds_vars,
+        set_ds_env_values,
+    )
+
+    secret_tok = "sk-proj-VERIFYARGSECRET1234567890abcdefghijKLMNOPQRST"
+    pem_secret = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwVERIFYPEMSECRET\n"
+        "-----END PRIVATE KEY-----"
+    )
+    prev_ds = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
+    try:
+        _DS_SECRET_VARS.add("DS_SF_PROD__PRIVATE_KEY")
+        _DS_KNOWN_VARS.add("DS_SF_PROD__PRIVATE_KEY")
+        set_ds_env_values({"DS_SF_PROD__PRIVATE_KEY": pem_secret})
+
+        medium_output = "PASS_HEAD " + ("ok " * 200) + "PASS_TAIL"  # ~620 chars (< 800 default)
+        assert 450 < len(medium_output) < 780
+        history = [
+            {"role": "user", "content": "fix app.py and run pytest"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "edit_file", "input": {"path": "src/app.py"}},
+                    {
+                        "type": "tool_use",
+                        "name": "bash",
+                        "input": {
+                            "command": f"echo {'a' * 100} {secret_tok}\n{pem_secret}\npytest -q",
+                            "workdir": "/app",
+                        },
+                    },
+                    {
+                        "type": "tool_use",
+                        "name": "scratchpad",
+                        "input": {
+                            "action": "exec",
+                            "one_line_description": "Verify CSV output",
+                            "code": "RAW_CODE_SHOULD_NOT_APPEAR = 1",
+                        },
+                    },
+                    {"type": "tool_use", "name": "custom_tool", "input": {"x": 1}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": medium_output}],
+            },
+            {"role": "assistant", "content": "Done."},
+        ]
+        out = _render_verify_transcript(history)
+        assert "edit_file (path='src/app.py')" in out
+        assert "bash (command=" in out
+        assert "workdir='/app'" in out
+        assert "scratchpad (action='exec', desc='Verify CSV output')" in out
+        assert "RAW_CODE_SHOULD_NOT_APPEAR" not in out
+        assert "ASSISTANT called tool: custom_tool" in out
+        # Secrets in bash args must be scrubbed BEFORE slicing at 120 chars.
+        assert "sk-proj-VERIFY" not in out
+        assert "VERIFYARGSECRET" not in out
+        assert "VERIFYPEMSECRET" not in out
+        # Default tool_cap=800 preserves 620-char output verbatim.
+        assert medium_output in out
+    finally:
+        _reset_registered_ds_vars()
+        for k in list(os.environ):
+            if k.startswith("DS_"):
+                del os.environ[k]
+        os.environ.update(prev_ds)

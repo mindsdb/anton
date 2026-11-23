@@ -1154,7 +1154,11 @@ _VERIFIER_JUDGMENT_RUBRIC = (
     "that returned its contents but does not record what was asked has not "
     "failed, and neither has a guessed table or field name rejected as unknown: "
     "a reply that says the value is not recorded, without substituting a "
-    "related figure, is COMPLETE, not STUCK."
+    "related figure, is COMPLETE, not STUCK. Also mark INCOMPLETE if the user "
+    "asked for specific files, code changes, outputs, or checks and the tool "
+    "transcript shows a required deliverable was omitted, modified after the "
+    "last verification run without being re-checked, or contradicted by the "
+    "actual tool output."
 )
 
 # Opens the block that shows the model text the user added mid-turn (ENG-4194).
@@ -1596,12 +1600,75 @@ def _stub_largest_results(*, messages: list[dict], model: str) -> list[dict]:
 _IMAGE_PLACEHOLDER = "[image]"
 
 
+def _clip_verify_arg(value: object, limit: int = 120) -> str:
+    """Scrub and single-line normalize a tool argument before slicing for the verifier."""
+    if not isinstance(value, str):
+        return ""
+    # Scrub raw text BEFORE whitespace-folding or slicing so multi-line secrets
+    # (registered DS_* PEM keys, two-line Bearer tokens) and tokens straddling
+    # `limit` can never leak into the verifier prompt.
+    cleaned = " ".join(scrub_output(value).split())
+    if len(cleaned) > limit:
+        return cleaned[:limit] + "..."
+    return cleaned
+
+
+def _summarize_verify_tool_call(name: object, tool_input: object) -> str:
+    """Render a compact, scrubbed one-line summary of a tool_use block for the verifier.
+
+    Exposing the tool target (command, file path, or scratchpad cell description)
+    lets the completion verifier cross-check whether requested deliverables were
+    written and verified after the final edit without inflating token cost.
+    """
+    tool_name = str(name) if name is not None else ""
+    if not isinstance(tool_input, dict) or not tool_input:
+        return f"ASSISTANT called tool: {tool_name}"
+
+    parts: list[str] = []
+    if tool_name == "bash":
+        cmd = _clip_verify_arg(tool_input.get("command"), 120)
+        wd = _clip_verify_arg(tool_input.get("workdir"), 60)
+        if cmd:
+            parts.append(f"command={cmd!r}")
+        if wd:
+            parts.append(f"workdir={wd!r}")
+    elif tool_name in ("edit_file", "write_file", "read_text_file", "read_image"):
+        path = _clip_verify_arg(
+            tool_input.get("path") or tool_input.get("file_path"), 120
+        )
+        if path:
+            parts.append(f"path={path!r}")
+    elif tool_name == "scratchpad":
+        act = _clip_verify_arg(tool_input.get("action"), 32)
+        desc = _clip_verify_arg(tool_input.get("one_line_description"), 120)
+        if act:
+            parts.append(f"action={act!r}")
+        if desc:
+            parts.append(f"desc={desc!r}")
+    elif tool_name in ("grep_search", "find_files"):
+        pat = _clip_verify_arg(tool_input.get("pattern"), 80)
+        path = _clip_verify_arg(tool_input.get("path"), 80)
+        if pat:
+            parts.append(f"pattern={pat!r}")
+        if path:
+            parts.append(f"path={path!r}")
+    elif tool_name in ("create_artifact", "generate_artifact", "update_artifact", "launch_backend"):
+        for key in ("slug", "name", "type", "primary"):
+            val = _clip_verify_arg(tool_input.get(key), 80)
+            if val:
+                parts.append(f"{key}={val!r}")
+
+    if parts:
+        return f"ASSISTANT called tool: {tool_name} ({', '.join(parts)})"
+    return f"ASSISTANT called tool: {tool_name}"
+
+
 def _render_verify_transcript(
     history: list[dict],
     *,
     max_convo: int = 10,
-    max_tool: int = 12,
-    tool_cap: int = 400,
+    max_tool: int = 16,
+    tool_cap: int = 800,
     text_cap: int = 2000,
     final_cap: int = 12000,
 ) -> str:
@@ -1686,7 +1753,14 @@ def _render_verify_transcript(
                 elif btype in ("image", "image_url"):
                     convo.append((i, speaker, _IMAGE_PLACEHOLDER))
                 elif btype == "tool_use":
-                    tools.append((i, f"ASSISTANT called tool: {block.get('name')}"))
+                    tools.append(
+                        (
+                            i,
+                            _summarize_verify_tool_call(
+                                block.get("name"), block.get("input")
+                            ),
+                        )
+                    )
                 elif btype == "tool_result":
                     rendered = _render_tool_result_content(block.get("content"), tool_cap)
                     tools.append((i, f"TOOL RESULT: {rendered}"))
