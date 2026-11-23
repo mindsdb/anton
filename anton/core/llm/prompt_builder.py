@@ -220,6 +220,15 @@ class ChatSystemPromptBuilder:
                 f"- {names}: Explore files and read exact lines quickly{ctx_note}. Batch independent "
                 "read/search calls in a single response to cut latency and turns."
             )
+        if "read_image" in reg:
+            lines.append(
+                "- `read_image`: Inspect image files, plots, or screenshots directly (batchable) "
+                "instead of writing OCR or vision scripts."
+            )
+        lines.append(
+            "- Start incrementally: inspect workspace files and environment with a quick inspection "
+            "call before planning or deriving full solutions."
+        )
         return "\nCODING & WORKSPACE TOOLS:\n" + "\n".join(lines) + "\n"
 
     @staticmethod

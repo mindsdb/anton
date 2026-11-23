@@ -51,6 +51,11 @@ def test_coding_tools_section_gates_individual_tools_accurately():
     assert "`write_file`" in write_only
     assert "`edit_file`" not in write_only
 
+    # bash + read_image without text-search tools emits read_image's own bullet cleanly
+    bash_img = builder.build(**common, tool_defs=[_tool("bash"), _tool("read_image")])
+    assert "- `read_image`: Inspect image files" in bash_img
+    assert "Explore files and read exact lines" not in bash_img
+
     # Full coding tool set activates across Desktop/CLI (with direct_generation) and Cloud alike
     full_defs = [
         _tool("bash"),

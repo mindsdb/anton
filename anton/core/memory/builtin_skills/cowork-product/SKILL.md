@@ -1,16 +1,6 @@
 ---
 name: cowork-product
-description: 'MANDATORY reading before answering ANY question about Cowork itself —
-  what it is, who makes it, whether there is a desktop app, how to install, update
-  or uninstall it, which operating systems it runs on, where a setting or feature
-  lives, why a feature the user read about is missing on their screen, what it
-  costs, the free allowance, which models it uses, whether it can make images,
-  video or audio, or what files and computers it can reach. Contains the product
-  identity, the download URL, the per-OS install and uninstall steps, plans and
-  models, what Cowork cannot make, and the desktop-vs-web feature differences
-  that make a correct answer look wrong on the other surface. Answering these from general knowledge describes a
-  different company''s product — that is a real reported bug, not a hypothetical.
-  When in doubt about anything concerning Cowork as a product, recall it.'
+description: 'MANDATORY before answering ANY question about Cowork itself (identity, maker, desktop vs web app, install/update/uninstall, OS support, settings, pricing/free allowance, models, media/file capabilities). Never answer Cowork product questions from general knowledge.'
 metadata:
   display_name: Cowork product facts (identity, install, surfaces, plans, limits)
   provenance: builtin

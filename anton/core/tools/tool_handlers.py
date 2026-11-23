@@ -2884,6 +2884,7 @@ async def handle_read_image(
     failure (missing file, non-image extension, bytes that are no PNG, JPEG,
     GIF or WebP, oversized image, etc.).
     """
+    import asyncio
     import base64
     from pathlib import Path
 
@@ -2978,73 +2979,107 @@ async def handle_read_image(
             ok=False, reason="not_an_image",
         )
 
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        # Tier 2: the read itself failed. `ok=False` is certain — the model got
-        # no image. The CAUSE is not: this wraps a bare `except Exception`, so
-        # `read_failed` is mapped TIER_UNCLASSIFIED rather than guessing at a
-        # permissions wall.
-        return ToolOutcome(
-            content=f"Error: cannot read '{path}': {exc}",
-            ok=False, reason="read_failed",
-        )
+    def _load_and_prepare_image() -> tuple[str, str | None, str | None, str | None]:
+        """Single-open, fstat-checked, strictly bounded image load + base64 off the event loop."""
+        import io
+        import os
+        import stat
 
-    # The format the bytes show, not the extension: a JPEG saved as .png
-    # sent as image/png draws a refusal, and a refused image turns
-    # `read_image` off for the rest of the session. A BMP, whatever its name,
-    # goes out as PNG. Bytes in none of the formats the API takes get a text
-    # answer, and nothing is sent.
-    fmt = sniff_image_format(raw[:16])
-    if fmt == "BMP":
+        # Exact raw ceiling for `len(raw) * 4 // 3 <= MAX_IMAGE_BYTES` for already-compressed
+        # formats, and a 50 MB raw cap for uncompressed BMP prior to PNG transcoding.
+        max_non_bmp_raw = (MAX_IMAGE_BYTES * 3 + 2) // 4
+        max_bmp_raw = 50 * 1024 * 1024
+
         try:
-            import io
-            from PIL import Image as _PILImage
+            with path.open("rb") as fh:
+                st = os.fstat(fh.fileno())
+                if not stat.S_ISREG(st.st_mode):
+                    return ("path_not_found", None, None, f"Error: file not found: {path}")
 
-            buf = io.BytesIO()
-            _PILImage.open(io.BytesIO(raw)).save(buf, format="PNG")
-            raw = buf.getvalue()
-            fmt = "PNG"
-        except Exception as exc:
-            # Tier 2 for the verdict, unclassified for the cause: a bare
-            # `except Exception` around a PIL call covers a missing Pillow (a
-            # wall) and a corrupt BMP (self-inflicted) with one sentinel.
-            return ToolOutcome(
-                content=f"Error: failed to convert BMP to PNG: {exc}",
-                ok=False, reason="bmp_convert_failed",
+                header = fh.read(16)
+                sniffed = sniff_image_format(header)
+                if sniffed not in ("PNG", "JPEG", "GIF", "WEBP", "BMP"):
+                    return (
+                        "not_an_image",
+                        None,
+                        None,
+                        f"Error: '{path.name}' is not a readable PNG, JPEG, GIF or WebP image.",
+                    )
+
+                max_raw = max_bmp_raw if sniffed == "BMP" else max_non_bmp_raw
+                if st.st_size > max_raw:
+                    return (
+                        "image_too_large",
+                        None,
+                        None,
+                        (
+                            f"Error: image is too large ({human_size(st.st_size)}); "
+                            "the API limit is ~3.7 MB raw / 5 MB base64. "
+                            "Resize the image and try again."
+                        ),
+                    )
+
+                # Strictly bounded read on the same open descriptor: even if the file
+                # grows concurrently after fstat, allocation never exceeds max_raw + 1.
+                remaining_cap = max(0, max_raw - len(header)) + 1
+                raw_bytes = header + fh.read(remaining_cap)
+        except OSError as exc:
+            return ("read_failed", None, None, f"Error: cannot read '{path}': {exc}")
+
+        if len(raw_bytes) > max_raw:
+            return (
+                "image_too_large",
+                None,
+                None,
+                (
+                    f"Error: image is too large ({human_size(len(raw_bytes))}); "
+                    "the API limit is ~3.7 MB raw / 5 MB base64. "
+                    "Resize the image and try again."
+                ),
             )
 
-    if fmt not in ("PNG", "JPEG", "GIF", "WEBP"):
-        return ToolOutcome(
-            content=f"Error: '{path.name}' is not a readable PNG, JPEG, GIF or WebP image.",
-            ok=False, reason="not_an_image",
-        )
+        out_fmt = sniffed
+        if out_fmt == "BMP":
+            try:
+                from PIL import Image as _PILImage
 
-    if len(raw) * 4 // 3 > MAX_IMAGE_BYTES:
-        # Tier 2: over the API's hard limit. The model chose the file and the
-        # message tells it what to do instead.
-        return ToolOutcome(
-            content=(
-                f"Error: image is too large ({human_size(len(raw))}); "
-                "the API limit is ~3.7 MB raw / 5 MB base64. "
-                "Resize the image and try again."
-            ),
-            ok=False, reason="image_too_large",
-        )
+                buf = io.BytesIO()
+                with _PILImage.open(io.BytesIO(raw_bytes)) as src:
+                    src.save(buf, format="PNG")
+                raw_bytes = buf.getvalue()
+                out_fmt = "PNG"
+            except Exception as exc:
+                return ("bmp_convert_failed", None, None, f"Error: failed to convert BMP to PNG: {exc}")
 
-    b64 = base64.standard_b64encode(raw).decode("ascii")
+        if len(raw_bytes) * 4 // 3 > MAX_IMAGE_BYTES:
+            return (
+                "image_too_large",
+                None,
+                None,
+                (
+                    f"Error: image is too large ({human_size(len(raw_bytes))}); "
+                    "the API limit is ~3.7 MB raw / 5 MB base64. "
+                    "Resize the image and try again."
+                ),
+            )
+
+        label = f"Loaded {path.name} ({human_size(len(raw_bytes))})."
+        try:
+            from PIL import Image as _PILImage
+
+            with _PILImage.open(io.BytesIO(raw_bytes)) as im:
+                label = f"Loaded {path.name} ({im.width}x{im.height}, {human_size(len(raw_bytes))})."
+        except Exception:
+            pass
+        b64_data = base64.standard_b64encode(raw_bytes).decode("ascii")
+        return ("ok", b64_data, out_fmt, label)
+
+    status, b64, fmt, info_text = await asyncio.to_thread(_load_and_prepare_image)
+    if status != "ok" or b64 is None or fmt is None:
+        return ToolOutcome(content=info_text or f"Error: cannot read '{path}'.", ok=False, reason=status)
+
     media_type = _media_type_for(fmt)
-
-    summary = f"Loaded {path.name} ({human_size(len(raw))})."
-    try:
-        import io
-        from PIL import Image as _PILImage
-
-        # The bytes already read, not a second open of the path.
-        with _PILImage.open(io.BytesIO(raw)) as im:
-            summary = f"Loaded {path.name} ({im.width}x{im.height}, {human_size(len(raw))})."
-    except Exception:
-        pass
+    summary = info_text or f"Loaded {path.name}."
 
     # Tier 1, and the ONLY multimodal verdict in the tree. `ok=True` is free
     # here: the list arms of both tool loops already treat a list result as a

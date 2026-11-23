@@ -428,11 +428,15 @@ def test_create_skill_draft_with_no_store_is_an_accepted_wall(tmp_path):
 #: both ways (a new handler; a migrated one regressing to bare returns).
 _ALL_HANDLERS = frozenset({
     "handle_ask_user",
+    "handle_bash",
     "handle_create_artifact",
     "handle_create_skill_draft",
     "handle_edit_artifact",
+    "handle_edit_file",
+    "handle_find_files",
     "handle_generate_artifact",
     "handle_generate_image",
+    "handle_grep_search",
     "handle_launch_backend",
     "handle_list_artifacts",
     "handle_memorize",
@@ -445,6 +449,7 @@ _ALL_HANDLERS = frozenset({
     "handle_update_artifact_metadata",
     "handle_web_fetch_fallback",
     "handle_web_search_fallback",
+    "handle_write_file",
 })
 
 #: The subset of the above that declares at least one explicit `ToolOutcome`
@@ -453,6 +458,7 @@ _VERDICT_DECLARING_HANDLERS = frozenset({
     # Tier 1 on a question that timed out or was skipped: the tool worked, and
     # its reason ends the turn. Every other result stays a bare return.
     "handle_ask_user",
+    "handle_bash",
     "handle_create_skill_draft",
     # Streaming handler: it YIELDS its verdicts rather than returning them.
     # Tier 1 on success (every listed file was statically verified by the
@@ -463,11 +469,14 @@ _VERDICT_DECLARING_HANDLERS = frozenset({
     # editor answered without editing), tier 2 when it put every file back
     # (`edit_not_applied` / `edit_check_failed`) or its arguments were wrong.
     "handle_edit_artifact",
+    "handle_edit_file",
+    "handle_find_files",
     "handle_generate_artifact",
     # ENG-4024, streaming: tier 1 when the image is saved, tier 2 on every
     # failure, each with a reason tiered in root_cause.py (a safety refusal
     # self-inflicted, a rate limit transient, no credits a wall).
     "handle_generate_image",
+    "handle_grep_search",
     "handle_list_artifacts",
     "handle_memorize",
     "handle_read_image",
@@ -476,6 +485,7 @@ _VERDICT_DECLARING_HANDLERS = frozenset({
     "handle_scratchpad",          # partially migrated before this ticket
     "handle_web_fetch_fallback",  # ENG-2677: 2xx only; non-2xx stays tier 3
     "handle_web_search_fallback", # ENG-2677: hits only; no-results stays tier 3
+    "handle_write_file",
 })
 
 

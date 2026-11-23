@@ -146,8 +146,8 @@ MEMORIZE_TOOL = ToolDef(
     description=(
         "Save a rule or lesson to long-term memory.\n"
         "Kinds: `always` (rule to follow), `never` (rule to avoid), `when` (conditional rule), "
-        "`lesson` (factual knowledge), `profile` (fact about who the user is — "
-        "An instruction on how to answer or work is a rule, not a profile entry.).\n"
+        "`lesson` (factual knowledge), `profile` (fact about who the user is). "
+        "An instruction on how to answer or work is a rule, not a profile entry.\n"
         "Scope: 'project' by default. A rule/preference given here is 'project', even when it says 'always' "
         "('Always show amounts in EUR' is 'project'). Choose 'global' only when the user says it applies to all their projects "
         "or for project-independent facts. Profile entries always go to global."

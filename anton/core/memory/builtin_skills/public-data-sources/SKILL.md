@@ -1,12 +1,6 @@
 ---
 name: public-data-sources
-description: 'Recall BEFORE fetching public news, market, economic, or world data
-  from the scratchpad. Catalog of free, open, no-API-key data endpoints and URL
-  patterns — news RSS (Google News, Reuters, AP, BBC, NPR), financial/market
-  (yfinance, FRED, CoinGecko), economic/global (World Bank, OECD, exchange rates),
-  and social/sentiment (Reddit, HackerNews) — plus how to layer them for "state of
-  affairs" and country dashboards. When in doubt about where to get free live data,
-  recall it.'
+description: 'Recall BEFORE fetching public news, market, economic, or world data in scratchpad: free no-API-key RSS, financial (yfinance, FRED, CoinGecko), economic (World Bank, OECD, FX), and social endpoints.'
 metadata:
   display_name: Public data & world-event sources
   provenance: builtin

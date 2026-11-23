@@ -1,9 +1,6 @@
 ---
 name: reading-files
-description: 'Recall BEFORE reading a web page, PDF, Word file, image, photo or
-  scanned document in the scratchpad. Which libraries to use, how to read a
-  scanned page or a photo of text with the model, and how to handle large
-  files without losing the work done so far.'
+description: 'Recall BEFORE reading a web page, PDF, Word doc, image, or scan in scratchpad (libraries, model-assisted OCR, and large-file handling).'
 metadata:
   display_name: Reading web pages, documents and scans
   provenance: builtin

@@ -1,13 +1,6 @@
 ---
 name: build-fullstack-backend
-description: 'ONLY for writing backend or fullstack code BY HAND. NOT needed on the
-  normal path — create_artifact(fullstack-stateless-app or fullstack-stateful-app)
-  followed by generate_artifact writes the backend, verifies it by importing it and
-  launches it. Recall this when editing an existing fullstack artifact, or when
-  generate_artifact failed and the user asked you to continue manually: it is the hard
-  contract — canonical FastAPI+Mangum backend.py template, SECRETS handling, /api/*
-  route prefix rules, static/ frontend layout, requirements.txt, launch and preview.
-  Covers backend, API and server code.'
+description: 'ONLY for writing backend/fullstack code BY HAND. NOT needed on normal create_artifact(fullstack-stateless-app/fullstack-stateful-app) -> generate_artifact path. Hard contract: FastAPI+Mangum backend.py, SECRETS, /api/* routes, static/, requirements.txt, launch/preview.'
 metadata:
   display_name: Backend & fullstack app generation
   provenance: builtin

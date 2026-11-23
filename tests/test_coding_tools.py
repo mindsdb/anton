@@ -755,3 +755,58 @@ def test_read_image_exposed_in_cloud_allowlist_and_readonly_parallel():
 
     assert "read_image" in CLOUD_TOOL_ALLOWLIST
     assert "read_image" in READ_ONLY_TOOLS
+
+
+def test_read_image_pre_stat_size_cap_and_non_image_precedence():
+    from PIL import Image as _PILImage
+    from anton.core.tools.tool_handlers import handle_read_image
+
+    async def _run():
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            sess = _make_session(root)
+
+            # Valid PNG loads cleanly with dimensions via single-open worker
+            ok_png = root / "ok.png"
+            _PILImage.new("RGB", (12, 8), color=(10, 20, 30)).save(ok_png, format="PNG")
+            out_ok = await handle_read_image(sess, {"file_path": str(ok_png)})
+            assert out_ok.ok and isinstance(out_ok.content, list)
+            assert out_ok.content[0]["source"]["media_type"] == "image/png"
+            assert "12x8" in out_ok.content[1]["text"]
+
+            # Valid BMP transcodes cleanly to PNG off the event loop
+            ok_bmp = root / "ok.bmp"
+            _PILImage.new("RGB", (6, 4), color=(40, 50, 60)).save(ok_bmp, format="BMP")
+            out_bmp = await handle_read_image(sess, {"file_path": str(ok_bmp)})
+            assert out_bmp.ok and isinstance(out_bmp.content, list)
+            assert out_bmp.content[0]["source"]["media_type"] == "image/png"
+            assert "6x4" in out_bmp.content[1]["text"]
+
+            # Oversized valid-header PNG rejected via fstat before reading full file
+            big_png = root / "huge.png"
+            with big_png.open("wb") as fh:
+                fh.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+                fh.seek(5 * 1024 * 1024)
+                fh.write(b"\x00")
+            out_big = await handle_read_image(sess, {"file_path": str(big_png)})
+            assert not out_big.ok and out_big.reason == "image_too_large"
+
+            # Oversized BMP (>50 MB) rejected via fstat before reading full file
+            big_bmp = root / "huge.bmp"
+            with big_bmp.open("wb") as fh:
+                fh.write(b"BM" + b"\x00" * 14)
+                fh.seek(51 * 1024 * 1024)
+                fh.write(b"\x00")
+            out_big_bmp = await handle_read_image(sess, {"file_path": str(big_bmp)})
+            assert not out_big_bmp.ok and out_big_bmp.reason == "image_too_large"
+
+            # Huge non-image named .png still returns not_an_image (header sniff precedes size cap)
+            fake_png = root / "fake.png"
+            with fake_png.open("wb") as fh:
+                fh.write(b"NOT_A_PNG_HEADER")
+                fh.seek(5 * 1024 * 1024)
+                fh.write(b"\x00")
+            out_fake = await handle_read_image(sess, {"file_path": str(fake_png)})
+            assert not out_fake.ok and out_fake.reason == "not_an_image"
+
+    asyncio.run(_run())
