@@ -657,3 +657,42 @@ def test_head_tail_stdout_truncation_and_orphan_scrub_safety(monkeypatch):
         raw_tail=exp_full[-(TAIL_OUTPUT + STDOUT_SCRUB_MARGIN) :],
     )
     assert "Z" * 100 not in clipped_exp and "EXP_END" in clipped_exp
+
+
+def test_ghost_tool_prompt_gating():
+    from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
+    from anton.core.llm.prompts import BACKEND_GENERATION_PROMPT
+
+    store = SimpleNamespace(
+        list_summaries=lambda: [
+            {"label": "browser", "description": "Use browser tool"},
+            {"label": "build-fullstack-backend", "description": "Fullstack skill"},
+            {"label": "public-data-sources", "description": "Public data"},
+        ]
+    )
+    builder = ChatSystemPromptBuilder()
+    common = dict(
+        conversation_started="2026-11-23",
+        system_prompt_context=SystemPromptContext(),
+        proactive_dashboards=False,
+        output_dir="/tmp",
+        skill_store=store,
+        fullstack_offered=True,
+    )
+    # Without browser / launch_backend / generate_artifact in tool_defs: omit dead-tool prompts
+    minimal_tools = [SimpleNamespace(name="scratchpad", input_schema={"properties": {}}, prompt=None)]
+    p_min = builder.build(**common, tool_defs=minimal_tools)
+    assert BACKEND_GENERATION_PROMPT not in p_min
+    assert "- `browser`" not in p_min
+    assert "- `build-fullstack-backend`" not in p_min
+    assert "- `public-data-sources`" in p_min
+
+    # With browser + launch_backend registered: both are included
+    full_tools = [
+        SimpleNamespace(name="browser", input_schema={"properties": {}}, prompt=None),
+        SimpleNamespace(name="launch_backend", input_schema={"properties": {}}, prompt=None),
+    ]
+    p_full = builder.build(**common, tool_defs=full_tools)
+    assert BACKEND_GENERATION_PROMPT in p_full
+    assert "- `browser`" in p_full
+    assert "- `build-fullstack-backend`" in p_full

@@ -100,6 +100,7 @@ class ChatSystemPromptBuilder:
         direct_reports: bool = True,
         internet_research: bool = True,
         reading_files_offered: bool = True,
+        browser_offered: bool = True,
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
@@ -149,6 +150,8 @@ class ChatSystemPromptBuilder:
             if not internet_research and label == "public-data-sources":
                 continue
             if not reading_files_offered and label == "reading-files":
+                continue
+            if not browser_offered and label == "browser":
                 continue
             if when:
                 lines.append(f"- `{label}` — {when}")
@@ -322,7 +325,17 @@ class ChatSystemPromptBuilder:
 
         # Short pointer only — the full backend/fullstack contract lives in the
         # built-in `build-fullstack-backend` skill (recalled on demand).
-        if fullstack_offered:
+        # Gate on actual tool availability when `tool_defs` is explicitly provided
+        # so sessions without `generate_artifact` / `launch_backend` / `browser`
+        # do not receive dead-tool instructions.
+        reg_tool_names = {getattr(t, "name", "") for t in tool_defs} if tool_defs is not None else None
+        backend_tools_offered = (
+            reg_tool_names is None or bool(reg_tool_names & {"generate_artifact", "launch_backend"})
+        )
+        browser_offered = reg_tool_names is None or ("browser" in reg_tool_names)
+        effective_fullstack = fullstack_offered and backend_tools_offered
+
+        if effective_fullstack:
             prompt += "\n\n" + BACKEND_GENERATION_PROMPT
 
         tool_prompts = self._build_tool_prompts_section(tool_defs)
@@ -341,9 +354,9 @@ class ChatSystemPromptBuilder:
         # Saved skills change rarely (the built-ins plus the user's own), so
         # they stay in the shared part ahead of anything project-specific.
         procedural_memory = self._build_procedural_memory_section(
-            skill_store, direct_generation=direct_generation, fullstack_offered=fullstack_offered,
+            skill_store, direct_generation=direct_generation, fullstack_offered=effective_fullstack,
             direct_reports=direct_reports, internet_research=internet_research,
-            reading_files_offered=reading_files_offered,
+            reading_files_offered=reading_files_offered, browser_offered=browser_offered,
         )
         if procedural_memory:
             prompt += procedural_memory
