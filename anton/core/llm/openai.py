@@ -4,6 +4,7 @@ import inspect
 import json
 import logging
 import os
+import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, NoReturn
 
@@ -1047,6 +1048,48 @@ async def _aclose_stream(stream: object) -> None:
 _SDK_TIMEOUT = openai.Timeout(LONGEST_SILENCE_S, connect=5.0)
 
 
+def _tcp_keepalive_socket_options() -> list[tuple[int, int, int]]:
+    """TCP keepalive socket options for long-running streaming LLM calls.
+
+    Prevents NAT gateways, cloud load balancers, and corporate firewalls from
+    reaping silent TCP connections during extended reasoning pauses while still
+    preserving `_SDK_TIMEOUT` / `model_call_idle_timeout_s` semantics.
+    """
+    opts: list[tuple[int, int, int]] = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    if hasattr(socket, "TCP_KEEPIDLE"):
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30))
+    elif hasattr(socket, "TCP_KEEPALIVE"):  # macOS
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 30))
+    if hasattr(socket, "TCP_KEEPINTVL"):
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10))
+    if hasattr(socket, "TCP_KEEPCNT"):
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 6))
+    return opts
+
+
+def _enable_tcp_keepalive(sdk_client: object) -> None:
+    """Attach TCP keepalive options to real httpx2 transports on an OpenAI SDK client."""
+    import httpx2
+
+    http_client = getattr(sdk_client, "_client", None)
+    if not isinstance(http_client, httpx2.AsyncClient):
+        return
+    transports: list[object] = []
+    default_transport = getattr(http_client, "_transport", None)
+    if default_transport is not None:
+        transports.append(default_transport)
+    mounts = getattr(http_client, "_mounts", None)
+    if isinstance(mounts, dict):
+        transports.extend(mounts.values())
+    opts = _tcp_keepalive_socket_options()
+    for transport in transports:
+        if not isinstance(transport, httpx2.AsyncHTTPTransport):
+            continue
+        pool = getattr(transport, "_pool", None)
+        if pool is not None and hasattr(pool, "_socket_options") and pool._socket_options is None:
+            pool._socket_options = opts
+
+
 class OpenAIProvider(LLMProvider):
     name: str = "openai"
 
@@ -1160,6 +1203,7 @@ class OpenAIProvider(LLMProvider):
                 kwargs["http_client"] = httpx.AsyncClient(verify=False)
             self._client = openai.AsyncOpenAI(**kwargs, timeout=_SDK_TIMEOUT)
 
+        _enable_tcp_keepalive(self._client)
         # After the if/else, not per branch: a future client flavor must not be
         # able to skip registration and leave its pool unclosed.
         register_provider(self)

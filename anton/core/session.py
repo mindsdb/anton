@@ -1409,6 +1409,12 @@ def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
     return f"{text[:head]}{marker}{text[-tail:]}"
 
 
+# Minimum tool rounds between proactive compactions within a single turn.
+# Keeps short turns and post-overflow retries strictly single-shot (preserving
+# prefix cache stability) while allowing very long multi-step turns (100+
+# rounds) to compact again instead of growing unboundedly into the spend ceiling.
+_PROACTIVE_COMPACTION_COOLDOWN_ROUNDS = 15
+
 # 2-4x what the prompt asks for (~1500 words — ~2000 tokens of English, should
 # fit in 8k limit for other languages), leaving room for reasoning and for the
 # preamble cheap models write before the record — both bill against this same
@@ -2131,6 +2137,12 @@ class ChatSession:
         else:
             self._verifier_latch = _VerifierLatch()
         self._context_pressure_threshold = s.context_pressure_threshold
+        raw_compaction_cap = getattr(s, "context_compaction_max_tokens", 100_000)
+        self._context_compaction_max_tokens = (
+            raw_compaction_cap
+            if isinstance(raw_compaction_cap, int) and not isinstance(raw_compaction_cap, bool)
+            else 100_000
+        )
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
         self._llm = config.llm_client
@@ -2541,10 +2553,21 @@ class ChatSession:
         # at the start of each turn. Prevents double-summarization when
         # the post-recovery response still reports high pressure.
         self._compacted_this_turn = False
+        # Tool-round index of the latest compaction in this turn (-1 = none).
+        # Paired with `_PROACTIVE_COMPACTION_COOLDOWN_ROUNDS` so short turns
+        # and post-overflow retries never double-compact, while 100+-round
+        # turns can re-compact once enough new work has accumulated.
+        self._last_compaction_round = -1
         # Stops a *failed* proactive compaction from being re-attempted every
         # tool round. A transient blip still gets a fresh attempt next
         # turn (both flags reset per turn).
         self._compaction_failed_this_turn = False
+        # True when the most recent `_summarize_history()` returned False only
+        # because there wasn't enough foldable history yet (too few turns or
+        # <10% new material), NOT because summarization failed. Distinguishes
+        # benign early-turn skips from real failures so proactive compaction
+        # stays armed once enough turns accumulate.
+        self._last_compaction_skipped = False
         # Backends launched via the launch_backend tool. Keyed by
         # artifact slug; each entry holds the asyncio.subprocess.Process
         # plus its port. Reaped in close() so backend processes don't
@@ -3902,7 +3925,9 @@ class ChatSession:
         marker, and without recording a durable compaction the host would
         replay as a summary.
         """
+        self._last_compaction_skipped = False
         if len(self._history) < 6:
+            self._last_compaction_skipped = True
             return False  # Too short to summarize
 
         min_recent = 4
@@ -3912,6 +3937,7 @@ class ChatSession:
         # Ensure we keep at least min_recent turns
         compacted_count = min(compacted_count, len(self._history) - min_recent)
         if compacted_count < 2:
+            self._last_compaction_skipped = True
             return False
 
         # Walk the cut backward to avoid breaking tool_use / tool_result
@@ -3938,6 +3964,7 @@ class ChatSession:
                 compacted_count -= 1
 
         if compacted_count < 2:
+            self._last_compaction_skipped = True
             return False
 
         old_turns = self._history[:compacted_count]
@@ -3967,6 +3994,7 @@ class ChatSession:
         new_old_len = _approx_len(new_old_turns)
         recent_len = _approx_len(recent_turns)
         if new_old_len < 0.10 * (new_old_len + recent_len):
+            self._last_compaction_skipped = True
             return False
 
         # Serialize old turns. Pull out any prior compacted summary so we
@@ -4175,6 +4203,33 @@ class ChatSession:
             if pad._compact_cells():
                 compacted = True
         return compacted
+
+    def _should_proactively_compact(self, usage: Usage) -> bool:
+        """Return True when input context warrants proactive history compaction.
+
+        Checks both fractional window pressure (for <=200k-window models) and an
+        absolute token ceiling (for ~1M-window models where 70% is 700k+ tokens,
+        causing runaway repeated prompt cost and degraded recall long before
+        overflow). Allows re-compaction on very long multi-step turns once
+        `_PROACTIVE_COMPACTION_COOLDOWN_ROUNDS` tool rounds have elapsed since
+        the previous compaction, while preserving single-shot behavior for short
+        turns and post-overflow retries.
+        """
+        if self._compaction_failed_this_turn:
+            return False
+        if self._compacted_this_turn:
+            if (
+                self._last_compaction_round < 0
+                or (self._turn_tool_rounds - self._last_compaction_round)
+                < _PROACTIVE_COMPACTION_COOLDOWN_ROUNDS
+            ):
+                return False
+        if usage.context_pressure > self._context_pressure_threshold:
+            return True
+        return (
+            self._context_compaction_max_tokens > 0
+            and usage.context_tokens >= self._context_compaction_max_tokens
+        )
 
     @staticmethod
     def _transient_backoff_delay(
@@ -4593,6 +4648,7 @@ class ChatSession:
         self._compact_scratchpads()
         if compacted:
             self._compacted_this_turn = True
+            self._last_compaction_round = self._turn_tool_rounds
         try:
             return await self._llm.plan(messages=factory_validated(), **kwargs)
         except ContextOverflowError:
@@ -5795,6 +5851,7 @@ class ChatSession:
         self._compact_scratchpads()
         if compacted:
             self._compacted_this_turn = True
+            self._last_compaction_round = self._turn_tool_rounds
             yield StreamContextCompacted(
                 message="Context was getting long — older history has been summarized."
             )
@@ -6489,6 +6546,10 @@ class ChatSession:
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
         self._turn_tool_rounds = 0
+        self._compacted_this_turn = False
+        self._last_compaction_round = -1
+        self._compaction_failed_this_turn = False
+        self._last_compaction_skipped = False
         self._turn_continuations = 0
         self._time_limit_continued_s = 0
         self._time_limit_resumed = False
@@ -7383,8 +7444,6 @@ class ChatSession:
         await self._settle_image_offer()
         tools = self._build_tools()
         system = await self._build_system_prompt(user_message)
-        self._compacted_this_turn = False
-        self._compaction_failed_this_turn = False
 
         response: StreamComplete | None = None
 
@@ -7411,21 +7470,19 @@ class ChatSession:
                 return
             llm_response = response.response
 
-        # Proactive compaction — at most once per turn, and not re-attempted
+        # Proactive compaction — guarded by cooldown and not re-attempted
         # after a failure (see `_compaction_failed_this_turn`).
-        if (
-            not self._compacted_this_turn
-            and not self._compaction_failed_this_turn
-            and llm_response.usage.context_pressure > self._context_pressure_threshold
-        ):
+        if self._should_proactively_compact(llm_response.usage):
+            self._last_compaction_skipped = False
             compacted = await self._summarize_history()
             self._compact_scratchpads()
             if compacted:
                 self._compacted_this_turn = True
+                self._last_compaction_round = self._turn_tool_rounds
                 yield StreamContextCompacted(
                     message="Context was getting long — older history has been summarized."
                 )
-            else:
+            elif not self._last_compaction_skipped:
                 self._compaction_failed_this_turn = True
 
         # Tool-call loop with circuit breaker, wrapped in a completion
@@ -8349,22 +8406,19 @@ class ChatSession:
                         return
                     llm_response = response.response
 
-                # Proactive compaction during tool loop — at most once per
-                # turn, and not re-attempted after a failure.
-                if (
-                    not self._compacted_this_turn
-                    and not self._compaction_failed_this_turn
-                    and llm_response.usage.context_pressure
-                    > self._context_pressure_threshold
-                ):
+                # Proactive compaction during tool loop — guarded by cooldown
+                # and not re-attempted after a failure.
+                if self._should_proactively_compact(llm_response.usage):
+                    self._last_compaction_skipped = False
                     compacted = await self._summarize_history()
                     self._compact_scratchpads()
                     if compacted:
                         self._compacted_this_turn = True
+                        self._last_compaction_round = self._turn_tool_rounds
                         yield StreamContextCompacted(
                             message="Context was getting long — older history has been summarized."
                         )
-                    else:
+                    elif not self._last_compaction_skipped:
                         self._compaction_failed_this_turn = True
 
             # A cell that crosses the limit mid-round leaves the round's other

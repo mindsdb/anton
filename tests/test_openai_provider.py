@@ -888,3 +888,29 @@ class TestChatCompletionsReasoningContent:
         from anton.core.llm.provider import StreamReasoningDelta, StreamTextDelta
         assert [e for e in yielded if isinstance(e, StreamReasoningDelta)] == []
         assert [e for e in yielded if isinstance(e, StreamTextDelta)] == [StreamTextDelta(text="hi")]
+
+
+class TestTCPKeepalive:
+    async def test_real_provider_enables_tcp_keepalive_on_transport_pool(self):
+        import socket
+        from anton.core.llm.openai import _tcp_keepalive_socket_options
+
+        opts = _tcp_keepalive_socket_options()
+        assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in opts
+        provider = OpenAIProvider(api_key="sk-test", base_url="https://api.example.com/v1")
+        try:
+            pool = provider._client._client._transport._pool
+            assert pool._socket_options == opts
+        finally:
+            await provider.aclose()
+
+    def test_enable_tcp_keepalive_noops_on_mock_transport(self):
+        import httpx2
+        from anton.core.llm.openai import _enable_tcp_keepalive
+
+        mock_http = httpx2.AsyncClient(
+            transport=httpx2.MockTransport(lambda req: httpx2.Response(200))
+        )
+        fake_sdk = SimpleNamespace(_client=mock_http)
+        _enable_tcp_keepalive(fake_sdk)  # must not raise or mutate MockTransport
+        assert isinstance(mock_http._transport, httpx2.MockTransport)

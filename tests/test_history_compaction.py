@@ -389,3 +389,280 @@ class TestSkipWhenLittleNewMaterial:
 
         mock_llm.summarize.assert_called_once()
         assert session.last_compaction is not None
+
+
+class TestProactiveAbsoluteTokenCeiling:
+    """Proactive compaction must also trigger on an absolute token ceiling so
+    1M-window models do not wait until ~700k tokens before compacting."""
+
+    def test_triggers_at_absolute_ceiling_even_with_low_pressure(self):
+        from anton.core.settings import CoreSettings
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=make_mock_llm(),
+            settings=CoreSettings(context_compaction_max_tokens=100_000),
+        ))
+        # 1M-window model: 100k tokens is only ~9.5% pressure, well below 0.7
+        below = Usage(input_tokens=5_000, cache_read_tokens=94_999, context_pressure=0.095)
+        at_cap = Usage(input_tokens=5_000, cache_read_tokens=95_000, context_pressure=0.095)
+        assert session._should_proactively_compact(below) is False
+        assert session._should_proactively_compact(at_cap) is True
+
+    def test_zero_ceiling_disables_absolute_trigger(self):
+        from anton.core.settings import CoreSettings
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=make_mock_llm(),
+            settings=CoreSettings(context_compaction_max_tokens=0),
+        ))
+        large = Usage(input_tokens=5_000, cache_read_tokens=200_000, context_pressure=0.20)
+        high_pressure = Usage(input_tokens=5_000, cache_read_tokens=5_000, context_pressure=0.80)
+        assert session._should_proactively_compact(large) is False
+        assert session._should_proactively_compact(high_pressure) is True
+
+    def test_cooldown_blocks_immediate_recompaction_and_allows_long_turn_recompaction(self):
+        from anton.core.session import _PROACTIVE_COMPACTION_COOLDOWN_ROUNDS
+        from anton.core.settings import CoreSettings
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=make_mock_llm(),
+            settings=CoreSettings(context_compaction_max_tokens=100_000),
+        ))
+        heavy = Usage(input_tokens=2_000, cache_read_tokens=105_000, context_pressure=0.10)
+        session._turn_tool_rounds = 18
+        assert session._should_proactively_compact(heavy) is True
+
+        # Simulate successful compaction at round 18
+        session._compacted_this_turn = True
+        session._last_compaction_round = 18
+        session._turn_tool_rounds = 18 + _PROACTIVE_COMPACTION_COOLDOWN_ROUNDS - 1
+        assert session._should_proactively_compact(heavy) is False
+
+        # Once full cooldown has elapsed, a long turn can compact again
+        session._turn_tool_rounds = 18 + _PROACTIVE_COMPACTION_COOLDOWN_ROUNDS
+        assert session._should_proactively_compact(heavy) is True
+
+        # Failed compaction still latches off for the rest of the turn
+        session._compaction_failed_this_turn = True
+        assert session._should_proactively_compact(heavy) is False
+
+    async def test_turn_stream_proactively_compacts_on_absolute_ceiling(self):
+        from anton.core.llm.provider import StreamComplete, StreamContextCompacted
+        from anton.core.settings import CoreSettings
+
+        async def _plan_stream(**kwargs):
+            yield StreamComplete(
+                response=LLMResponse(
+                    content="Done",
+                    usage=Usage(
+                        input_tokens=4_000,
+                        cache_read_tokens=100_000,
+                        context_pressure=0.10,
+                    ),
+                )
+            )
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=make_mock_llm(),
+            settings=CoreSettings(context_compaction_max_tokens=100_000),
+        ))
+        session._llm.plan_stream = _plan_stream
+        session._llm.plan = AsyncMock(
+            return_value=LLMResponse(content="STATUS: COMPLETE — done")
+        )
+        session._summarize_history = AsyncMock(return_value=True)
+
+        events = [e async for e in session.turn_stream("hello")]
+
+        assert session._summarize_history.await_count == 1
+        assert sum(isinstance(e, StreamContextCompacted) for e in events) == 1
+        assert session._compacted_this_turn is True
+        assert session._last_compaction_round == 0
+
+    def test_non_int_compaction_max_tokens_falls_back_to_default(self):
+        mock_settings = MagicMock()
+        mock_settings.context_pressure_threshold = 0.7
+        mock_settings.max_consecutive_errors = 5
+        mock_settings.resilience_nudge_at = 2
+        mock_settings.model_call_idle_timeout_s = 120.0
+        mock_settings.max_images_per_turn = 8
+        mock_settings.max_tool_rounds = 100
+        mock_settings.max_continuations = 3
+        mock_settings.max_turn_tokens = 25_000_000
+        mock_settings.max_turn_seconds = 0
+        mock_settings.cell_timeout_default = 120
+        mock_settings.cell_inactivity_timeout = 30
+        mock_settings.cell_inactivity_after_progress = 60
+        mock_settings.cell_inactivity_max = 60
+        mock_settings.cell_total_max = 3600
+        mock_settings.cell_install_timeout = 120
+        mock_settings.cell_keep_recent = 5
+        # MagicMock attribute (unconfigured) must fall back to 100_000
+        session = ChatSession(ChatSessionConfig(
+            llm_client=make_mock_llm(),
+            settings=mock_settings,
+        ))
+        assert session._context_compaction_max_tokens == 100_000
+
+        # Bool must also be rejected (isinstance(True, int) is True in Python)
+        mock_settings.context_compaction_max_tokens = True
+        session_bool = ChatSession(ChatSessionConfig(
+            llm_client=make_mock_llm(),
+            settings=mock_settings,
+        ))
+        assert session_bool._context_compaction_max_tokens == 100_000
+
+    async def test_benign_early_turn_skip_does_not_disable_later_compaction(self):
+        """A benign skip on round 0 (len(history) < 6) at >=100k tokens must
+        NOT latch _compaction_failed_this_turn, so later rounds in the same
+        turn still compact once enough history has accumulated."""
+        from anton.core.llm.provider import (
+            StreamComplete,
+            StreamContextCompacted,
+            ToolCall,
+        )
+        from anton.core.settings import CoreSettings
+
+        heavy = Usage(input_tokens=4_000, cache_read_tokens=105_000, context_pressure=0.10)
+        call_idx = 0
+
+        async def _plan_stream(**kwargs):
+            nonlocal call_idx
+            call_idx += 1
+            if call_idx <= 4:
+                yield StreamComplete(
+                    response=LLMResponse(
+                        content="x" * 200,
+                        tool_calls=[ToolCall(id=f"tc_{call_idx}", name="no_such_tool", input={})],
+                        usage=heavy,
+                        stop_reason="tool_use",
+                    )
+                )
+            else:
+                yield StreamComplete(
+                    response=LLMResponse(
+                        content="Finished",
+                        usage=heavy,
+                        stop_reason="end_turn",
+                    )
+                )
+
+        mock_llm = make_mock_llm()
+        mock_llm.plan_stream = _plan_stream
+        mock_llm.plan = AsyncMock(return_value=_summarize_response("STATUS: COMPLETE — done"))
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nCompacted"))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm,
+            settings=CoreSettings(context_compaction_max_tokens=100_000),
+        ))
+
+        events = [e async for e in session.turn_stream("x" * 400)]
+
+        # Round 0 had len(history) == 1 (< 6) and skipped benignly; later rounds
+        # grew past 6 messages and compacted cleanly.
+        assert mock_llm.summarize.await_count == 1
+        assert sum(isinstance(e, StreamContextCompacted) for e in events) == 1
+        assert session._compacted_this_turn is True
+        assert session._compaction_failed_this_turn is False
+
+    async def test_stream_drop_retry_preserves_compaction_cooldown_and_failure_latch(self):
+        """Re-entering `_stream_and_handle_tools` on a mid-turn stream drop must
+        preserve `_compacted_this_turn` / `_last_compaction_round` and
+        `_compaction_failed_this_turn` instead of resetting them."""
+        from anton.core.llm.provider import (
+            StreamComplete,
+            StreamContextCompacted,
+            ToolCall,
+            TransientProviderError,
+        )
+        from anton.core.settings import CoreSettings
+
+        heavy = Usage(input_tokens=4_000, cache_read_tokens=105_000, context_pressure=0.10)
+        drop = TransientProviderError(
+            "Lost connection mid-response",
+            provider="OpenAI",
+            code="connection_error",
+            session_backoff=True,
+        )
+
+        # Case 1: Compaction succeeded on round 0, then round 1 drops and retries.
+        # The retry must NOT compact a second time inside the 15-round cooldown.
+        step = 0
+
+        async def _plan_stream_cooldown(**kwargs):
+            nonlocal step
+            step += 1
+            if step == 1:
+                yield StreamComplete(
+                    response=LLMResponse(
+                        content="step 1",
+                        tool_calls=[ToolCall(id="tc_1", name="no_such_tool", input={})],
+                        usage=heavy,
+                        stop_reason="tool_use",
+                    )
+                )
+            elif step == 2:
+                raise drop
+            else:
+                yield StreamComplete(
+                    response=LLMResponse(content="recovered", usage=heavy, stop_reason="end_turn")
+                )
+
+        mock_llm = make_mock_llm()
+        mock_llm.plan_stream = _plan_stream_cooldown
+        mock_llm.plan = AsyncMock(return_value=_summarize_response("STATUS: COMPLETE — done"))
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nCompacted"))
+
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm,
+            initial_history=_alternating_history(10, "x" * 100),
+            settings=CoreSettings(context_compaction_max_tokens=100_000),
+        ))
+        session._backoff_sleep = AsyncMock(return_value=False)
+
+        events = [e async for e in session.turn_stream("go")]
+        assert mock_llm.summarize.await_count == 1
+        assert sum(isinstance(e, StreamContextCompacted) for e in events) == 1
+        assert session._compacted_this_turn is True
+        assert session._last_compaction_round == 0
+
+        # Case 2: Summarization failed on round 0, then round 1 drops and retries.
+        # The retry must keep `_compaction_failed_this_turn` latched True.
+        step2 = 0
+
+        async def _plan_stream_failed(**kwargs):
+            nonlocal step2
+            step2 += 1
+            if step2 == 1:
+                yield StreamComplete(
+                    response=LLMResponse(
+                        content="step 1",
+                        tool_calls=[ToolCall(id="tc_1", name="no_such_tool", input={})],
+                        usage=heavy,
+                        stop_reason="tool_use",
+                    )
+                )
+            elif step2 == 2:
+                raise drop
+            else:
+                yield StreamComplete(
+                    response=LLMResponse(content="recovered", usage=heavy, stop_reason="end_turn")
+                )
+
+        mock_llm2 = make_mock_llm()
+        mock_llm2.plan_stream = _plan_stream_failed
+        mock_llm2.plan = AsyncMock(return_value=_summarize_response("STATUS: COMPLETE — done"))
+        mock_llm2.summarize = AsyncMock(side_effect=RuntimeError("summarizer down"))
+
+        session2 = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm2,
+            initial_history=_alternating_history(10, "x" * 100),
+            settings=CoreSettings(context_compaction_max_tokens=100_000),
+        ))
+        session2._backoff_sleep = AsyncMock(return_value=False)
+
+        events2 = [e async for e in session2.turn_stream("go")]
+        assert mock_llm2.summarize.await_count == 1
+        assert not any(isinstance(e, StreamContextCompacted) for e in events2)
+        assert session2._compaction_failed_this_turn is True
