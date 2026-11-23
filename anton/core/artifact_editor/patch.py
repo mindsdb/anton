@@ -239,16 +239,23 @@ def _finish(files: list[_File]) -> list[FileEdit]:
 # --- compact ---------------------------------------------------------------
 
 
-def _looks_like_path(text: str) -> bool:
+_NAMED_FILE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+
+
+def _looks_like_path(text: str, *, spaced: bool = False) -> bool:
     """What keeps a created file's own contents from being read as the next
     file's header. A CSS file full of ``@media (...)`` and ``@import url(...)``,
     or TypeScript ``@Component({...})``, would otherwise cut the file short at
     its first at-rule and start a second file named after it. Real paths
-    carry no spaces, brackets, quotes or semicolons; the at-rules that matter
-    all do. A bare ``@Component`` alone on a line would still be misread."""
+    carry no brackets, quotes or semicolons; the at-rules that matter all do.
+    With ``spaced``, a name with spaces counts when it ends in a file
+    extension, so a user's "Marsh Light.md" is a path while "@media screen" is
+    not. A bare ``@Component`` alone on a line would still be misread."""
     if not text or len(text) > 200 or text.startswith("@"):
         return False
-    return not any(ch in text for ch in " \t(){}[]\"';,")
+    if any(ch in text for ch in "\t(){}[]\"';,"):
+        return False
+    return " " not in text or (spaced and _NAMED_FILE.search(text) is not None)
 
 
 # "@END", "*** END ***", "EOF": bare end markers models add, which are not
@@ -306,7 +313,7 @@ def _compact_header(line: str) -> tuple[str, str] | None:
     mode = " "
     if rest and rest[0] in "+->":
         mode, rest = rest[0], rest[1:]
-    if not _looks_like_path(rest):
+    if not _looks_like_path(rest, spaced=True):
         return None
     return mode, _clean_path(rest)
 

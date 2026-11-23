@@ -101,6 +101,26 @@ def test_compact_created_content_survives_at_rules():
     assert set(result.written) == {"styles/app.css"}
 
 
+def test_compact_edits_a_file_whose_name_has_spaces():
+    after = ok(
+        {"Marsh Light.md": "Meg walked Biscuit at dawn.\n"},
+        "@Marsh Light.md\n-Meg walked Biscuit at dawn.\n+Meg walked Barley at dawn.\n",
+    )
+    assert after["Marsh Light.md"] == "Meg walked Barley at dawn.\n"
+
+
+def test_compact_creates_a_file_whose_name_has_spaces():
+    after = ok({"keep.txt": "x\n"}, "@+Scene - Varley call.md\nThe phone rang.\n")
+    assert after["Scene - Varley call.md"] == "The phone rang.\n"
+
+
+def test_compact_created_content_keeps_spaced_at_rules():
+    scss = "@include respond-to small\n@media screen and print\n.a { color: red; }\n"
+    result, after = run({"keep.txt": "x\n"}, "@+styles/app.scss\n" + scss)
+    assert result.ok
+    assert after["styles/app.scss"] == scss
+
+
 def test_compact_takes_several_edits_to_one_file():
     after = ok(
         {"a.ts": "const first = 1;\nconst middle = 2;\nconst last = 3;\n"},
