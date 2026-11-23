@@ -38,6 +38,7 @@ from anton.core.llm.provider import (
     ErrorBodyFields,
     FreeServingPausedError,
     BudgetExceededError,
+    ModelNotInTierError,
     ModelRestrictedError,
     ModelUnavailableError,
     ProviderAuthError,
@@ -46,6 +47,7 @@ from anton.core.llm.provider import (
     TokenLimitExceeded,
     TransientProviderError,
     WalletEmptyError,
+    WindowAllowanceExhaustedError,
     classify_transient,
     mindshub_billing_stop,
     mindshub_model_restriction,
@@ -753,6 +755,9 @@ def test_the_error_body_is_split_into_its_two_levels():
     assert both.code == "wallet_empty"
     # Values are kept as sent, not coerced.
     assert ProviderErrorBody.parse({"code": ["wallet_empty"]}).code == ["wallet_empty"]
+    # The plan stops' fields sit at the top level of the wire body, beside `error`.
+    plan = ProviderErrorBody.parse({"window": "5h", "required_tier": "pro", "error": {"window": "7d"}})
+    assert (plan.top.window, plan.top.required_tier, plan.envelope.window) == ("5h", "pro", "7d")
     # Anything but a dict parses as empty, and so does a non-object `error`.
     for junk in (None, "<html>402</html>", [{"code": "wallet_empty"}], {"error": "denied"}):
         parsed = ProviderErrorBody.parse(junk)
@@ -1158,17 +1163,34 @@ _BILLING_CTA = (
 )
 _BUDGET_CTA = (
     "An organization owner or admin can raise it at "
-    "https://console.mindshub.ai/settings/organization/billing?tab=budgets."
+    "https://console.mindshub.ai/settings/organization/billing?tab=budgets&from=budget_denial."
 )
 _SCOPED_BUDGET_CTA = (
     "An administrator can raise it at "
-    "https://console.mindshub.ai/settings/organization/billing?tab=budgets."
+    "https://console.mindshub.ai/settings/organization/billing?tab=budgets&from=budget_denial."
+)
+
+
+_WINDOW_CTA = (
+    "Add credits at https://console.mindshub.ai/settings/organization/billing "
+    "to continue now, or wait for it to reset."
+)
+_TIER_CTA = (
+    "Upgrade your plan or add credits at "
+    "https://console.mindshub.ai/settings/organization/billing to continue."
 )
 
 
 def _cta(code):
-    """Credits lift every billing stop but a budget, which points at the Budgets tab (no role without a scope)."""
-    return _SCOPED_BUDGET_CTA if code == "budget_exceeded" else _BILLING_CTA
+    """Credits lift every billing stop but a budget, which points at the Budgets tab (no role without a scope).
+
+    A spent plan window also lifts by waiting, and a model outside the plan's tier by upgrading.
+    """
+    return {
+        "budget_exceeded": _SCOPED_BUDGET_CTA,
+        "window_allowance_exhausted": _WINDOW_CTA,
+        "model_not_in_tier": _TIER_CTA,
+    }.get(code, _BILLING_CTA)
 
 
 _BILLING_STOPS = [
@@ -1181,6 +1203,10 @@ _BILLING_STOPS = [
                  id="fuse"),
     pytest.param("budget_exceeded", 402, BudgetExceededError,
                  "a MindsHub spending budget is used up.", id="budget"),
+    pytest.param("window_allowance_exhausted", 429, WindowAllowanceExhaustedError,
+                 "your MindsHub plan's allowance is used up.", id="window"),
+    pytest.param("model_not_in_tier", 403, ModelNotInTierError,
+                 "your MindsHub plan does not cover this model.", id="tier"),
 ]
 
 
@@ -1319,6 +1345,177 @@ def test_the_allowance_copy_never_states_the_window():
     text = str(err.value).lower()
     for word in ("month", "week", "day", "hour"):
         assert word not in text, f"allowance copy names a window: {text}"
+
+
+# The subscription plans' two stops carry a top-level body field each
+# (`window`, `required_tier`) that has no header copy. The OpenAI SDK keeps
+# only the `error` envelope as `exc.body`, so the mapper reads the response.
+
+@pytest.mark.parametrize("window,words", [("5h", "5-hour"), ("7d", "weekly")])
+def test_a_plan_window_stop_carries_its_window(window, words):
+    exc = _sdk_error(
+        429,
+        json_body={"error": {"message": "denied", "type": "rate_limit_error",
+                             "code": "window_allowance_exhausted"},
+                   "reset_at": _RESET_AT, "window": window},
+        headers={"X-MindsHub-Reason": "window_allowance_exhausted",
+                 "X-MindsHub-Reset-At": _RESET_AT, "x-should-retry": "false"},
+    )
+    assert "window" not in exc.body  # the premise: the SDK dropped the top level
+    with pytest.raises(WindowAllowanceExhaustedError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert isinstance(err.value, TokenLimitExceeded)
+    assert err.value.reason == "window_allowance_exhausted"
+    assert err.value.status_code == 429
+    assert err.value.window == window
+    assert err.value.reset_at == _RESET_AT_NORMALIZED
+    assert str(err.value) == (
+        f"Server returned 429: your MindsHub plan's {words} allowance is used up. {_WINDOW_CTA}"
+    )
+
+
+def test_the_anthropic_twin_reads_the_plan_window_too():
+    exc = _anthropic_sdk_error(
+        429,
+        json_body={"type": "error",
+                   "error": {"type": "rate_limit_error", "message": "denied"},
+                   "reset_at": _RESET_AT, "window": "7d"},
+        headers={"X-MindsHub-Reason": "window_allowance_exhausted",
+                 "X-MindsHub-Reset-At": _RESET_AT},
+    )
+    with pytest.raises(WindowAllowanceExhaustedError) as err:
+        _raise_anthropic(exc, model="claude-sonnet")
+    assert err.value.window == "7d"
+    assert err.value.reset_at == _RESET_AT_NORMALIZED
+
+
+@pytest.mark.parametrize("raw", ["30d", "", 5, ["5h"], None])
+def test_a_plan_window_the_copy_cannot_name_is_dropped(raw):
+    body = {"error": {"code": "window_allowance_exhausted"}}
+    if raw is not None:
+        body["window"] = raw
+    exc = _sdk_error(429, json_body=body)
+    with pytest.raises(WindowAllowanceExhaustedError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.window is None
+    assert "your MindsHub plan's allowance is used up." in str(err.value)
+
+
+@pytest.mark.parametrize("status,reason,error_type,field", [
+    (429, "window_allowance_exhausted", WindowAllowanceExhaustedError, "window"),
+    (403, "model_not_in_tier", ModelNotInTierError, "required_tier"),
+])
+def test_a_plan_stop_on_a_body_that_is_not_json_still_raises_its_typed_error(
+    status, reason, error_type, field,
+):
+    """The reason header alone names the stop, and the response's body is not
+    readable as JSON, so the field the body would have carried stays unset."""
+    exc = _sdk_error(
+        status, text_body="<html>upstream gateway page</html>",
+        headers={"X-MindsHub-Reason": reason, "Content-Type": "text/html"},
+    )
+    with pytest.raises(error_type) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.reason == reason
+    assert err.value.status_code == status
+    assert getattr(err.value, field) is None
+
+
+@pytest.mark.parametrize("tier,name", [("plus", "Plus"), ("pro", "Pro")])
+def test_a_model_tier_stop_carries_its_required_tier(tier, name):
+    exc = _sdk_error(
+        403,
+        json_body={"error": {"message": "denied", "type": "permission_error",
+                             "code": "model_not_in_tier", "param": "model"},
+                   "required_tier": tier},
+        headers={"X-MindsHub-Reason": "model_not_in_tier"},
+    )
+    assert "required_tier" not in exc.body  # the premise: the SDK dropped the top level
+    with pytest.raises(ModelNotInTierError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert isinstance(err.value, TokenLimitExceeded)
+    assert err.value.reason == "model_not_in_tier"
+    assert err.value.status_code == 403
+    assert err.value.required_tier == tier
+    assert err.value.reset_at is None
+    assert str(err.value) == (
+        f"Server returned 403: your MindsHub plan does not cover this model; "
+        f"it needs {name}. {_TIER_CTA}"
+    )
+
+
+def test_the_anthropic_twin_reads_the_required_tier_too():
+    exc = _anthropic_sdk_error(
+        403,
+        json_body={"type": "error",
+                   "error": {"type": "permission_error", "message": "denied"},
+                   "required_tier": "pro"},
+        headers={"X-MindsHub-Reason": "model_not_in_tier"},
+    )
+    with pytest.raises(ModelNotInTierError) as err:
+        _raise_anthropic(exc, model="claude-sonnet")
+    assert err.value.required_tier == "pro"
+
+
+def test_a_newer_tier_passes_through_unnamed_in_the_copy():
+    exc = _sdk_error(403, json_body={"error": {"code": "model_not_in_tier"},
+                                     "required_tier": "max"})
+    with pytest.raises(ModelNotInTierError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.required_tier == "max"
+    assert "your MindsHub plan does not cover this model." in str(err.value)
+
+
+@pytest.mark.parametrize("raw", ["Pro!", "", 3, None])
+def test_a_required_tier_that_is_not_an_identifier_is_dropped(raw):
+    body = {"error": {"code": "model_not_in_tier"}}
+    if raw is not None:
+        body["required_tier"] = raw
+    exc = _sdk_error(403, json_body=body)
+    with pytest.raises(ModelNotInTierError) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert err.value.required_tier is None
+
+
+@pytest.mark.parametrize("code,status", [
+    ("model_not_in_tier", 429),          # the tier stop rides only a 403
+    ("model_not_in_tier", 402),
+    ("window_allowance_exhausted", 403),  # every other stop rides a 402/429
+    ("wallet_empty", 403),
+])
+def test_a_billing_code_on_a_status_the_gate_never_sends_it_on_is_no_stop(code, status):
+    exc = _sdk_error(status, json_body={"error": {"code": code}},
+                     headers={"X-MindsHub-Reason": code})
+    assert mindshub_billing_stop(exc=exc, body=exc.body, status_code=status) is None
+
+
+def test_a_third_party_model_not_in_tier_is_no_stop():
+    """A BYOK endpoint echoing the code must not get the plan card."""
+
+    def handler(request):
+        return httpx.Response(403, json={"error": {"code": "model_not_in_tier"},
+                                         "required_tier": "pro"})
+
+    client = openai.OpenAI(
+        base_url="https://example.com/v1", api_key="k", max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(openai.APIStatusError) as caught:
+        client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}])
+    exc = caught.value
+    assert mindshub_billing_stop(exc=exc, body=exc.body, status_code=403) is None
+    with pytest.raises(Exception) as err:
+        _raise_for_status_error(exc, "sonnet")
+    assert not isinstance(err.value, TokenLimitExceeded)
+
+
+@pytest.mark.parametrize("status,code", [
+    (429, "window_allowance_exhausted"),
+    (403, "model_not_in_tier"),
+])
+def test_the_plan_stops_are_never_transient(status, code):
+    assert classify_transient(status, {"code": code}, provider="X") is None
+    assert classify_transient(status, {"error": {"code": code}}, provider="X") is None
 
 
 def test_the_openai_quota_branch_still_raises_plain_token_limit():

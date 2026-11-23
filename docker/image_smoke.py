@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 # Both entrypoints read one bounded thing from stdin and stop at EOF, so an empty
 # stdin drives a complete, harmless run: cloud_turn fails to parse the empty line
@@ -250,6 +251,51 @@ def check_user_site_disabled() -> list[str]:
     return []
 
 
+PYPROJECT_PATH = Path(__file__).resolve().parents[1] / "pyproject.toml"
+
+
+def scratchpad_group_imports(pyproject: Path = PYPROJECT_PATH) -> dict[str, list[str]]:
+    """Each distribution in the `scratchpad` dependency group, with the top-level
+    modules it installs. Read from pyproject so a package added to the group is
+    checked without anyone remembering to list it here."""
+    import tomllib
+    from importlib.metadata import packages_distributions
+
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    group = tomllib.loads(pyproject.read_text())["dependency-groups"]["scratchpad"]
+    wanted = {canonicalize_name(Requirement(spec).name) for spec in group}
+    found: dict[str, list[str]] = {name: [] for name in wanted}
+    for module, dists in packages_distributions().items():
+        for dist in dists:
+            name = canonicalize_name(dist)
+            if name in found:
+                found[name].append(module)
+    return found
+
+
+def check_scratchpad_packages() -> list[str]:
+    """Every package the agent is told the sandbox has must import in it.
+
+    Cells cannot install a package by importing it (imports never install), so a
+    package that is missing or whose native library fails to load costs every
+    turn that needs it a round, or the whole task. Each import runs in its own
+    interpreter so a native crash is reported rather than ending the smoke.
+    """
+    failures = []
+    for dist, modules in sorted(scratchpad_group_imports().items()):
+        if not modules:
+            failures.append(f"scratchpad packages: {dist} is not installed")
+            continue
+        for module in sorted(modules):
+            proc = run_command([sys.executable, "-c", f"import {module}"])
+            if proc.returncode != 0:
+                tail = proc.stderr.decode(errors="replace")[-500:]
+                failures.append(f"scratchpad packages: import {module} ({dist}) failed\n{tail}")
+    return failures
+
+
 #: One module per tree the Dockerfile compiles: stdlib, dependencies, anton.
 BYTECODE_MODULES = ("json", "openai", "anton.cloud_turn.session")
 
@@ -283,6 +329,7 @@ CHECKS = (
     check_runtime_uv,
     check_agent_code_read_only,
     check_user_site_disabled,
+    check_scratchpad_packages,
     check_bytecode,
 )
 

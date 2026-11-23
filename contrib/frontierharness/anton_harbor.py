@@ -15,12 +15,12 @@ class AntonHarbor(BaseInstalledAgent):
         return "anton"
 
     def version(self) -> str | None:
-        return anton_common.anton_ref()
+        return anton_common.anton_ref(self._get_env)
 
     async def install(self, environment: BaseEnvironment) -> None:
         await self.ensure_system_dependencies(environment, ("curl",))
         await self.exec_as_agent(
-            environment, command=anton_common.install_script(anton_common.anton_ref())
+            environment, command=anton_common.install_script(anton_common.anton_ref(self._get_env))
         )
 
     @with_prompt_template
@@ -33,7 +33,7 @@ class AntonHarbor(BaseInstalledAgent):
         await self.exec_as_agent(
             environment,
             command=anton_common.run_script(instruction, str(self.environment_logs_dir)),
-            env=anton_common.anton_env(self._get_env("ANTON_FH_API_KEY")),
+            env=anton_common.anton_env(self._get_env, self.model_name),
         )
 
     def populate_context_post_run(self, context: AgentContext) -> None:

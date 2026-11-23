@@ -4,12 +4,14 @@
 `workspace` is the artifact folder the editor reads and writes through;
 `editor` is the one-conversation edit loop and `checkers` how it finds out
 whether the artifact still works. `router` and `quick` are the artifact
-viewer's quick-edit bar (ENG-4227): route a message, then edit directly.
+viewer's quick-edit bar (ENG-4227): route a message, then edit directly;
+`reply` answers small talk and questions about the artifact in the bar (ENG-4455).
 """
 
 from anton.core.artifact_editor.checkers import CheckResult, Checker, Finding, select_checker
 from anton.core.artifact_editor.editor import ArtifactEditor, EditUsage, Outcome
 from anton.core.artifact_editor.quick import QuickEditResult, quick_edit_llm_from_settings, run_quick_edit
+from anton.core.artifact_editor.reply import answer_request
 from anton.core.artifact_editor.router import (
     RouteDecision,
     decisions_available,
@@ -39,6 +41,7 @@ __all__ = [
     "SearchHit",
     "Snapshot",
     "WorkspaceError",
+    "answer_request",
     "decisions_available",
     "decisions_config",
     "describe_artifact",
