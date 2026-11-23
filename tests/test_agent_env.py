@@ -23,6 +23,7 @@ _SERVER_ENV = {
     "ANTON_MINDS_API_KEY": "anton-minds-secret",
     "GOOGLE_DRIVE_CLIENT_SECRET": "gd-secret",
     "AWS_PROFILE": "work",
+    "SSH_AUTH_SOCK": "/private/tmp/agent.sock",
     "OPENAI_API_KEY": "coding-key",
     "DS_SERVER__PASSWORD": "server-ds-secret",
     "PYTHONNOUSERSITE": "1",
@@ -41,7 +42,7 @@ _SECRETS = (
 @pytest.mark.parametrize("host_basics", [False, True])
 def test_server_secrets_and_unlisted_names_never_pass(host_basics):
     child = agent_env(_SERVER_ENV, ds_env={}, host_basics=host_basics)
-    for name in (*_SECRETS, "AWS_PROFILE"):
+    for name in (*_SECRETS, "AWS_PROFILE", "SSH_AUTH_SOCK"):
         assert name not in child
 
 

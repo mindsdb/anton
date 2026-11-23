@@ -112,7 +112,7 @@ _ENV_PREFIXES = ("ANTON_OPENAI_", "ANTON_ANTHROPIC_", "ANTON_SCRATCHPAD_", "DS_"
 # With no policy the child keeps the parent's own home, temp and user, which a
 # policy replaces with per-person folders, and Windows needs its system names.
 _HOST_BASIC_NAMES = frozenset({
-    "HOME", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP", "SSH_AUTH_SOCK",
+    "HOME", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP",
     "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "USERNAME",
     "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
     "ALLUSERSPROFILE", "PUBLIC", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
@@ -127,11 +127,11 @@ _ENV_NEVER_PREFIXES = ("COWORK_", "LD_", "DYLD_")
 # built on every spawn, so each variable is logged once per process.
 _LOGGED_PIP_CREDENTIALS: set[str] = set()
 # A workspace .env key passes unless it could repoint the interpreter, the
-# loader, the per-person folders or the certificate trust.
+# loader, the per-person folders or the certificate trust, or reach the SSH agent.
 _OVERLAY_DENIED_NAMES = frozenset({
     "HOME", "TMPDIR", "TMP", "TEMP", "PATH", "USER", "LOGNAME", "MPLCONFIGDIR", "PIP_CACHE_DIR",
     "REQUESTS_CA_BUNDLE", "PIP_CERT", "CURL_CA_BUNDLE", "DATABASE_URI", "MINDS_API_KEY",
-    "ANTON_MINDS_API_KEY",
+    "ANTON_MINDS_API_KEY", "SSH_AUTH_SOCK",
 })
 _OVERLAY_DENIED_PREFIXES = ("LD_", "PYTHON", "XDG_", "SSL_", "COWORK_")
 
@@ -397,6 +397,11 @@ def overlay_key_allowed(key: str) -> bool:
     if _env_never(key):
         return False
     return key not in _OVERLAY_DENIED_NAMES and not key.startswith(_OVERLAY_DENIED_PREFIXES)
+
+
+def parent_value_passes(key: str, *, host_basics: bool) -> bool:
+    """Whether ``agent_env`` keeps the value the parent itself holds for ``key``."""
+    return _env_key_allowed(key, frozenset(), host_basics=host_basics)
 
 
 def _env_key_allowed(key: str, overlay_keys: frozenset[str], *, host_basics: bool) -> bool:

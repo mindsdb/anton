@@ -913,17 +913,17 @@ class TestScratchpadEnvironment:
         ("name", "inherit_server_env", "expected"),
         [
             ("ALREADY_SET_VAR", True, "parent-value"),
-            # Off the allowlist: the server's value is dropped and the .env
-            # one is only-if-unset, so the cell gets neither.
-            ("ALREADY_SET_VAR", False, "NOT_FOUND"),
+            # Off the allowlist: the filter drops the server's value, so the
+            # .env one takes its place.
+            ("ALREADY_SET_VAR", False, "project-value"),
             ("HTTPS_PROXY", False, "parent-value"),
         ],
     )
     async def test_workspace_env_overlay_never_overrides_inherited(
         self, monkeypatch, name, inherit_server_env, expected
     ):
-        """The project .env is only-if-unset, as it was when it went through
-        os.environ — it must not be able to replace PATH or an existing key."""
+        """The project .env never replaces a value the cell gets from the
+        server; it fills only names the cell would otherwise lack."""
         monkeypatch.setenv(name, "parent-value")
         pad = make_scratchpad(
             name="workspace-env-no-override",

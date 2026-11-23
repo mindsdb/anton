@@ -25,6 +25,7 @@ from anton.core.backends.sandbox import (
     SandboxedSpawn,
     agent_env,
     overlay_key_allowed,
+    parent_value_passes,
     validate_pad_name,
 )
 from anton.core.backends.wire import (
@@ -248,6 +249,24 @@ def _apply_workspace_overlay(env: dict[str, str], overlay: dict[str, str] | None
             env[key] = value
             applied.append(key)
     return applied
+
+
+def _overlay_where_the_filter_drops_the_parent(
+    env: dict[str, str], overlay: dict[str, str] | None, applied: list[str], *, host_basics: bool
+) -> list[str]:
+    """Give a held key the workspace overlay's value when the filter drops the parent's.
+
+    Without it such a key reaches agent code with neither value. Runs on the
+    env just before the filter, so nothing that configures the pad reads the
+    overlay's value. ``applied`` holds the keys the overlay already set.
+    Mutates ``env``; returns the keys it replaced.
+    """
+    replaced: list[str] = []
+    for key, value in (overlay or {}).items():
+        if key in env and key not in applied and not parent_value_passes(key, host_basics=host_basics):
+            env[key] = value
+            replaced.append(key)
+    return replaced
 
 
 _WINDOWS = sys.platform == "win32"
@@ -1378,9 +1397,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             else None
         )
 
-        # Only the keys the .env set are judged as .env keys. A key the server
-        # already held keeps the server's value, so naming it in the .env must
-        # not carry that value past the allowlist.
+        # Only the keys the .env set are judged as .env keys. A held key the
+        # filter keeps stays the server's, so naming it in the .env must not
+        # carry that value past the allowlist; one the filter drops takes the .env value.
+        if filtered:
+            overlaid += _overlay_where_the_filter_drops_the_parent(
+                env, overlay, overlaid, host_basics=policy is None
+            )
         if policy is not None:
             env = policy.child_env(env, overlay_keys=overlaid)
         elif filtered:

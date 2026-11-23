@@ -25,6 +25,7 @@ from anton.core.backends.local import (
     LocalScratchpadRuntime,
     _apply_workspace_overlay,
     _overlay_for_agent_code,
+    _overlay_where_the_filter_drops_the_parent,
 )
 from anton.core.backends.sandbox import agent_env
 
@@ -141,15 +142,48 @@ async def test_a_pod_shaped_cell_keeps_the_turn_overlay_and_user_site_off(tmp_pa
     assert report["user_site"] is False
 
 
+async def test_a_cell_never_gets_the_ssh_agent_from_the_server_or_the_dotenv(tmp_path, planted, monkeypatch):
+    monkeypatch.setenv("SSH_AUTH_SOCK", str(tmp_path / "server-agent.sock"))
+
+    report = await _report(tmp_path, workspace_env_overlay={"SSH_AUTH_SOCK": str(tmp_path / "project.sock")})
+
+    assert "SSH_AUTH_SOCK" not in report["names"]
+
+
+async def test_a_dotenv_name_the_filter_drops_from_the_server_reaches_the_cell_with_the_dotenv_value(
+    tmp_path, planted, monkeypatch
+):
+    monkeypatch.setenv("AWS_PROFILE", "server-profile")
+
+    report = await _report(tmp_path, workspace_env_overlay={"AWS_PROFILE": "project-profile"})
+
+    assert report["hashes"]["AWS_PROFILE"] == _sha("project-profile")
+
+
+async def test_a_dotenv_value_never_configures_the_pad_in_place_of_the_servers(tmp_path, planted, monkeypatch):
+    """The pad reads the artifacts root before the filter; the .env must not repoint it."""
+    server_root = str(tmp_path / "server-artifacts")
+    monkeypatch.setenv("ANTON_CLOUD_ARTIFACTS_ROOT", server_root)
+
+    report = await _report(
+        tmp_path,
+        workspace_env_overlay={"ANTON_CLOUD_ARTIFACTS_ROOT": str(tmp_path / "project-artifacts")},
+    )
+
+    assert report["hashes"]["ANTON_SCRATCHPAD_ARTIFACTS_ROOT"] == _sha(server_root)
+
+
 def _windows_child(parent: dict[str, str], dotenv: dict[str, str]) -> dict[str, str]:
     """The cell's env built the way ``_start_process`` builds it on Windows."""
     env = dict(parent)
     overlay = _overlay_for_agent_code(dotenv, windows=True)
     overlaid = _apply_workspace_overlay(env, overlay)
+    overlaid += _overlay_where_the_filter_drops_the_parent(env, overlay, overlaid, host_basics=True)
     return agent_env(env, overlay_keys=overlaid, ds_env={}, host_basics=True)
 
 
 def test_on_windows_a_lowercase_dotenv_name_cannot_carry_or_shadow_a_server_value():
+    """The server's value never passes; a dropped name takes the .env's own value, once."""
     parent = {
         "PATH": "C:\\Windows",
         "GOOGLE_DRIVE_CLIENT_SECRET": "server-secret",
@@ -164,25 +198,37 @@ def test_on_windows_a_lowercase_dotenv_name_cannot_carry_or_shadow_a_server_valu
     child = _windows_child(parent, dotenv)
 
     upper = {key.upper(): value for key, value in child.items()}
-    assert "GOOGLE_DRIVE_CLIENT_SECRET" not in upper
+    assert [k for k in child if k.upper() == "GOOGLE_DRIVE_CLIENT_SECRET"] == ["GOOGLE_DRIVE_CLIENT_SECRET"]
+    assert child["GOOGLE_DRIVE_CLIENT_SECRET"] == "from-dotenv"
     assert "PYTHONPATH" not in upper
     assert [k for k in child if k.upper() == "OPENAI_BASE_URL"] == ["OPENAI_BASE_URL"]
     assert child["OPENAI_BASE_URL"] == "https://server.example/v1"
 
 
-async def test_on_windows_a_real_cell_gets_no_lowercase_dotenv_secret(tmp_path, planted, monkeypatch):
+async def test_on_windows_a_real_cell_gets_no_server_secret_through_a_lowercase_dotenv_name(
+    tmp_path, planted, monkeypatch
+):
     """Runs on every OS: the Windows switch is set for the pad, the cell is real."""
     monkeypatch.setattr(local, "_WINDOWS", True)
 
-    report = await _report(
+    # The cell compares the values itself: output naming a secret is redacted.
+    seen = await _report(
         tmp_path,
+        "import json, os\n"
+        "names = [n for n in os.environ if n.upper() in ('GOOGLE_DRIVE_CLIENT_SECRET', 'PYTHONPATH')]\n"
+        "values = set(os.environ.values())\n"
+        "print(json.dumps({'names': sorted(names),\n"
+        "    'dotenv': os.environ.get('GOOGLE_DRIVE_CLIENT_SECRET') == 'from-dotenv',\n"
+        f"    'server': {_PLANTED_SECRETS['GOOGLE_DRIVE_CLIENT_SECRET']!r} in values,\n"
+        "    'evil_path': any('evil-path' in v for v in values)}))",
         workspace_env_overlay={"google_drive_client_secret": "from-dotenv", "pythonpath": "evil-path"},
     )
 
-    upper_names = {name.upper() for name in report["names"]}
-    assert "GOOGLE_DRIVE_CLIENT_SECRET" not in upper_names
-    assert "pythonpath" not in report["names"]
-    assert not {_sha("from-dotenv"), _sha("evil-path")} & set(report["hashes"].values())
+    assert [n for n in seen["names"] if n.upper() == "GOOGLE_DRIVE_CLIENT_SECRET"] == ["GOOGLE_DRIVE_CLIENT_SECRET"]
+    assert "pythonpath" not in seen["names"]
+    assert seen["dotenv"] is True
+    assert seen["server"] is False
+    assert seen["evil_path"] is False
 
 
 async def test_a_cell_pointed_at_another_endpoint_never_gets_the_mindshub_key(tmp_path, planted):
