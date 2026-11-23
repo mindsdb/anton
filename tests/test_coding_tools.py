@@ -1011,6 +1011,60 @@ def test_edit_file_smart_mismatch_hint_and_scrubbing():
                 assert "MISMATCHPEMSECRET" not in out3
                 assert "MISMATCHBEARERPAYLOAD" not in out3
                 assert "tail_line_value = 42" in out3
+
+                # 4. Probing substrings of a single-line secret (or whitespace-altered
+                # raw secret) must return NO match hint (secret-probing oracle closed).
+                f4 = root / "single_secret.txt"
+                f4.write_text(f"token = {tok}\nplain = 1\n", encoding="utf-8")
+                probe1 = await handle_edit_file(
+                    sess,
+                    {
+                        "path": "single_secret.txt",
+                        "old_string": "sk-proj-MISMATCH\n__NONEXISTENT__",
+                        "new_string": "x",
+                    },
+                )
+                assert not probe1.ok and probe1.reason == "old_string_not_found"
+                assert "Closest match" not in str(probe1.content)
+                assert "different whitespace" not in str(probe1.content)
+
+                probe2 = await handle_edit_file(
+                    sess,
+                    {
+                        "path": "single_secret.txt",
+                        "old_string": f"token   =   {tok}",
+                        "new_string": "x",
+                    },
+                )
+                assert not probe2.ok and probe2.reason == "old_string_not_found"
+                assert "different whitespace" not in str(probe2.content)
+                assert "Closest match" not in str(probe2.content)
+                assert "MISMATCHBOUNDARY" not in str(probe2.content)
+
+                # 5. Genuine code differences (partial-token prefix/suffix, trailing
+                # comments after newline) must NOT be misdiagnosed as whitespace-only.
+                f5 = root / "code_diff.py"
+                f5.write_text(
+                    "def f():\n"
+                    "    return 100\n"
+                    "my_alpha = 1\n"
+                    "beta = 2\n"
+                    "foo = bar\n"
+                    "baz = qux # comment\n",
+                    encoding="utf-8",
+                )
+                for bad_old in (
+                    "        return 1",
+                    "    return 1\n",
+                    "  alpha = 1\n  beta = 2",
+                    "foo = bar\nbaz = qux\n",
+                ):
+                    m = await handle_edit_file(
+                        sess,
+                        {"path": "code_diff.py", "old_string": bad_old, "new_string": "x"},
+                    )
+                    assert not m.ok and m.reason == "old_string_not_found"
+                    assert "different whitespace/indentation" not in str(m.content), (bad_old, m.content)
             finally:
                 _reset_registered_ds_vars()
                 for k in list(os.environ):
