@@ -543,70 +543,89 @@ async def handle_write_file(session: "ChatSession", tc_input: dict) -> ToolOutco
 def _build_edit_mismatch_hint(working: str, old_string: str) -> str:
     """Return a scrubbed diagnostic hint when `edit_file`'s `old_string` is not found.
 
-    Scrubs `working` *before* slicing so multi-line secrets (registered PEM keys,
-    two-line Bearer tokens) and tokens straddling line/snippet caps can never leak.
+    Scrubs full `working` *before* searching or slicing so neither raw multi-line
+    secrets nor single-line secrets can ever leak or be probed via mismatch hints.
     """
     o_lines = old_string.splitlines()
     if not o_lines:
         return ""
-    scrubbed_text = scrub_output(working)
-    scrubbed_lines = scrubbed_text.splitlines()
-    raw_lines = working.splitlines()
-    # If scrubbing collapsed a multi-line secret (changing line count), search
-    # directly on `scrubbed_lines` so reported line numbers and rendered lines
-    # stay aligned without ever referencing un-scrubbed text.
-    search_lines = scrubbed_lines if len(scrubbed_lines) != len(raw_lines) else raw_lines
-    render_lines = scrubbed_lines
+    scrubbed_lines = scrub_output(working).splitlines()
 
     def _format_window(lo: int, hi: int) -> str:
         lo = max(0, lo)
-        hi = min(len(render_lines), hi)
+        hi = min(len(scrubbed_lines), hi)
         snippet = "\n".join(
-            f"  {ln_no + 1}: {render_lines[ln_no][:200]}" for ln_no in range(lo, hi)
+            f"  {ln_no + 1}: {scrubbed_lines[ln_no][:200]}" for ln_no in range(lo, hi)
         )
         if len(snippet) > 900:
             snippet = snippet[:900] + "\n  ..."
         return snippet
 
-    # 1. Detect whitespace/indentation-only mismatches in an O(N) candidate scan.
+    # 1. Detect whitespace/indentation-only mismatches with boundary-safe checks.
+    norm_o_lines = [" ".join(ln.split()) for ln in o_lines]
     norm_target_tokens = old_string.split()
     norm_target_str = " ".join(norm_target_tokens)
-    norm_o_lines = [" ".join(ln.split()) for ln in o_lines]
-    first_nonempty_idx = next((i for i, s in enumerate(norm_o_lines) if s), None)
+    anchor_ws_idx: int | None = None
+    anchor_ws_len = 0
+    for idx, s in enumerate(norm_o_lines):
+        if len(s) > anchor_ws_len:
+            anchor_ws_len = len(s)
+            anchor_ws_idx = idx
+
     if (
         len(norm_target_str) >= 8
-        and first_nonempty_idx is not None
+        and anchor_ws_idx is not None
         and len(o_lines) <= 200
-        and len(search_lines) <= 20_000
+        and len(scrubbed_lines) <= 20_000
     ):
-        first_norm = norm_o_lines[first_nonempty_idx]
+        anchor_ws = norm_o_lines[anchor_ws_idx]
         win = len(o_lines)
-        for i, line in enumerate(search_lines):
-            if first_norm not in " ".join(line.split()):
+        has_trailing_newline = old_string.endswith(("\n", "\r"))
+        checks = 0
+        max_ws_checks = 500
+        for i, line in enumerate(scrubbed_lines):
+            if anchor_ws not in " ".join(line.split()):
                 continue
-            start = i - first_nonempty_idx
-            if start < 0 or start + win > len(search_lines):
+            start = i - anchor_ws_idx
+            if start < 0 or start + win > len(scrubbed_lines):
                 continue
-            window_norm = " ".join(" ".join(search_lines[start : start + win]).split())
-            if norm_target_str in window_norm:
+            checks += 1
+            if checks > max_ws_checks:
+                break
+            if win >= 2:
+                matched = all(
+                    " ".join(scrubbed_lines[start + k].split()) == norm_o_lines[k]
+                    for k in range(win)
+                )
+            elif has_trailing_newline:
+                matched = " ".join(scrubbed_lines[start].split()) == norm_o_lines[0]
+            else:
+                line_tokens = scrubbed_lines[start].split()
+                n_tok = len(norm_target_tokens)
+                matched = n_tok > 0 and any(
+                    line_tokens[pos : pos + n_tok] == norm_target_tokens
+                    for pos in range(len(line_tokens) - n_tok + 1)
+                )
+            if matched:
                 lo = max(0, start - 2)
-                hi = min(len(render_lines), start + min(win, 10) + 2)
+                hi = min(len(scrubbed_lines), start + min(win, 10) + 2)
                 snippet = _format_window(lo, hi)
                 return (
                     f" Text matches near line {start + 1} with different whitespace/indentation. "
                     f"Context around line {start + 1}:\n{snippet}"
                 )
 
-    # 2. Try non-empty stripped lines in descending distinctiveness order (longest
-    # lines with len >= 4 first, then shorter fallbacks) so neither trivial leading
-    # lines (`{`, `}`, `else:`) nor a typo on the single longest line prevent finding
-    # the real target region.
+    # 2. Try unique non-empty stripped lines in descending distinctiveness order
+    # (longest lines with len >= 4 first, then shorter fallbacks), capped to avoid
+    # quadratic scans on large non-matching files, stopping after 5 line hits.
+    seen_candidates: set[str] = set()
     long_candidates: list[tuple[int, int, str]] = []
     short_candidates: list[tuple[int, int, str]] = []
     for idx, ln in enumerate(o_lines):
         stripped = ln.strip()
-        if not stripped:
+        if not stripped or stripped in seen_candidates:
             continue
+        seen_candidates.add(stripped)
         if len(stripped) >= 4:
             long_candidates.append((-len(stripped), idx, stripped))
         else:
@@ -616,8 +635,13 @@ def _build_edit_mismatch_hint(working: str, old_string: str) -> str:
 
     hits: list[int] = []
     anchor_offset = 0
-    for _, idx, candidate in (*long_candidates, *short_candidates):
-        cand_hits = [i + 1 for i, line in enumerate(search_lines) if candidate in line][:5]
+    for _, idx, candidate in (*long_candidates, *short_candidates)[:32]:
+        cand_hits: list[int] = []
+        for i, line in enumerate(scrubbed_lines):
+            if candidate in line:
+                cand_hits.append(i + 1)
+                if len(cand_hits) >= 5:
+                    break
         if cand_hits:
             hits = cand_hits
             anchor_offset = idx
@@ -627,10 +651,10 @@ def _build_edit_mismatch_hint(working: str, old_string: str) -> str:
     center = hits[0] - 1
     est_start = max(0, center - anchor_offset)
     lo = max(0, min(center - 3, est_start - 2))
-    hi = min(len(render_lines), max(center + 4, est_start + min(len(o_lines), 8) + 2))
+    hi = min(len(scrubbed_lines), max(center + 4, est_start + min(len(o_lines), 8) + 2))
     if hi - lo > 12:
         lo = max(0, center - 4)
-        hi = min(len(render_lines), center + 8)
+        hi = min(len(scrubbed_lines), center + 8)
     snippet = _format_window(lo, hi)
     return f" Closest match appears near lines {hits}. Context around line {hits[0]}:\n{snippet}"
 
