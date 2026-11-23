@@ -1,0 +1,65 @@
+{
+  "call_request": {
+    "protocol_version": 1,
+    "correlation_id": "33333333-3333-4333-8333-333333333333",
+    "connection_id": 1,
+    "credential_version": 1,
+    "tool": "search_issues",
+    "arguments": {"query": "open bugs", "limit": 5}
+  },
+  "call_response": {
+    "protocol_version": 1,
+    "connection_id": 1,
+    "credential_version": 1,
+    "content": [
+      {"type": "text", "text": "Found 2 issues."},
+      {"type": "structured", "value": {"issues": [{"id": 7, "title": "Crash on start"}, {"id": 9, "title": "Slow search"}]}}
+    ],
+    "is_error": false,
+    "dropped_content_types": []
+  },
+  "call_response_dropped": {
+    "protocol_version": 1,
+    "connection_id": 1,
+    "credential_version": 1,
+    "content": [
+      {"type": "text", "text": "The image could not be shown."}
+    ],
+    "is_error": true,
+    "dropped_content_types": ["image", "structuredContent"]
+  },
+  "member_tools_request": {
+    "protocol_version": 1,
+    "name": "cm-0123456789abcdef0123456789abcdef"
+  },
+  "member_tools_response": {
+    "tools_revision": 1,
+    "tools": [
+      {"name": "create_issue", "description": "Creates an issue.", "read_only": false, "allowed": false, "usable": true, "reason": null},
+      {"name": "search_issues", "description": "Searches issues.", "read_only": true, "allowed": true, "usable": true, "reason": null}
+    ]
+  },
+  "consumer_rules": [
+    "POST call_request to /v1/datasources/custom-mcp/call with the turn key as the Authorization Bearer, through the datasources Ingress; never in the body.",
+    "Send back the connection_id and credential_version the turn's custom_mcp block carries, and the tool's own name as the server listed it.",
+    "tool passes auth's usable name rule (custom-mcp-limits-v1.json, max_tool_name_length); arguments are a JSON object of at most 256 KiB as compact UTF-8.",
+    "content holds the server's text parts in order, then at most one structured part when the server sent an object nested at most 64 deep; dropped_content_types names every content type left out, once.",
+    "member_tools_request is POSTed in-cluster to /v1/datasources/custom-mcp/member-tools with the member's own credential as the Authorization Bearer; it is not served through the Ingress.",
+    "A 502 or 504 leaves the application as 503 with upstream_status set to it; read code, not the status, to tell failures apart."
+  ],
+  "errors": [
+    {"status": 401, "code": "unauthorized", "routes": ["call", "member-tools"], "meaning": "No bearer, the Ingress gate stamped no identity on a call, or auth refused the member's credential."},
+    {"status": 503, "code": "gateway_disabled", "routes": ["call", "member-tools"], "meaning": "CUSTOM_MCP_GATEWAY__ENABLED is off, or the resolver identity is missing."},
+    {"status": 422, "code": "invalid_request", "routes": ["call", "member-tools"], "meaning": "The body is not exactly this shape, tool is not a usable name, or arguments are over 256 KiB or not strict JSON; nothing was sent."},
+    {"status": 404, "code": "invalid_connection", "routes": ["call", "member-tools"], "meaning": "auth will not resolve this connection for this turn key, or the member has no signed-in server with this name."},
+    {"status": 503, "code": "authorization_unavailable", "routes": ["call", "member-tools"], "meaning": "auth or the call-rate store could not be asked, auth answered another binding, auth's switch is off, the token is being refreshed, or the member signed in again during the listing."},
+    {"status": 403, "code": "destination_forbidden", "routes": ["call", "member-tools"], "meaning": "The server URL is on or under our own domains, an IP literal, an xn-- host or not on port 443, or its host resolves to an address that is not public."},
+    {"status": 403, "code": "tool_not_allowed", "routes": ["call"], "meaning": "The tool is not switched on for this connection; nothing was sent to the server."},
+    {"status": 409, "code": "needs_reconnect", "routes": ["call", "member-tools"], "meaning": "The server refused its token after a fresh resolve, or auth could not refresh it; the member must sign in again."},
+    {"status": 429, "code": "rate_limited", "routes": ["call", "member-tools"], "meaning": "The grant's calls for this 60 s window, auth's resolve or lookup rate, or the open calls allowed for this connection, this turn or this process are used up."},
+    {"status": 504, "code": "timed_out", "routes": ["call", "member-tools"], "leaves_as": 503, "meaning": "The call outlasted its 45 s deadline, or the listing its 30 s."},
+    {"status": 502, "code": "response_too_large", "routes": ["call"], "leaves_as": 503, "meaning": "The server's answer is over 1 MiB, or echoes the token too often to scrub. Nothing of the answer is returned."},
+    {"status": 502, "code": "listing_too_large", "routes": ["member-tools"], "leaves_as": 503, "meaning": "A listing page is over 1 MiB, the listing over 2 MiB, or the sync body over 3 MiB. Nothing is stored."},
+    {"status": 502, "code": "upstream_unavailable", "routes": ["call", "member-tools"], "leaves_as": 503, "meaning": "The server could not be reached, failed, or answered something that is not strict JSON-RPC; the answer could not be written as strict JSON; or the scrub could not run. Nothing of the answer leaves and nothing is stored."}
+  ]
+}

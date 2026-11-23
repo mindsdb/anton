@@ -6,6 +6,8 @@ import sys
 
 import pytest
 
+from anton.core.mcp.names import registrable_tool_name
+
 # The top-level packages the MCP SDK installs.
 _MCP_SDK_PACKAGES = ("mcp", "mcp_types")
 
@@ -31,3 +33,18 @@ def test_importing_names_or_access_does_not_import_the_mcp_sdk(module):
     SDK when it is there."""
     assert _sdk_modules_after_importing(module="anton.core.mcp.registry")
     assert _sdk_modules_after_importing(module=module) == []
+
+
+def test_importing_the_cloud_turns_custom_mcp_tools_does_not_import_the_mcp_sdk():
+    """A cloud turn's custom MCP tools call the gateway, never a server, so building them needs no SDK."""
+    assert _sdk_modules_after_importing(module="anton.cloud_turn.custom_mcp") == []
+
+
+def test_under_a_custom_server_connection_a_42_character_tool_name_registers_and_43_does_not():
+    """auth's usable rule allows 42 characters because the `cm-<32 hex>` connection part
+    shortens to 8 hex characters, leaving 42 of the 64 a model API takes."""
+    connection = "cm-" + "0123456789abcdef" * 2
+
+    registered = registrable_tool_name("custom_mcp", "t" * 42, connection_name=connection)
+    assert registered is not None and len(registered) == 64
+    assert registrable_tool_name("custom_mcp", "t" * 43, connection_name=connection) is None
