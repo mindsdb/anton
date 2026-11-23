@@ -103,11 +103,25 @@ _ENV_NAMES = frozenset({
     "LANG", "LC_ALL", "LC_CTYPE", "TZ", "NO_PROXY", "no_proxy", "HTTP_PROXY", "http_proxy",
     "HTTPS_PROXY", "https_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
     "CURL_CA_BUNDLE", "PIP_CERT",
+    # The pod image sets PYTHONNOUSERSITE so cell code can't plant a .pth in
+    # the user site of a venv made with --system-site-packages.
+    "PYTHONNOUSERSITE", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED",
 })
 _ENV_PREFIXES = ("ANTON_OPENAI_", "ANTON_ANTHROPIC_", "ANTON_SCRATCHPAD_", "DS_", "PIP_")
+# With no policy the child keeps the parent's own home, temp and user, which a
+# policy replaces with per-person folders, and Windows needs its system names.
+_HOST_BASIC_NAMES = frozenset({
+    "HOME", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP", "SSH_AUTH_SOCK",
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "USERNAME",
+    "USERDOMAIN", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+    "ALLUSERSPROFILE", "PUBLIC", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
+    "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "COMMONPROGRAMW6432", "COMPUTERNAME",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "PSMODULEPATH", "OS",
+})
+_HOST_BASIC_PREFIXES = ("XDG_",)
 # These never pass, whatever else names them.
 _ENV_NEVER_NAMES = frozenset({"DATABASE_URI", "MINDS_API_KEY", "ANTON_MINDS_API_KEY", "ANTON_UV_PATH"})
-_ENV_NEVER_PREFIXES = ("COWORK_", "LD_")
+_ENV_NEVER_PREFIXES = ("COWORK_", "LD_", "DYLD_")
 # Each PIP_* variable already logged for lost credentials. The environment is
 # built on every spawn, so each variable is logged once per process.
 _LOGGED_PIP_CREDENTIALS: set[str] = set()
@@ -384,14 +398,62 @@ def overlay_key_allowed(key: str) -> bool:
     return key not in _OVERLAY_DENIED_NAMES and not key.startswith(_OVERLAY_DENIED_PREFIXES)
 
 
-def _env_key_allowed(key: str, overlay_keys: frozenset[str]) -> bool:
+def _env_key_allowed(key: str, overlay_keys: frozenset[str], *, host_basics: bool) -> bool:
     if key in overlay_keys:
         # Its value may be the workspace .env's, so the overlay rule decides,
         # even for a name the allowlist would pass from the server.
         return overlay_key_allowed(key)
     if _env_never(key):
         return False
-    return key in _ENV_NAMES or key.startswith(_ENV_PREFIXES)
+    if key in _ENV_NAMES or key.startswith(_ENV_PREFIXES):
+        return True
+    return host_basics and (key in _HOST_BASIC_NAMES or key.startswith(_HOST_BASIC_PREFIXES))
+
+
+def agent_env(
+    env: Mapping[str, str],
+    *,
+    overlay_keys: Iterable[str] = (),
+    ds_env: Mapping[str, str] | None = None,
+    host_basics: bool = False,
+) -> dict[str, str]:
+    """The part of ``env`` that agent code may see.
+
+    Inputs: ``env``, the environment built for the child; ``overlay_keys``,
+    the workspace ``.env`` keys in it, each judged by ``overlay_key_allowed``
+    even where the allowlist names it; ``ds_env``, the pad's own connection
+    values, which replace every ``DS_*`` in ``env`` when given (``None``
+    keeps them); ``host_basics``, which passes the parent's home, temp, user
+    and Windows system names for a child with no policy to set its own.
+    Output: a new dict; ``env`` is not changed. An entry execve would reject
+    (an empty key, a key with ``=`` or NUL, a value with NUL) is dropped and
+    logged, so it cannot fail every spawn. Every URL in a ``PIP_*`` value
+    loses its userinfo and query (``_pip_value_for_agent_code``).
+    """
+    overlay = frozenset(overlay_keys)
+    child: dict[str, str] = {}
+    for key, value in env.items():
+        if ds_env is not None and key.startswith("DS_"):
+            continue
+        if not _env_key_allowed(key, overlay, host_basics=host_basics):
+            continue
+        _add_passable(child, key, value)
+    for key, value in (ds_env or {}).items():
+        _add_passable(child, key, value)
+    return child
+
+
+def _add_passable(child: dict[str, str], key: str, value: str) -> None:
+    """Add ``key`` to ``child`` unless execve would refuse it; strip a ``PIP_*`` value's credentials."""
+    if not key or "=" in key or "\0" in key or "\0" in value:
+        logger.warning("sandbox: dropped the environment entry %r, which execve refuses", key)
+        return
+    if key.startswith("PIP_"):
+        stripped = _pip_value_for_agent_code(key, value)
+        if stripped is None:
+            return
+        value = stripped
+    child[key] = value
 
 
 def _url_without_credentials(word: str) -> str:
@@ -547,30 +609,12 @@ class CellSandbox(BaseModel):
     def child_env(
         self, env: Mapping[str, str], *, overlay_keys: Iterable[str] = ()
     ) -> dict[str, str]:
-        """The allowlisted part of ``env``, with the per-person folders set.
+        """The allowlisted part of ``env`` (``agent_env``), with the per-person folders set.
 
-        ``overlay_keys`` names the workspace ``.env`` keys in ``env``. Each
-        passes unless it could repoint the interpreter, the loader, the folders
-        or the certificate trust, even where the allowlist names it. An entry
-        execve would reject (an empty key, a key with ``=`` or NUL, a value
-        with NUL) is dropped and logged, so it cannot fail every spawn after
-        the lock. Every URL in a ``PIP_*`` value loses its userinfo and query
-        (``_pip_value_for_agent_code``).
+        ``overlay_keys`` names the workspace ``.env`` keys in ``env``. The
+        ``DS_*`` already in ``env`` stay; callers put the pad's own there.
         """
-        overlay = frozenset(overlay_keys)
-        child: dict[str, str] = {}
-        for key, value in env.items():
-            if not _env_key_allowed(key, overlay):
-                continue
-            if not key or "=" in key or "\0" in key or "\0" in value:
-                logger.warning("sandbox: dropped the environment entry %r, which execve refuses", key)
-                continue
-            if key.startswith("PIP_"):
-                stripped = _pip_value_for_agent_code(key, value)
-                if stripped is None:
-                    continue
-                value = stripped
-            child[key] = value
+        child = agent_env(env, overlay_keys=overlay_keys)
         child.update(self._fixed_env())
         return child
 
