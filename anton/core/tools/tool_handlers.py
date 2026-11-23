@@ -3522,6 +3522,49 @@ async def handle_read_text_file(
     return await asyncio.to_thread(_read_text_file, session, raw.strip(), tc_input, display_root)
 
 
+_SECRET_DOT_DIRS = frozenset({".anton", ".cowork", ".git", ".ssh", ".aws", ".gnupg"})
+_SECRET_FILENAMES = frozenset(
+    {
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        ".git-credentials",
+        ".pgpass",
+        "credentials.json",
+        "secrets.json",
+        ".published.json",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "id_dsa",
+    }
+)
+_SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+
+
+def _is_safe_workspace_dotfile(resolved: Path, *, base: Path) -> bool:
+    """Return True iff ``resolved`` is a non-secret dotfile strictly inside ``base``."""
+    try:
+        rel = resolved.relative_to(base.resolve())
+    except (ValueError, OSError, RuntimeError):
+        return False
+    lower_parts = tuple(p.lower() for p in rel.parts)
+    if not lower_parts:
+        return False
+    for part in lower_parts:
+        if part in _SECRET_DOT_DIRS or part.startswith(".cowork-"):
+            return False
+    name = lower_parts[-1]
+    if name in _SECRET_FILENAMES or name.endswith(_SECRET_SUFFIXES):
+        return False
+    if name == ".env" or (
+        name.startswith(".env.")
+        and not name.endswith((".example", ".sample", ".template", ".dist"))
+    ):
+        return False
+    return True
+
+
 def _read_text_file(
     session: "ChatSession", raw: str, tc_input: dict, display_root: "Path | None"
 ) -> ToolOutcome:
@@ -3542,9 +3585,11 @@ def _read_text_file(
         )
     shown = _shown_path(path, display_root)
 
+    reason = file_access.read_refusal(resolved, workspace=base, owned_roots=owned_roots)
+    if reason == file_access.REFUSED_HIDDEN and _is_safe_workspace_dotfile(resolved, base=base):
+        reason = None
     refusal = file_access.under_policy(
-        file_access.read_refusal(resolved, workspace=base, owned_roots=owned_roots),
-        resolved, policy, outside=file_access.REFUSED_OUTSIDE,
+        reason, resolved, policy, outside=file_access.REFUSED_OUTSIDE,
     )
     if refusal is not None:
         _log.debug("read_text_file refused %s: %s", resolved, refusal)
@@ -3560,6 +3605,16 @@ def _read_text_file(
                 " to the conversation."
             )
         return ToolOutcome(content=message, ok=False, reason="access_denied")
+
+    from anton.core.tools.coding_tools import is_protected_secret_path
+
+    if is_protected_secret_path(resolved):
+        _log.debug("read_text_file refused protected secret path %s", resolved)
+        return ToolOutcome(
+            content=f"Error: access denied: {shown} is a protected secret/credential path.",
+            ok=False,
+            reason="access_denied",
+        )
 
     try:
         mode = resolved.stat().st_mode

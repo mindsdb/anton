@@ -177,6 +177,48 @@ class ChatSystemPromptBuilder:
         output_format = template.format(output_dir=output_dir)
         return BASE_VISUALIZATIONS_PROMPT.format(output_format=output_format)
 
+    @staticmethod
+    def _build_coding_tools_section(tool_defs: list["ToolDef"] | None) -> str:
+        """Concise guidance for registered native coding/search tools.
+
+        Emitted only when ``tool_defs`` explicitly registers at least one
+        native coding tool, and advertises each tool individually so
+        restricted or sandboxed sessions never mention withheld tools.
+        """
+        if tool_defs is None:
+            return ""
+        reg = {getattr(t, "name", "") for t in tool_defs}
+        if not (reg & {"bash", "edit_file", "write_file", "grep_search", "find_files"}):
+            return ""
+        lines: list[str] = []
+        if "bash" in reg:
+            lines.append(
+                "- `bash`: Run shell commands directly in the workspace (git, builds, compilers, "
+                "tests, CLI utilities, package managers, services, system inspection). "
+                "Non-interactive (stdin is /dev/null). Prefer `bash` over wrapping shell commands "
+                "inside Python `scratchpad`, and combine sequential shell steps with `&&` instead "
+                "of many tiny single-command turns."
+            )
+        if "edit_file" in reg:
+            lines.append(
+                "- `edit_file`: Make surgical exact-match edits to existing files (use the `edits` "
+                "array to apply multiple hunks to a file atomically in one call)."
+            )
+        if "write_file" in reg:
+            lines.append(
+                "- `write_file`: Create new workspace files or write complete files cleanly at "
+                "their target paths."
+            )
+        read_tools = [n for n in ("read_text_file", "grep_search", "find_files") if n in reg]
+        if read_tools:
+            names = ", ".join(f"`{n}`" for n in read_tools)
+            ctx_note = " (use `grep_search` `context_lines` to inspect surrounding code directly)" if "grep_search" in reg else ""
+            lines.append(
+                f"- {names}: Explore files and read exact lines quickly{ctx_note}. Batch independent "
+                "read/search calls in a single response to cut latency and turns."
+            )
+        return "\nCODING & WORKSPACE TOOLS:\n" + "\n".join(lines) + "\n"
+
     def build(
         self,
         *,
@@ -257,6 +299,7 @@ class ChatSystemPromptBuilder:
             configured_block=system_prompt_context.runtime_context,
             product_block=list(product_lines) if product_lines else None,
         )
+        coding_tools_section = self._build_coding_tools_section(tool_defs)
         if internet_research:
             chat_prompt = CHAT_SYSTEM_PROMPT if classify else NO_CLASSIFY_CHAT_SYSTEM_PROMPT
         else:
@@ -266,6 +309,7 @@ class ChatSystemPromptBuilder:
             # PRODUCT carries the configured name. An explicit deployment must
             # not also introduce itself as Anton in the prompt's opening line.
             identity_lead="You are an AI coworker" if deployment_identity is not None else "You are Anton",
+            coding_tools_section=coding_tools_section,
             runtime_identity_section=runtime_identity_section,
             artifacts_section=artifacts_section,
             visualizations_section=visualizations_section,

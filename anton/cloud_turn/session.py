@@ -70,6 +70,11 @@ _ARTIFACTS_ROOT_ENV = "ANTON_CLOUD_ARTIFACTS_ROOT"
 CLOUD_TOOL_ALLOWLIST = frozenset(
     {
         "scratchpad",
+        "bash",
+        "write_file",
+        "edit_file",
+        "grep_search",
+        "find_files",
         "create_artifact",
         "list_artifacts",
         "update_artifact",

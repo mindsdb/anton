@@ -119,6 +119,10 @@ def serving_model_lines(
             f"is underneath, say it is not disclosed — never name, guess, or deny an "
             f"underlying vendor model.",
         ]
+    if srv and req and (srv.lower() == req.lower() or srv.lower().rsplit("/", 1)[-1] == req.lower()):
+        # Keep the static prompt prefix byte-identical across Turn 1 and Turn 2+
+        # whenever the served model matches the requested model (avoiding prompt-cache invalidation).
+        return [f"- Serving model: {req} (the model requested for this conversation)."]
     if srv:
         return [f"- Serving model: {srv} (as reported by the provider on its last response)."]
     if req:

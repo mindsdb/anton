@@ -1760,6 +1760,14 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
     _, cfg = _build(tmp_path, monkeypatch)
     assert set(cfg.tool_allowlist) == {
         "scratchpad",
+        # Workspace coding/search tools: fail closed under CellSandbox and
+        # WriteGate, block credential files, strip secrets from subprocess env,
+        # and accept no user-credential parameters (same posture as scratchpad).
+        "bash",
+        "write_file",
+        "edit_file",
+        "grep_search",
+        "find_files",
         "create_artifact",
         "list_artifacts",
         "update_artifact",

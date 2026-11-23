@@ -56,7 +56,9 @@ problem rather than replacing correct content. Keep the final reply short.
 Reference the artifact by name and slug and include its primary entry-point
 path. For a fullstack app, use the running backend URL, never the standalone
 static HTML path, which cannot reach the app's API.
-Pure inline chat answers and throwaway computation files need no artifact.
+Pure inline chat answers, throwaway computation files, and normal workspace source code,
+configs, scripts, tests, build outputs, or files requested at specific workspace or
+filesystem paths need no artifact — write or edit those directly in place.
 """
 
 # Where nothing starts an app backend (`live_app_slots.fullstack_offered` is

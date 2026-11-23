@@ -159,11 +159,14 @@ def _resolve_openai_compatible_flavor(settings: AntonSettings) -> str:
     No new env var is introduced — we infer flavor purely from the existing
     config the setup flow already produces.
     """
+    from .endpoints import ENDPOINT_MINDSHUB, classify_base_url
     from .openai import OpenAIProvider
 
     base = (getattr(settings, "openai_base_url", None) or "").rstrip("/").lower()
     minds = (getattr(settings, "minds_url", None) or "").rstrip("/").lower()
     if minds and base in (minds, f"{minds}/v1", f"{minds}/api/v1"):
+        return OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
+    if base and classify_base_url(base) == ENDPOINT_MINDSHUB:
         return OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
     return OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC
 

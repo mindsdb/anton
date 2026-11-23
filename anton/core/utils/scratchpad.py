@@ -15,25 +15,20 @@ from pydantic import BaseModel, ConfigDict
 from anton.core.backends.sandbox import cell_sandbox_of, validate_pad_name
 from anton.core.settings import UncheckedMode
 from anton.core.tools.registry import ToolOutcome
-from anton.core.utils.write_check import (
-    PACKAGE_FILE_SUFFIXES,
-    CellWrites,
-    EarlierCell,
-    FileChange,
-    HttpWrite,
-    HttpWriteRule,
-    ProjectSnapshot,
-    SqlWrite,
-    UncheckedCause,
-    find_cell_writes,
-    snapshot_project_files,
-)
 from anton.utils.datasources import scrub_output
 
 if TYPE_CHECKING:
     from anton.core.backends.manager import ScratchpadManager
     from anton.core.interaction.elicit import AskOption
     from anton.core.session import ChatSession
+    from anton.core.utils.write_check import (
+        CellWrites,
+        FileChange,
+        HttpWrite,
+        HttpWriteRule,
+        ProjectSnapshot,
+        SqlWrite,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +124,8 @@ class WriteGate:
         policy = cell_sandbox_of(manager)
         if policy is not None and policy.shared_dir is not None:
             roots.append(("shared", policy.shared_dir))
+        from anton.core.utils.write_check import snapshot_project_files
+
         self.snapshots = tuple([
             await asyncio.to_thread(
                 snapshot_project_files, root=root, label=label, taken_at=taken_at
@@ -554,6 +551,13 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     gate = getattr(session, "_write_gate", None)
     if not isinstance(gate, WriteGate):
         return None
+    from anton.core.utils.write_check import (
+        CellWrites,
+        EarlierCell,
+        UncheckedCause,
+        find_cell_writes,
+    )
+
     try:
         # The cells compaction folded away come first: the pad's process still
         # holds what they imported and bound. Their outcomes still decide
@@ -667,6 +671,7 @@ def invalid_package_spec(entry: str) -> bool:
     lies, with the code it runs to build or install it. A name such as
     "discord.py" is a name on the index, as any other is.
     """
+    from anton.core.utils.write_check import PACKAGE_FILE_SUFFIXES
     from packaging.requirements import InvalidRequirement, Requirement
 
     try:

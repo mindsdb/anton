@@ -970,9 +970,10 @@ GENERATE_IMAGE_TOOL_NO_PAD_HELPER = replace(
 READ_TEXT_FILE_TOOL = ToolDef(
     name="read_text_file",
     description=(
-        "Read a text file: an artifact's source, a project file or a conversation "
-        "attachment. Files elsewhere, dot-files, and binary or non-UTF-8 files are "
-        "refused.\n\n"
+        "Read a text file: an artifact's source, a project file (including non-secret "
+        "workspace dotfiles such as .gitignore or .github/ workflows) or a conversation "
+        "attachment. Files elsewhere, secret or internal dot-files (.env, .git, .anton), "
+        "and binary or non-UTF-8 files are refused.\n\n"
         f"Returns the first {DEFAULT_LINE_COUNT} lines unless you pass a range; "
         f"`end_line=-1` reads to the end. One call returns at most {MAX_OUTPUT_CHARS:,} "
         "characters. The first line of the result is a header naming the lines "

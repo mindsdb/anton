@@ -165,7 +165,6 @@ from anton.core.utils.scratchpad import (
     fill_in_scratchpad_action,
     scratchpad_action,
 )
-from anton.core.utils.write_check import parse_http_write_rules
 from anton.core.utils.write_hold import parse_relay_hosts, unchecked_mode
 # Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
 # handle_scratchpad's own exec branch (tool_handlers.py) rather than duplicated
@@ -2330,6 +2329,8 @@ class ChatSession:
         # MagicMock settings object reads off.
         self._write_gate: WriteGate | None = None
         if getattr(s, "write_approval", False) is True:
+            from anton.core.utils.write_check import parse_http_write_rules
+
             listed = getattr(s, "write_approval_http", "")
             # The relayed hosts count only with a relay to hold their writes,
             # so a stray hosts setting never drops a card.
@@ -2381,6 +2382,7 @@ class ChatSession:
         # artifact tools and the prompt offer html-apps only.
         from anton.core.artifacts.live_app_slots import fullstack_offered
 
+        self._cell_sandbox = config.cell_sandbox
         self._fullstack_offered = fullstack_offered(config.cell_sandbox)
 
         self.tool_registry = ToolRegistry()
@@ -3319,6 +3321,13 @@ class ChatSession:
                 self._set_memory_pin("workspace", workspace_discovery_names(self._scratchpads))
                 self._save_memory_pin()
             workspace_ctx = render_workspace_discovery(pin["workspace"])
+            # Place host-specific installed-package visibility in the volatile
+            # session tail (after SESSION_CONTEXT_MARKER) rather than in the
+            # static tool schema prefix, preserving Cowork visibility while
+            # keeping the shared tool prefix byte-identical across environments.
+            pkg_note = self._format_installed_packages_note()
+            if pkg_note:
+                workspace_ctx = f"{workspace_ctx}\n\n{pkg_note}" if workspace_ctx else f"\n\n{pkg_note}"
 
         # Ensure the registry is populated before we extract tool prompts.
         await self._settle_image_offer()
@@ -3471,6 +3480,13 @@ class ChatSession:
             # `generate_image` is offered only where an images API serves it
             # (`_settle_image_offer`), so a host may allow it unconditionally.
             withheld = set() if getattr(self, "_image_offer", None) else {GENERATE_IMAGE_TOOL.name}
+            from anton.core.tools.coding_tools import CODING_WRITE_TOOLS
+
+            if (
+                getattr(self, "_cell_sandbox", None) is not None
+                or getattr(self, "_write_gate", None) is not None
+            ):
+                withheld |= {t.name for t in CODING_WRITE_TOOLS}
             unknown = set(self._tool_allowlist) - built - deferred - withheld
             if unknown:
                 raise ValueError(
@@ -3521,6 +3537,17 @@ class ChatSession:
                     skill = store.load(raw) if store is not None else None
                     self._register_tool_bundle(skill.label if skill else raw)
 
+    def _format_installed_packages_note(self) -> str:
+        """Render the notable host-installed packages summary for the session tail."""
+        pkg_list = getattr(self._scratchpads, "available_packages", None)
+        if not pkg_list:
+            return ""
+        notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)
+        if notable:
+            pkg_line = ", ".join(notable)
+            return f"Installed Python packages ({len(pkg_list)} total, notable: {pkg_line})."
+        return f"Installed Python packages: {len(pkg_list)} total (standard library plus dependencies)."
+
     def _build_core_tools(self) -> None:
         # Copy — SCRATCHPAD_TOOL is a module-level singleton; mutating its
         # .description in place would leak across every session/user sharing
@@ -3529,15 +3556,6 @@ class ChatSession:
             internet_research=getattr(self, "_internet_research_enabled", True),
             classify=getattr(self, "_classify_enabled", True),
         ))
-        pkg_list = self._scratchpads.available_packages
-        if pkg_list:
-            notable = sorted(p for p in pkg_list if p.lower() in self._NOTABLE_PACKAGES)
-            if notable:
-                pkg_line = ", ".join(notable)
-                extra = f"\n\nInstalled packages ({len(pkg_list)} total, notable: {pkg_line})."
-            else:
-                extra = f"\n\nInstalled packages: {len(pkg_list)} total (standard library plus dependencies)."
-            scratchpad_tool.description = scratchpad_tool.description + extra
 
         # Inject scratchpad wisdom from memory, pinned like the system memory:
         # tools come first in the request.
@@ -3562,6 +3580,18 @@ class ChatSession:
         self.tool_registry.register_tool(scratchpad_tool)
         self.tool_registry.register_tool(READ_IMAGE_TOOL)
         self.tool_registry.register_tool(READ_TEXT_FILE_TOOL)
+        from anton.core.tools.coding_tools import CODING_READ_TOOLS, CODING_WRITE_TOOLS
+
+        for _coding_tool in CODING_READ_TOOLS:
+            self.tool_registry.register_tool(_coding_tool)
+        # Only register unsandboxed write/shell tools when neither CellSandbox
+        # (Landlock) nor WriteGate (user write approval) is enforcing cell-level policy.
+        if (
+            getattr(self, "_cell_sandbox", None) is None
+            and getattr(self, "_write_gate", None) is None
+        ):
+            for _coding_tool in CODING_WRITE_TOOLS:
+                self.tool_registry.register_tool(_coding_tool)
         # Interactive file/folder disambiguation. Registered on every host, but
         # in one of two shapes — because "degrades to picker_unavailable" is
         # not a neutral degradation when the definition also injects a
@@ -7611,6 +7641,49 @@ class ChatSession:
 
                 # Process each tool call
                 import time as _time
+                from anton.core.tools.coding_tools import READ_ONLY_TOOLS
+
+                # Pre-execute a pure read-only batch concurrently to cut multi-read latency
+                # while keeping state-mutating calls strictly ordered and preserving exact
+                # tool_call -> tool_start -> tool_done event ordering, per-call elapsed
+                # timing, and cancellation cleanup.
+                _prefetched_outcomes: dict[str, tuple[ToolOutcome | Exception, float]] = {}
+                _cancel_ev = getattr(self, "_cancel_event", None)
+                if (
+                    len(llm_response.tool_calls) > 1
+                    and self._unanswered_question is None
+                    and not self._time_limit_reached()
+                    and not (_cancel_ev is not None and _cancel_ev.is_set())
+                    and all(
+                        tc.name in READ_ONLY_TOOLS and damaged_tool_call_result(tc) is None
+                        for tc in llm_response.tool_calls
+                    )
+                ):
+                    async def _run_readonly(
+                        call: ToolCall,
+                    ) -> tuple[str, ToolOutcome | Exception, float]:
+                        _rt0 = _time.monotonic()
+                        try:
+                            res = await self.tool_registry.dispatch_tool(
+                                self, call.name, call.input, tool_call_id=call.id
+                            )
+                            return call.id, res, max(_time.monotonic() - _rt0, 0.0)
+                        except Exception as exc:
+                            return call.id, exc, max(_time.monotonic() - _rt0, 0.0)
+
+                    _prefetch_tasks = [
+                        asyncio.create_task(_run_readonly(tc))
+                        for tc in llm_response.tool_calls
+                    ]
+                    try:
+                        for _cid, _res, _relapsed in await asyncio.gather(*_prefetch_tasks):
+                            _prefetched_outcomes[_cid] = (_res, _relapsed)
+                    finally:
+                        _pending = [t for t in _prefetch_tasks if not t.done()]
+                        for _pt in _pending:
+                            _pt.cancel()
+                        if _pending:
+                            await asyncio.gather(*_pending, return_exceptions=True)
 
                 tool_results: list[dict] = []
                 for tc in llm_response.tool_calls:
@@ -7626,7 +7699,10 @@ class ChatSession:
                     # The limit is checked per round, but a round runs its calls
                     # one after another: without this, every cell in the round
                     # would overrun it, past what the turn's key was sized for.
-                    if self._time_limit_reached():
+                    # Calls that already completed during read-only prefetch still
+                    # emit their result & telemetry normally rather than being
+                    # misreported as unexecuted.
+                    if self._time_limit_reached() and tc.id not in _prefetched_outcomes:
                         _time_limit_refused_calls = True
                         tool_results.append(_not_run_past_time_limit(tc))
                         for event in _discarded_tool_call_events(
@@ -7926,76 +8002,44 @@ class ChatSession:
                                 message="Analyzing results...",
                             )
                         else:
-                            # Non-scratchpad, non-interactive tool — track elapsed.
-                            # dispatch_tool_stream() forwards ToolProgress markers
-                            # from a streaming handler as they arrive; a plain
-                            # (non-streaming) handler yields exactly one item (its
-                            # result), so this same loop works for both kinds.
                             yield StreamTaskProgress(
                                 phase="tool_start",
                                 message=tc.name,
                             )
-                            # Runs through _dispatch_draining (ENG-1276/ask-user,
-                            # #292) so a generic tool can elicit() mid-call just
-                            # like the interactive branch above. ToolProgress
-                            # markers (ENG-763) are relayed by dispatch_tool
-                            # itself via session.emitter — _dispatch_draining
-                            # forwards them here as ordinary ("event", ev)
-                            # tuples, no different from an ask_user event.
-                            # (answer_wait_s was reset with _tool_t0 above.)
                             _tool_error: Exception | None = None
-                            agen = self._dispatch_draining(tc)
+                            _tool_elapsed: float | None = None
+                            _was_prefetched = tc.id in _prefetched_outcomes
                             try:
-                                try:
-                                    async for _kind, _payload in agen:
-                                        if _kind == "event":
-                                            yield _payload
-                                        else:
-                                            _outcome = _payload
-                                finally:
-                                    await agen.aclose()
-                                # Anything a tool queued after the helper handed us
-                                # the result — a background task outliving its tool
-                                # call — would otherwise sit in the queue until the
-                                # next tool's drain, or forever if this was the last
-                                # tool of the turn, leaving a published card that is
-                                # never retired. Not reachable by any tool today
-                                # (every ask_user emit happens inside elicit(),
-                                # before the handler returns, and a
-                                # generate_artifact sub-agent runs inside the drained
-                                # window too), so this is a guard for the next one.
-                                #
-                                # An ordinary in-loop yield, deliberately NOT in a
-                                # `finally`: you cannot yield from an async
-                                # generator's finally.
-                                while not self.emitter.empty():
-                                    yield self.emitter.get_nowait()
-                                result_text = _outcome.content
-                                tool_ok = _outcome.ok
-                                tool_reason = _outcome.reason
+                                if _was_prefetched:
+                                    _prefetched, _tool_elapsed = _prefetched_outcomes.pop(tc.id)
+                                    if isinstance(_prefetched, Exception):
+                                        raise _prefetched
+                                    _outcome = _prefetched
+                                    result_text = _outcome.content
+                                    tool_ok = _outcome.ok
+                                    tool_reason = _outcome.reason
+                                else:
+                                    agen = self._dispatch_draining(tc)
+                                    try:
+                                        async for _kind, _payload in agen:
+                                            if _kind == "event":
+                                                yield _payload
+                                            else:
+                                                _outcome = _payload
+                                    finally:
+                                        await agen.aclose()
+                                    while not self.emitter.empty():
+                                        yield self.emitter.get_nowait()
+                                    result_text = _outcome.content
+                                    tool_ok = _outcome.ok
+                                    tool_reason = _outcome.reason
                             except Exception as exc:
-                                # Caught locally ONLY so the tool_done marker
-                                # below can still be yielded from ordinary
-                                # (non-unwinding) execution; re-raised right
-                                # after, so the outer handler a few lines below
-                                # still builds "Tool 'x' failed: ...".
-                                # GeneratorExit is a BaseException, not an
-                                # Exception, so cancellation via the consumer
-                                # closing this generator is NOT caught here —
-                                # it propagates straight through and the
-                                # generator closes without a tool_done, same as
-                                # any other stream abort. NOT a try/finally
-                                # with a yield inside: yielding while the
-                                # generator is being closed raises "async
-                                # generator ignored GeneratorExit".
                                 _tool_error = exc
 
-                            # Human thinking time is not the tool's runtime:
-                            # a 4-minute ask_user would otherwise show up in
-                            # the CLI report and in telemetry as a slow tool.
-                            _tool_elapsed = (
-                                _time.monotonic() - _tool_t0 - self.answer_wait_s
-                            )
+                            if _tool_elapsed is None:
+                                _tool_elapsed = (
+                                    _time.monotonic() - _tool_t0 - self.answer_wait_s
+                                )
                             # A raised exception is a definitive failure verdict
                             # regardless of tool_ok — without this, tool_done
                             # firing (guaranteed even on error, by design) with

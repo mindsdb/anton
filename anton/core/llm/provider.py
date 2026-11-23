@@ -737,6 +737,10 @@ _CONTEXT_WINDOWS: list[tuple[str, int]] = [
     ("claude-haiku-4", 200_000),
     ("claude-3", 200_000),
     ("claude-", 200_000),
+    # Kimi / Moonshot specific verified models (never overestimate Kimi K2 at 1M)
+    ("kimi-k3", 1_048_576),
+    ("kimi-k2.5", 256_000),
+    ("kimi-k2", 128_000),
     # OpenAI families
     ("gpt-5", 400_000),
     ("gpt-4.1", 1_000_000),
@@ -744,6 +748,12 @@ _CONTEXT_WINDOWS: list[tuple[str, int]] = [
     ("gpt-4", 128_000),
     ("o3", 200_000),
     ("o1", 200_000),
+    # Other specific verified frontier models (broad/unknown prefixes keep conservative default)
+    ("gemini-3", 1_000_000),
+    ("gemini-2.5", 1_000_000),
+    ("glm-5-3", 200_000),
+    ("glm-5.3", 200_000),
+    ("deepseek-v4", 200_000),
 ]
 _DEFAULT_CONTEXT_WINDOW = 128_000
 
@@ -751,12 +761,16 @@ _DEFAULT_CONTEXT_WINDOW = 128_000
 def context_window(model: str) -> int:
     """Return ``model``'s context window in tokens.
 
-    First match wins — the table is ordered specific-first. An unknown model
-    gets the conservative default rather than an error: a low guess only
+    First match wins — the table is ordered specific-first. Normalizes
+    provider-prefixed IDs (e.g. ``accounts/fireworks/models/kimi-k3`` or
+    ``moonshotai/Kimi-K3``) by also checking the final path segment. An unknown
+    model gets the conservative default rather than an error: a low guess only
     understates pressure, raising would break every turn on a newer model id.
     """
+    norm = (model or "").strip().lower()
+    tail = norm.rsplit("/", 1)[-1]
     for prefix, size in _CONTEXT_WINDOWS:
-        if model.startswith(prefix):
+        if norm.startswith(prefix) or tail.startswith(prefix):
             return size
     return _DEFAULT_CONTEXT_WINDOW
 
