@@ -145,7 +145,13 @@ Events written back on stdout (JSONL):
       `error` is "TypeName: message", so a consumer reads the failure's kind
       off the class name. A MindsHub billing stop that knows when its limit
       lifts adds `"reset_at": "<ISO-8601 instant with a UTC offset>"`; every
-      other failure omits the key.
+      other failure omits the key. A spent-budget stop whose gateway named the
+      budget adds `"budget_scope": "<org|workspace|api_key|team|user|all_members|...>"`
+      the same way, `"budget_period": "<day|month|year>"` when it named one, and
+      `"budget_model": "<alias>"` for a budget on one model. A spent plan
+      window (`WindowAllowanceExhaustedError`) adds `"window": "<5h|7d>"` when
+      the gateway named it, and a model outside the plan's tier
+      (`ModelNotInTierError`) adds `"required_tier": "<plus|pro|...>"` likewise.
 
 The tool/round step kinds the controller relays unchanged as `turn_step` are
 not spelled out above: `tool_start`, `tool_end`, `tool_result`, `compacted`,
@@ -157,6 +163,8 @@ rendered as an agent message; the pod sends it only when the request set
 `tool_messages`.
 A request with `jev_decisions` set to false never asks Jev, MindsHub's
 decision model, whether the agent finished: the organization opted out.
+A request with `jev_classify` set to false gives the agent no scratchpad
+classify() or classify_yes_no(), which label texts with Jev.
 A request with `ui_locale` (a tag in `anton.core.llm.ui_locale.UI_LOCALE_NAMES`:
 en, es, pt-BR, de, fr, it, ja, ko, zh-CN) tells the agent which
 language the user's app is set to (ENG-4149); absent or unsupported adds nothing.
@@ -698,6 +706,9 @@ class TurnRequestV1:
     #: controller that does not forward the field changes nothing; anything
     #: else turns it off, since a malformed opt-out must not read as consent.
     jev_decisions: bool = True
+    #: Whether the agent's scratchpad may label texts with Jev through
+    #: classify() and classify_yes_no(). Read like `jev_decisions`.
+    jev_classify: bool = True
     #: The language the user's app is set to, a tag in
     #: `anton.core.llm.ui_locale.UI_LOCALE_NAMES` (en, es, pt-BR, de, fr, it,
     #: ja, ko, zh-CN), which cowork-server read from the app's
@@ -778,6 +789,7 @@ class TurnRequestV1:
             interactive=d.get("interactive") is True,
             tool_messages=d.get("tool_messages") is True,
             jev_decisions=d.get("jev_decisions", True) is True,
+            jev_classify=d.get("jev_classify", True) is True,
             ui_locale=d.get("ui_locale") if isinstance(d.get("ui_locale"), str) else None,
             preview_checks=d.get("preview_checks") is True,
             # Same defensive isinstance check as oauth/trace.

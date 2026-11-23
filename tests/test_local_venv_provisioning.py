@@ -418,7 +418,7 @@ async def test_install_packages_provisions_the_venv_off_the_event_loop(tmp_path,
     monkeypatch.setattr(pad, "_ensure_venv", fake_ensure_venv)
 
     with pytest.raises(_Provisioned):
-        await pad.install_packages(["requests"])
+        await pad.install_packages(["anton-test-not-installed"])
 
     assert threads and threads[0] != threading.get_ident()
 
@@ -699,7 +699,7 @@ async def test_cancelled_provisioning_finishes_before_teardown(
     monkeypatch.setattr(local.venv, "create", gated_create)
     monkeypatch.setattr(pad, "_ensure_venv", record_provisioning)
     operation = asyncio.create_task(
-        pad.reset() if action == "reset" else pad.install_packages(["requests"])
+        pad.reset() if action == "reset" else pad.install_packages(["anton-test-not-installed"])
     )
     assert await asyncio.to_thread(building.wait, 10)
     operation.cancel()

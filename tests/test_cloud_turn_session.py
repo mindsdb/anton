@@ -355,6 +355,13 @@ def test_jev_decisions_set_the_completion_check(tmp_path, monkeypatch, jev_decis
     assert cfg.settings.verifier_jev == verifier_jev
 
 
+@pytest.mark.parametrize(("jev_classify", "classify_jev"), [(False, "off"), (True, "on")])
+def test_jev_classify_sets_the_scratchpad_classify(tmp_path, monkeypatch, jev_classify, classify_jev):
+    monkeypatch.delenv("ANTON_CLASSIFY_JEV", raising=False)
+    _, cfg = _build(tmp_path, monkeypatch, jev_classify=jev_classify)
+    assert cfg.settings.classify_jev == classify_jev
+
+
 @pytest.mark.parametrize("ui_locale", ["es", None])
 def test_ui_locale_reaches_the_session(tmp_path, monkeypatch, ui_locale):
     """ENG-4149: the request's UI language is the session's."""

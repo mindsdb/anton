@@ -269,7 +269,10 @@ async def _stream_turn(
     a ``turn_completed`` naming the artifacts the turn touched. Any failure
     (parse or turn) -> one ``turn_failed`` with a scrubbed error string, plus
     ``reset_at`` when the failure is a MindsHub billing stop that knows when
-    its limit lifts.
+    its limit lifts, ``budget_scope`` / ``budget_period`` / ``budget_model`` when it is a spent
+    budget whose scope or period the gateway named, ``window`` when it is a spent plan
+    window the gateway named, and ``required_tier`` when it is a model outside the plan's
+    tier and the gateway named the tier that covers it.
 
     A background ticker emits a bare ``heartbeat`` event every
     ``ANTON_CLOUD_TURN_HEARTBEAT_SECONDS`` (default 5) so long-but-alive turns
@@ -282,7 +285,9 @@ async def _stream_turn(
     interleave mid-line - no lock needed.
     """
     from anton.core.llm.provider import (
+        BudgetExceededError,
         MindsHubBillingStop,
+        ModelNotInTierError,
         StreamAskUser,
         StreamAskUserAnswered,
         StreamBrowserSession,
@@ -295,6 +300,7 @@ async def _stream_turn(
         StreamToolUseEnd,
         StreamToolUseStart,
         StreamTurnEnded,
+        WindowAllowanceExhaustedError,
     )
 
     builder = session_builder or build_cloud_chat_session
@@ -562,6 +568,18 @@ async def _stream_turn(
         # no instant that parses, and then the key is left off.
         if isinstance(exc, MindsHubBillingStop) and exc.reset_at:
             failed["reset_at"] = exc.reset_at
+        # A spent budget's scope rides the same way, so the host can say whose budget it is.
+        if isinstance(exc, BudgetExceededError) and exc.budget_scope:
+            failed["budget_scope"] = exc.budget_scope
+        if isinstance(exc, BudgetExceededError) and exc.budget_period:
+            failed["budget_period"] = exc.budget_period
+        if isinstance(exc, BudgetExceededError) and exc.budget_model:
+            failed["budget_model"] = exc.budget_model
+        # Name the spent plan window and the tier that covers the model on the failure frame.
+        if isinstance(exc, WindowAllowanceExhaustedError) and exc.window:
+            failed["window"] = exc.window
+        if isinstance(exc, ModelNotInTierError) and exc.required_tier:
+            failed["required_tier"] = exc.required_tier
         with contextlib.suppress(Exception):
             addons.return_unread()  # before the terminal: cowork stops reading at it
         wire(failed)

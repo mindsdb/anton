@@ -72,6 +72,23 @@ def test_notion_read_mode_allows_only_its_read_tools():
     assert allowed_for_mode("notion", "notion-search", "none") is False
 
 
+def test_slack_read_mode_allows_only_its_read_tools():
+    for tool in ("slack_search_public", "slack_read_channel", "slack_read_thread", "slack_get_reactions"):
+        assert allowed_for_mode("slack", tool, "read") is True, tool
+    for tool in (
+        "slack_send_message",
+        "slack_add_reaction",
+        "slack_update_canvas",
+        "slack_get_file_upload_url",
+        "a_tool_added_later",
+    ):
+        assert allowed_for_mode("slack", tool, "read") is False, tool
+        assert allowed_for_mode("slack", tool, "write") is True, tool
+    assert returns_records(engine="slack", tool="slack_read_channel") is True
+    assert returns_records(engine="slack", tool="slack_search_users") is False
+    assert returns_records(engine="slack", tool="slack_send_message") is False
+
+
 def test_a_tool_that_returns_the_customers_records_returns_records():
     for data_tool in (
         "search_crm_objects",
