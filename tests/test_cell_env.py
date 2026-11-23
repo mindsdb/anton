@@ -77,7 +77,8 @@ def planted(monkeypatch, tmp_path) -> dict[str, str]:
     return {"home": str(home), "tmp": os.path.realpath(tmp)}
 
 
-async def _report(tmp_path: Path, **pad_kwargs) -> dict:
+async def _report(tmp_path: Path, code: str = _REPORT, **pad_kwargs) -> dict | list:
+    """Run ``code`` in a real pad and parse the JSON on its last output line."""
     coding = {
         "coding_provider": "openai",
         "coding_model": "",
@@ -92,7 +93,7 @@ async def _report(tmp_path: Path, **pad_kwargs) -> dict:
     (tmp_path / "project").mkdir(exist_ok=True)
     await pad.start()
     try:
-        cell = await pad.execute(_REPORT)
+        cell = await pad.execute(code)
         assert cell.error is None, cell.error
         return json.loads(cell.stdout.strip().splitlines()[-1])
     finally:
@@ -118,9 +119,15 @@ async def test_a_cell_with_no_connections_of_its_own_gets_no_inherited_ds_value(
 
 
 async def test_a_cli_cell_keeps_the_servers_environment(tmp_path, planted):
-    report = await _report(tmp_path, scratchpad_ds_env=None, inherit_server_env=True)
+    # The full report of a server environment can pass the cell's output cap.
+    present = await _report(
+        tmp_path,
+        f"import json, os; print(json.dumps([n for n in {sorted(_PLANTED_SECRETS)!r} if n in os.environ]))",
+        scratchpad_ds_env=None,
+        inherit_server_env=True,
+    )
 
-    assert set(_PLANTED_SECRETS) <= set(report["names"])
+    assert sorted(present) == sorted(_PLANTED_SECRETS)
 
 
 async def test_a_pod_shaped_cell_keeps_the_turn_overlay_and_user_site_off(tmp_path, planted, monkeypatch):
