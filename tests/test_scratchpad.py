@@ -711,16 +711,22 @@ class TestCellMetadata:
 
 
 class TestScratchpadEnvironment:
-    async def test_env_vars_accessible(self, monkeypatch):
-        """Secrets from .anton/.env (in os.environ) are accessible in scratchpad."""
+    @pytest.mark.parametrize(
+        ("inherit_server_env", "expected"), [(True, "s3cret_value"), (False, "NOT_FOUND")]
+    )
+    async def test_an_unlisted_server_name_reaches_only_a_cli_cell(
+        self, monkeypatch, inherit_server_env, expected
+    ):
+        """The CLI copies .anton/.env into os.environ and its cells see it;
+        any other host's cell gets only the allowlisted names."""
         monkeypatch.setenv("MY_TEST_SECRET", "s3cret_value")
-        pad = make_scratchpad(name="env-test")
+        pad = make_scratchpad(name="env-test", inherit_server_env=inherit_server_env)
         await pad.start()
         try:
             cell = await pad.execute(
                 "import os; print(os.environ.get('MY_TEST_SECRET', 'NOT_FOUND'))"
             )
-            assert cell.stdout.strip() == "s3cret_value"
+            assert cell.stdout.strip() == expected
         finally:
             await pad.close()
 
@@ -818,17 +824,20 @@ class TestScratchpadEnvironment:
         finally:
             await pad.close()
 
-    async def test_scratchpad_ds_env_none_preserves_inherited_ds_vars(self, monkeypatch):
-        """scratchpad_ds_env=None (default) keeps today's behaviour: inherited
-        DS_* vars pass through untouched."""
+    @pytest.mark.parametrize(("inherit_server_env", "expected"), [(True, "True"), (False, "False")])
+    async def test_scratchpad_ds_env_none_keeps_inherited_ds_vars_only_in_a_cli_cell(
+        self, monkeypatch, inherit_server_env, expected
+    ):
+        """scratchpad_ds_env=None (default): a CLI cell keeps inherited DS_*
+        vars; any other host's cell gets none."""
         monkeypatch.setenv("DS_POSTGRES_PROD__PASSWORD", "inherited-secret")
-        pad = make_scratchpad(name="ds-env-none")
+        pad = make_scratchpad(name="ds-env-none", inherit_server_env=inherit_server_env)
         await pad.start()
         try:
             cell = await pad.execute(
                 "import os; print(os.environ.get('DS_POSTGRES_PROD__PASSWORD') == 'inherited-secret')"
             )
-            assert cell.stdout.strip() == "True"
+            assert cell.stdout.strip() == expected
         finally:
             await pad.close()
 
@@ -900,20 +909,33 @@ class TestScratchpadEnvironment:
         finally:
             await pad.close()
 
-    async def test_workspace_env_overlay_never_overrides_inherited(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("name", "inherit_server_env", "expected"),
+        [
+            ("ALREADY_SET_VAR", True, "parent-value"),
+            # Off the allowlist: the server's value is dropped and the .env
+            # one is only-if-unset, so the cell gets neither.
+            ("ALREADY_SET_VAR", False, "NOT_FOUND"),
+            ("HTTPS_PROXY", False, "parent-value"),
+        ],
+    )
+    async def test_workspace_env_overlay_never_overrides_inherited(
+        self, monkeypatch, name, inherit_server_env, expected
+    ):
         """The project .env is only-if-unset, as it was when it went through
         os.environ — it must not be able to replace PATH or an existing key."""
-        monkeypatch.setenv("ALREADY_SET_VAR", "parent-value")
+        monkeypatch.setenv(name, "parent-value")
         pad = make_scratchpad(
             name="workspace-env-no-override",
-            workspace_env_overlay={"ALREADY_SET_VAR": "project-value"},
+            workspace_env_overlay={name: "project-value"},
+            inherit_server_env=inherit_server_env,
         )
         await pad.start()
         try:
             cell = await pad.execute(
-                "import os; print(os.environ.get('ALREADY_SET_VAR', 'NOT_FOUND'))"
+                f"import os; print(os.environ.get({name!r}, 'NOT_FOUND'))"
             )
-            assert cell.stdout.strip() == "parent-value"
+            assert cell.stdout.strip() == expected
         finally:
             await pad.close()
 
@@ -934,17 +956,22 @@ class TestScratchpadEnvironment:
         finally:
             await pad.close()
 
-    async def test_workspace_env_overlay_none_leaves_env_unchanged(self, monkeypatch):
-        """workspace_env_overlay=None (default) does not touch an unrelated
-        inherited var — no stripping happens for this overlay, unlike DS_*."""
+    @pytest.mark.parametrize(
+        ("inherit_server_env", "expected"), [(True, "inherited-value"), (False, "NOT_FOUND")]
+    )
+    async def test_workspace_env_overlay_none_leaves_only_a_cli_cells_env_unchanged(
+        self, monkeypatch, inherit_server_env, expected
+    ):
+        """workspace_env_overlay=None (default): a CLI cell keeps an unrelated
+        inherited var; any other host's cell gets only the allowlisted names."""
         monkeypatch.setenv("SOME_INHERITED_VAR", "inherited-value")
-        pad = make_scratchpad(name="workspace-env-none")
+        pad = make_scratchpad(name="workspace-env-none", inherit_server_env=inherit_server_env)
         await pad.start()
         try:
             cell = await pad.execute(
                 "import os; print(os.environ.get('SOME_INHERITED_VAR', 'NOT_FOUND'))"
             )
-            assert cell.stdout.strip() == "inherited-value"
+            assert cell.stdout.strip() == expected
         finally:
             await pad.close()
 

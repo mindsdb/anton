@@ -23,6 +23,7 @@ from anton.core.backends.sandbox import (
     CellSandbox,
     SandboxUnavailable,
     SandboxedSpawn,
+    agent_env,
     overlay_key_allowed,
     validate_pad_name,
 )
@@ -247,6 +248,22 @@ def _apply_workspace_overlay(env: dict[str, str], overlay: dict[str, str] | None
             env[key] = value
             applied.append(key)
     return applied
+
+
+_WINDOWS = sys.platform == "win32"
+
+
+def _overlay_for_agent_code(overlay: dict[str, str], *, windows: bool) -> dict[str, str]:
+    """The workspace ``.env`` keys agent code may get, before they are laid over the env.
+
+    A key that could repoint the interpreter, the loader or the folders of
+    agent code is dropped (``overlay_key_allowed``). On Windows, where
+    ``os.environ`` names are uppercase, keys are uppercased first, because
+    every later rule compares names exactly.
+    """
+    if windows:
+        overlay = {key.upper(): value for key, value in overlay.items()}
+    return {key: value for key, value in overlay.items() if overlay_key_allowed(key)}
 
 
 def _utf8_env(base: "os._Environ[str] | dict[str, str]") -> dict[str, str]:
@@ -477,6 +494,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         internet_research_enabled: bool = True,
         classify_enabled: bool = True,
         image_model: str | None = None,
+        inherit_server_env: bool = False,
         _venvs_base: Path | None = None,
     ) -> None:
         # The name becomes a folder the host deletes and recreates, so one that
@@ -525,8 +543,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._credential_path: Path | None = None
         self._credential_written: str | None = None
         # The Landlock policy every spawn of agent code runs under; None runs
-        # them unlocked with the server's environment.
+        # them unlocked.
         self._cell_sandbox: CellSandbox | None = cell_sandbox
+        # True only for the CLI, whose cells run in the person's own shell
+        # environment. Every other host's cells get the allowlisted one.
+        self._inherit_server_env = inherit_server_env
         # The running cell's launch under a policy, whose refusal pipe says
         # whether the launcher refused once the process has ended.
         self._cell_launch: SandboxedSpawn | None = None
@@ -1173,11 +1194,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
 
         # Force UTF-8 in the child (ENG-824).
         env = _utf8_env(os.environ)
+        filtered = policy is not None or not self._inherit_server_env
         overlay = self._workspace_env_overlay
-        if policy is not None and overlay:
-            # A project .env must not repoint the interpreter, the loader or
-            # the per-person folders of sandboxed code.
-            overlay = {k: v for k, v in overlay.items() if overlay_key_allowed(k)}
+        if filtered and overlay:
+            overlay = _overlay_for_agent_code(overlay, windows=_WINDOWS)
         # Before the DS_* strip, so a project .env cannot smuggle a credential.
         overlaid = _apply_workspace_overlay(env, overlay)
         # The pad's log is the cell output the model reads, so its calls send
@@ -1238,8 +1258,11 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env["OPENAI_API_KEY"] = env["ANTON_OPENAI_API_KEY"]
         if "OPENAI_BASE_URL" not in env and "ANTON_OPENAI_BASE_URL" in env:
             env["OPENAI_BASE_URL"] = env["ANTON_OPENAI_BASE_URL"]
+        # Only for the CLI: other hosts pass the coding key, and a filtered pad
+        # pointed at another endpoint would otherwise send it the MindsHub key.
         if (
-            "OPENAI_API_KEY" not in env
+            not filtered
+            and "OPENAI_API_KEY" not in env
             and "ANTON_MINDS_API_KEY" in env
             and self._coding_provider == "openai-compatible"
         ):
@@ -1355,11 +1378,18 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             else None
         )
 
+        # Only the keys the .env set are judged as .env keys. A key the server
+        # already held keeps the server's value, so naming it in the .env must
+        # not carry that value past the allowlist.
         if policy is not None:
-            # Only the keys the .env set are judged as .env keys. A key the
-            # server already held keeps the server's value, so naming it in
-            # the .env must not carry that value past the allowlist.
             env = policy.child_env(env, overlay_keys=overlaid)
+        elif filtered:
+            env = agent_env(
+                env,
+                overlay_keys=overlaid,
+                ds_env=self._scratchpad_ds_env or {},
+                host_basics=True,
+            )
 
         async def spawn() -> asyncio.subprocess.Process:
             if policy is None:
@@ -2261,7 +2291,9 @@ def local_scratchpad_runtime_factory(
     internet_research_enabled: bool = True,
     classify_enabled: bool = True,
     image_model: str | None = None,
+    inherit_server_env: bool = False,
 ) -> ScratchpadRuntime:
+    """Build a local pad; every keyword is ``LocalScratchpadRuntime``'s own."""
     return LocalScratchpadRuntime(
         name=name,
         coding_provider=coding_provider,
@@ -2280,4 +2312,5 @@ def local_scratchpad_runtime_factory(
         internet_research_enabled=internet_research_enabled,
         classify_enabled=classify_enabled,
         image_model=image_model,
+        inherit_server_env=inherit_server_env,
     )

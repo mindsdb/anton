@@ -6,7 +6,8 @@ agent code (the cell, the venv health check, package installs and the artifact
 verifier's two checks) then starts through ``landlock_launcher.py``: the
 launcher locks itself to the policy's paths with Landlock and execs the target
 in place, so the process id, process group and exit code stay the target's.
-With no policy, nothing here runs.
+With no policy, only ``agent_env`` runs here: a cell still gets the
+allowlisted environment, unless its host keeps the server's (the CLI).
 
 Standard library and pydantic only, so a host can probe the kernel and run the
 self-test without importing the rest of anton.

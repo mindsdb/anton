@@ -509,8 +509,9 @@ class TestCliHostsSupplyTheVault:
             captured.update(kwargs)
             return MagicMock()
 
-        def fake_factory(_settings, *, cancel_ends_turn):
+        def fake_factory(_settings, *, cancel_ends_turn, inherit_server_env):
             captured["policy"] = cancel_ends_turn
+            captured["inherit_server_env"] = inherit_server_env
             return MagicMock()
 
         with (
@@ -521,6 +522,7 @@ class TestCliHostsSupplyTheVault:
 
         assert captured["data_vault"] is not None
         assert captured["policy"] is False
+        assert captured["inherit_server_env"] is True
 
     async def test_rebuilt_session_is_given_a_vault(self):
         from anton.core.datasources.data_vault import LocalDataVault
@@ -532,8 +534,9 @@ class TestCliHostsSupplyTheVault:
             captured["config"] = config
             return MagicMock()
 
-        def fake_factory(_settings, *, cancel_ends_turn):
+        def fake_factory(_settings, *, cancel_ends_turn, inherit_server_env):
             captured["policy"] = cancel_ends_turn
+            captured["inherit_server_env"] = inherit_server_env
             return MagicMock()
 
         with (
@@ -554,6 +557,7 @@ class TestCliHostsSupplyTheVault:
 
         assert isinstance(captured["config"].data_vault, LocalDataVault)
         assert captured["policy"] is False
+        assert captured["inherit_server_env"] is True
 
     async def test_the_cli_chat_session_keeps_ctrl_c_cell_only(self, tmp_path):
         import anton.chat as chat
@@ -568,8 +572,9 @@ class TestCliHostsSupplyTheVault:
             captured["config"] = config
             raise Built
 
-        def fake_factory(_settings, *, cancel_ends_turn):
+        def fake_factory(_settings, *, cancel_ends_turn, inherit_server_env):
             captured["policy"] = cancel_ends_turn
+            captured["inherit_server_env"] = inherit_server_env
             return MagicMock()
 
         settings = MagicMock(
@@ -592,3 +597,4 @@ class TestCliHostsSupplyTheVault:
 
         assert captured["config"].data_vault is vault
         assert captured["policy"] is False
+        assert captured["inherit_server_env"] is True

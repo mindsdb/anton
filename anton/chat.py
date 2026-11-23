@@ -1571,7 +1571,7 @@ async def _chat_loop(
 
     session = ChatSession(ChatSessionConfig(
         llm_client=state["llm_client"],
-        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False),
+        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False, inherit_server_env=True),
         settings=settings,
         self_awareness=self_awareness,
         cortex=cortex,
