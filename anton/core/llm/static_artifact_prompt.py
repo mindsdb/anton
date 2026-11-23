@@ -21,11 +21,13 @@ and open requests). Pass user_request verbatim, keep agent_understanding short,
 pass observed data/procedures in known_data, and avoid duplicate pre-fetching.
 
 EXISTING ARTIFACTS:
-Find it with list_artifacts (pass match when slug/id is known). Preserve the
-artifact, correct content, appearance and unrelated files. For small edits,
-patch in place (report_tools.update/insert works for reports); for major
-rebuilds, call generate_artifact with the existing slug. Never create a duplicate artifact to make an edit.
-If the artifact is gone (not in list_artifacts or files missing), do not
+Find the existing artifact with list_artifacts, using match when its slug or
+id is known. Preserve the artifact, correct content, appearance and unrelated
+files. For a small edit, read and patch only the relevant content in place;
+report_tools.update/insert can update an existing report. For a substantial
+rebuild, use generate_artifact with the existing slug and requested change.
+Never create a duplicate artifact to make an edit.
+If the artifact to change is gone (not in list_artifacts or files missing), do not
 recreate it or substitute another: tell the user it is missing, ask whether to
 create it again as a new artifact, and end your turn.
 

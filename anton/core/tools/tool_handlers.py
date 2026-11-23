@@ -3534,9 +3534,9 @@ _SECRET_DOT_DIRS = frozenset(
         ".docker",
         ".azure",
         ".gcloud",
-        ".config",
     }
 )
+_SECRET_CONFIG_SUBDIRS = frozenset({"gh", "gcloud", "stripe", "hub", "helm", "git", "pip", "op"})
 _SECRET_FILENAMES = frozenset(
     {
         ".netrc",
@@ -3568,8 +3568,14 @@ def _is_safe_workspace_dotfile(resolved: Path, *, base: Path) -> bool:
     lower_parts = tuple(p.lower() for p in rel.parts)
     if not lower_parts:
         return False
-    for part in lower_parts:
+    for i, part in enumerate(lower_parts):
         if part in _SECRET_DOT_DIRS or part.startswith(".cowork-"):
+            return False
+        if (
+            part == ".config"
+            and i + 1 < len(lower_parts)
+            and lower_parts[i + 1] in _SECRET_CONFIG_SUBDIRS
+        ):
             return False
     name = lower_parts[-1]
     if name in _SECRET_FILENAMES or name.endswith(_SECRET_SUFFIXES):

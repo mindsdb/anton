@@ -94,15 +94,30 @@ READ_ONLY_TOOLS = frozenset({
 })
 
 
+_CONFIG_SECRET_SUBDIRS = frozenset({"gh", "gcloud", "stripe", "hub", "helm", "git", "pip", "op"})
+
+
 def is_protected_secret_path(resolved: Path) -> bool:
     """Return True if ``resolved`` points to an Anton/Cowork/user credential file."""
     parts = resolved.parts
     lower_parts = tuple(p.lower() for p in parts)
 
     # Block ~/.ssh, ~/.aws, ~/.gnupg, cloud/CLI credential dirs, and credential rc files
-    for sensitive_dir in (".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".gcloud", ".config"):
+    for sensitive_dir in (".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".gcloud"):
         if sensitive_dir in lower_parts:
             return True
+
+    # Block known credential subdirectories under .config (and $HOME/.config itself),
+    # while preserving legitimate workspace project configs like <repo>/.config/nextest.toml.
+    for i, part in enumerate(lower_parts[:-1]):
+        if part == ".config" and lower_parts[i + 1] in _CONFIG_SECRET_SUBDIRS:
+            return True
+    try:
+        home_cfg = (Path.home() / ".config").resolve()
+        if resolved == home_cfg or home_cfg in resolved.parents:
+            return True
+    except (OSError, RuntimeError):
+        pass
 
     name = resolved.name.lower()
     if name in (
@@ -115,7 +130,12 @@ def is_protected_secret_path(resolved: Path) -> bool:
         ".bash_history",
         ".zsh_history",
         "credentials.json",
+        "secrets.json",
         ".published.json",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "id_dsa",
     ):
         return True
 
@@ -749,13 +769,40 @@ async def handle_grep_search(session: "ChatSession", tc_input: dict) -> ToolOutc
             "!.ssh/**",
             "!.aws/**",
             "!.gnupg/**",
+            "!.kube/**",
+            "!.docker/**",
+            "!.azure/**",
+            "!.gcloud/**",
+            "!.config/gh/**",
+            "!.config/gcloud/**",
+            "!.config/stripe/**",
+            "!.config/hub/**",
+            "!.config/helm/**",
+            "!.config/git/**",
+            "!.config/pip/**",
+            "!.config/op/**",
             "!.env",
             "!.env.*",
+            "!.envrc",
             "!credentials.json",
+            "!secrets.json",
             "!.netrc",
             "!.npmrc",
             "!.pypirc",
+            "!.git-credentials",
+            "!.pgpass",
+            "!.bash_history",
+            "!.zsh_history",
             "!.published.json",
+            "!id_rsa",
+            "!id_ed25519",
+            "!id_ecdsa",
+            "!id_dsa",
+            "!*.pem",
+            "!*.key",
+            "!*.p12",
+            "!*.pfx",
+            "!*.kdbx",
         ):
             args.extend(["--glob", neg_glob])
         args.extend(["--", pattern, str(target)])

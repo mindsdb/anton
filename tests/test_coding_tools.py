@@ -546,6 +546,41 @@ def test_artifact_prompts_and_tool_never_hijack_user_specified_paths():
         assert "no user-specified file path" in head
 
 
+def test_workspace_dotconfig_allowed_while_secret_parity_holds():
+    async def _run():
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            sess = _make_session(root)
+
+            # Legitimate workspace .config/nextest.toml allowed across read/write/edit/grep
+            (root / ".config").mkdir()
+            (root / ".config" / "nextest.toml").write_text("[profile.default]\nretries = 1\n", encoding="utf-8")
+            assert (await handle_read_text_file(sess, {"path": ".config/nextest.toml"})).ok
+            assert (await handle_edit_file(sess, {"path": ".config/nextest.toml", "old_string": "retries = 1", "new_string": "retries = 2"})).ok
+            g_ok = await handle_grep_search(sess, {"pattern": "retries = 2", "path": ".config"})
+            assert g_ok.ok and "nextest.toml" in str(g_ok.content), g_ok
+
+            # Credential .config subdirs & top-level secret files strictly blocked everywhere
+            (root / ".config" / "gh").mkdir()
+            (root / ".config" / "gh" / "hosts.yml").write_text("oauth_token: gh_secret_xyz\n", encoding="utf-8")
+            (root / ".kube").mkdir()
+            (root / ".kube" / "config").write_text("token: kube_secret_xyz\n", encoding="utf-8")
+            (root / "secrets.json").write_text('{"tok":"top_secret_json_xyz"}\n', encoding="utf-8")
+            (root / "id_rsa").write_text("PRIVATE KEY secret_rsa_xyz\n", encoding="utf-8")
+            (root / ".git-credentials").write_text("https://u:git_cred_xyz@host\n", encoding="utf-8")
+            for p in (".config/gh/hosts.yml", ".kube/config", "secrets.json", "id_rsa", ".git-credentials"):
+                assert not (await handle_read_text_file(sess, {"path": p})).ok, p
+                assert not (await handle_write_file(sess, {"path": p, "content": "x"})).ok, p
+                assert not (await handle_edit_file(sess, {"path": p, "old_string": "x", "new_string": "y"})).ok, p
+                assert not (await handle_grep_search(sess, {"pattern": "xyz", "path": p})).ok, p
+            # Whole-workspace grep must not leak any of them
+            g_all = await handle_grep_search(sess, {"pattern": "xyz", "path": "."})
+            for leaked in ("gh_secret_xyz", "kube_secret_xyz", "top_secret_json_xyz", "secret_rsa_xyz", "git_cred_xyz"):
+                assert leaked not in str(g_all.content)
+
+    asyncio.run(_run())
+
+
 def test_head_tail_stdout_truncation_and_orphan_scrub_safety(monkeypatch):
     from anton.core.backends import local as local_mod
     from anton.core.backends.base import Cell
