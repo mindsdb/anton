@@ -661,7 +661,27 @@ def test_head_tail_stdout_truncation_and_orphan_scrub_safety(monkeypatch):
 
 def test_ghost_tool_prompt_gating():
     from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
-    from anton.core.llm.prompts import BACKEND_GENERATION_PROMPT
+    from anton.core.llm.prompts import (
+        ARTIFACTS_PROMPT,
+        BACKEND_GENERATION_PROMPT,
+        NO_DIRECT_REPORTS_ARTIFACTS_PROMPT,
+        NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT,
+        STATIC_ARTIFACTS_PROMPT,
+    )
+    from anton.core.tools.edit_artifact import route_section_to_editor
+    from anton.core.tools.tool_defs import CREATE_ARTIFACT_TOOL
+
+    # Positive check that ENG-4207 edit_artifact SECTION_ROUTES fire on all ARTIFACTS_PROMPT variants
+    expected_route = "when the user names it, call `edit_artifact` with that name as `slug` directly"
+    for variant in (
+        ARTIFACTS_PROMPT,
+        STATIC_ARTIFACTS_PROMPT,
+        NO_DIRECT_REPORTS_ARTIFACTS_PROMPT,
+        NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT,
+    ):
+        routed = route_section_to_editor(variant)
+        assert expected_route in routed
+        assert "Change it with `edit_artifact(slug, task)`" in routed
 
     store = SimpleNamespace(
         list_summaries=lambda: [
@@ -679,15 +699,46 @@ def test_ghost_tool_prompt_gating():
         skill_store=store,
         fullstack_offered=True,
     )
-    # Without browser / launch_backend / generate_artifact in tool_defs: omit dead-tool prompts
+    # tool_defs=None preserves backward-compatible inclusion of all three
+    p_none = builder.build(**common, tool_defs=None)
+    assert BACKEND_GENERATION_PROMPT in p_none
+    assert "- `browser`" in p_none
+    assert "- `build-fullstack-backend`" in p_none
+    assert "fullstack-stateless-app" in p_none
+
+    # Bare coding toolset without artifact/backend/browser tools omits all three consistently
     minimal_tools = [SimpleNamespace(name="scratchpad", input_schema={"properties": {}}, prompt=None)]
     p_min = builder.build(**common, tool_defs=minimal_tools)
     assert BACKEND_GENERATION_PROMPT not in p_min
     assert "- `browser`" not in p_min
     assert "- `build-fullstack-backend`" not in p_min
+    assert "fullstack-stateless-app" not in p_min
     assert "- `public-data-sources`" in p_min
 
-    # With browser + launch_backend registered: both are included
+    # cloud_turn-like toolset: fullstack-capable create_artifact without browser/generate_artifact/launch_backend
+    # omits browser skill while keeping fullstack ARTIFACTS_PROMPT, BACKEND_GENERATION_PROMPT, and build-fullstack-backend
+    cloud_tools = [
+        SimpleNamespace(name="scratchpad", input_schema={"properties": {}}, prompt=None),
+        CREATE_ARTIFACT_TOOL,
+    ]
+    p_cloud = builder.build(**common, tool_defs=cloud_tools)
+    assert "- `browser`" not in p_cloud
+    assert BACKEND_GENERATION_PROMPT in p_cloud
+    assert "- `build-fullstack-backend`" in p_cloud
+    assert "fullstack-stateless-app" in p_cloud
+
+    # Static-only create_artifact (no fullstack enum values) omits fullstack guidance consistently
+    static_create = SimpleNamespace(
+        name="create_artifact",
+        input_schema={"properties": {"type": {"enum": ["html-app", "document"]}}},
+        prompt=None,
+    )
+    p_static = builder.build(**common, tool_defs=[static_create])
+    assert BACKEND_GENERATION_PROMPT not in p_static
+    assert "- `build-fullstack-backend`" not in p_static
+    assert "fullstack-stateless-app" not in p_static
+
+    # With browser + launch_backend registered: all are included
     full_tools = [
         SimpleNamespace(name="browser", input_schema={"properties": {}}, prompt=None),
         SimpleNamespace(name="launch_backend", input_schema={"properties": {}}, prompt=None),

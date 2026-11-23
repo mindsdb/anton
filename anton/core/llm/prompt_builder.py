@@ -222,6 +222,25 @@ class ChatSystemPromptBuilder:
             )
         return "\nCODING & WORKSPACE TOOLS:\n" + "\n".join(lines) + "\n"
 
+    @staticmethod
+    def _tool_offers_fullstack(tool_defs: list[Any] | None) -> bool:
+        """True when ``tool_defs`` is omitted or exposes any tool capable of creating/launching fullstack apps."""
+        if tool_defs is None:
+            return True
+        for tool in tool_defs:
+            name = getattr(tool, "name", "")
+            if name in ("generate_artifact", "launch_backend"):
+                return True
+            if name == "create_artifact":
+                schema = getattr(tool, "input_schema", None) or {}
+                type_prop = (schema.get("properties") or {}).get("type")
+                type_enum = type_prop.get("enum") if isinstance(type_prop, dict) else None
+                if type_enum is None or any(
+                    t in ("fullstack-stateless-app", "fullstack-stateful-app") for t in type_enum
+                ):
+                    return True
+        return False
+
     def build(
         self,
         *,
@@ -257,6 +276,8 @@ class ChatSystemPromptBuilder:
         scratchpad's classify() and classify_yes_no(). ``ui_locale_context`` is
         the language line (`anton.core.llm.ui_locale.ui_locale_line`); empty
         adds nothing."""
+        effective_fullstack = fullstack_offered and self._tool_offers_fullstack(tool_defs)
+        browser_offered = tool_defs is None or any(getattr(t, "name", "") == "browser" for t in tool_defs)
         direct_generation = any(getattr(tool, "name", "") == "generate_artifact"
                                 and "name" in tool.input_schema.get("properties", {})
                                 for tool in tool_defs or [])
@@ -266,7 +287,7 @@ class ChatSystemPromptBuilder:
             direct_generation=direct_generation,
             direct_reports=direct_reports,
         )
-        if fullstack_offered:
+        if effective_fullstack:
             artifacts_section = ARTIFACTS_PROMPT if direct_reports else NO_DIRECT_REPORTS_ARTIFACTS_PROMPT
         else:
             artifacts_section = (STATIC_ARTIFACTS_PROMPT if direct_reports
@@ -275,7 +296,7 @@ class ChatSystemPromptBuilder:
         if direct_generation:
             from .static_artifact_prompt import ARTIFACTS, STATIC_ARTIFACTS
 
-            artifacts_section = ARTIFACTS if fullstack_offered else STATIC_ARTIFACTS
+            artifacts_section = ARTIFACTS if effective_fullstack else STATIC_ARTIFACTS
         # With the artifact editor offered (ENG-4207), changes and repairs go to it.
         if any(getattr(tool, "name", "") == "edit_artifact" for tool in tool_defs or []):
             from anton.core.tools.edit_artifact import route_section_to_editor
@@ -325,16 +346,6 @@ class ChatSystemPromptBuilder:
 
         # Short pointer only — the full backend/fullstack contract lives in the
         # built-in `build-fullstack-backend` skill (recalled on demand).
-        # Gate on actual tool availability when `tool_defs` is explicitly provided
-        # so sessions without `generate_artifact` / `launch_backend` / `browser`
-        # do not receive dead-tool instructions.
-        reg_tool_names = {getattr(t, "name", "") for t in tool_defs} if tool_defs is not None else None
-        backend_tools_offered = (
-            reg_tool_names is None or bool(reg_tool_names & {"generate_artifact", "launch_backend"})
-        )
-        browser_offered = reg_tool_names is None or ("browser" in reg_tool_names)
-        effective_fullstack = fullstack_offered and backend_tools_offered
-
         if effective_fullstack:
             prompt += "\n\n" + BACKEND_GENERATION_PROMPT
 
