@@ -369,7 +369,7 @@ def test_the_judged_reply_survives_a_thread_longer_than_the_convo_budget():
     assert "chars elided" not in out
 
 
-def test_tool_use_summary_shows_scrubbed_targets_and_wider_default_tool_cap():
+def test_tool_use_summary_shows_scrubbed_targets_and_omitted_tool_marker():
     import os
     from anton.utils.datasources import (
         _DS_KNOWN_VARS,
@@ -390,14 +390,13 @@ def test_tool_use_summary_shows_scrubbed_targets_and_wider_default_tool_cap():
         _DS_KNOWN_VARS.add("DS_SF_PROD__PRIVATE_KEY")
         set_ds_env_values({"DS_SF_PROD__PRIVATE_KEY": pem_secret})
 
-        medium_output = "PASS_HEAD " + ("ok " * 200) + "PASS_TAIL"  # ~620 chars (< 800 default)
-        assert 450 < len(medium_output) < 780
         history = [
             {"role": "user", "content": "fix app.py and run pytest"},
             {
                 "role": "assistant",
                 "content": [
                     {"type": "tool_use", "name": "edit_file", "input": {"path": "src/app.py"}},
+                    {"type": "tool_use", "name": "read_image", "input": {"path": 123, "file_path": "img/out.png"}},
                     {
                         "type": "tool_use",
                         "name": "bash",
@@ -420,23 +419,26 @@ def test_tool_use_summary_shows_scrubbed_targets_and_wider_default_tool_cap():
             },
             {
                 "role": "user",
-                "content": [{"type": "tool_result", "content": medium_output}],
+                "content": [{"type": "tool_result", "content": "5 passed in 0.4s"}],
             },
             {"role": "assistant", "content": "Done."},
         ]
         out = _render_verify_transcript(history)
         assert "edit_file (path='src/app.py')" in out
+        assert "read_image (path='img/out.png')" in out
         assert "bash (command=" in out
+        assert "pytest -q" in out  # head+tail clipping preserves trailing verification command
         assert "workdir='/app'" in out
         assert "scratchpad (action='exec', desc='Verify CSV output')" in out
         assert "RAW_CODE_SHOULD_NOT_APPEAR" not in out
         assert "ASSISTANT called tool: custom_tool" in out
-        # Secrets in bash args must be scrubbed BEFORE slicing at 120 chars.
+        # Secrets in bash args must be scrubbed BEFORE head+tail slicing.
         assert "sk-proj-VERIFY" not in out
         assert "VERIFYARGSECRET" not in out
         assert "VERIFYPEMSECRET" not in out
-        # Default tool_cap=800 preserves 620-char output verbatim.
-        assert medium_output in out
+        # When tool events exceed max_tool, an explicit elision marker is emitted.
+        out_narrow = _render_verify_transcript(history, max_tool=2)
+        assert "[... 4 earlier tool events omitted ...]" in out_narrow
     finally:
         _reset_registered_ds_vars()
         for k in list(os.environ):

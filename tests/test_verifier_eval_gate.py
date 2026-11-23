@@ -660,7 +660,8 @@ def test_every_scope_marker_resolves_to_a_span_in_the_code():
     assert set(scope.SPAN_MARKERS["anton/core/session.py"]) == {
         "_VerifierVerdict", "_VERIFIER_TOKEN_BUDGETS", "_VERIFIER_NO_PREAMBLE",
         "_VERIFIER_JUDGMENT_RUBRIC", "_build_verify_request", "_render_verify_transcript",
-        "_render_tool_result_content", "_clip_keep_cause", "_IMAGE_PLACEHOLDER",
+        "_render_tool_result_content", "_clip_keep_cause", "_clip_verify_arg",
+        "_summarize_verify_tool_call", "_IMAGE_PLACEHOLDER",
     }
     # The forced-tool-call body, not only the delegators that call it: a
     # tool_choice mutation inside _generate_object_with read "guard" before.

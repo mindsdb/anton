@@ -1154,11 +1154,13 @@ _VERIFIER_JUDGMENT_RUBRIC = (
     "that returned its contents but does not record what was asked has not "
     "failed, and neither has a guessed table or field name rejected as unknown: "
     "a reply that says the value is not recorded, without substituting a "
-    "related figure, is COMPLETE, not STUCK. Also mark INCOMPLETE if the user "
-    "asked for specific files, code changes, outputs, or checks and the tool "
-    "transcript shows a required deliverable was omitted, modified after the "
-    "last verification run without being re-checked, or contradicted by the "
-    "actual tool output."
+    "related figure, is COMPLETE, not STUCK. Unless the assistant is WAITING on "
+    "the user or STUCK on a documented blocker, also mark INCOMPLETE if the user "
+    "asked for specific files, code changes, outputs, or checks and the visible "
+    "tool transcript shows a required deliverable was modified after the last "
+    "verification run without being re-checked, contradicted by the actual tool "
+    "output, or clearly omitted (do not assume earlier tool calls outside an "
+    "omitted-history window were skipped)."
 )
 
 # Opens the block that shows the model text the user added mid-turn (ENG-4194).
@@ -1601,16 +1603,22 @@ _IMAGE_PLACEHOLDER = "[image]"
 
 
 def _clip_verify_arg(value: object, limit: int = 120) -> str:
-    """Scrub and single-line normalize a tool argument before slicing for the verifier."""
+    """Scrub and single-line normalize a tool argument with head+tail clipping."""
     if not isinstance(value, str):
         return ""
     # Scrub raw text BEFORE whitespace-folding or slicing so multi-line secrets
     # (registered DS_* PEM keys, two-line Bearer tokens) and tokens straddling
     # `limit` can never leak into the verifier prompt.
     cleaned = " ".join(scrub_output(value).split())
-    if len(cleaned) > limit:
-        return cleaned[:limit] + "..."
-    return cleaned
+    if len(cleaned) <= limit:
+        return cleaned
+    marker = " ... "
+    if limit <= len(marker) + 4:
+        return cleaned[:limit]
+    budget = limit - len(marker)
+    head = budget // 2
+    tail = budget - head
+    return f"{cleaned[:head]}{marker}{cleaned[-tail:]}"
 
 
 def _summarize_verify_tool_call(name: object, tool_input: object) -> str:
@@ -1633,8 +1641,8 @@ def _summarize_verify_tool_call(name: object, tool_input: object) -> str:
         if wd:
             parts.append(f"workdir={wd!r}")
     elif tool_name in ("edit_file", "write_file", "read_text_file", "read_image"):
-        path = _clip_verify_arg(
-            tool_input.get("path") or tool_input.get("file_path"), 120
+        path = _clip_verify_arg(tool_input.get("path"), 120) or _clip_verify_arg(
+            tool_input.get("file_path"), 120
         )
         if path:
             parts.append(f"path={path!r}")
@@ -1668,7 +1676,7 @@ def _render_verify_transcript(
     *,
     max_convo: int = 10,
     max_tool: int = 16,
-    tool_cap: int = 800,
+    tool_cap: int = 400,
     text_cap: int = 2000,
     final_cap: int = 12000,
 ) -> str:
@@ -1783,6 +1791,14 @@ def _render_verify_transcript(
         ),
         default=-1,
     )
+    kept_tools = tools[-max_tool:] if max_tool > 0 else []
+    omitted_tools = len(tools) - len(kept_tools)
+    if omitted_tools > 0:
+        anchor_idx = kept_tools[0][0] if kept_tools else tools[-1][0]
+        kept_tools = [
+            (anchor_idx, f"[... {omitted_tools} earlier tool events omitted ...]"),
+            *kept_tools,
+        ]
     kept = [
         (
             i,
@@ -1790,7 +1806,7 @@ def _render_verify_transcript(
             f"{_clip_keep_cause(text, final_cap if n == judged else text_cap)}",
         )
         for n, (i, speaker, text) in enumerate(kept_convo)
-    ] + tools[-max_tool:]
+    ] + kept_tools
     kept.sort(key=lambda entry: entry[0])
     return "\n".join(line for _, line in kept) or "(no conversation)"
 

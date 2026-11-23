@@ -40,6 +40,8 @@ SPAN_MARKERS: dict[str, tuple[str, ...]] = {
         "_render_verify_transcript",
         "_render_tool_result_content",
         "_clip_keep_cause",
+        "_clip_verify_arg",
+        "_summarize_verify_tool_call",
         # Inlined into the transcript the verifier judges (review of #486).
         "_IMAGE_PLACEHOLDER",
     ),
