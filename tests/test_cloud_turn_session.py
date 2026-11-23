@@ -1772,6 +1772,9 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
         "list_artifacts",
         "update_artifact",
         "read_text_file",
+        # Read-only image reader (enforces CellSandbox, image magic-byte sniffing,
+        # and images_refused): accepts only a path, nothing a credential could ride in.
+        "read_image",
         "memorize",
         "recall_skill",
         "create_skill_draft",

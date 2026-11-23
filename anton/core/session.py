@@ -6471,6 +6471,8 @@ class ChatSession:
         _max_auto_retries = 2
         _retry_count = 0
         _drop_retries = 0
+        _total_drop_retries = 0
+        _max_turn_drop_retries = 8
         # The one resend this turn allows after the model refused a request
         # over a render-check screenshot (see the handler below), and whether
         # it still waits for a request that goes through without them. The
@@ -6582,12 +6584,17 @@ class ChatSession:
                         # history without the dropped images; its completion
                         # shows they caused the refusal. Before the generator
                         # resumes, so the tools it runs next see the flag.
-                        if _screenshot_drop_unconfirmed and isinstance(event, StreamComplete):
-                            _screenshot_drop_unconfirmed = False
-                            self._confirm_render_screenshots_refused()
-                        if _tool_image_drop_unconfirmed and isinstance(event, StreamComplete):
-                            _tool_image_drop_unconfirmed = False
-                            self._confirm_tool_images_refused()
+                        if isinstance(event, StreamComplete):
+                            # Forward progress on a completed model call resets the
+                            # consecutive-drop counter so isolated network blips across a
+                            # long multi-step turn do not prematurely exhaust retries.
+                            _drop_retries = 0
+                            if _screenshot_drop_unconfirmed:
+                                _screenshot_drop_unconfirmed = False
+                                self._confirm_render_screenshots_refused()
+                            if _tool_image_drop_unconfirmed:
+                                _tool_image_drop_unconfirmed = False
+                                self._confirm_tool_images_refused()
                         if isinstance(event, StreamTextDelta):
                             assistant_text_parts.append(event.text)
                             if event.text.strip():
@@ -6636,17 +6643,23 @@ class ChatSession:
                     # note, as for any provider blip.
                     if is_stream_drop(_agent_exc):
                         self._seal_dangling_tool_uses("interrupted by a transient provider error")
-                        if _drop_retries < _max_auto_retries:
+                        if _drop_retries < _max_auto_retries and _total_drop_retries < _max_turn_drop_retries:
                             delay = self._transient_backoff_delay(_drop_retries)
                             _drop_retries += 1
+                            _total_drop_retries += 1
                             if await self._backoff_sleep(delay):
                                 break
                             continue
                         _stamp_retry_terminal(
                             self._turn_cost, _agent_exc, "request_attempt_limit"
                         )
+                        attempts_used = (
+                            _total_drop_retries + 1
+                            if _total_drop_retries >= _max_turn_drop_retries
+                            else _drop_retries + 1
+                        )
                         raise self._attempt_limit_error(
-                            _agent_exc, _drop_retries + 1
+                            _agent_exc, attempts_used
                         ) from _agent_exc
 
                     # ENG-673: a mid-stream transient failure that had NO prior

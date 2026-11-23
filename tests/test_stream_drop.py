@@ -151,3 +151,56 @@ async def test_turn_ends_after_the_third_drop():
     assert "incident" not in str(info.value)
     assert info.value.provider == "Anthropic"
     assert info.value.model == "latest:sonnet"
+
+
+async def test_turn_resets_consecutive_drop_counter_after_stream_complete():
+    from anton.core.llm.provider import LLMResponse, StreamComplete
+
+    s = _session()
+    s._transient_budget_s = 0.0
+    s._backoff_sleep = AsyncMock(return_value=False)
+    drop = TransientProviderError(
+        "Lost the connection to Anthropic mid-response — try again in a moment.",
+        provider="Anthropic", code="connection_error", session_backoff=True,
+    )
+    calls = {"n": 0}
+
+    async def _progress_then_drop(_msg: str):
+        calls["n"] += 1
+        # Simulate 4 separate rounds that each complete one model call, then drop on the next
+        if calls["n"] <= 4:
+            yield StreamComplete(response=LLMResponse(content="", stop_reason="tool_use"))
+            raise drop
+        yield StreamTextDelta(text="recovered-across-rounds")
+        yield StreamComplete(response=LLMResponse(content="recovered-across-rounds", stop_reason="end_turn"))
+
+    s._stream_and_handle_tools = _progress_then_drop
+    events = [e async for e in s.turn_stream("long multi-step task")]
+    text = "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert "recovered-across-rounds" in text
+    assert calls["n"] == 5
+    assert s._backoff_sleep.await_count == 4
+
+
+async def test_turn_caps_total_drops_even_with_progress():
+    from anton.core.llm.provider import LLMResponse, StreamComplete
+
+    s = _session()
+    s._transient_budget_s = 0.0
+    s._backoff_sleep = AsyncMock(return_value=False)
+    drop = TransientProviderError(
+        "Lost the connection to Anthropic mid-response — try again in a moment.",
+        provider="Anthropic", code="connection_error", session_backoff=True,
+    )
+    calls = {"n": 0}
+
+    async def _always_progress_then_drop(_msg: str):
+        calls["n"] += 1
+        yield StreamComplete(response=LLMResponse(content="", stop_reason="tool_use"))
+        raise drop
+
+    s._stream_and_handle_tools = _always_progress_then_drop
+    with pytest.raises(ProviderOverloadedError) as info:
+        _ = [e async for e in s.turn_stream("flaky upstream")]
+    assert calls["n"] == 9
+    assert "did not recover after 9 attempts" in str(info.value)

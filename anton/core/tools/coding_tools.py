@@ -89,6 +89,7 @@ _STRIPPED_ENV_PREFIXES = ("ANTON_", "COWORK_")
 # concurrently when a single LLM response batches calls exclusively from this set.
 READ_ONLY_TOOLS = frozenset({
     "read_text_file",
+    "read_image",
     "grep_search",
     "find_files",
 })

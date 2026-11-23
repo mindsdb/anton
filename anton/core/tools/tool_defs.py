@@ -144,22 +144,13 @@ def scratchpad_tool(*, internet_research: bool = True, classify: bool = True) ->
 MEMORIZE_TOOL = ToolDef(
     name="memorize",
     description=(
-        "Encode a rule or lesson into long-term memory for future sessions. "
-        "Use this when you learn something important, discover a useful pattern, "
-        "or the user asks you to remember something.\n\n"
-        "Entry kinds:\n"
-        "- always: Something to always do ('Use httpx instead of requests')\n"
-        "- never: Something to never do ('Never use time.sleep() in scratchpad')\n"
-        "- when: Conditional rule ('If paginated API → use async + progress()')\n"
-        "- lesson: Factual knowledge ('CoinGecko rate-limits at 50/min')\n"
-        "- profile: Fact about who the user is ('Name: Jorge', 'Timezone: PST'). "
-        "An instruction on how to answer or work is a rule, not a profile entry.\n\n"
-        "Scope: 'project' by default. A rule or preference the user gives in this "
-        "conversation is 'project', even when it says 'always': 'Always show "
-        "amounts in EUR' is 'project'. Choose 'global' only when the user says it "
-        "applies to all their projects or everywhere ('In every project, answer in "
-        "English'), or for general knowledge that holds in any project, such as a "
-        "library quirk. A profile entry always goes to global."
+        "Save a rule or lesson to long-term memory.\n"
+        "Kinds: `always` (rule to follow), `never` (rule to avoid), `when` (conditional rule), "
+        "`lesson` (factual knowledge), `profile` (fact about who the user is — "
+        "An instruction on how to answer or work is a rule, not a profile entry.).\n"
+        "Scope: 'project' by default. A rule/preference given here is 'project', even when it says 'always' "
+        "('Always show amounts in EUR' is 'project'). Choose 'global' only when the user says it applies to all their projects "
+        "or for project-independent facts. Profile entries always go to global."
     ),
     input_schema={
         "type": "object",
@@ -171,7 +162,7 @@ MEMORIZE_TOOL = ToolDef(
                     "properties": {
                         "text": {
                             "type": "string",
-                            "description": "The memory to encode",
+                            "description": "Memory text.",
                         },
                         "kind": {
                             "type": "string",
@@ -180,15 +171,11 @@ MEMORIZE_TOOL = ToolDef(
                         "scope": {
                             "type": "string",
                             "enum": ["global", "project"],
-                            "description": (
-                                "'project' unless the user says the entry applies to "
-                                "all their projects, or it is general knowledge that "
-                                "holds in any project; the tool's Scope note says when."
-                            ),
+                            "description": "'project' unless the user says it applies to all their projects or it is project-independent.",
                         },
                         "topic": {
                             "type": "string",
-                            "description": "Topic slug for lessons (e.g. 'api-coingecko')",
+                            "description": "Topic slug for lessons (e.g. 'api-coingecko').",
                         },
                     },
                     "required": ["text", "kind", "scope"],
@@ -260,47 +247,33 @@ CREATE_ARTIFACT_TOOL = ToolDef(
 UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
     name="update_artifact",
     description=(
-        "Update mutable fields on an existing artifact. Pass only the fields you want to change.\n\n"
-        "- `primary`: relative path of the entry-point file (e.g. \"index.html\"). "
-        "Pass empty string to clear (renderer reverts to heuristic: "
-        "`index.html` → newest `.html` → newest non-housekeeping file).\n"
-        "- `port`: port the backend process is listening on (fullstack apps only). "
-        "Normally written automatically by `launch_backend` — set manually only "
-        "if you started the server some other way.\n"
-        "- `datasources`: list of vault-connection slugs the artifact's backend "
-        "reads from (e.g. `[\"postgres-prod_db\", \"hubspot-main\"]`). REQUIRED "
-        "for fullstack apps whose `backend.py` references any "
-        "`DS_<ENGINE>_<NAME>__<FIELD>` env var — declare it right after writing "
-        "`backend.py` so metadata.json "
-        "captures which connections the deployable depends on. Slugs must match "
-        "existing vault connections (see `Connected Data Sources` in the system "
-        "prompt). Pass `[]` to clear."
+        "Update mutable fields on an existing artifact (pass only fields to change).\n"
+        "- `primary`: entry-point relative path (e.g. \"index.html\"); `\"\"` clears to heuristic.\n"
+        "- `port`: port the backend process listens on (fullstack only; normally set by `launch_backend`).\n"
+        "- `datasources`: vault-connection slugs read by `backend.py` (`DS_<ENGINE>_<NAME>__<FIELD>`); "
+        "declare right after writing `backend.py` using Connected Data Sources slugs. `[]` clears."
     ),
     input_schema={
         "type": "object",
         "properties": {
             "slug": {
                 "type": "string",
-                "description": "Folder slug of the artifact to update.",
+                "description": "Artifact folder slug.",
             },
             "primary": {
                 "type": "string",
-                "description": "Relative path of the entry-point file. Empty string to clear.",
+                "description": "Entry-point relative path (`\"\"` to clear).",
             },
             "port": {
                 "type": "integer",
-                "description": "Port number the backend process is listening on.",
+                "description": "Backend listening port.",
             },
             "datasources": {
                 "type": "array",
-                "description": (
-                    "Vault-connection slugs the backend reads from. Replaces "
-                    "the existing list — pass the full set every time. Use "
-                    "`[]` to clear."
-                ),
+                "description": "Full replacement list of vault-connection slugs (`[]` to clear).",
                 "items": {
                     "type": "string",
-                    "description": "Connection slug, e.g. \"postgres-prod_db\".",
+                    "description": "Connection slug (e.g. \"postgres-prod_db\").",
                 },
             },
         },
@@ -313,11 +286,9 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
 LIST_ARTIFACTS_TOOL = ToolDef(
     name="list_artifacts",
     description=(
-        "List the artifacts in this workspace, newest first. An artifact's folder "
-        "is `<root>/<slug>`, and paths in the result are relative to it. Without "
-        "`match` you get a summary (name, type, updatedAt, description, primary); "
-        "with `match` the full record, including id, files and service_files "
-        "(housekeeping and generation files, not what was built)."
+        "List workspace artifacts newest first (folder: `<root>/<slug>`). "
+        "Without `match`: summary (name, type, updatedAt, description, primary); "
+        "with `match`: full record including id, files, and service_files."
     ),
     input_schema={
         "type": "object",
@@ -325,15 +296,12 @@ LIST_ARTIFACTS_TOOL = ToolDef(
             "fields": {
                 "type": "array",
                 "items": {"type": "string", "enum": list(ARTIFACT_LIST_FIELDS)},
-                "description": (
-                    "Fields to return instead of the default set. Every artifact is "
-                    "headed by its slug whatever you ask for, so the slug needs no field."
-                ),
+                "description": "Fields to return instead of default (the slug needs no field).",
             },
             "match": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Slugs or ids of the artifacts to return. Default: all.",
+                "description": "Filter by slugs or ids (default: all).",
             },
         },
     },
@@ -804,57 +772,37 @@ READ_IMAGE_TOOL = ToolDef(
 
 _IMAGES_PROMPT_HEAD = (
     "IMAGES:\n"
-    "- When the user wants a picture — an illustration, a photo, a hero or banner image, "
-    "slide or page images, an icon or a logo concept — make a real one with "
-    "`generate_image`. Never fake it by drawing with matplotlib, PIL, SVG, HTML canvas or "
-    "CSS shapes, and never say you cannot make images. Charts, plots and diagrams of data "
-    "are still drawn with code.\n"
-    "- To change an image (the user's upload, or one you made), pass its path in "
-    "`reference_images` and say what to change and what to keep.\n"
-    "- A picture the user asked for on its own: `generate_image` registers it as an "
-    "`image` artifact itself, so do not call `create_artifact` for it. The picture is not "
-    "in your context: describe it from your prompt, or `read_image` its `absolute_path` "
-    "if you must check it.\n"
-    "- A picture for an artifact (a slide, a document, an app page): an artifact reads "
-    "only files inside its own folder, so save the image there by passing `filename` as a "
-    "path in that folder — `.anton/artifacts/<slug>/hero.png`, or under `static/` for a "
-    "fullstack app — and reference it from the artifact by its path inside the folder. "
-    "For a page `generate_artifact` builds, pass the image's `absolute_path` in its "
-    "`attachments` instead; for a single-file HTML page you write, embed it as a "
-    "`data:` URI.\n"
+    "- For real pictures (illustrations, photos, banners, icons, logos), call `generate_image` — "
+    "never fake them with matplotlib/PIL/SVG/canvas/CSS, and never say you cannot make images. "
+    "Charts, plots and diagrams of data are still drawn with code.\n"
+    "- To edit an image, pass its path in `reference_images` and state what to change and keep.\n"
+    "- Standalone picture: `generate_image` registers an `image` artifact automatically (don't call `create_artifact`); "
+    "describe from your prompt or `read_image` its `absolute_path` to verify.\n"
+    "- Picture for an artifact: save inside its folder via `filename` (`.anton/artifacts/<slug>/hero.png`, or `static/` for fullstack); "
+    "for `generate_artifact`, pass `absolute_path` in `attachments`; for single-file HTML, embed as a `data:` URI.\n"
 )
 # The scratchpad's generate_image(), offered only where it can work (see
 # GENERATE_IMAGE_TOOL_NO_PAD_HELPER).
 _IMAGES_PROMPT_PAD_HELPER = (
-    "- For several images that are parts of one piece of work (a deck's slide images), "
-    "call `generate_image(prompt, size=None, quality=None, reference_images=None, "
-    "path=None)` in the scratchpad instead — a global there, do not import it. It saves "
-    "each image to `path` (relative to the project, or absolute, such as a file in the "
-    "folder `create_artifact` returned), else as an image artifact of its own, returns "
-    "the saved file's absolute path, and counts against the turn's image limit.\n"
+    "- For batch images (e.g. slide decks), call "
+    "`generate_image(prompt, size=None, quality=None, reference_images=None, path=None)` "
+    "in the scratchpad instead (a global there, do not import); saves to `path` or a new artifact, "
+    "returns absolute path, and counts against the turn limit.\n"
 )
 _IMAGES_PROMPT_TAIL = (
-    "- Each image costs the user money: make the images asked for, not unrequested "
-    "variations."
+    "- Each image costs money: generate only requested images, not extra variations."
 )
 
 
 GENERATE_IMAGE_TOOL = ToolDef(
     name="generate_image",
     description=(
-        "Make a real image from a text prompt: an illustration, a photo-like picture, a hero "
-        "or banner image, a slide or page image, an icon or a logo concept. Pass "
-        "`reference_images` to edit images or work from them instead (the user's upload, or "
-        "an image you made). One image per call.\n\n"
-        "Write the prompt as a full description: the subject, composition, style, lighting "
-        "and colors, any text that must appear in the image, and what to avoid. For an edit, "
-        "say what to change and what to keep.\n\n"
-        "The image is saved as a new `image` artifact, or where `filename` says. Returns JSON "
-        "with `status: generated`, `path` (relative to the project), `absolute_path`, "
-        "`artifact_slug`, `width`, `height`, `mime_type`, `model` and `usage` — never the "
-        "image itself. On failure it returns a message to "
-        "relay to the user: a safety refusal, a rate limit, no credits, a provider error. A "
-        "turn may make a limited number of images; the tool says when that is reached."
+        "Generate or edit one image (illustration, photo, banner, icon, logo). "
+        "Describe subject, composition, style, lighting, colors, required text, and exclusions; "
+        "pass `reference_images` to edit existing PNG/JPEG/WebP files.\n"
+        "Saves as a new `image` artifact or at `filename` (project-relative). Returns JSON metadata "
+        "(`status`, `path`, `absolute_path`, `artifact_slug`, `width`, `height`, `mime_type`, `model`, `usage`) "
+        "— never image bytes; relay provider/safety/limit errors to the user."
     ),
     prompt=_IMAGES_PROMPT_HEAD + _IMAGES_PROMPT_PAD_HELPER + _IMAGES_PROMPT_TAIL,
     input_schema={
@@ -862,37 +810,28 @@ GENERATE_IMAGE_TOOL = ToolDef(
         "properties": {
             "prompt": {
                 "type": "string",
-                "description": "What the image shows, in full; for an edit, what to change and what to keep.",
+                "description": "Full image description (or what to change/keep when editing).",
             },
             "reference_images": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": (
-                    "Images to edit or work from: PNG, JPEG or WebP paths, absolute or "
-                    "relative to the project. Given, the call is an edit."
-                ),
+                "description": "PNG/JPEG/WebP paths (absolute or project-relative) to edit or base on.",
             },
             "size": {
                 "type": "string",
-                "description": (
-                    "WIDTHxHEIGHT: 1024x1024 (square), 1536x1024 (landscape), 1024x1536 "
-                    "(portrait), or auto (the default) to let the model choose."
-                ),
+                "description": "WIDTHxHEIGHT: 1024x1024, 1536x1024, 1024x1536, or auto (default).",
             },
             "quality": {
                 "type": "string",
                 "enum": ["auto", "low", "medium", "high"],
-                "description": "low is fastest and cheapest, for drafts; high for final, detailed work. Default auto.",
+                "description": "low (fast/draft), medium, high (final), or auto (default).",
             },
             "filename": {
                 "type": "string",
                 "description": (
-                    "A file name, such as 'hero-banner.png', saves the image as a new image "
-                    "artifact. A path relative to the project saves it there instead: in an "
-                    "artifact's folder ('.anton/artifacts/<slug>/hero.png') to use it in that "
-                    "artifact, or elsewhere in the project ('images/fox.png'). A taken name "
-                    "gets -2, -3, ...; nothing is overwritten. The extension picks the format: "
-                    ".png (the default), .jpg or .webp."
+                    "Bare filename ('hero.png') creates a new image artifact; project-relative path "
+                    "('.anton/artifacts/<slug>/hero.png' or 'images/fox.png') saves there without overwriting (-2, -3). "
+                    "Format from extension: .png (default), .jpg, .webp."
                 ),
             },
         },

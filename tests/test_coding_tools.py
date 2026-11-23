@@ -747,3 +747,11 @@ def test_ghost_tool_prompt_gating():
     assert BACKEND_GENERATION_PROMPT in p_full
     assert "- `browser`" in p_full
     assert "- `build-fullstack-backend`" in p_full
+
+
+def test_read_image_exposed_in_cloud_allowlist_and_readonly_parallel():
+    from anton.cloud_turn.session import CLOUD_TOOL_ALLOWLIST
+    from anton.core.tools.coding_tools import READ_ONLY_TOOLS
+
+    assert "read_image" in CLOUD_TOOL_ALLOWLIST
+    assert "read_image" in READ_ONLY_TOOLS

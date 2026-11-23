@@ -79,6 +79,10 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         "list_artifacts",
         "update_artifact",
         "read_text_file",
+        # Read-only image inspection (always registered in core; enforces
+        # CellSandbox, image magic-byte sniffing, and images_refused). Also
+        # resolves `generate_image`'s prompt reference to `read_image`.
+        "read_image",
         # Safe to list only because a cortex is always built — core registers
         # `memorize` with one, and an allowlist name matching no tool is fatal.
         "memorize",
