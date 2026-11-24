@@ -68,6 +68,8 @@ async def build_chat_session(
 
     Replicates the same wiring the Anton CLI uses: settings → workspace → LLM client →
     memory (cortex + episodes + history) → data vault env injection → ChatSession.
+    Unlike the CLI, its cells get the allowlisted environment, so a workspace
+    ``.env`` name off the allowlist does not reach them.
 
     Parameters
     ----------
