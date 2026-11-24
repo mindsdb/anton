@@ -30,7 +30,7 @@ from anton.core.artifacts.internal_files import (
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault, withheld_fields
 from anton.minds_client import minds_request, minds_request_with_status
-from anton.publish_access import access_from_owner_side
+from anton.publish_access import WEBSITE_MODE, access_from_owner_side
 from anton.utils.datasources import scrub_credentials
 
 # LLM API key env vars whose values must be stripped from published files.
@@ -389,12 +389,14 @@ def build_access_payload(
         {"mode": "public"}                                          # or None
         {"mode": "password", "password": "plaintext"}
         {"mode": "restricted", "emails": [...], "org_allowed": bool}
+        {"mode": "website"}                     # + "confirmed_by_owner": True on the owner's save
 
     Output (what travels to anton-services):
 
         {"mode": "public"}
         {"mode": "password", "password_hash": "pbkdf2_sha256$...", "pwd_version": N}
         {"mode": "restricted", "allowed_emails": [...], "org_allowed": bool, "access_version": N}
+        {"mode": "website"} or {"mode": "website", "confirmed_by_owner": True}
 
     The plaintext password is hashed here and never forwarded. `previous` is
     the owner-side `.published.json` entry of the last publish: while the
@@ -417,6 +419,13 @@ def build_access_payload(
             "org_allowed": bool(access.get("org_allowed")),
             "access_version": access_version,
         }
+    if mode == WEBSITE_MODE:
+        payload = {"mode": WEBSITE_MODE}
+        # The upload service creates a website only with this flag; it keeps
+        # an existing one without it.
+        if access.get("confirmed_by_owner") is True:
+            payload["confirmed_by_owner"] = True
+        return payload
     return {"mode": "public"}
 
 # Patterns that capture relative paths from HTML attributes and CSS url()
@@ -722,7 +731,8 @@ def publish(
         access: Structured access spec, mutually exclusive with `password`:
                   {"mode": "public"} |
                   {"mode": "password", "password": "..."} |
-                  {"mode": "restricted", "emails": [...], "org_allowed": bool}.
+                  {"mode": "restricted", "emails": [...], "org_allowed": bool} |
+                  {"mode": "website"} (+ "confirmed_by_owner": True).
                   When omitted, a bare `password=` is mapped to password mode.
                   See `build_access_payload` for the outbound shape.
         access_version: Monotonic version bumped whenever the restricted list/
