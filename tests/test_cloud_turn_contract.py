@@ -454,6 +454,19 @@ def test_prompt_and_timeout_are_optional(over):
     [spec] = _host_tools_request([entry]).host_tools
     assert spec.prompt is None
     assert spec.timeout_s == 60
+    assert spec.unlock_skill is None
+
+
+def test_a_host_tool_can_wait_for_a_skill():
+    [spec] = _host_tools_request([_host_tool(unlock_skill="docs")]).host_tools
+    assert spec.unlock_skill == "docs"
+
+
+@pytest.mark.parametrize("value", ["", "Docs", "../docs", 7, "a" * 65])
+def test_a_malformed_unlock_skill_drops_the_entry(value, caplog):
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
+        assert _host_tools_request([_host_tool(unlock_skill=value)]).host_tools == ()
+    assert [r.reason for r in caplog.records] == ["invalid_unlock_skill"]
 
 
 def test_a_request_without_host_tools_has_none_and_logs_nothing(caplog):

@@ -228,6 +228,14 @@ def test_a_proxy_carries_the_spec_and_skips_taken_names(caplog):
     assert (tool.name, tool.description, tool.input_schema, tool.prompt) == (
         "read_note", "Read a note.", {"type": "object"}, "Read notes with read_note.")
     assert any("skipped host tool" in r.getMessage() for r in caplog.records)
+    assert tool.unlock_skill is None
+
+
+def test_a_proxy_waits_for_the_skill_its_spec_names():
+    spec = HostToolSpecV1(name="edit_doc", description="Edit a doc.", input_schema={"type": "object"},
+                          unlock_skill="docs")
+    [tool] = proxy_tool_defs(CloudHostTools(lambda e: None), [spec], set())
+    assert tool.unlock_skill == "docs"
 
 
 async def test_progress_reaches_the_session_with_the_tool_call_id():
@@ -370,6 +378,27 @@ async def test_a_real_session_offers_the_proxy_and_puts_its_prompt_in_the_system
     # `generate_image` is withheld where no images API serves it, as with this mock client.
     assert names == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}) | {"read_note"}
     assert NOTE_TOOL["prompt"] in prompt
+
+
+_NOTES_SKILL = (
+    "---\nname: notes\ndescription: Load before editing notes.\n---\nEdit notes with edit_note.\n"
+)
+
+
+async def test_a_host_tool_that_waits_for_a_skill_registers_once_the_skill_is_recalled(tmp_path, monkeypatch):
+    from anton.core.tools.recall_skill import handle_recall_skill
+
+    waiting = dict(NOTE_TOOL, name="edit_note", unlock_skill="notes")
+    session = _real_session(tmp_path, monkeypatch, bridge=CloudHostTools(lambda e: None),
+                            host_tools=[NOTE_TOOL, waiting],
+                            skills={"notes": {"files": {"SKILL.md": _NOTES_SKILL}}})
+    session._build_tools()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert "read_note" in names and "edit_note" not in names
+    out = await handle_recall_skill(session, {"label": "notes"})
+    assert "Edit notes with edit_note." in str(getattr(out, "content", out))
+    session._build_tools()
+    assert "edit_note" in {t.name for t in session.tool_registry.get_tool_defs()}
 
 
 async def test_a_real_session_without_host_tools_has_no_host_prompt(tmp_path, monkeypatch):

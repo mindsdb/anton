@@ -200,5 +200,6 @@ def proxy_tool_defs(
             input_schema=spec.input_schema,
             handler=_proxy_handler(bridge, spec.name, spec.timeout_s),
             prompt=spec.prompt,
+            unlock_skill=spec.unlock_skill,
         ))
     return tools
