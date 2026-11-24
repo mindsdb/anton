@@ -4,6 +4,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import openai
+import pytest
 
 import anton.minds_client as minds_client
 from anton.cli import _setup_openai, _validate_openai_probe_response
@@ -848,6 +849,73 @@ class TestSetupCustomOpenAIAzure:
 
         assert not azure_called
         assert settings.openai_api_version == "2025-01"
+
+
+class TestCustomEndpointScheme:
+    """A base URL typed without a scheme gets https://, unless its host is local.
+
+    Plain HTTP to a public host would send the API key in clear text, so only
+    hosts on this machine or the local network (Ollama, LM Studio) get http://.
+    """
+
+    @pytest.mark.parametrize(
+        ("typed", "expected"),
+        [
+            # Public hosts and public IPs get https://.
+            ("api.example.com/v1", "https://api.example.com/v1"),
+            ("api.mindshub.ai/v1", "https://api.mindshub.ai/v1"),
+            ("8.8.8.8/v1", "https://8.8.8.8/v1"),
+            ("[2606:4700::1111]/v1", "https://[2606:4700::1111]/v1"),
+            # Local names get http://.
+            ("localhost:11434/v1", "http://localhost:11434/v1"),
+            ("ollama.localhost:11434/v1", "http://ollama.localhost:11434/v1"),
+            ("ollama.local:11434", "http://ollama.local:11434"),
+            # Loopback, private and link-local IPs get http://.
+            ("127.0.0.1:8000/v1", "http://127.0.0.1:8000/v1"),
+            ("192.168.1.10:1234/v1", "http://192.168.1.10:1234/v1"),
+            ("10.0.0.5/v1", "http://10.0.0.5/v1"),
+            ("172.16.0.2:8000/v1", "http://172.16.0.2:8000/v1"),
+            ("169.254.10.20:8080/v1", "http://169.254.10.20:8080/v1"),
+            ("[::1]:11434/v1", "http://[::1]:11434/v1"),
+            ("[fd00::5]:8000/v1", "http://[fd00::5]:8000/v1"),
+            # A typed scheme is kept exactly as typed, in any case.
+            ("http://api.example.com/v1", "http://api.example.com/v1"),
+            ("https://localhost:11434/v1", "https://localhost:11434/v1"),
+            ("HTTPS://x.y/v1", "HTTPS://x.y/v1"),
+            # A host that cannot be parsed gets the safe default.
+            ("[::1/v1", "https://[::1/v1"),
+        ],
+    )
+    def test_endpoint_url_with_scheme(self, typed, expected):
+        from anton.cli import _endpoint_url_with_scheme
+
+        assert _endpoint_url_with_scheme(typed=typed) == expected
+
+    def test_setup_probes_and_saves_https_for_a_public_host_typed_without_scheme(self, monkeypatch):
+        """The setup flow itself applies the default, to the probe and to the saved URL."""
+        from anton.cli import _setup_custom_openai
+
+        settings = AntonSettings(_env_file=None)
+        workspace = MagicMock()
+
+        # base_url, api_key, model, api_version (blank)
+        prompts = iter(["api.example.com/v1", "key", "my-model", ""])
+        monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: next(prompts))
+        monkeypatch.setattr("anton.cli._validate_with_spinner", lambda _c, _l, fn: fn())
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = MagicMock(choices=[MagicMock(
+            finish_reason="stop",
+            message=MagicMock(content="pong"),
+        )])
+
+        with patch("anton.cli.openai") as mock_openai_mod:
+            mock_openai_mod.OpenAI.return_value = mock_client
+            _setup_custom_openai(settings, workspace)
+
+        assert mock_openai_mod.OpenAI.call_args.kwargs["base_url"] == "https://api.example.com/v1"
+        assert settings.openai_base_url == "https://api.example.com/v1"
+        workspace.set_secret.assert_any_call("ANTON_OPENAI_BASE_URL", "https://api.example.com/v1")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -71,7 +71,7 @@ OpenAI-compatible endpoint, web search needs an external provider — run
 Works with Ollama, vLLM, Together, Groq, LM Studio, Azure, or any
 OpenAI-compatible API. You provide:
 
-- **Base URL** — e.g. `http://localhost:11434/v1` for Ollama
+- **Base URL** — e.g. `http://localhost:11434/v1` for Ollama. If you leave out the scheme, Anton adds `https://`, or `http://` when the host is `localhost`, a `.localhost` or `.local` name, or a loopback, private or link-local IP address.
 - **API key** — press Enter to skip if your endpoint doesn't need one
 - **Model name**
 - **API version** — leave blank for standard endpoints; required for Azure

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import importlib
+import ipaddress
 import logging
 import os
 import shutil
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import typer
 from rich.console import Console
@@ -1407,6 +1409,40 @@ def _strip_to_azure_endpoint(raw_url: str) -> str:
     return f"{scheme}://{host}"
 
 
+def _is_local_endpoint_host(*, host: str) -> bool:
+    """Return True for a host on this machine or the local network.
+
+    That is ``localhost``, a ``*.localhost`` or ``*.local`` name, or an IP
+    address that is loopback, private (RFC 1918, IPv6 ULA) or link-local.
+    """
+    if host == "localhost" or host.endswith((".localhost", ".local")):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_link_local
+
+
+def _endpoint_url_with_scheme(*, typed: str) -> str:
+    """Return the endpoint URL the user typed, with a scheme added when it has none.
+
+    A typed ``http://`` or ``https://`` (any case) is kept as typed. Without
+    one, a local host gets ``http://``, since local servers such as Ollama
+    and LM Studio usually serve plain HTTP. Every other host gets
+    ``https://``, so the API key does not cross the internet in clear text.
+    A string whose host cannot be parsed also gets ``https://``.
+    """
+    if typed.lower().startswith(("http://", "https://")):
+        return typed
+    try:
+        host = urlsplit(f"//{typed}").hostname or ""
+    except ValueError:
+        host = ""
+    scheme = "http" if _is_local_endpoint_host(host=host) else "https"
+    return f"{scheme}://{typed}"
+
+
 def _setup_custom_openai(settings, ws) -> None:
     """Set up a custom OpenAI-compatible endpoint (Ollama, vLLM, Together, Groq, LM Studio, Azure, etc.)."""
     console.print()
@@ -1420,8 +1456,7 @@ def _setup_custom_openai(settings, ws) -> None:
         if base_url:
             break
         console.print("  [anton.warning]Base URL is required.[/]")
-    if not base_url.startswith("http://") and not base_url.startswith("https://"):
-        base_url = "http://" + base_url
+    base_url = _endpoint_url_with_scheme(typed=base_url)
 
     api_key = _setup_prompt(
         "API key (Enter to skip if not needed)", is_password=True
