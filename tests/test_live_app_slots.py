@@ -794,6 +794,30 @@ def test_a_connection_that_builds_an_earlier_ones_names_is_left_out(second, save
         {"engine": "postgres", "name": second.name, "reason": "name_clash"}]
 
 
+@pytest.mark.parametrize("order", [("prod", "prod--db"), ("prod--db", "prod")], ids=["prod-first", "prod--db-first"])
+@pytest.mark.parametrize("prod_fields", [
+    # prod's DB__USER builds DS_POSTGRES_PROD__DB__USER, the name prod--db's USER would have.
+    {"HOST": "samples.mindsdb.com", "DB__USER": "prod-user"},
+    # No field nests, but every prod--db name still sits in prod's DS_POSTGRES_PROD__ namespace.
+    {"HOST": "samples.mindsdb.com"},
+], ids=["nested-field", "nested-prefix"])
+def test_a_connection_whose_names_sit_in_an_earlier_ones_namespace_is_left_out(order, prod_fields):
+    approved = ApprovedConnections(version=1, connections=(
+        ApprovedConnection(engine="postgres", name="prod", kind="db", host="samples.mindsdb.com", port=5432),
+        ApprovedConnection(engine="postgres", name="prod--db", kind="db", host="db.example.com", port=5432),
+    ))
+    vault = FakeVault({
+        ("postgres", "prod"): prod_fields,
+        ("postgres", "prod--db"): {"HOST": "db.example.com", "PASSWORD": _PG_PASSWORD},
+    })
+    refs = [DatasourceRef(engine="postgres", name=name) for name in order]
+    resolved = las.resolve_connections(vault, refs, approved, slug="a")
+    first, second = order
+    assert [g.slot.name for g in resolved.granted] == [first]
+    assert [m.model_dump() for m in resolved.missing] == [{"engine": "postgres", "name": second, "reason": "name_clash"}]
+    assert resolved.env == vault.env_for("postgres", first)
+
+
 def test_a_connection_declared_twice_is_sent_once():
     vault = FakeVault({("postgres", "demo"): {"HOST": "samples.mindsdb.com", "PASSWORD": _PG_PASSWORD}})
     refs = [_DECLARED[0], DatasourceRef(engine="Postgres", name="Demo")]
@@ -801,6 +825,18 @@ def test_a_connection_declared_twice_is_sent_once():
     assert [g.slot.name for g in resolved.granted] == ["demo"]
     assert resolved.missing == []
     assert resolved.env == {"DS_POSTGRES_DEMO__HOST": "samples.mindsdb.com", "DS_POSTGRES_DEMO__PASSWORD": _PG_PASSWORD}
+
+
+@pytest.mark.parametrize("approved, reason", [
+    (_approved_set(), "not_saved"),
+    (ApprovedConnections(version=1), "not_approved"),
+], ids=["not-saved", "not-approved"])
+def test_a_connection_declared_twice_and_left_out_is_named_once(approved, reason):
+    refs = [_DECLARED[0], DatasourceRef(engine="Postgres", name="Demo")]
+    resolved = las.resolve_connections(FakeVault({}), refs, approved, slug="a")
+    assert [m.model_dump() for m in resolved.missing] == [{"engine": "postgres", "name": "demo", "reason": reason}]
+    assert resolved.granted == []
+    assert resolved.env == {}
 
 
 def test_an_api_approved_for_writes_points_at_its_relay_and_carries_its_override():

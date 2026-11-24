@@ -675,7 +675,9 @@ def _map_datasources(session, ds_keys: list[str]) -> tuple[list, list[str]]:
     """Map DS_* env keys used by backend.py to vault `DatasourceRef`s.
 
     Returns `(refs, unmapped)`. A key maps when some connection's
-    `DS_<ENGINE>_<NAME>` prefix matches `DS_..._<FIELD>`. Mirrors the vault
+    `DS_<ENGINE>_<NAME>` prefix matches `DS_..._<FIELD>`, to the longest such
+    prefix: postgres/prod--db builds DS_POSTGRES_PROD__DB, which also starts
+    with postgres/prod's DS_POSTGRES_PROD__. Mirrors the vault
     lookup already used by `handle_update_artifact` (tool_handlers.py): the
     session attribute is `_data_vault`, falling back to `LocalDataVault()`.
     """
@@ -694,9 +696,10 @@ def _map_datasources(session, ds_keys: list[str]) -> tuple[list, list[str]]:
     refs: list = []
     unmapped: list[str] = []
     for key in ds_keys:
-        match = next(
+        match = max(
             ((e, n) for (e, n) in conns if key.startswith(_slug_env_prefix(e, n) + "__")),
-            None,
+            key=lambda conn: len(_slug_env_prefix(*conn)),
+            default=None,
         )
         if match is None:
             unmapped.append(key)

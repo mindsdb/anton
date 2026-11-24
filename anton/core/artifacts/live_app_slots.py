@@ -129,7 +129,7 @@ MISSING_REASON_TEXT: dict[MissingReason, str] = {
         "or over 128 fields or 1 MiB in all)"
     ),
     "too_many": "past the 32 connections a live app takes",
-    "name_clash": "builds the same DS_ names as another connection the app gets (rename one)",
+    "name_clash": "its DS_ names would mix with those of another connection the app gets (rename one)",
 }
 
 
@@ -719,15 +719,20 @@ def _env_string_bytes(name: str, value: str) -> int:
     return len(name) + 1 + len(value.encode())
 
 
+def _in_namespace(name: str, prefix: str) -> bool:
+    """Whether `name` sits in `prefix`'s `DS_<ENGINE>_<NAME>__` namespace."""
+    return name.startswith(f"{prefix}__")
+
+
 def resolve_connections(
     vault, datasources: Sequence[DatasourceRef], approved: ApprovedConnections, *, slug: str
 ) -> ResolvedConnections:
     """The `DS_*` a launch sends: for each declared connection that the
     operator approved, the person saved pointing at the approved host, the
-    slot would take, and no earlier connection already sends `DS_*` names
-    for. Connections go in declared order, each while the env and the slot's
-    connection count still have room for it. Every other declared connection
-    is named in `missing`.
+    slot would take, and whose `DS_*` names don't mix with an earlier
+    connection's. Connections go in declared order, each while the env and
+    the slot's connection count still have room for it. Every other declared
+    connection is named in `missing`, once.
 
     Resolved per connection with `build_datasource_env`, the resolver both
     in-process launch paths use, so a slot gets exactly what the local
@@ -737,13 +742,17 @@ def resolve_connections(
 
     resolved = ResolvedConnections()
     granted_prefixes: set[str] = set()
+    # Lower-cased, as an approved entry matches a declared one.
+    declared: set[tuple[str, str]] = set()
     for ref in datasources or ():
+        key = (ref.engine.lower(), ref.name.lower())
+        if key in declared:
+            # Declared twice: the first one already went or is named in `missing`.
+            continue
+        declared.add(key)
         entry = approved.find(ref)
         if entry is None:
             resolved.missing.append(_missing(ref, "not_approved"))
-            continue
-        if any(g.approved is entry for g in resolved.granted):
-            # Declared twice: its values already go.
             continue
         if len(resolved.granted) >= MAX_LAUNCH_CONNECTIONS:
             resolved.missing.append(_missing(ref, "too_many"))
@@ -775,11 +784,15 @@ def resolve_connections(
         if not all(_env_value_is_valid(value) for value in env.values()):
             resolved.missing.append(_missing(ref, "field_values"))
             continue
-        # Two approved connections can build one prefix, as postgres/prod-db
-        # and postgres/prod_db both build DS_POSTGRES_PROD_DB, or one name, when
-        # a name or field holds "__". The later one's values would then replace
-        # or sit beside the earlier one's, and the app can't tell them apart.
-        if ref.env_prefix in granted_prefixes or not env.keys().isdisjoint(resolved.env):
+        # Two approved connections can put names in one namespace. postgres/prod-db
+        # and postgres/prod_db both build DS_POSTGRES_PROD_DB. postgres/prod--db
+        # builds DS_POSTGRES_PROD__DB, where postgres/prod's db__user field also
+        # lands. The later one's values would then replace or sit beside the
+        # earlier one's, and the app can't tell them apart.
+        if (ref.env_prefix in granted_prefixes
+                or not env.keys().isdisjoint(resolved.env)
+                or any(_in_namespace(name, prefix) for name in env for prefix in granted_prefixes)
+                or any(_in_namespace(name, ref.env_prefix) for name in resolved.env)):
             resolved.missing.append(_missing(ref, "name_clash"))
             continue
         sent = {**resolved.env, **env}
