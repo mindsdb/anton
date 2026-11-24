@@ -6237,15 +6237,16 @@ class ChatSession:
             if (
                 tc.name in ("edit_file", "write_file")
                 and not block.get("is_error")
-                and not result_str.startswith("Error:")
+                and not result_str.startswith(("Error:", "Tool '"))
             ):
                 raw_path = inp.get("path")
                 if isinstance(raw_path, str) and raw_path.strip():
                     stripped_path = raw_path.strip()
-                    if ws_root_str and not os.path.isabs(stripped_path):
-                        norm_path = os.path.normpath(os.path.join(ws_root_str, stripped_path))
+                    expanded_path = os.path.expanduser(stripped_path)
+                    if ws_root_str and not os.path.isabs(expanded_path):
+                        norm_path = os.path.normpath(os.path.join(ws_root_str, expanded_path))
                     else:
-                        norm_path = os.path.normpath(stripped_path)
+                        norm_path = os.path.normpath(expanded_path)
                     path_sig = hashlib.sha256(norm_path.encode("utf-8", "replace")).hexdigest()
                     if path_sig not in seen_edit_paths_this_round:
                         seen_edit_paths_this_round.add(path_sig)

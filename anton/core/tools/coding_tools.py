@@ -215,6 +215,7 @@ _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _REPEAT_LINE_COLLAPSE_THRESHOLD = 5
 _BINARY_OUTPUT_MIN_CHARS = 512
 _BINARY_OUTPUT_MAX_RATIO = 0.15
+_NON_TEXT_RE = re.compile(r"[\ufffd\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
 def _is_binary_text(text: str) -> tuple[bool, int]:
@@ -228,10 +229,7 @@ def _is_binary_text(text: str) -> tuple[bool, int]:
     n = len(text)
     if n < _BINARY_OUTPUT_MIN_CHARS:
         return False, 0
-    non_text = 0
-    for ch in text:
-        if ch == "\ufffd" or (ord(ch) < 32 and ch not in "\t\n\r"):
-            non_text += 1
+    non_text = n - len(_NON_TEXT_RE.sub("", text))
     ratio = non_text / n
     if ratio > _BINARY_OUTPUT_MAX_RATIO:
         return True, int(round(ratio * 100.0))

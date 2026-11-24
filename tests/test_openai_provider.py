@@ -914,3 +914,80 @@ class TestTCPKeepalive:
         fake_sdk = SimpleNamespace(_client=mock_http)
         _enable_tcp_keepalive(fake_sdk)  # must not raise or mutate MockTransport
         assert isinstance(mock_http._transport, httpx2.MockTransport)
+
+    async def test_session_affinity_routing_opaque_and_scoped(self):
+        from anton.core.llm.tracing import TraceContext, reset_trace_context, set_trace_context
+
+        # Chat Completions path sends opaque `user` + `x-session-id` + `x-session-affinity`
+        provider = OpenAIProvider(api_key="sk-test", base_url="https://api.example.com/v1")
+        try:
+            mock_client = AsyncMock()
+            fake_msg = SimpleNamespace(content="ok", tool_calls=None)
+            fake_choice = SimpleNamespace(message=fake_msg, finish_reason="stop")
+            fake_usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, prompt_tokens_details=None)
+            mock_client.chat.completions.create = AsyncMock(
+                return_value=SimpleNamespace(choices=[fake_choice], usage=fake_usage, model="kimi-k3")
+            )
+            provider._client = mock_client
+
+            tok1 = set_trace_context(TraceContext(session_id="secret-conv-A"))
+            try:
+                await provider.complete(model="kimi-k3", system="s", messages=[{"role": "user", "content": "hi"}])
+                kw1 = mock_client.chat.completions.create.call_args.kwargs
+                await provider.complete(model="kimi-k3", system="s", messages=[{"role": "user", "content": "hi2"}])
+                kw2 = mock_client.chat.completions.create.call_args.kwargs
+            finally:
+                reset_trace_context(tok1)
+
+            tok2 = set_trace_context(TraceContext(session_id="secret-conv-B"))
+            try:
+                await provider.complete(model="kimi-k3", system="s", messages=[{"role": "user", "content": "hi"}])
+                kw3 = mock_client.chat.completions.create.call_args.kwargs
+            finally:
+                reset_trace_context(tok2)
+
+            assert kw1["user"].startswith("anton-")
+            assert "secret-conv-A" not in kw1["user"]
+            assert kw1["user"] == kw2["user"]
+            assert kw1["user"] != kw3["user"]
+            assert kw1["extra_headers"]["x-session-id"] == kw1["user"]
+            assert kw1["extra_headers"]["x-session-affinity"] == kw1["user"]
+        finally:
+            await provider.aclose()
+
+        # Direct OpenAI Responses path sets `prompt_cache_key` without adding `extra_headers`
+        oai = OpenAIProvider(api_key="sk-test", flavor=OpenAIProvider.FLAVOR_OPENAI)
+        try:
+            tok3 = set_trace_context(TraceContext(session_id="secret-conv-C"))
+            try:
+                rkw = oai._build_responses_kwargs(
+                    model="gpt-5", system="s", messages=[{"role": "user", "content": "hi"}],
+                    tools=None, tool_choice=None, max_tokens=100, native_web_tools=None,
+                )
+            finally:
+                reset_trace_context(tok3)
+            assert rkw["prompt_cache_key"].startswith("anton-")
+            assert "secret-conv-C" not in rkw["prompt_cache_key"]
+            assert "extra_headers" not in rkw
+        finally:
+            await oai.aclose()
+
+        # MindsHub Chat Completions merges affinity headers alongside Langfuse trace headers
+        mh = OpenAIProvider(api_key="sk-test", base_url="https://api.mindshub.ai/v1")
+        try:
+            mock_mh = AsyncMock()
+            mock_mh.chat.completions.create = AsyncMock(
+                return_value=SimpleNamespace(choices=[fake_choice], usage=fake_usage, model="kimi-k3")
+            )
+            mh._client = mock_mh
+            tok4 = set_trace_context(TraceContext(session_id="conv-mh-1"))
+            try:
+                await mh.complete(model="kimi-k3", system="s", messages=[{"role": "user", "content": "hi"}])
+                mh_kw = mock_mh.chat.completions.create.call_args.kwargs
+            finally:
+                reset_trace_context(tok4)
+            assert mh_kw["extra_headers"]["Langfuse-Session-Id"] == "conv-mh-1"
+            assert mh_kw["extra_headers"]["x-session-affinity"] == mh_kw["user"]
+            assert "conv-mh-1" not in mh_kw["user"]
+        finally:
+            await mh.aclose()

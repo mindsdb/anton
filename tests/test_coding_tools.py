@@ -1208,6 +1208,20 @@ def test_bash_terminal_output_cleans_ansi_and_progress_and_scrubs_colored_secret
         assert "[binary output suppressed:" not in _scrub_and_clean_terminal(ansi_text)
         short_bin = b"\x00\x01\x02hello" * 10
         assert "[binary output suppressed:" not in _scrub_and_clean_terminal(short_bin)
+
+        # Scratchpad `_clip_stdout` also cleans ANSI, progress bars, and repeat spam while re-scrubbing secrets.
+        from anton.core.backends.local import _clip_stdout
+
+        pad_raw = (
+            f"tok=\x1b[32m{tok[:8]}\x1b[0m{tok[8:]}\n"
+            + "0%\r50%\r100%\n"
+            + "\n".join(["epoch warn"] * 6)
+            + "\ndone"
+        )
+        pad_out = _clip_stdout(pad_raw, total=len(pad_raw), cwd_note="")
+        assert tok not in pad_out
+        assert "[DS_TEST_ANSI__TOKEN]" in pad_out
+        assert "100%\nepoch warn\n... (repeated 5 more times)\ndone" in pad_out
     finally:
         _reset_registered_ds_vars()
         for k in list(os.environ):

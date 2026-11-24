@@ -292,7 +292,17 @@ def _clip_stdout(
     and apply Anton's left-edge defenses (`exact_secret_suffix_at_start` +
     `_without_orphan_region`) to the left-cut tail so orphaned values cannot leak.
     """
+    def _clean_and_rescrub(s: str) -> str:
+        from anton.core.tools.coding_tools import _clean_terminal_output
+
+        cleaned = _clean_terminal_output(s)
+        if cleaned != s:
+            cleaned = scrub_output(cleaned)
+        return cleaned
+
     text = scrub_output(raw)
+    if total <= len(raw):
+        text = _clean_and_rescrub(text)
     if total > MAX_OUTPUT:
         if total <= len(raw):
             # Full output was scrubbed intact with no cut edges.
@@ -321,8 +331,9 @@ def _clip_stdout(
                         safe_tail = tail_text
                     max_tail = min(TAIL_OUTPUT, max(total - keep_head, 0))
                     if max_tail > 0 and safe_tail:
-                        tail_part = safe_tail[-max_tail:]
-                text = format_truncated_stdout(text[:keep_head], tail_part, total)
+                        tail_part = _clean_and_rescrub(safe_tail[-max_tail:])
+                head_part = _clean_and_rescrub(text[:keep_head])
+                text = format_truncated_stdout(head_part, tail_part, total)
             else:
                 text = f"... (output withheld: it could not be scrubbed safely, {total} chars total)"
     if cwd_note:

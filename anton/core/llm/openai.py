@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import logging
 import os
+import secrets
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, NoReturn
@@ -1203,6 +1205,11 @@ class OpenAIProvider(LLMProvider):
                 kwargs["http_client"] = httpx.AsyncClient(verify=False)
             self._client = openai.AsyncOpenAI(**kwargs, timeout=_SDK_TIMEOUT)
 
+        # Per-provider random salt and fallback key for opaque sticky KV-cache
+        # session routing (zero PII / raw Cowork session ID leakage).
+        self._affinity_salt = secrets.token_hex(16)
+        self._default_affinity_key = f"anton-{secrets.token_hex(12)}"
+
         _enable_tcp_keepalive(self._client)
         # After the if/else, not per branch: a future client flavor must not be
         # able to skip registration and leave its pool unclosed.
@@ -1306,6 +1313,24 @@ class OpenAIProvider(LLMProvider):
         filter the tag out.
         """
         return "".join(c for c in tag if c.isprintable() and c != ",").strip()
+
+    def _session_affinity_key(self) -> str:
+        """Return an opaque, per-process sticky KV-cache routing key.
+
+        Hashes ``TraceContext.session_id`` with a per-provider random salt
+        (falling back to a per-provider random token when no session id is set)
+        so distinct conversations on a shared provider stay pinned to their
+        warm inference replica without leaking raw session IDs upstream.
+        """
+        from .tracing import get_trace_context
+
+        ctx = get_trace_context()
+        if ctx is not None and ctx.session_id:
+            digest = hashlib.sha256(
+                f"{self._affinity_salt}:{ctx.session_id}".encode("utf-8", "replace")
+            ).hexdigest()[:24]
+            return f"anton-{digest}"
+        return self._default_affinity_key
 
     def _build_trace_headers(self) -> dict[str, str] | None:
         """Return langfuse-style headers for the active trace, or None.
@@ -1421,9 +1446,12 @@ class OpenAIProvider(LLMProvider):
             kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = _translate_tool_choice(tool_choice)
-        trace_headers = self._build_trace_headers()
-        if trace_headers:
-            kwargs["extra_headers"] = trace_headers
+        affinity_key = self._session_affinity_key()
+        kwargs["user"] = affinity_key
+        chat_headers = dict(self._build_trace_headers() or {})
+        chat_headers["x-session-id"] = affinity_key
+        chat_headers["x-session-affinity"] = affinity_key
+        kwargs["extra_headers"] = chat_headers
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
@@ -1543,9 +1571,12 @@ class OpenAIProvider(LLMProvider):
         merged_tools.extend(_native_web_entries_for_flavor(self._flavor, native_web_tools))
         if merged_tools:
             kwargs["tools"] = merged_tools
-        trace_headers = self._build_trace_headers()
-        if trace_headers:
-            kwargs["extra_headers"] = trace_headers
+        affinity_key = self._session_affinity_key()
+        kwargs["user"] = affinity_key
+        chat_headers = dict(self._build_trace_headers() or {})
+        chat_headers["x-session-id"] = affinity_key
+        chat_headers["x-session-affinity"] = affinity_key
+        kwargs["extra_headers"] = chat_headers
 
         content_text = ""
         tool_calls: list[ToolCall] = []
@@ -1853,6 +1884,8 @@ class OpenAIProvider(LLMProvider):
             kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = _translate_tool_choice_to_responses(tool_choice)
+        if self._flavor == self.FLAVOR_OPENAI:
+            kwargs["prompt_cache_key"] = self._session_affinity_key()
         # Same trace headers as the chat.completions path.
         trace_headers = self._build_trace_headers()
         if trace_headers:
