@@ -414,14 +414,10 @@ def _ensure_vault_gitignored(anton_dir: Path) -> bool:
     Appends when a `.gitignore` already exists rather than skipping: a project
     that happens to have one would otherwise get no protection at all.
     """
-    gitignore = anton_dir / ".gitignore"
-    pattern = ".env*"
+    from anton.utils.gitignore import ensure_gitignored
+
     try:
-        existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
-        if pattern in existing.split():
-            return True
-        prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
-        gitignore.write_text(f"{prefix}{pattern}\n", encoding="utf-8")
+        ensure_gitignored(folder=anton_dir, pattern=".env*")
         return True
     except OSError:
         return False
@@ -619,20 +615,24 @@ def _reconcile_publish_identity(settings) -> bool:
 
 
 def _secure_anton_home() -> None:
-    """Make ~/.anton and its .env private to this user before anything writes there.
+    """Tighten an existing ~/.anton to 0700 and its .env to 0600 before anything reads them.
 
-    Creates ~/.anton at 0700, or tightens one an earlier version left at
-    0755, and tightens its .env to 0600. A symbolic link at ~/.anton is left
-    as it is, and so is the .env behind it. Never fatal, for the reason given
+    An earlier version left both at the umask's modes, such as 0755 and 0644.
+    Nothing is created here: each step that writes into ~/.anton creates it
+    0700. This step leaves a symbolic link at ~/.anton as it is, and the .env
+    behind it too; a later step that writes that .env still makes it 0600
+    through `anton.workspace._open_private`. Never fatal, for the reason given
     at its call site: an OSError here would stop every `anton` command on a
     container with no writable home.
     """
-    from anton.utils.private_dir import anton_home, tighten_private_file
+    from anton.utils.private_dir import make_private_dir, tighten_private_file
 
+    home = Path.home() / ".anton"
     try:
-        home = anton_home()
-        if not home.is_symlink():
-            tighten_private_file(home / ".env")
+        if home.is_symlink() or not home.is_dir():
+            return
+        make_private_dir(path=home)
+        tighten_private_file(path=home / ".env")
     except OSError as exc:
         console.print(f"[anton.muted]  Could not make ~/.anton private: {escape(str(exc))}[/]")
 
@@ -657,6 +657,9 @@ def _ensure_workspace(settings) -> None:
     if not local_ws.is_initialized():
         local_ws.initialize()
         console.print(f"[anton.muted]  workspace is {local_path}/.anton[/]")
+    else:
+        # An earlier version left an existing .anton at the umask's mode.
+        local_ws.make_anton_dir_private()
 
     # Local env wins, then global fills in anything missing (API keys, etc.)
     local_ws.apply_env_to_process()

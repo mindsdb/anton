@@ -249,12 +249,18 @@ def test_parse_requirements_drops_anton_state_before_install():
 # python (here sys.executable); skip only the integration cases if either is
 # absent (a module-level importorskip would skip the pure tests above too).
 import importlib.util
+import os
 
 _HAS_ASGI = (
     importlib.util.find_spec("fastapi") is not None
     and importlib.util.find_spec("mangum") is not None
 )
-_needs_asgi = pytest.mark.skipif(not _HAS_ASGI, reason="fastapi/mangum not installed in the venv")
+# The CI job that installs both sets this, so a missing package fails there
+# instead of skipping into a green check.
+_needs_asgi = pytest.mark.skipif(
+    not _HAS_ASGI and not os.environ.get("ANTON_REQUIRE_SANDBOX_PACKAGES"),
+    reason="fastapi/mangum not installed in the venv",
+)
 
 BACKEND_OK = '''
 import os, argparse

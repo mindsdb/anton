@@ -61,9 +61,10 @@ jobs:
         run: uv run --locked --group dev pytest tests/e2e/ -v --durations=20
 
   sandbox-packages:
-    # The scratchpad image installs the `scratchpad` dependency group; the
-    # unit-test jobs do not. Tests that exercise those packages skip without
-    # them, so they run here, with the group installed.
+    # The scratchpad image installs the `scratchpad` dependency group, and an
+    # app backend's venv holds fastapi and mangum; the unit-test jobs have
+    # neither. Tests that exercise those packages skip without them, so they
+    # run here, with the packages installed.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -77,6 +78,10 @@ jobs:
         env:
           ANTON_REQUIRE_SANDBOX_PACKAGES: "1"
         run: uv run --locked --group dev --group scratchpad pytest tests/test_reading_files_skill.py tests/test_image_smoke.py -v -rs
+      - name: Run the backend verifier tests, which need fastapi and mangum
+        env:
+          ANTON_REQUIRE_SANDBOX_PACKAGES: "1"
+        run: uv run --locked --group dev --with fastapi==0.162.0 --with mangum==0.22.0 pytest tests/test_artifact_verify_backend.py -v -rs
 
   windows-installer:
     runs-on: windows-latest

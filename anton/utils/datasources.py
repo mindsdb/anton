@@ -1698,7 +1698,7 @@ def persist_custom_engine(
     )
     existing = remove_engine_block(existing, slug)
 
-    make_private_dir(user_ds_path.parent)
+    make_private_dir(path=user_ds_path.parent)
     tmp_path.write_text(existing + yaml_block, encoding="utf-8")
 
     parsed = registry.validate_file(tmp_path)

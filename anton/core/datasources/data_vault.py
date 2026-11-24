@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from anton.utils.private_dir import anton_home
+from anton.utils.private_dir import anton_home, make_private_dir
 
 logger = logging.getLogger(__name__)
 
@@ -227,17 +227,18 @@ class LocalDataVault:
     """File-based credential store in ~/.anton/data_vault/."""
 
     def __init__(self, vault_dir: Path | None = None) -> None:
+        # The default folder sits in ~/.anton, which holds keys and memory too,
+        # so ~/.anton is made private before the vault is.
+        self._in_anton_home = vault_dir is None
         self._dir = vault_dir or Path("~/.anton/data_vault").expanduser()
 
     def _path_for(self, engine: str, name: str) -> Path:
         return self._dir / f"{_sanitize(engine)}-{_sanitize(name)}"
 
     def _ensure_dir(self) -> None:
-        if self._dir.parent == Path.home() / ".anton":
-            # The default folder: ~/.anton above it holds keys and memory too.
+        if self._in_anton_home:
             anton_home()
-        self._dir.mkdir(parents=True, exist_ok=True)
-        self._dir.chmod(0o700)
+        make_private_dir(path=self._dir)
 
     def save(
         self,

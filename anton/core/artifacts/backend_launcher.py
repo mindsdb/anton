@@ -137,7 +137,7 @@ def _anton_state_pythonpath_dir() -> str:
     # of this user is starting never finds the entry missing.
     if link.is_symlink() and Path(os.readlink(link)) == pkg:
         return str(root)
-    # Reset the entry, then (re)link — keeps it fresh and simple.
+    # Reset the entry, then (re)link, which keeps it fresh and simple.
     if link.is_symlink() or link.exists():
         if link.is_dir() and not link.is_symlink():
             shutil.rmtree(link)
@@ -174,20 +174,20 @@ def _anton_state_pythonpath_root() -> Path:
         os.mkdir(root, PRIVATE_DIR_MODE)
     except FileExistsError:
         pass
-    refusal = _unsafe_folder_reason(root)
+    refusal = _unsafe_folder_reason(path=root)
     if refusal is None:
         # A umask can leave a new folder narrower than 0700, and an older
         # folder of this user's can be wider.
-        make_private_dir(root)
+        make_private_dir(path=root)
         return root
-    return _own_pythonpath_root(refusal)
+    return _own_pythonpath_root(refusal=refusal)
 
 
-def _own_pythonpath_root(refusal: str) -> Path:
+def _own_pythonpath_root(*, refusal: str) -> Path:
     """This process's mkdtemp folder for `anton_state`, made on first use."""
     global _fallback_pythonpath_root
     cached = _fallback_pythonpath_root
-    if cached is not None and _unsafe_folder_reason(cached) is None:
+    if cached is not None and _unsafe_folder_reason(path=cached) is None:
         return cached
     _log.warning(
         "Refused the shared anton_state import folder; using a fresh one",
@@ -198,7 +198,7 @@ def _own_pythonpath_root(refusal: str) -> Path:
     return cached
 
 
-def _unsafe_folder_reason(path: Path) -> str | None:
+def _unsafe_folder_reason(*, path: Path) -> str | None:
     """Why ``path`` could hold another account's modules, or None when only this user can change it."""
     try:
         st = os.lstat(path)

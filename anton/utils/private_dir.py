@@ -8,11 +8,15 @@ private because their folder is. It changes a folder only when the current
 user owns it, and it never follows a symbolic link at the folder's name: the
 link's target belongs to whoever made the link.
 
-On Windows a new folder takes its parent's access list, and a repository
-outside the profile, such as ``C:\\src\\app``, lets every local account read
-it. `make_private_dir` gives the folder an access list that names only SYSTEM,
-Administrators and the folder's owner, with inheritance removed. That runs
-once per folder: a marker file inside records that the list is in place.
+On Windows a new folder takes its parent's access list. Inside the user's
+profile that list already shuts out other standard accounts, so a folder there,
+such as ``~/.anton``, is only created. A repository outside the profile, such as
+``C:\\src\\app``, lets every local account read it, so for a folder that can
+sit anywhere, such as a project's ``.anton``, `make_private_dir` can give the
+folder an access list that names only SYSTEM, Administrators and the folder's
+owner, with inheritance removed. That runs once per folder: a marker file inside
+records which folder got the list, so a copy or a clone that carries the marker
+gets the list again.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from anton.utils.gitignore import ensure_gitignored
 from anton.utils.nofollow import opened_dir_nofollow
 
 _log = logging.getLogger(__name__)
@@ -40,7 +45,9 @@ PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 
 #: Written inside a folder once its owner-only access list is in place, so
-#: the list is applied once per folder rather than at every call.
+#: the list is applied once per folder rather than at every call. It holds the
+#: folder's volume serial number and file index, and the folder's .gitignore
+#: lists it, so it is never committed.
 WINDOWS_ACL_MARKER = ".owner-only-acl"
 
 #: SYSTEM, Administrators and OWNER RIGHTS, each with full control that every
@@ -56,36 +63,44 @@ OWNER_ONLY_GRANTS = (
 
 
 def anton_home() -> Path:
-    """``~/.anton``, created or made private to the current user."""
+    """``~/.anton``, created or made private to the current user.
+
+    On Windows it is only created: it sits in the user's profile, and an
+    owner-only list there would drop any grant an organization added to the
+    profile.
+    """
     home = Path.home() / ".anton"
-    make_private_dir(home)
+    make_private_dir(path=home)
     return home
 
 
-def make_private_dir(path: Path) -> None:
+def make_private_dir(*, path: Path, windows_acl: bool = False) -> None:
     """Create ``path`` so that only the current user can open it, or make an existing folder so.
 
     Missing parents are created with the default mode, because they belong to
     the user's home or project, not to anton. On macOS and Linux the folder
-    ends 0700. On Windows it gets the owner-only access list once. A symbolic
-    link (or a Windows junction) at the name, and on macOS and Linux a folder
-    another account owns, are left as they are. Raises FileExistsError when
-    something other than a folder holds the name, as
-    ``Path.mkdir(exist_ok=True)`` does.
+    ends 0700. A symbolic link at the name and a folder another account owns
+    are left as they are. So is a folder whose mode can't change, such as one
+    on a read-only mount or a FAT drive: that logs a warning and returns,
+    because the folder still works. Raises FileExistsError when something
+    other than a folder holds the name, as ``Path.mkdir(exist_ok=True)`` does.
+
+    On Windows the folder is only created, with its parent's access list,
+    unless ``windows_acl`` is set. With it, the folder gets the owner-only
+    access list once, and a link or junction at the name is left as it is.
+    Set it for a folder that can sit outside the user's profile.
     """
+    if _IS_WINDOWS and not windows_acl:
+        path.mkdir(parents=True, exist_ok=True)
+        return
     try:
-        os.mkdir(path, PRIVATE_DIR_MODE)
+        _mkdir_unless_taken(path=path)
     except FileNotFoundError:
         path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.mkdir(path, PRIVATE_DIR_MODE)
-        except FileExistsError:
-            pass
-    except FileExistsError:
-        pass
+        _mkdir_unless_taken(path=path)
 
     st = os.lstat(path)
-    if stat.S_ISLNK(st.st_mode) or _is_junction(path):
+    if stat.S_ISLNK(st.st_mode) or _is_junction(path=path):
         _log.info(
             "Left a folder's permissions as they are",
             extra={"event": "private_folder_left", "reason": "symlink"},
@@ -94,7 +109,7 @@ def make_private_dir(path: Path) -> None:
     if not stat.S_ISDIR(st.st_mode):
         raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(path))
     if _IS_WINDOWS:
-        _apply_owner_only_acl(path)
+        _apply_owner_only_acl(path=path, st=st)
         return
     if st.st_uid != os.getuid():
         _log.info(
@@ -104,14 +119,38 @@ def make_private_dir(path: Path) -> None:
         return
     if stat.S_IMODE(st.st_mode) == PRIVATE_DIR_MODE:
         return
-    # Opened without following a link, so a link swapped in after the lstat
-    # raises instead of passing the chmod to its target.
-    with opened_dir_nofollow(path.parent, (path.name,)) as fd:
-        if os.fstat(fd).st_uid == os.getuid():
-            os.fchmod(fd, PRIVATE_DIR_MODE)
+    try:
+        # Opened without following a link, so a link swapped in after the
+        # lstat raises instead of passing the chmod to its target.
+        with opened_dir_nofollow(path.parent, (path.name,)) as fd:
+            if os.fstat(fd).st_uid == os.getuid():
+                os.fchmod(fd, PRIVATE_DIR_MODE)
+    except OSError as exc:
+        _log.warning(
+            "Could not make a folder private",
+            extra={
+                "event": "private_folder_chmod_failed",
+                "reason": errno.errorcode.get(exc.errno, "unknown"),
+                "error_type": type(exc).__name__,
+            },
+        )
 
 
-def tighten_private_file(path: Path) -> None:
+def _mkdir_unless_taken(*, path: Path) -> None:
+    """``os.mkdir(path, 0o700)``, passing over a name something already holds.
+
+    Some systems report EACCES or EROFS rather than EEXIST for a name that
+    exists, as ``Path.mkdir`` notes, so any error counts as taken when
+    something is at the name. FileNotFoundError for a missing parent raises.
+    """
+    try:
+        os.mkdir(path, PRIVATE_DIR_MODE)
+    except OSError:
+        if not os.path.lexists(path):
+            raise
+
+
+def tighten_private_file(*, path: Path) -> None:
     """Make an existing file at ``path`` readable and writable only by its owner (0600).
 
     Does nothing when nothing holds the name, and nothing on Windows, where
@@ -148,7 +187,7 @@ def tighten_private_file(path: Path) -> None:
         os.close(fd)
 
 
-def icacls_command(path: Path) -> list[str]:
+def icacls_command(*, path: Path) -> list[str]:
     """The icacls call that gives ``path`` the owner-only access list.
 
     Named by its full path in System32: a bare ``icacls`` would let Windows
@@ -160,17 +199,26 @@ def icacls_command(path: Path) -> list[str]:
     return [icacls, str(path), "/inheritance:r", "/grant:r", *OWNER_ONLY_GRANTS]
 
 
-def _apply_owner_only_acl(path: Path) -> None:
-    """Give ``path`` the owner-only access list, unless its marker says it has it.
+def _apply_owner_only_acl(*, path: Path, st: os.stat_result) -> None:
+    """Give ``path`` the owner-only access list, unless its marker says this folder has it.
 
-    A failure logs a warning and leaves no marker, so the next call tries again.
+    ``st`` is the folder's own lstat. The marker names the folder by its volume
+    serial number and file index, which a copy or a clone does not share, so a
+    marker that came along with the folder's contents gets the list applied
+    again. A marker that can't be read counts as missing, because applying the
+    list again is safe. A failure logs a warning and leaves the marker as it
+    was, so the next call tries again.
     """
     marker = path / WINDOWS_ACL_MARKER
-    if marker.exists():
-        return
+    identity = f"{st.st_dev}:{st.st_ino}"
+    try:
+        if marker.read_text(encoding="utf-8").strip() == identity:
+            return
+    except (OSError, UnicodeDecodeError):
+        pass
     try:
         result = subprocess.run(
-            icacls_command(path),
+            icacls_command(path=path),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -191,7 +239,9 @@ def _apply_owner_only_acl(path: Path) -> None:
         )
         return
     try:
-        marker.write_bytes(b"")
+        # Listed first, so the marker never shows up as a file to commit.
+        ensure_gitignored(folder=path, pattern=WINDOWS_ACL_MARKER)
+        marker.write_text(identity + "\n", encoding="utf-8")
     except OSError as exc:
         _log.warning(
             "Could not record a folder's owner-only access list",
@@ -199,7 +249,7 @@ def _apply_owner_only_acl(path: Path) -> None:
         )
 
 
-def _is_junction(path: Path) -> bool:
+def _is_junction(*, path: Path) -> bool:
     """Whether ``path`` is a Windows junction; always False elsewhere and before Python 3.12."""
     isjunction = getattr(os.path, "isjunction", None)
     return bool(isjunction and isjunction(path))

@@ -133,7 +133,7 @@ def _check_and_update(result: dict, settings) -> None:
         # Remember this tag so we don't force-reinstall it again next launch
         # (see _SKIP_MARKER) \u2014 that repeated reinstall is what bricks installs.
         try:
-            make_private_dir(_SKIP_MARKER.parent)
+            make_private_dir(path=_SKIP_MARKER.parent)
             _SKIP_MARKER.write_text(latest_tag)
         except Exception:
             pass

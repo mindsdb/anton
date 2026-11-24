@@ -2,7 +2,8 @@
 
 The folder holds API keys, global memory and saved connections. Every step that
 can create it creates it 0700, the terms and first-run steps create ``.env``
-0600, and the CLI tightens an older folder and ``.env`` when it starts.
+0600, and the CLI tightens an older folder and ``.env`` when it starts, along
+with the project's ``.anton``.
 """
 
 from __future__ import annotations
@@ -111,6 +112,23 @@ def test_the_default_data_vault_creates_a_private_home(home):
     assert _mode(home / ".anton" / "data_vault") == 0o700
 
 
+def test_a_symlinked_data_vault_keeps_its_targets_mode(home, tmp_path):
+    """The link's target belongs to whoever made the link; each record is still 0600."""
+    from anton.core.datasources.data_vault import LocalDataVault
+
+    target = tmp_path / "vault-target"
+    target.mkdir()
+    os.chmod(target, 0o755)
+    (home / ".anton").mkdir(mode=0o700)
+    (home / ".anton" / "data_vault").symlink_to(target, target_is_directory=True)
+
+    record = LocalDataVault().save("postgres", "private", {"host": "db.internal"})
+
+    assert _mode(target) == 0o755
+    assert record.resolve().parent == target.resolve()
+    assert _mode(record) == 0o600
+
+
 def test_a_data_vault_elsewhere_leaves_the_home_alone(home, tmp_path):
     from anton.core.datasources.data_vault import LocalDataVault
 
@@ -132,8 +150,44 @@ def test_the_installation_id_creates_a_private_home(home, monkeypatch):
     assert _mode(home / ".anton") == 0o700
 
 
-def _boot_cli(args: list[str]):
-    """Run the real `anton` entry point up to the subcommand, with the network off."""
+async def test_the_cli_chat_creates_a_private_home(home, tmp_path):
+    """The chat keeps its global memory and the skills it saves under ~/.anton."""
+    import anton.chat as chat
+    import anton.chat_session as chat_session
+    from anton.config.settings import AntonSettings
+    from tests.conftest import make_mock_llm
+
+    class Built(Exception):
+        """Stops _chat_loop once it has built its session."""
+
+    def fake_session(config):
+        raise Built
+
+    project = tmp_path / "project"
+    project.mkdir()
+    settings = AntonSettings(episodic_memory=False, _env_file=None)
+    settings.resolve_workspace(str(project))
+    vault = mock.MagicMock()
+    vault.list_connections.return_value = []
+    with (
+        mock.patch("anton.core.llm.client.LLMClient.from_settings", return_value=make_mock_llm()),
+        mock.patch.object(chat, "LocalDataVault", return_value=vault),
+        mock.patch.object(chat, "ChatSession", fake_session),
+        mock.patch.object(chat, "build_runtime_context", lambda _s: ""),
+        mock.patch.object(chat_session, "get_runtime_factory", lambda *_a, **_k: mock.MagicMock()),
+        pytest.raises(Built),
+    ):
+        await chat._chat_loop(mock.MagicMock(), settings)
+
+    assert _mode(home / ".anton") == 0o700
+
+
+def _boot_cli(args: list[str], *, run_chat: mock.Mock | None = None):
+    """Run the real `anton` entry point up to the subcommand, with the network off.
+
+    With no subcommand the entry point opens the project and starts a chat;
+    ``run_chat`` stands in for the chat, so the project steps run for real.
+    """
     from typer.testing import CliRunner
 
     import anton.cli as cli_mod
@@ -145,6 +199,9 @@ def _boot_cli(args: list[str]):
         mock.patch("anton.diagnostics.configure_logging"),
         mock.patch("anton.updater.check_and_update", return_value=False),
         mock.patch("anton.analytics.send_event"),
+        mock.patch.object(cli_mod, "_has_api_key", return_value=True),
+        mock.patch("anton.channel.branding.render_banner"),
+        mock.patch("anton.chat.run_chat", run_chat or mock.Mock()),
     ):
         return CliRunner().invoke(cli_mod.app, args)
 
@@ -182,12 +239,45 @@ def test_the_cli_start_leaves_a_symlinked_home_and_its_env_alone(home, tmp_path)
 
 
 def test_the_cli_start_carries_on_when_the_home_cannot_be_made_private(home, monkeypatch):
-    def refuse():
-        raise PermissionError(13, "Permission denied", str(home / ".anton"))
+    (home / ".anton").mkdir()
+    (home / ".anton" / ".env").write_text("ANTON_ANTHROPIC_API_KEY=secret\n")
 
-    monkeypatch.setattr("anton.utils.private_dir.anton_home", refuse)
+    def refuse(*, path):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr("anton.utils.private_dir.tighten_private_file", refuse)
 
     result = _boot_cli(["--no-update", "version"])
 
     assert result.exit_code == 0, result.output
     assert "Could not make ~/.anton private" in result.output
+
+
+def test_the_cli_start_creates_no_home(home):
+    """A container whose home can't be written must not print an error on every command."""
+    os.chmod(home, 0o555)
+    try:
+        result = _boot_cli(["--no-update", "version"])
+    finally:
+        os.chmod(home, 0o755)
+
+    assert result.exit_code == 0, result.output
+    assert "Could not make ~/.anton private" not in result.output
+    assert not (home / ".anton").exists()
+
+
+def test_the_cli_start_pins_an_existing_project_anton_folder(home, tmp_path):
+    """The project is already set up, so the start never reaches initialize()."""
+    project = tmp_path / "project"
+    anton_dir = project / ".anton"
+    (anton_dir / "memory").mkdir(parents=True)
+    (anton_dir / "anton.md").write_text("# mine\n")
+    os.chmod(anton_dir, 0o755)
+    run_chat = mock.Mock()
+
+    result = _boot_cli(["--no-update", "--folder", str(project)], run_chat=run_chat)
+
+    assert result.exit_code == 0, result.output
+    run_chat.assert_called_once()
+    assert _mode(anton_dir) == 0o700
+    assert (anton_dir / "anton.md").read_text() == "# mine\n"

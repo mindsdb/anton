@@ -1518,7 +1518,11 @@ async def _chat_loop(
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
     del dreg
 
-    global_memory_dir = Path.home() / ".anton" / "memory"
+    from anton.utils.private_dir import anton_home
+
+    # Created here, private, so the global memory and the skills the chat
+    # saves under ~/.anton never create it at the umask's mode.
+    global_memory_dir = anton_home() / "memory"
     project_memory_dir = settings.workspace_path / ".anton" / "memory"
 
     from anton.core.memory.episodes import EpisodicMemory

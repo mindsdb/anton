@@ -178,6 +178,20 @@ class Workspace:
 
     # ── Initialization ───────────────────────────────────────────
 
+    def make_anton_dir_private(self) -> None:
+        """Create ``.anton`` so only the current user can open it, or make an existing one so.
+
+        It holds the project's memory, conversation records and .env. On
+        macOS and Linux it ends 0700. On Windows a project's ``.anton`` gets
+        the owner-only access list once, because the project can sit outside
+        the user's profile, such as ``C:\\src\\app``. ``~/.anton``, the
+        ``.anton`` of a workspace at the home folder, sits in the profile, so
+        it keeps the profile's list. See `make_private_dir`.
+        """
+        base = os.path.normcase(os.path.abspath(self._base))
+        home = os.path.normcase(os.path.abspath(Path.home()))
+        make_private_dir(path=self._anton_dir, windows_acl=base != home)
+
     def initialize(self, *, create_anton_md: bool = True, refuse_links: bool = False) -> list[str]:
         """Create the workspace structure. Returns list of actions taken.
 
@@ -218,15 +232,13 @@ class Workspace:
     def _initialize_once(self, *, create_anton_md: bool = True, refuse_links: bool = False) -> list[str]:
         actions: list[str] = []
 
-        # Create .anton/ directory and memory subdirectory. `.anton` holds the
-        # project's memory, conversation records and .env, so it is private
-        # to the current user, and one that already exists is made so.
+        # Create .anton/ directory and memory subdirectory.
         if refuse_links:
             self._base.mkdir(parents=True, exist_ok=True)
-            make_private_dir(self._anton_dir)
+            self.make_anton_dir_private()
             make_dirs_nofollow(self._base, self._anton_dir / "memory")
         else:
-            make_private_dir(self._anton_dir)
+            self.make_anton_dir_private()
             (self._anton_dir / "memory").mkdir(exist_ok=True)
         actions.append(f"Created {self._anton_dir}")
 
@@ -387,7 +399,7 @@ class Workspace:
         if "\n" in value or "\r" in value:
             raise ValueError(f"{key} must not contain a newline")
 
-        make_private_dir(self._anton_dir)
+        self.make_anton_dir_private()
 
         # Read existing lines
         lines: list[str] = []

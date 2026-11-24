@@ -160,7 +160,7 @@ When you run `anton` in a directory:
 - `.anton/memory/lessons.md` — factual knowledge: things I've learned (stock API quirks, dashboard patterns, data fetching notes).
 - `.anton/memory/topics/*` — topic-specific lessons: deeper notes organized by subject (dashboard-visualization, stock-data-api, etc.).
 
-Only your account can open `.anton/` and the global `~/.anton/`. On macOS and Linux anton creates each folder at `0700` and tightens an older one to `0700` when it starts, and it keeps `~/.anton/.env` at `0600`. On Windows each of these folders gets an access list that names only SYSTEM, Administrators and the folder's owner, so a project outside your profile, such as `C:\src\app`, doesn't share its `.anton/` with other local accounts.
+Only your account can open `.anton/` and the global `~/.anton/`. On macOS and Linux anton creates each folder at `0700`, and it tightens an older one to `0700` when it starts in that project. It keeps `~/.anton/.env` at `0600`. On Windows a project's `.anton/` gets an access list that names only SYSTEM, Administrators and the folder's owner, so a project outside your profile, such as `C:\src\app`, doesn't share its `.anton/` with other local accounts. `~/.anton/` sits in your profile, whose access list already keeps other standard accounts out, so anton leaves that list as it is.
 
 Override the working folder:
 ```bash

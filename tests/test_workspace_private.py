@@ -3,24 +3,31 @@
 It holds the project's memory, conversation records and ``.env``. On macOS and
 Linux the folder is 0700, new or existing. On Windows it gets an access list
 that names only SYSTEM, Administrators and its owner, once, recorded by a
-marker inside. The last test checks that list on a real Windows runner.
+marker inside that names the folder; ``~/.anton`` sits in the profile and keeps
+the profile's list. The last tests check that list on a real Windows runner.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
+import shutil
 import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from anton.workspace import Workspace
 
 _posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and modes")
+
+#: Kept before any test replaces it, for the tests that run git while icacls is faked.
+_real_run = subprocess.run
 
 #: The helper module and its marker are named as text, not imported, so each
 #: test reports its own result against code that predates the helper.
@@ -123,6 +130,45 @@ def test_an_anton_folder_another_account_owns_keeps_its_mode(tmp_path, monkeypat
     assert _mode(anton_dir) == 0o755
 
 
+@_posix_only
+def test_initialize_carries_on_when_the_folder_mode_cannot_change(tmp_path, monkeypatch, caplog, umask_022):
+    """A FAT drive or a read-only mount refuses the chmod, and the folder still works."""
+    anton_dir = tmp_path / ".anton"
+    anton_dir.mkdir()
+    os.chmod(anton_dir, 0o755)
+
+    def refuse(fd, mode):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchmod", refuse)
+
+    with caplog.at_level(logging.WARNING, logger=_HELPER):
+        actions = Workspace(tmp_path).initialize()
+
+    assert f"Created {anton_dir}" in actions
+    assert (anton_dir / ".env").is_file()
+    assert _mode(anton_dir) == 0o755
+    assert [
+        (r.levelno, getattr(r, "event", None), getattr(r, "reason", None))
+        for r in caplog.records if r.name == _HELPER
+    ] == [(logging.WARNING, "private_folder_chmod_failed", "EPERM")]
+
+
+@_posix_only
+def test_initialize_takes_an_existing_folder_whose_mkdir_reports_another_error(tmp_path, monkeypatch):
+    """Some systems answer EROFS or EACCES, not EEXIST, for a folder that exists on a read-only mount."""
+    Workspace(tmp_path).initialize()
+
+    def read_only(path, mode=0o777, **kwargs):
+        raise OSError(errno.EROFS, "Read-only file system", str(path))
+
+    monkeypatch.setattr(os, "mkdir", read_only)
+
+    actions = Workspace(tmp_path).initialize()
+
+    assert actions == [f"Created {tmp_path / '.anton'}"]
+
+
 def test_a_file_at_the_anton_name_still_fails_initialize(tmp_path):
     (tmp_path / ".anton").write_text("not a folder")
 
@@ -196,6 +242,63 @@ def test_windows_gives_an_existing_anton_folder_the_list_once(tmp_path, icacls_c
     assert (tmp_path / ".anton" / "anton.md").read_text() == "# mine\n"
 
 
+def test_windows_gives_a_copy_of_a_marked_anton_folder_the_list_again(tmp_path, icacls_calls):
+    """A clone of a repository that committed the marker, or a copy in Explorer, carries it."""
+    calls, _ = icacls_calls
+    original = tmp_path / "original"
+    original.mkdir()
+    Workspace(original).initialize()
+    copy = tmp_path / "copy"
+    shutil.copytree(original, copy)
+    assert (copy / ".anton" / _MARKER).is_file()
+
+    Workspace(copy).initialize()
+    Workspace(copy).initialize()
+    Workspace(original).initialize()
+
+    assert len(calls) == 2
+    _assert_owner_only_call(calls[1], copy / ".anton")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_windows_keeps_the_marker_out_of_git(tmp_path, icacls_calls):
+    _real_run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".anton").mkdir()
+    (tmp_path / ".anton" / ".gitignore").write_text(".env*")
+
+    Workspace(tmp_path).initialize()
+
+    assert (tmp_path / ".anton" / _MARKER).is_file()
+    # The project's own lines stay, and the marker joins them.
+    assert (tmp_path / ".anton" / ".gitignore").read_text().split() == [".env*", _MARKER]
+    status = _real_run(
+        ["git", "-C", str(tmp_path), "status", "--porcelain", "--untracked-files=all"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert ".anton/anton.md" in status
+    assert _MARKER not in status
+
+
+def test_windows_leaves_the_home_anton_folder_to_the_profiles_list(tmp_path, monkeypatch, icacls_calls):
+    """~/.anton sits in the profile, whose list already shuts out other standard accounts."""
+    from anton.chat import _persist_first_run_done
+
+    calls, _ = icacls_calls
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    Workspace(home).initialize()
+    Workspace(home).set_secret("ANTON_TEST_PRIVATE_KEY", "value")
+    os.environ.pop("ANTON_TEST_PRIVATE_KEY", None)
+    _persist_first_run_done(SimpleNamespace(first_run_done=False))
+
+    assert calls == []
+    assert (home / ".anton" / "anton.md").is_file()
+    assert not (home / ".anton" / _MARKER).exists()
+
+
 def _acl_warnings(caplog) -> list[logging.LogRecord]:
     return [
         r for r in caplog.records
@@ -252,11 +355,21 @@ def _acl(path: Path) -> tuple[bool, set[str]]:
     return bool(data["protected"]), {sids} if isinstance(sids, str) else set(sids)
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="reads a real Windows access list")
-def test_windows_anton_folder_shuts_out_a_users_grant_on_its_project(tmp_path):
+_windows_only = pytest.mark.skipif(sys.platform != "win32", reason="reads a real Windows access list")
+
+
+@pytest.fixture
+def users_readable_project(tmp_path) -> Path:
+    """A project folder that grants Users read, as a folder under ``C:\\`` does."""
     project = tmp_path / "project"
     project.mkdir()
     subprocess.run(["icacls", str(project), "/grant", "*S-1-5-32-545:(OI)(CI)RX"], check=True, capture_output=True)
+    return project
+
+
+@_windows_only
+def test_windows_anton_folder_shuts_out_a_users_grant_on_its_project(users_readable_project):
+    project = users_readable_project
     # A plain folder in the same project inherits that grant, so the check below can fire.
     plain = project / "plain"
     plain.mkdir()
@@ -273,3 +386,28 @@ def test_windows_anton_folder_shuts_out_a_users_grant_on_its_project(tmp_path):
     # The files inside take the folder's list.
     _, env_sids = _acl(project / ".anton" / ".env")
     assert not env_sids & _BROAD_SIDS, env_sids
+
+
+@_windows_only
+def test_windows_existing_anton_folder_and_its_files_lose_a_users_grant(users_readable_project):
+    """An .anton an earlier version made inherits the project's grant, and so does each file in it.
+
+    Python's os.mkdir(mode=0o700) protects only a folder it creates, so this
+    case passes only when icacls replaces the existing folder's list and the
+    change reaches the files already inside.
+    """
+    anton_dir = users_readable_project / ".anton"
+    (anton_dir / "memory").mkdir(parents=True)
+    (anton_dir / ".env").write_text("ANTON_TEST_PRIVATE_KEY=value\n")
+    (anton_dir / "memory" / "x.md").write_text("a note\n")
+    existing = (anton_dir, anton_dir / ".env", anton_dir / "memory" / "x.md")
+    for path in existing:
+        assert "S-1-5-32-545" in _acl(path)[1], path
+
+    Workspace(users_readable_project).initialize()
+
+    assert _acl(anton_dir)[0]
+    for path in existing:
+        _, sids = _acl(path)
+        assert not sids & _BROAD_SIDS, (path, sids)
+    assert (anton_dir / ".env").read_text() == "ANTON_TEST_PRIVATE_KEY=value\n"
