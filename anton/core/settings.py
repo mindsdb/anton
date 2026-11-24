@@ -161,7 +161,7 @@ class CoreSettings(BaseSettings):
     # large-window models (e.g. 1M-token windows where 0.7x = 700k+ tokens).
     # Long tool loops past ~65k tokens multiply repeated prompt cost and
     # degrade recall long before hitting a 1M window. 0 disables the ceiling.
-    context_compaction_max_tokens: int = 65_000
+    context_compaction_max_tokens: int = 75_000
     max_consecutive_errors: int = 5
     resilience_nudge_at: int = 2
     token_status_cache_ttl: float = 60.0

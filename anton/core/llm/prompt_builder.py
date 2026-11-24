@@ -226,7 +226,7 @@ class ChatSystemPromptBuilder:
                 "instead of writing OCR or vision scripts."
             )
         lines.append(
-            "- Act first to gather facts: on your first turn, immediately run a quick "
+            "- Inspect first to gather facts: on your first turn, immediately run a quick "
             "workspace/file/environment inspection before deep planning; batch independent "
             "read/search/edit calls in one response, and iterate in tight edit-and-run cycles "
             "(testing small prototypes directly instead of deriving large implementations in thought)."

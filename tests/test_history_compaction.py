@@ -482,7 +482,7 @@ class TestProactiveAbsoluteTokenCeiling:
     def test_non_int_compaction_max_tokens_falls_back_to_default(self):
         from anton.core.settings import CoreSettings
 
-        assert CoreSettings().context_compaction_max_tokens == 65_000
+        assert CoreSettings().context_compaction_max_tokens == 75_000
 
         mock_settings = MagicMock()
         mock_settings.context_pressure_threshold = 0.7
@@ -501,12 +501,12 @@ class TestProactiveAbsoluteTokenCeiling:
         mock_settings.cell_total_max = 3600
         mock_settings.cell_install_timeout = 120
         mock_settings.cell_keep_recent = 5
-        # MagicMock attribute (unconfigured) must fall back to 65_000
+        # MagicMock attribute (unconfigured) must fall back to 75_000
         session = ChatSession(ChatSessionConfig(
             llm_client=make_mock_llm(),
             settings=mock_settings,
         ))
-        assert session._context_compaction_max_tokens == 65_000
+        assert session._context_compaction_max_tokens == 75_000
 
         # Bool must also be rejected (isinstance(True, int) is True in Python)
         mock_settings.context_compaction_max_tokens = True
@@ -514,7 +514,7 @@ class TestProactiveAbsoluteTokenCeiling:
             llm_client=make_mock_llm(),
             settings=mock_settings,
         ))
-        assert session_bool._context_compaction_max_tokens == 65_000
+        assert session_bool._context_compaction_max_tokens == 75_000
 
     async def test_benign_early_turn_skip_does_not_disable_later_compaction(self):
         """A benign skip on round 0 (len(history) < 6) at >=100k tokens must
@@ -688,12 +688,12 @@ class TestProactiveAbsoluteTokenCeiling:
 
         # Non-milestone round does not fire.
         results: list[dict] = []
-        session._turn_tool_rounds = 24
+        session._turn_tool_rounds = 39
         assert session._maybe_append_strategy_pivot_checkpoint(results) is False
         assert results == []
 
-        # Milestone rounds 25, 50, 80 fire exactly once each.
-        for r in (25, 50, 80):
+        # Milestone rounds 40, 75, 110 fire exactly once each.
+        for r in (40, 75, 110):
             results = []
             session._turn_tool_rounds = r
             assert session._maybe_append_strategy_pivot_checkpoint(results) is True
@@ -707,20 +707,20 @@ class TestProactiveAbsoluteTokenCeiling:
         # Skipped when an unanswered user question ends the turn.
         session._pivot_checkpoints_fired.clear()
         session._unanswered_question = "Which file?"
-        session._turn_tool_rounds = 25
+        session._turn_tool_rounds = 40
         results = []
         assert session._maybe_append_strategy_pivot_checkpoint(results) is False
         assert results == []
 
         # Skipped when round_cap is reached on the milestone round itself.
         session._unanswered_question = None
-        session._max_tool_rounds = 25
+        session._max_tool_rounds = 40
         results = []
         assert session._maybe_append_strategy_pivot_checkpoint(results) is False
         assert results == []
 
     async def test_strategy_pivot_checkpoint_not_duplicated_after_stream_drop_retry(self):
-        """A mid-turn stream drop after round 25 must keep `_pivot_checkpoints_fired`
+        """A mid-turn stream drop after round 40 must keep `_pivot_checkpoints_fired`
         intact across `_stream_and_handle_tools` re-entry."""
         from anton.core.llm.provider import (
             StreamComplete,
@@ -740,7 +740,7 @@ class TestProactiveAbsoluteTokenCeiling:
         async def _plan_stream(**kwargs):
             nonlocal step
             step += 1
-            if step <= 25:
+            if step <= 40:
                 yield StreamComplete(
                     response=LLMResponse(
                         content="",
@@ -749,13 +749,13 @@ class TestProactiveAbsoluteTokenCeiling:
                         stop_reason="tool_use",
                     )
                 )
-            elif step == 26:
+            elif step == 41:
                 raise drop
-            elif step == 27:
+            elif step == 42:
                 yield StreamComplete(
                     response=LLMResponse(
                         content="",
-                        tool_calls=[ToolCall(id="tc_26", name="no_such_tool", input={})],
+                        tool_calls=[ToolCall(id="tc_41", name="no_such_tool", input={})],
                         usage=light,
                         stop_reason="tool_use",
                     )
@@ -777,10 +777,10 @@ class TestProactiveAbsoluteTokenCeiling:
             for m in session._history
             if m.get("role") == "user" and isinstance(m.get("content"), list)
             for b in m["content"]
-            if b.get("type") == "text" and "Checkpoint (round 25)" in b.get("text", "")
+            if b.get("type") == "text" and "Checkpoint (round 40)" in b.get("text", "")
         ]
         assert len(checkpoints) == 1
-        assert session._pivot_checkpoints_fired == {25}
+        assert session._pivot_checkpoints_fired == {40}
 
     async def test_empty_summary_retries_once_and_recovers(self):
         """A transient empty summary response retries once before failing
@@ -990,3 +990,10 @@ class TestProactiveAbsoluteTokenCeiling:
         assert "3 separate" in loop_notes[2][1]
         # After escalation is already sent, a 4th distinct loop still gets a normal check (not a 2nd escalation).
         assert loop_notes[3][0] is True and "Stagnation check" in loop_notes[3][1]
+
+        # hard_truncate_history also clears stagnation counters/escalation state.
+        session2._history = _alternating_history(10, "y" * 80)
+        session2.hard_truncate_history(keep=4)
+        assert session2._stagnation_counts == {}
+        assert session2._stagnation_nudged == set()
+        assert session2._stagnation_escalation_sent is False

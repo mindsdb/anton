@@ -283,21 +283,21 @@ _TRUNCATION_FAILURE_NOTICE = (
 # edit/test loops and long spinning turns with zero extra LLM calls and zero
 # prefix-cache invalidation.
 _STRATEGY_PIVOT_CHECKPOINTS: dict[int, str] = {
-    25: (
-        f"{ANTON_NOTE} Checkpoint (round 25): pause and reassess before making another "
+    40: (
+        f"{ANTON_NOTE} Checkpoint (round 40): pause and reassess before making another "
         "incremental edit. If recent checks are not converging, re-read the exact "
         "requirements and actual failure output from first principles, question your "
         "current assumptions, and switch to a simpler or fundamentally different approach."
     ),
-    50: (
-        f"{ANTON_NOTE} Checkpoint (round 50): you have spent 50 tool rounds on this turn. "
+    75: (
+        f"{ANTON_NOTE} Checkpoint (round 75): you have spent 75 tool rounds on this turn. "
         "Audit whether your current approach is genuinely converging on a verified solution. "
         "If you are stuck tweaking the same failure, step back to the root cause or switch "
         "strategy; if your solution already passes verification, finish cleanly rather than "
         "over-iterating."
     ),
-    80: (
-        f"{ANTON_NOTE} Checkpoint (round 80): you have spent 80 tool rounds on this turn. "
+    110: (
+        f"{ANTON_NOTE} Checkpoint (round 110): you have spent 110 tool rounds on this turn. "
         "Consolidate and run a decisive clean verification — either fix the single confirmed "
         "root cause or stop spinning on a non-converging path and report your best verified "
         "state cleanly."
@@ -1472,6 +1472,8 @@ _SUMMARY_SYSTEM_PROMPT = (
     "## Completed — work already done, each as `action → outcome`\n"
     "## Active state — variables, data, files/artifacts in play and their "
     "current values or paths\n"
+    "## Failed / Ruled Out — approaches, commands, or hypotheses tried that "
+    "failed and why (include exact error/assertion causes so they are not repeated)\n"
     "## Blocked — anything stuck and why\n"
     "## Decisions — choices made and the reason\n"
     "## Remaining — what is still left to do\n\n"
@@ -2271,11 +2273,11 @@ class ChatSession:
         else:
             self._verifier_latch = _VerifierLatch()
         self._context_pressure_threshold = s.context_pressure_threshold
-        raw_compaction_cap = getattr(s, "context_compaction_max_tokens", 65_000)
+        raw_compaction_cap = getattr(s, "context_compaction_max_tokens", 75_000)
         self._context_compaction_max_tokens = (
             raw_compaction_cap
             if isinstance(raw_compaction_cap, int) and not isinstance(raw_compaction_cap, bool)
-            else 65_000
+            else 75_000
         )
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
@@ -4160,7 +4162,7 @@ class ChatSession:
                         elif block.get("type") == "tool_result":
                             lines.append(
                                 f"[tool_result]: "
-                                f"{_clip_keep_cause(str(block.get('content', '')), 500)}"
+                                f"{_clip_keep_cause(str(block.get('content', '')), 800)}"
                             )
 
         old_text = "\n".join(lines)
@@ -4771,6 +4773,9 @@ class ChatSession:
         # later in this session can map a count back onto the seed.
         self._last_compaction = None
         self._compaction_sealed = True
+        self._stagnation_counts.clear()
+        self._stagnation_nudged.clear()
+        self._stagnation_escalation_sent = False
 
     async def plan_with_recovery(
         self,
@@ -6163,13 +6168,16 @@ class ChatSession:
         *,
         raw_outputs: dict[str, str] | None = None,
     ) -> bool:
-        """Detect exact repeated (tool, input, output) cycles and inject one nudge.
+        """Detect exact repeated (tool, input, output) cycles and inject two-tier nudges.
 
-        Stores only SHA-256 digests (never raw tool arguments or outputs), hashes
-        pre-nudge outputs (so resilience/circuit-breaker suffixes don't perturb
-        signatures), normalizes `bash` elapsed-time headers, and piggy-backs an
-        `ANTON_NOTE` block inside `tool_results` (zero extra LLM call, zero
-        prefix-cache invalidation, filtered from verifier views).
+        Emits a tactical pivot check on the 3rd repeat of a signature, and a
+        one-shot per-epoch escalation cue if a signature repeats 5+ times or
+        3+ distinct loops stall. Stores only SHA-256 digests (never raw tool
+        arguments or outputs), hashes pre-nudge outputs (so resilience/circuit-
+        breaker suffixes don't perturb signatures), normalizes `bash` elapsed-
+        time headers, and piggy-backs at most one `ANTON_NOTE` block inside
+        `tool_results` (zero extra LLM call, zero prefix-cache invalidation,
+        filtered from verifier views).
         """
         if self._unanswered_question is not None:
             return False
