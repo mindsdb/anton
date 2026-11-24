@@ -871,29 +871,35 @@ class TestProactiveAbsoluteTokenCeiling:
             }],
         }
 
-        # 5 tool images (< trigger_at=6): no-op, zero history mutation.
-        history = [user_attachment, render_msg] + [_img_msg(i) for i in range(5)]
+        # 8 tool images (< default trigger_at=9): no-op, zero history mutation.
+        history = [user_attachment, render_msg] + [_img_msg(i) for i in range(8)]
         assert drop_older_tool_images(history) == 0
         assert all(m["content"][0]["content"][1]["type"] == "image" for m in history[2:])
 
-        # 6th tool image triggers batch eviction: oldest 3 replaced, newest 3 kept.
-        history.append(_img_msg(5))
-        assert drop_older_tool_images(history) == 3
-        for idx in range(3):
-            block = history[2 + idx]["content"][0]["content"][1]
+        # Explicit lower trigger_at override still works on demand.
+        assert drop_older_tool_images(history, trigger_at=6) == 5
+        assert sum(
+            1 for m in history[2:] if m["content"][0]["content"][1]["type"] == "image"
+        ) == 3
+
+        # Fresh 9-image history triggers default batch eviction: oldest 6 replaced, newest 3 kept.
+        history9 = [user_attachment, render_msg] + [_img_msg(i) for i in range(9)]
+        assert drop_older_tool_images(history9) == 6
+        for idx in range(6):
+            block = history9[2 + idx]["content"][0]["content"][1]
             assert block == {"type": "text", "text": OLDER_TOOL_IMAGE_PLACEHOLDER}
-        for idx in range(3, 6):
-            block = history[2 + idx]["content"][0]["content"][1]
+        for idx in range(6, 9):
+            block = history9[2 + idx]["content"][0]["content"][1]
             assert block["type"] == "image"
             assert block["source"]["data"] == f"DATA_{idx}"
         # User attachment and render screenshot are untouched, and refusal flag is false.
         assert user_attachment["content"][0]["type"] == "image"
         assert render_msg["content"][0]["content"][1]["type"] == "image"
-        assert tool_images_refused(history) is False
+        assert tool_images_refused(history9) is False
 
-        # Unseen current-round parallel batch protection: 2 prior images + a brand-new
-        # 4-image parallel batch in messages[-1] (total 6 >= trigger_at) must evict
-        # only the 2 older seen images and keep all 4 new images intact.
+        # Unseen current-round parallel batch protection: 5 prior images + a brand-new
+        # 4-image parallel batch in messages[-1] (total 9 >= trigger_at) must evict
+        # only the 5 older seen images and keep all 4 new images intact.
         parallel_batch_msg = {
             "role": "user",
             "content": [
@@ -908,10 +914,10 @@ class TestProactiveAbsoluteTokenCeiling:
                 for k in range(4)
             ],
         }
-        batch_history = [_img_msg(0), _img_msg(1), parallel_batch_msg]
-        assert drop_older_tool_images(batch_history) == 2
-        assert batch_history[0]["content"][0]["content"][1] == {"type": "text", "text": OLDER_TOOL_IMAGE_PLACEHOLDER}
-        assert batch_history[1]["content"][0]["content"][1] == {"type": "text", "text": OLDER_TOOL_IMAGE_PLACEHOLDER}
+        batch_history = [_img_msg(i) for i in range(5)] + [parallel_batch_msg]
+        assert drop_older_tool_images(batch_history) == 5
+        for i in range(5):
+            assert batch_history[i]["content"][0]["content"][1] == {"type": "text", "text": OLDER_TOOL_IMAGE_PLACEHOLDER}
         for k in range(4):
             blk = parallel_batch_msg["content"][k]["content"][1]
             assert blk["type"] == "image"

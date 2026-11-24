@@ -966,7 +966,7 @@ def drop_older_screenshots(messages: list[dict]) -> int:
 
 
 def drop_older_tool_images(
-    messages: list[dict], *, keep_recent: int = 3, trigger_at: int = 6
+    messages: list[dict], *, keep_recent: int = 3, trigger_at: int = 9
 ) -> int:
     """Bound accumulated tool-returned images (e.g. `read_image`) in `messages`.
 

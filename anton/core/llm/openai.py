@@ -1269,6 +1269,10 @@ class OpenAIProvider(LLMProvider):
     def accepts_large_output(self) -> bool:
         return self._flavor in (self.FLAVOR_OPENAI, self.FLAVOR_MINDS_PASSTHROUGH)
 
+    @property
+    def supports_streamed_summarize(self) -> bool:
+        return True
+
     def export_connection_info(self) -> ProviderConnectionInfo:
         return ProviderConnectionInfo(
             provider=self.name,
@@ -1619,7 +1623,14 @@ class OpenAIProvider(LLMProvider):
 
         oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
         if self._flavor == self.FLAVOR_MINDS_PASSTHROUGH:
-            oai_messages = _with_claude_cache_breakpoints(oai_messages, model)
+            # One-off compaction calls (`router` role) never resend the same
+            # transcript, so mark only the reusable system prompt (matching `complete`).
+            from .tracing import get_call_role
+
+            mark_messages = (get_call_role() or self.trace_role) != "router"
+            oai_messages = _with_claude_cache_breakpoints(
+                oai_messages, model, mark_messages=mark_messages
+            )
 
         kwargs = build_chat_completion_kwargs(
             model=model,

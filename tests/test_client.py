@@ -452,6 +452,103 @@ class TestRouterRole:
         assert client.router_provider is coding
         assert client.router_model == "model-b"
 
+    async def test_summarize_streams_on_streaming_capable_provider(self, mock_providers):
+        """Real streaming providers (`supports_streamed_summarize = True`) execute
+        summarize() via stream() so large compactions avoid non-streaming timeouts."""
+        from anton.core.llm.provider import TransientProviderError
+
+        planning, _ = mock_providers
+
+        class _StreamingRouterProvider(LLMProvider):
+            supports_streamed_summarize = True
+
+            def __init__(self, mode: str = "ok") -> None:
+                self.mode = mode
+                self.stream_calls = 0
+                self.complete_calls = 0
+                self.roles: list[str | None] = []
+
+            async def complete(self, **kwargs) -> LLMResponse:
+                self.complete_calls += 1
+                return LLMResponse(content="should-not-call-complete", usage=Usage())
+
+            async def stream(self, **kwargs):
+                self.stream_calls += 1
+                self.roles.append(get_call_role())
+                if self.mode == "auth_once" and self.stream_calls == 1:
+                    raise ProviderAuthError("Invalid API key")
+                if self.mode == "auth_always":
+                    raise ProviderAuthError("Invalid API key")
+                if self.mode == "incomplete":
+                    yield StreamTextDelta(text="partial")
+                    return
+                yield StreamTextDelta(text="streamed summary")
+                yield StreamComplete(
+                    response=LLMResponse(
+                        content="streamed summary",
+                        usage=Usage(input_tokens=120, output_tokens=30),
+                        stop_reason="stop",
+                    )
+                )
+
+        # 1. Happy path: streams, never calls complete(), sets role="router", notifies usage.
+        router = _StreamingRouterProvider("ok")
+        client = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=router,
+            coding_model="model-b",
+        )
+        recorded_usage: list[tuple[str, str, int]] = []
+        client.usage_listener = lambda role, model, usage: recorded_usage.append(
+            (role, model, usage.input_tokens)
+        )
+        res = await client.summarize(system="sys", messages=[{"role": "user", "content": "old"}])
+        assert res.content == "streamed summary"
+        assert router.stream_calls == 1
+        assert router.complete_calls == 0
+        assert router.roles == ["router"]
+        assert recorded_usage == [("router", "model-b", 120)]
+
+        # 2. One auth refusal retried via _stream_with_auth_confirmation.
+        router_retry = _StreamingRouterProvider("auth_once")
+        client_retry = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=planning,
+            coding_model="model-b",
+            router_provider=router_retry,
+            router_model="model-c",
+        )
+        res2 = await client_retry.summarize(system="sys", messages=[])
+        assert res2.content == "streamed summary"
+        assert router_retry.stream_calls == 2
+
+        # 3. Persistent auth refusal preserves coding fallback attribution.
+        router_fail = _StreamingRouterProvider("auth_always")
+        client_fail = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=router_fail,
+            coding_model="model-b",
+        )
+        with pytest.raises(ProviderAuthError) as err:
+            await client_fail.summarize(system="sys", messages=[])
+        assert router_fail.stream_calls == 2
+        assert err.value.role == "coding"
+
+        # 4. Stream ending without StreamComplete raises TransientProviderError.
+        router_inc = _StreamingRouterProvider("incomplete")
+        client_inc = LLMClient(
+            planning_provider=planning,
+            planning_model="model-a",
+            coding_provider=router_inc,
+            coding_model="model-b",
+        )
+        with pytest.raises(TransientProviderError) as inc_err:
+            await client_inc.summarize(system="sys", messages=[])
+        assert inc_err.value.code == "incomplete_stream"
+
 
 class TestStructuredOutputRole:
     """The forced-tool-call path shares `_generate_object_with`, so its auth

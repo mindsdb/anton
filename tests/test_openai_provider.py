@@ -1099,3 +1099,71 @@ class TestSessionAffinityRouting:
         finally:
             openai_mod._PROMPT_CACHE_KEY_REFUSED.discard(("", model))
             await oai.aclose()
+
+    async def test_stream_skips_claude_message_cache_marks_for_router_role(self):
+        """Streamed compaction (`router` role) marks only the reusable system prompt,
+        not one-off compaction transcripts, matching non-streaming `complete()`."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from anton.core.llm.anthropic import AnthropicProvider
+        from anton.core.llm.openai import OpenAIProvider
+        from anton.core.llm.tracing import call_role
+
+        provider = OpenAIProvider(
+            api_key="test-key",
+            base_url="https://api.mindshub.ai/v1",
+            flavor=OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH,
+        )
+        assert provider.supports_streamed_summarize is True
+        assert AnthropicProvider.supports_streamed_summarize.fget(None) is True
+
+        captured: list[dict] = []
+
+        async def _fake_create(**kwargs):
+            captured.append(dict(kwargs))
+
+            async def _gen():
+                yield SimpleNamespace(
+                    model="claude-sonnet-4-6",
+                    usage=None,
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="summary", tool_calls=None), finish_reason="stop")],
+                )
+
+            return _gen()
+
+        await provider._client.close()
+        provider._client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=_fake_create)),
+            close=AsyncMock(),
+        )
+        try:
+            with call_role("router"):
+                async for _ in provider.stream(
+                    model="claude-sonnet-4-6",
+                    system="Summarize history",
+                    messages=[{"role": "user", "content": "one-off transcript"}],
+                    max_tokens=1024,
+                ):
+                    pass
+            with call_role("planning"):
+                async for _ in provider.stream(
+                    model="claude-sonnet-4-6",
+                    system="Main prompt",
+                    messages=[{"role": "user", "content": "turn message"}],
+                    max_tokens=1024,
+                ):
+                    pass
+
+            assert len(captured) == 2
+            router_msgs = captured[0]["messages"]
+            planning_msgs = captured[1]["messages"]
+            # Router call: system marked, user transcript NOT marked.
+            assert isinstance(router_msgs[0]["content"], list)
+            assert "cache_control" in router_msgs[0]["content"][0]
+            assert router_msgs[1]["content"] == "one-off transcript"
+            # Planning call: both system and user message marked.
+            assert isinstance(planning_msgs[1]["content"], list)
+            assert "cache_control" in planning_msgs[1]["content"][-1]
+        finally:
+            await provider.aclose()

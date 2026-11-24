@@ -296,6 +296,10 @@ class AnthropicProvider(LLMProvider):
     def accepts_large_output(self) -> bool:
         return True
 
+    @property
+    def supports_streamed_summarize(self) -> bool:
+        return True
+
     def native_web_tools(self) -> set[str]:
         # Anthropic's Messages API ships both server-side web_search and
         # web_fetch tools; we route both through the provider when enabled.
@@ -437,14 +441,19 @@ class AnthropicProvider(LLMProvider):
         native_web_tools: set[str] | None = None,
         reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        from .tracing import get_call_role
+
         web_entries, beta_headers = _build_native_web_tools(native_web_tools)
         merged_tools = list(tools or []) + web_entries
 
+        # One-off compaction calls (`router` role) never resend the same
+        # transcript, so skip message-level cache breakpoints (matching `complete`).
+        is_router_call = (get_call_role() or self.trace_role) == "router"
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
             "system": _cached_system(system),
-            "messages": _cached_messages(messages),
+            "messages": messages if is_router_call else _cached_messages(messages),
         }
         if merged_tools:
             kwargs["tools"] = merged_tools
