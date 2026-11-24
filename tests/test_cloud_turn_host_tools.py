@@ -225,10 +225,9 @@ def test_a_proxy_carries_the_spec_and_skips_taken_names(caplog):
     with caplog.at_level("WARNING", logger="anton.cloud_turn.host_tools"):
         tools = proxy_tool_defs(CloudHostTools(lambda e: None), [taken_spec, SPEC], {"scratchpad"})
     [tool] = tools
-    assert (tool.name, tool.description, tool.input_schema, tool.prompt) == (
-        "read_note", "Read a note.", {"type": "object"}, "Read notes with read_note.")
+    assert (tool.name, tool.description, tool.input_schema, tool.prompt, tool.unlock_skill) == (
+        "read_note", "Read a note.", {"type": "object"}, "Read notes with read_note.", None)
     assert any("skipped host tool" in r.getMessage() for r in caplog.records)
-    assert tool.unlock_skill is None
 
 
 def test_a_proxy_waits_for_the_skill_its_spec_names():
