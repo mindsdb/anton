@@ -4332,7 +4332,7 @@ class ChatSession:
             "request. The most recent user message takes priority; if the user changed "
             "direction, narrowed scope, or cancelled something, follow that and do NOT "
             "resume superseded work described below. Do not repeat approaches already "
-            "recorded under Completed or Blocked; focus directly on Remaining.\n\n"
+            "recorded under Completed, Failed / Ruled Out, or Blocked; focus directly on Remaining.\n\n"
             f"{summary}"
         )
         summary_msg = {"role": "user", "content": summary_body}

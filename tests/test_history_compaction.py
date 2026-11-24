@@ -681,7 +681,7 @@ class TestProactiveAbsoluteTokenCeiling:
         ok = await session._summarize_history()
         assert ok is True
         first_msg = session._history[0]["content"]
-        assert "Do not repeat approaches already recorded under Completed or Blocked" in first_msg
+        assert "Do not repeat approaches already recorded under Completed, Failed / Ruled Out, or Blocked" in first_msg
 
     def test_strategy_pivot_checkpoints_fire_once_and_respect_guards(self):
         session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))

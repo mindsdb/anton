@@ -207,6 +207,47 @@ def _truncate_head_tail(text: str, *, max_chars: int, head_chars: int, tail_char
     )
 
 
+# Linear-time ANSI CSI / OSC escape strippers for terminal output hygiene.
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def _clean_terminal_output(text: str) -> str:
+    """Normalize terminal progress-bar overwrites and ANSI color/cursor escapes.
+
+    Strips ANSI CSI/OSC sequences and collapses carriage-return (`\\r`) progress
+    updates (keeping the final non-empty segment per line while preserving CRLF
+    line endings) so progress spam from installers, compilers, and test runners
+    does not waste context tokens or push real errors out of truncation bounds.
+    """
+    if "\x1b" in text:
+        text = _ANSI_OSC_RE.sub("", text)
+        text = _ANSI_CSI_RE.sub("", text)
+    if "\r" in text:
+        text = text.replace("\r\n", "\n")
+        if "\r" in text:
+            cleaned_lines: list[str] = []
+            for line in text.split("\n"):
+                if "\r" in line:
+                    parts = [p for p in line.split("\r") if p]
+                    cleaned_lines.append(parts[-1] if parts else "")
+                else:
+                    cleaned_lines.append(line)
+            text = "\n".join(cleaned_lines)
+    return text
+
+
+def _scrub_and_clean_terminal(raw: bytes) -> str:
+    """Decode bytes, scrub secrets before and after ANSI stripping, and clean progress spam."""
+    text = raw.decode("utf-8", errors="replace")
+    had_esc = "\x1b" in text
+    scrubbed = scrub_output(text)
+    cleaned = _clean_terminal_output(scrubbed)
+    if had_esc:
+        cleaned = scrub_output(cleaned)
+    return cleaned
+
+
 def _sanitized_shell_env() -> dict[str, str]:
     env: dict[str, str] = {}
     for k, v in os.environ.items():
@@ -306,7 +347,12 @@ async def handle_bash(session: "ChatSession", tc_input: dict) -> ToolOutcome:
         spawn_kwargs: dict = {}
     else:
         shell_bin = "/bin/bash" if Path("/bin/bash").exists() else "/bin/sh"
-        argv = [shell_bin, "-c", command]
+        # Run the user command inside a child shell whose $PPID is the disposable
+        # outer session leader (not Anton's host Python PID). The trailing
+        # `exit "$rc"` prevents GNU bash's tail-call `exec` optimization so a
+        # command running `kill -INT $PPID` can never terminate Anton itself,
+        # while keeping the entire tree inside proc.pid's session for killpg().
+        argv = [shell_bin, "-c", 'rc=0; "$1" -c "$2" || rc=$?; exit "$rc"', "_", shell_bin, command]
         spawn_kwargs = {"start_new_session": True}
 
     t0 = time.monotonic()
@@ -462,15 +508,15 @@ async def handle_bash(session: "ChatSession", tc_input: dict) -> ToolOutcome:
         tail_snap = bytes(tail_buf)
         dropped_snap = dropped_bytes
     if dropped_snap > 0:
-        head_scrubbed = scrub_output(head_snap.decode("utf-8", errors="replace"))
-        tail_scrubbed = scrub_output(tail_snap.decode("utf-8", errors="replace"))
+        head_scrubbed = _scrub_and_clean_terminal(head_snap)
+        tail_scrubbed = _scrub_and_clean_terminal(tail_snap)
         scrubbed = (
             f"{head_scrubbed}\n"
             f"... [omitted {dropped_snap:,} middle bytes of command output] ...\n"
             f"{tail_scrubbed}"
         )
     else:
-        scrubbed = scrub_output((head_snap + tail_snap).decode("utf-8", errors="replace"))
+        scrubbed = _scrub_and_clean_terminal(head_snap + tail_snap)
     output = _truncate_head_tail(
         scrubbed,
         max_chars=MAX_BASH_OUTPUT_CHARS,

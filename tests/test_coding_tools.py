@@ -1073,3 +1073,73 @@ def test_edit_file_smart_mismatch_hint_and_scrubbing():
                 os.environ.update(prev_ds)
 
     asyncio.run(_run())
+
+
+def test_bash_isolates_ppid_from_host_signals():
+    """Commands running inside handle_bash must see the disposable outer shell
+    as $PPID (never Anton's host PID), so `kill -INT $PPID` cannot kill Anton
+    while exact exit codes still propagate."""
+    if os.name == "nt":
+        return
+
+    async def _run():
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sess = _make_session(root)
+
+            # 1. $PPID inside bash command must NOT be our host Python PID.
+            res = await handle_bash(sess, {"command": "echo $PPID"})
+            assert res.ok, res
+            lines = str(res.content).strip().splitlines()
+            reported_ppid = int(lines[-1].strip())
+            assert reported_ppid != os.getpid(), (
+                f"handle_bash exposed host PID {os.getpid()} directly as $PPID"
+            )
+
+            # 2. Sending SIGINT to $PPID from inside a bash command must NOT kill host.
+            sig_res = await handle_bash(
+                sess,
+                {"command": "(sleep 0.05; kill -INT $PPID 2>/dev/null) & wait; echo survived"},
+            )
+            assert isinstance(sig_res.content, str)
+
+            # 3. Non-zero exit codes propagate verbatim through the wrapper shell.
+            rc_res = await handle_bash(sess, {"command": "exit 42"})
+            assert not rc_res.ok and rc_res.reason == "exit_42", rc_res
+
+    asyncio.run(_run())
+
+
+def test_bash_terminal_output_cleans_ansi_and_progress_and_scrubs_colored_secrets():
+    """handle_bash strips ANSI CSI/OSC escapes, collapses \\r progress spam while
+    preserving CRLF lines, and still scrubs secrets wrapped in ANSI sequences."""
+    from anton.core.tools.coding_tools import _clean_terminal_output, _scrub_and_clean_terminal
+    from anton.utils.datasources import (
+        _DS_KNOWN_VARS,
+        _DS_SECRET_VARS,
+        _reset_registered_ds_vars,
+        set_ds_env_values,
+    )
+
+    assert _clean_terminal_output("\x1b[31mERROR:\x1b[0m failed\r\nok") == "ERROR: failed\nok"
+    assert _clean_terminal_output("\x1b]0;window title\x07line1\n0%\r50%\r100%\n") == "line1\n100%\n"
+    assert _clean_terminal_output("keep1\r\nkeep2\r\n") == "keep1\nkeep2\n"
+
+    # ANSI-wrapped registered secret must still be scrubbed cleanly.
+    prev_ds = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
+    try:
+        _reset_registered_ds_vars()
+        tok = "ANSISecret_9876543210_XYZ"
+        _DS_SECRET_VARS.add("DS_TEST_ANSI__TOKEN")
+        _DS_KNOWN_VARS.add("DS_TEST_ANSI__TOKEN")
+        set_ds_env_values({"DS_TEST_ANSI__TOKEN": tok})
+        raw = f"token=\x1b[32m{tok[:8]}\x1b[0m{tok[8:]}\n".encode("utf-8")
+        cleaned = _scrub_and_clean_terminal(raw)
+        assert tok not in cleaned
+        assert "[DS_TEST_ANSI__TOKEN]" in cleaned
+    finally:
+        _reset_registered_ds_vars()
+        for k in list(os.environ):
+            if k.startswith("DS_"):
+                del os.environ[k]
+        os.environ.update(prev_ds)
