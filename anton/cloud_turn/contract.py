@@ -544,8 +544,6 @@ def _parse_limits(value: object, conversation_id: str) -> dict[str, int]:
 _HOST_TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 DEFAULT_HOST_TOOL_TIMEOUT_S = 60
 MAX_HOST_TOOL_TIMEOUT_S = 120
-#: A skill label, as recall_skill resolves it: the folder name of a staged skill.
-_SKILL_LABEL = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 
 
 @dataclass(frozen=True)
@@ -559,7 +557,8 @@ class HostToolSpecV1:
     prompt: str | None = None
     timeout_s: int = DEFAULT_HOST_TOOL_TIMEOUT_S
     #: The tool waits until the agent recalls this skill, as ``ToolDef.unlock_skill``.
-    #: The host sends that skill in the turn's ``skills`` block.
+    #: The host sends that skill in the turn's ``skills`` block, under this
+    #: slug and with this frontmatter ``name``: the recall unlocks by the name.
     unlock_skill: str | None = None
 
 
@@ -585,7 +584,7 @@ def _host_tool_spec(entry: object) -> HostToolSpecV1 | str:
     if not _positive_int(timeout_s) or timeout_s > MAX_HOST_TOOL_TIMEOUT_S:
         return "invalid_timeout"
     unlock_skill = entry.get("unlock_skill")
-    if unlock_skill is not None and (not isinstance(unlock_skill, str) or not _SKILL_LABEL.fullmatch(unlock_skill)):
+    if unlock_skill is not None and not _is_skill_name(unlock_skill):
         return "invalid_unlock_skill"
     return HostToolSpecV1(name, description, input_schema, prompt or None, timeout_s, unlock_skill)
 

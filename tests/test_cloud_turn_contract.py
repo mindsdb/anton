@@ -462,7 +462,7 @@ def test_a_host_tool_can_wait_for_a_skill():
     assert spec.unlock_skill == "docs"
 
 
-@pytest.mark.parametrize("value", ["", "Docs", "../docs", 7, "a" * 65])
+@pytest.mark.parametrize("value", ["", "Docs", "../docs", 7, "a" * 65, "my_skill", "a--b", "docs-"])
 def test_a_malformed_unlock_skill_drops_the_entry(value, caplog):
     with caplog.at_level("WARNING", logger="anton.cloud_turn.contract"):
         assert _host_tools_request([_host_tool(unlock_skill=value)]).host_tools == ()

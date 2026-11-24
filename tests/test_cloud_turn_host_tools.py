@@ -234,8 +234,17 @@ def test_a_proxy_carries_the_spec_and_skips_taken_names(caplog):
 def test_a_proxy_waits_for_the_skill_its_spec_names():
     spec = HostToolSpecV1(name="edit_doc", description="Edit a doc.", input_schema={"type": "object"},
                           unlock_skill="docs")
-    [tool] = proxy_tool_defs(CloudHostTools(lambda e: None), [spec], set())
+    [tool] = proxy_tool_defs(CloudHostTools(lambda e: None), [spec], set(), skills={"docs"})
     assert tool.unlock_skill == "docs"
+
+
+def test_a_proxy_whose_skill_is_not_in_the_turn_is_offered_at_once(caplog):
+    spec = HostToolSpecV1(name="edit_doc", description="Edit a doc.", input_schema={"type": "object"},
+                          unlock_skill="docs")
+    with caplog.at_level("WARNING", logger="anton.cloud_turn.host_tools"):
+        [tool] = proxy_tool_defs(CloudHostTools(lambda e: None), [spec], set(), skills={"notes"})
+    assert tool.unlock_skill is None
+    assert [r.reason for r in caplog.records] == ["skill_missing"]
 
 
 async def test_progress_reaches_the_session_with_the_tool_call_id():
@@ -399,6 +408,14 @@ async def test_a_host_tool_that_waits_for_a_skill_registers_once_the_skill_is_re
     assert "Edit notes with edit_note." in str(getattr(out, "content", out))
     session._build_tools()
     assert "edit_note" in {t.name for t in session.tool_registry.get_tool_defs()}
+
+
+async def test_a_host_tool_whose_skill_was_not_sent_is_registered_at_once(tmp_path, monkeypatch):
+    waiting = dict(NOTE_TOOL, name="edit_note", unlock_skill="notes")
+    session = _real_session(tmp_path, monkeypatch, bridge=CloudHostTools(lambda e: None),
+                            host_tools=[NOTE_TOOL, waiting], skills={})
+    session._build_tools()
+    assert {"read_note", "edit_note"} <= {t.name for t in session.tool_registry.get_tool_defs()}
 
 
 async def test_a_real_session_without_host_tools_has_no_host_prompt(tmp_path, monkeypatch):

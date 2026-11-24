@@ -183,8 +183,14 @@ def _proxy_handler(bridge: CloudHostTools, name: str, timeout_s: int) -> Callabl
 
 def proxy_tool_defs(
     bridge: CloudHostTools, specs: Iterable["HostToolSpecV1"], taken: Collection[str],
+    skills: Collection[str] = (),
 ) -> list["ToolDef"]:
-    """One proxy ``ToolDef`` per spec whose name is not in *taken*; each skipped name logs a warning."""
+    """One proxy ``ToolDef`` per spec whose name is not in *taken*; each skipped name logs a warning.
+
+    A spec waits for its ``unlock_skill`` only when that skill is among the
+    turn's *skills*. Without it no recall could ever unlock the tool, so the
+    tool is offered from the start, with a warning.
+    """
     from anton.core.tools.tool_defs import ToolDef
 
     tools: list[ToolDef] = []
@@ -194,12 +200,18 @@ def proxy_tool_defs(
                            spec.name, extra={"event": "host_tool_skipped", "reason": "name_taken",
                                              "_diagnostic_safe_template": True})
             continue
+        unlock_skill = spec.unlock_skill
+        if unlock_skill is not None and unlock_skill not in skills:
+            logger.warning("cloud turn: host tool %s offered at once, the skill it waits for is not in the turn",
+                           spec.name, extra={"event": "host_tool_unlocked", "reason": "skill_missing",
+                                             "_diagnostic_safe_template": True})
+            unlock_skill = None
         tools.append(ToolDef(
             name=spec.name,
             description=spec.description,
             input_schema=spec.input_schema,
             handler=_proxy_handler(bridge, spec.name, spec.timeout_s),
             prompt=spec.prompt,
-            unlock_skill=spec.unlock_skill,
+            unlock_skill=unlock_skill,
         ))
     return tools

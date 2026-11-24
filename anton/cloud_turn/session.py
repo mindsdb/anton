@@ -1138,6 +1138,7 @@ def build_cloud_chat_session(
             host_tools,
             request.host_tools,
             taken=set(tool_allowlist) | {t.name for t in extra_tools} | _CORE_TOOL_NAMES,
+            skills=turn_skills or (),
         )
         extra_tools.extend(proxies)
         tool_allowlist |= {p.name for p in proxies}
