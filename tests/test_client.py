@@ -537,7 +537,9 @@ class TestRouterRole:
         assert router_fail.stream_calls == 2
         assert err.value.role == "coding"
 
-        # 4. Stream ending without StreamComplete raises TransientProviderError.
+        # 4. Stream ending without StreamComplete raises canonical truncated_stream error.
+        from anton.core.llm.provider import provider_failure_kind
+
         router_inc = _StreamingRouterProvider("incomplete")
         client_inc = LLMClient(
             planning_provider=planning,
@@ -547,7 +549,9 @@ class TestRouterRole:
         )
         with pytest.raises(TransientProviderError) as inc_err:
             await client_inc.summarize(system="sys", messages=[])
-        assert inc_err.value.code == "incomplete_stream"
+        assert inc_err.value.code == "truncated_stream"
+        assert inc_err.value.session_backoff is False
+        assert provider_failure_kind(inc_err.value.code) == "bad_response"
 
 
 class TestStructuredOutputRole:

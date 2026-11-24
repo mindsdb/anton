@@ -1167,3 +1167,93 @@ class TestSessionAffinityRouting:
             assert "cache_control" in planning_msgs[1]["content"][-1]
         finally:
             await provider.aclose()
+
+    async def test_anthropic_stream_skips_message_cache_marks_for_router_role(self):
+        """AnthropicProvider.stream() omits message-level cache_control for router
+        (compaction) calls, keeps it for planning calls, and marks system for both."""
+        from contextlib import asynccontextmanager
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from anton.core.llm.anthropic import AnthropicProvider
+        from anton.core.llm.tracing import call_role
+
+        anth = AnthropicProvider(api_key="test-key")
+        assert anth.supports_streamed_summarize is True
+
+        captured: list[dict] = []
+
+        def _fake_stream(**kwargs):
+            captured.append(dict(kwargs))
+
+            @asynccontextmanager
+            async def _cm():
+                async def _events():
+                    yield SimpleNamespace(
+                        type="message_start",
+                        message=SimpleNamespace(
+                            model="claude-sonnet-4-6",
+                            usage=SimpleNamespace(
+                                input_tokens=10,
+                                output_tokens=0,
+                                cache_read_input_tokens=0,
+                                cache_creation_input_tokens=0,
+                            ),
+                        ),
+                    )
+                    yield SimpleNamespace(
+                        type="content_block_start",
+                        index=0,
+                        content_block=SimpleNamespace(type="text"),
+                    )
+                    yield SimpleNamespace(
+                        type="content_block_delta",
+                        index=0,
+                        delta=SimpleNamespace(type="text_delta", text="ok"),
+                    )
+                    yield SimpleNamespace(
+                        type="message_delta",
+                        delta=SimpleNamespace(stop_reason="end_turn"),
+                        usage=SimpleNamespace(output_tokens=2),
+                    )
+
+                yield _events()
+
+            return _cm()
+
+        await anth._client.close()
+        anth._client = SimpleNamespace(
+            messages=SimpleNamespace(stream=_fake_stream),
+            close=AsyncMock(),
+        )
+        try:
+            with call_role("router"):
+                async for _ in anth.stream(
+                    model="claude-sonnet-4-6",
+                    system="Summarize history",
+                    messages=[{"role": "user", "content": "one-off transcript"}],
+                    max_tokens=1024,
+                ):
+                    pass
+            with call_role("planning"):
+                async for _ in anth.stream(
+                    model="claude-sonnet-4-6",
+                    system="Main prompt",
+                    messages=[{"role": "user", "content": "turn message"}],
+                    max_tokens=1024,
+                ):
+                    pass
+
+            assert len(captured) == 2
+            router_kw, planning_kw = captured
+            # System prompt stays cache-marked on both calls.
+            assert isinstance(router_kw["system"], list)
+            assert "cache_control" in router_kw["system"][-1]
+            assert isinstance(planning_kw["system"], list)
+            assert "cache_control" in planning_kw["system"][-1]
+            # Router call skips message-level cache_control; planning call applies it.
+            assert router_kw["messages"] == [{"role": "user", "content": "one-off transcript"}]
+            assert isinstance(planning_kw["messages"][-1]["content"], list)
+            assert "cache_control" in planning_kw["messages"][-1]["content"][-1]
+        finally:
+            await anth.aclose()

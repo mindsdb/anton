@@ -820,7 +820,8 @@ class LLMClient:
                 raise TransientProviderError(
                     "Model stream ended without a completion response during history summarization.",
                     provider="The model provider",
-                    code="incomplete_stream",
+                    code="truncated_stream",
+                    session_backoff=False,
                     model=self._router_model,
                 )
             self._notify_usage("router", self._router_model, response.usage, listener)
