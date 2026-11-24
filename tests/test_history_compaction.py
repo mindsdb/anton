@@ -781,3 +781,122 @@ class TestProactiveAbsoluteTokenCeiling:
         ]
         assert len(checkpoints) == 1
         assert session._pivot_checkpoints_fired == {25}
+
+    async def test_empty_summary_retries_once_and_recovers(self):
+        """A transient empty summary response (e.g., reasoning model emitting
+        empty visible content) retries once before failing compaction, and
+        doubles budget capped by client max_tokens if truncated."""
+        mock_llm = make_mock_llm()
+        mock_llm.max_tokens = 12_000
+        mock_llm.summarize = AsyncMock(
+            side_effect=[
+                LLMResponse(
+                    content="",
+                    usage=Usage(input_tokens=100, output_tokens=8192),
+                    stop_reason="max_tokens",
+                ),
+                _summarize_response("## Goal\nRecovered on retry"),
+            ]
+        )
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm,
+            initial_history=_alternating_history(10, "x" * 100),
+        ))
+        assert await session._summarize_history() is True
+        assert mock_llm.summarize.await_count == 2
+        assert mock_llm.summarize.await_args_list[0].kwargs["max_tokens"] == 8192
+        assert mock_llm.summarize.await_args_list[1].kwargs["max_tokens"] == 12_000
+        assert "Recovered on retry" in session._history[0]["content"]
+
+    def test_drop_older_tool_images_batches_and_preserves_other_images(self):
+        from anton.core.artifacts.render_check import (
+            OLDER_TOOL_IMAGE_PLACEHOLDER,
+            SCREENSHOT_CAPTION,
+            drop_older_tool_images,
+            tool_images_refused,
+        )
+
+        def _img_msg(i: int) -> dict:
+            return {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": f"tc_{i}",
+                    "content": [
+                        {"type": "text", "text": f"Image {i}"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": f"DATA_{i}"}},
+                    ],
+                }],
+            }
+
+        user_attachment = {
+            "role": "user",
+            "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "USER_IMG"}}],
+        }
+        render_msg = {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "tc_render",
+                "content": [
+                    {"type": "text", "text": f"{SCREENSHOT_CAPTION} index.html"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "RENDER_IMG"}},
+                ],
+            }],
+        }
+
+        # 5 tool images (< trigger_at=6): no-op, zero history mutation.
+        history = [user_attachment, render_msg] + [_img_msg(i) for i in range(5)]
+        assert drop_older_tool_images(history) == 0
+        assert all(m["content"][0]["content"][1]["type"] == "image" for m in history[2:])
+
+        # 6th tool image triggers batch eviction: oldest 3 replaced, newest 3 kept.
+        history.append(_img_msg(5))
+        assert drop_older_tool_images(history) == 3
+        for idx in range(3):
+            block = history[2 + idx]["content"][0]["content"][1]
+            assert block == {"type": "text", "text": OLDER_TOOL_IMAGE_PLACEHOLDER}
+        for idx in range(3, 6):
+            block = history[2 + idx]["content"][0]["content"][1]
+            assert block["type"] == "image"
+            assert block["source"]["data"] == f"DATA_{idx}"
+        # User attachment and render screenshot are untouched, and refusal flag is false.
+        assert user_attachment["content"][0]["type"] == "image"
+        assert render_msg["content"][0]["content"][1]["type"] == "image"
+        assert tool_images_refused(history) is False
+
+    def test_stagnation_detector_fires_once_on_third_identical_cycle(self):
+        from anton.core.llm.provider import ToolCall
+
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        tc = ToolCall(id="tc_1", name="bash", input={"command": "pytest -q"})
+        same_fail = "FAILED tests/test_core.py::test_calc - AssertionError: 1 != 2"
+
+        # Calls 1 and 2 do not nudge.
+        for _ in range(2):
+            tr = [{"type": "tool_result", "tool_use_id": "tc_1", "content": same_fail}]
+            assert session._record_and_maybe_nudge_stagnation([tc], tr) is False
+            assert len(tr) == 1
+
+        # Changing output does not trigger stagnation.
+        tr_diff = [{"type": "tool_result", "tool_use_id": "tc_1", "content": "FAILED tests/test_core.py::test_other - ValueError: bad"}]
+        assert session._record_and_maybe_nudge_stagnation([tc], tr_diff) is False
+
+        # 3rd identical output triggers exactly one stagnation nudge.
+        tr3 = [{"type": "tool_result", "tool_use_id": "tc_1", "content": same_fail}]
+        assert session._record_and_maybe_nudge_stagnation([tc], tr3) is True
+        assert len(tr3) == 2
+        assert "Stagnation check" in tr3[1]["text"]
+
+        # 4th repeat for same signature does not duplicate the nudge.
+        tr4 = [{"type": "tool_result", "tool_use_id": "tc_1", "content": same_fail}]
+        assert session._record_and_maybe_nudge_stagnation([tc], tr4) is False
+        assert len(tr4) == 1
+
+        # Guard: skipped when unanswered question is pending.
+        session._stagnation_counts.clear()
+        session._stagnation_nudged.clear()
+        session._unanswered_question = "Need input?"
+        for _ in range(3):
+            tr_q = [{"type": "tool_result", "tool_use_id": "tc_1", "content": same_fail}]
+            assert session._record_and_maybe_nudge_stagnation([tc], tr_q) is False

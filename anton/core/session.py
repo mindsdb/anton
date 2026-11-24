@@ -190,6 +190,7 @@ from anton.core.artifacts.render_check import (
     confirm_refused_screenshots,
     confirm_refused_tool_images,
     drop_older_screenshots,
+    drop_older_tool_images,
     drop_refused_screenshots,
     drop_refused_tool_images,
     screenshots_refused,
@@ -1476,7 +1477,8 @@ _SUMMARY_SYSTEM_PROMPT = (
     "If a PREVIOUS SUMMARY is provided, update it with the new turns "
     "instead of starting over. If the user changed direction, narrowed "
     "scope, or cancelled something, reflect that — drop superseded items "
-    "from Remaining, don't keep them. Keep it under ~1500 words."
+    "from Remaining, don't keep them. Keep it under ~1500 words. "
+    "Output the markdown state record directly with no preamble."
 )
 
 
@@ -2199,6 +2201,11 @@ class ChatSession:
         # per turn in `_turn_stream_inner` so stream-drop retries never
         # duplicate a checkpoint.
         self._pivot_checkpoints_fired: set[int] = set()
+        # Per-turn SHA-256 repeat-output stagnation tracker (hash-only so no
+        # raw outputs or secrets are retained); reset per turn in
+        # `_turn_stream_inner`.
+        self._stagnation_counts: dict[str, int] = {}
+        self._stagnation_nudged: set[str] = set()
         # Verifier-forced continuations this turn has run, against
         # `max_continuations`. Per turn for the same reason: a retry must
         # not hand out a fresh set. Reset per turn in turn_stream.
@@ -4206,6 +4213,35 @@ class ChatSession:
                 messages=[{"role": "user", "content": user_content}],
                 max_tokens=output_budget_tokens,
             )
+            # Reasoning models occasionally emit an empty visible message on the
+            # first compaction attempt (e.g., hidden thinking consuming tokens or
+            # a short empty stop). Retry once with an explicit direct-output cue
+            # (and up to 2x budget capped by client ceiling if truncated) before
+            # giving up on compaction for the turn.
+            if not (summary_response.content or "").strip():
+                retry_budget = (
+                    min(_SUMMARY_OUTPUT_BUDGET * 2, self._client_max_tokens())
+                    if summary_response.stop_reason == "max_tokens"
+                    else output_budget_tokens
+                )
+                logger.info(
+                    "history summarization: empty first record (stop_reason=%s) — retrying once (budget=%d)",
+                    summary_response.stop_reason,
+                    retry_budget,
+                )
+                summary_response = await self._llm.summarize(
+                    system=_SUMMARY_SYSTEM_PROMPT,
+                    messages=[{
+                        "role": "user",
+                        "content": (
+                            f"{user_content}\n\n"
+                            "Return the concise markdown state record directly in your "
+                            "response text — do not leave the message empty."
+                        ),
+                    }],
+                    max_tokens=retry_budget,
+                )
+                output_budget_tokens = retry_budget
             # A truncated record is kept, not retried:
             # - hitting a cap 4x the requested length means the model ignored the
             #   length instruction, and more room only buys more of the same
@@ -6106,6 +6142,80 @@ class ChatSession:
         tool_results.append({"type": "text", "text": checkpoint_text})
         return True
 
+    def _record_and_maybe_nudge_stagnation(
+        self, tool_calls: list[ToolCall], tool_results: list[dict]
+    ) -> bool:
+        """Detect exact repeated (tool, input, output) cycles and inject one nudge.
+
+        Stores only SHA-256 digests (never raw tool arguments or outputs) and
+        piggy-backs an `ANTON_NOTE` block inside `tool_results` (zero extra LLM
+        call, zero prefix-cache invalidation, filtered from verifier views).
+        """
+        if self._unanswered_question is not None:
+            return False
+        if self._max_tool_rounds > 0:
+            effective_round_cap = self._max_tool_rounds + self._round_cap_continued_rounds
+            if self._turn_tool_rounds >= effective_round_cap:
+                return False
+
+        calls_by_id = {tc.id: tc for tc in tool_calls}
+        nudged_this_round = False
+        for block in tool_results:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            tc = calls_by_id.get(block.get("tool_use_id"))
+            if tc is None:
+                continue
+            raw_content = block.get("content", "")
+            if isinstance(raw_content, list):
+                text_parts = [
+                    str(b.get("text", ""))
+                    for b in raw_content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ]
+                result_str = "\n".join(text_parts)
+            else:
+                result_str = str(raw_content)
+
+            inp = tc.input if isinstance(tc.input, dict) else {}
+            if tc.name == "bash":
+                target = f"{' '.join(str(inp.get('command', '')).split())}|{inp.get('workdir', '')}"
+            elif tc.name == "scratchpad":
+                target = f"{inp.get('name', '')}|{inp.get('action', '')}|{' '.join(str(inp.get('code', '')).split())}"
+            elif tc.name == "read_text_file":
+                target = f"{inp.get('path', '')}|{inp.get('start_line', '')}|{inp.get('end_line', '')}"
+            elif tc.name in ("grep_search", "find_files"):
+                target = f"{inp.get('pattern', '')}|{inp.get('path', '')}|{inp.get('glob', '')}"
+            elif tc.name == "edit_file" and result_str.startswith("Error:"):
+                target = f"{inp.get('path', '')}|{len(str(inp.get('old_string', '')))}"
+            else:
+                continue
+
+            norm_out = " ".join(result_str.split())
+            if len(norm_out) < 20:
+                continue
+
+            sig = hashlib.sha256(
+                f"{tc.name}\0{target}\0{norm_out}".encode("utf-8", "replace")
+            ).hexdigest()
+            if sig not in self._stagnation_counts and len(self._stagnation_counts) >= 512:
+                continue
+            count = self._stagnation_counts.get(sig, 0) + 1
+            self._stagnation_counts[sig] = count
+            if not nudged_this_round and count >= 3 and sig not in self._stagnation_nudged:
+                self._stagnation_nudged.add(sig)
+                tool_results.append({
+                    "type": "text",
+                    "text": (
+                        f"{ANTON_NOTE} Stagnation check: '{tc.name}' with the same input "
+                        "just produced identical output for the 3rd time. Stop repeating "
+                        "this cycle — inspect the underlying state or assumptions from "
+                        "first principles, or switch to a fundamentally different approach."
+                    ),
+                })
+                nudged_this_round = True
+        return nudged_this_round
+
     def _track_memory_write(self, task: asyncio.Task) -> None:
         """Register fire-and-forget memory encoding so a host that tears down at
         end of turn can await it instead of guessing at a settling delay."""
@@ -6647,8 +6757,9 @@ class ChatSession:
         # NOT be stamped.
         stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
         self._append_history({"role": "user", "content": stamped_input})
-        # A host may seed history with earlier turns' render screenshots.
+        # A host may seed history with earlier turns' render screenshots or images.
         drop_older_screenshots(self._history)
+        drop_older_tool_images(self._history)
         # A host that builds a session per turn seeds the notes that say the
         # model refused a screenshot, or a tool's image, in an earlier turn.
         if screenshots_refused(self._history):
@@ -6691,6 +6802,8 @@ class ChatSession:
         self._round_cap_continued_rounds = 0
         self._turn_tool_rounds = 0
         self._pivot_checkpoints_fired = set()
+        self._stagnation_counts = {}
+        self._stagnation_nudged = set()
         self._compacted_this_turn = False
         self._last_compaction_round = -1
         self._compaction_failed_this_turn = False
@@ -8455,6 +8568,9 @@ class ChatSession:
                 # so the LLM sees the alarm before its next decision.
                 self._acc_maybe_nudge(tool_results)
                 self._maybe_append_strategy_pivot_checkpoint(tool_results)
+                self._record_and_maybe_nudge_stagnation(
+                    llm_response.tool_calls, tool_results
+                )
 
                 # Only on turns with MCP tools: without them the scratchpad is
                 # the only way to the data, and the notice points at tools the
@@ -8486,8 +8602,10 @@ class ChatSession:
 
                 self._append_history({"role": "user", "content": tool_results})
                 # Every model call resends the whole history: one render
-                # screenshot in it, the newest, is enough.
+                # screenshot in it, the newest, is enough; bound accumulated
+                # tool-returned images (e.g. `read_image`) in batches too.
                 drop_older_screenshots(self._history)
+                drop_older_tool_images(self._history)
 
                 # The turn ends here, on anton's own line, with no model call:
                 # one would get to answer the question itself. The answer, when

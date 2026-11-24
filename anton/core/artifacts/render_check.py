@@ -858,6 +858,10 @@ OLDER_SCREENSHOT_PLACEHOLDER = (
     "[An older render-check screenshot was removed to keep the conversation small; "
     "the newest one is kept.]"
 )
+OLDER_TOOL_IMAGE_PLACEHOLDER = (
+    "[An older image attachment was omitted to keep the conversation compact; "
+    "call read_image again if you need to re-inspect it.]"
+)
 # Left by `drop_refused_screenshots`. `confirm_refused_screenshots` turns it
 # into the note below once a request goes through without the screenshots.
 DROPPED_SCREENSHOT_PLACEHOLDER = (
@@ -959,6 +963,28 @@ def drop_older_screenshots(messages: list[dict]) -> int:
     messages) sees the same history.
     """
     return _replace_blocks(_sites(messages, _is_screenshot)[:-1], OLDER_SCREENSHOT_PLACEHOLDER)
+
+
+def drop_older_tool_images(
+    messages: list[dict], *, keep_recent: int = 3, trigger_at: int = 6
+) -> int:
+    """Bound accumulated tool-returned images (e.g. `read_image`) in `messages`.
+
+    Unlike render screenshots (where only 1 is ever needed), visual debugging
+    often compares 2-5 images side by side, and mutating history on every call
+    would bust provider KV prefix caching. This helper is therefore a no-op
+    until at least ``trigger_at`` live tool-image blocks accumulate; once hit,
+    it keeps the ``keep_recent`` newest images and replaces older ones in
+    batches, leaving render screenshots and user-attached images untouched.
+    """
+    if keep_recent < 1 or trigger_at <= keep_recent:
+        return 0
+    sites = _tool_image_sites(
+        messages, wanted=lambda b: b.get("type") in ("image", "image_url")
+    )
+    if len(sites) < trigger_at:
+        return 0
+    return _replace_blocks(sites[:-keep_recent], OLDER_TOOL_IMAGE_PLACEHOLDER)
 
 
 def drop_refused_screenshots(messages: list[dict]) -> int:
