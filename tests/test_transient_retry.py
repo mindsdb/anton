@@ -1043,3 +1043,90 @@ async def test_a_deadline_swallowed_by_compaction_fails_the_next_call_at_once():
     # first round do not count: one 0.2 s deadline, then an immediate failure.
     elapsed = loop.time() - summarize_started[0]
     assert elapsed < 0.2 * 2, f"took {elapsed:.2f}s: the next call waited out its own deadline"
+
+
+async def test_incident_budget_is_finite_by_time_slept():
+    """Mid-stream incident backoff accounts time slept (matching rate-limit
+    backoff), terminating cleanly within `_transient_budget_s` even when
+    `_backoff_sleep` is mocked without advancing wall clock."""
+    s = _session()
+    sleeps: list[float] = []
+
+    async def _record(delay: float) -> bool:
+        sleeps.append(delay)
+        if len(sleeps) > 20:
+            raise AssertionError("incident backoff never terminated")
+        return False
+
+    s._backoff_sleep = _record
+
+    async def _always_overloaded(_msg: str):
+        raise TransientProviderError(
+            "overloaded", provider="Anthropic", code="overloaded_error", session_backoff=True,
+        )
+        yield  # pragma: no cover
+
+    s._stream_and_handle_tools = _always_overloaded
+
+    with pytest.raises(ProviderOverloadedError) as ei:
+        _ = [e async for e in s.turn_stream("do it")]
+
+    assert ei.value.code == "provider_overloaded"
+    assert len(sleeps) >= 2
+    assert sum(sleeps) <= s._transient_budget_s + 0.01, sleeps
+
+
+async def test_incident_budget_resets_after_stream_complete_under_turn_cap():
+    """Isolated mid-stream incidents separated by completed rounds reset the
+    per-incident curve, while the 180s turn-wide cap still bounds a broken upstream."""
+    from anton.core.llm.provider import LLMResponse
+
+    # 1. Isolated blips across 4 separate completed rounds all recover.
+    s = _session()
+    sleeps: list[float] = []
+
+    async def _record(delay: float) -> bool:
+        sleeps.append(delay)
+        return False
+
+    s._backoff_sleep = _record
+    calls = {"n": 0}
+
+    async def _blip_each_round(_msg: str):
+        calls["n"] += 1
+        if calls["n"] <= 4:
+            yield StreamComplete(response=LLMResponse(content="", stop_reason="tool_use"))
+            raise TransientProviderError(
+                "overloaded", provider="Anthropic", code="overloaded_error", session_backoff=True,
+            )
+        yield StreamTextDelta(text="all-recovered")
+        yield StreamComplete(response=LLMResponse(content="all-recovered", stop_reason="end_turn"))
+
+    s._stream_and_handle_tools = _blip_each_round
+    events = [e async for e in s.turn_stream("long task")]
+    assert "all-recovered" in "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    # Every reset starts at attempt 0 (~2s ±20%), never escalating to 10s/18s.
+    assert len(sleeps) == 4 and all(d < 5.0 for d in sleeps), sleeps
+
+    # 2. Persistent failures even with progress still hit the 180s turn-wide cap.
+    s2 = _session()
+    sleeps2: list[float] = []
+
+    async def _record2(delay: float) -> bool:
+        sleeps2.append(delay)
+        if len(sleeps2) > 200:
+            raise AssertionError("turn-wide incident cap never tripped")
+        return False
+
+    s2._backoff_sleep = _record2
+
+    async def _always_progress_then_overload(_msg: str):
+        yield StreamComplete(response=LLMResponse(content="", stop_reason="tool_use"))
+        raise TransientProviderError(
+            "overloaded", provider="Anthropic", code="overloaded_error", session_backoff=True,
+        )
+
+    s2._stream_and_handle_tools = _always_progress_then_overload
+    with pytest.raises(ProviderOverloadedError):
+        _ = [e async for e in s2.turn_stream("flaky upstream")]
+    assert sum(sleeps2) <= 180.01, sleeps2

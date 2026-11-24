@@ -1321,8 +1321,7 @@ BASH_TOOL = ToolDef(
         "Prefer this for CLI tools, git, compilers, builds, tests, package installation, "
         "system inspection, and service management. Non-interactive (stdin is /dev/null). "
         "Combine related inspection or verification checks into one compound command rather "
-        "than separate round-trips, pass non-interactive and parallel build flags (e.g. `make -j$(nproc)`) "
-        "where supported, and never `cat` binary files (PDFs, images, archives — inspect with `file` or parse with dedicated tools). "
+        "than separate round-trips, and pass non-interactive flags for installs/builds. "
         "Output uses head+tail truncation up to 16,000 characters so errors at the end are preserved."
     ),
     input_schema={
