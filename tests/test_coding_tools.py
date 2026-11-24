@@ -1081,6 +1081,8 @@ def test_bash_isolates_ppid_from_host_signals():
     while exact exit codes still propagate."""
     if os.name == "nt":
         return
+    import contextlib
+    import signal
 
     async def _run():
         with tempfile.TemporaryDirectory() as td:
@@ -1096,23 +1098,50 @@ def test_bash_isolates_ppid_from_host_signals():
                 f"handle_bash exposed host PID {os.getpid()} directly as $PPID"
             )
 
-            # 2. Sending SIGINT to $PPID from inside a bash command must NOT kill host.
+            # 2. Sending SIGINT to $PPID from inside a bash command must NOT kill host
+            #    and must allow the inner command to finish cleanly.
             sig_res = await handle_bash(
                 sess,
                 {"command": "(sleep 0.05; kill -INT $PPID 2>/dev/null) & wait; echo survived"},
             )
-            assert isinstance(sig_res.content, str)
+            assert sig_res.ok, sig_res
+            assert "survived" in str(sig_res.content), sig_res
 
             # 3. Non-zero exit codes propagate verbatim through the wrapper shell.
             rc_res = await handle_bash(sess, {"command": "exit 42"})
             assert not rc_res.ok and rc_res.reason == "exit_42", rc_res
+
+            # 4. Timeout on a SIGTERM-ignoring command must escalate to SIGKILL
+            #    with no surviving child process.
+            pidfile = root / "term_ignore.pid"
+            to_res = await handle_bash(
+                sess,
+                {
+                    "command": f"trap '' TERM; echo $$ > {pidfile}; exec sleep 30",
+                    "timeout_seconds": 1,
+                },
+            )
+            assert not to_res.ok and to_res.reason == "timeout", to_res
+            leaked_pid = int(pidfile.read_text().strip())
+            alive = True
+            for _ in range(20):
+                try:
+                    os.kill(leaked_pid, 0)
+                except ProcessLookupError:
+                    alive = False
+                    break
+                await asyncio.sleep(0.05)
+            if alive:
+                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                    os.kill(leaked_pid, signal.SIGKILL)
+            assert not alive, f"SIGTERM-ignoring child {leaked_pid} survived timeout SIGKILL"
 
     asyncio.run(_run())
 
 
 def test_bash_terminal_output_cleans_ansi_and_progress_and_scrubs_colored_secrets():
     """handle_bash strips ANSI CSI/OSC escapes, collapses \\r progress spam while
-    preserving CRLF lines, and still scrubs secrets wrapped in ANSI sequences."""
+    preserving CRLF lines, and still scrubs secrets wrapped in ANSI or CRLF."""
     from anton.core.tools.coding_tools import _clean_terminal_output, _scrub_and_clean_terminal
     from anton.utils.datasources import (
         _DS_KNOWN_VARS,
@@ -1125,18 +1154,34 @@ def test_bash_terminal_output_cleans_ansi_and_progress_and_scrubs_colored_secret
     assert _clean_terminal_output("\x1b]0;window title\x07line1\n0%\r50%\r100%\n") == "line1\n100%\n"
     assert _clean_terminal_output("keep1\r\nkeep2\r\n") == "keep1\nkeep2\n"
 
-    # ANSI-wrapped registered secret must still be scrubbed cleanly.
+    # Both ANSI-wrapped and CRLF-encoded multi-line registered secrets must be scrubbed.
     prev_ds = {k: v for k, v in os.environ.items() if k.startswith("DS_")}
     try:
         _reset_registered_ds_vars()
         tok = "ANSISecret_9876543210_XYZ"
+        pem_secret = (
+            "-----BEGIN PRIVATE KEY-----\n"
+            "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwCRLFPEMSECRET\n"
+            "-----END PRIVATE KEY-----"
+        )
         _DS_SECRET_VARS.add("DS_TEST_ANSI__TOKEN")
         _DS_KNOWN_VARS.add("DS_TEST_ANSI__TOKEN")
-        set_ds_env_values({"DS_TEST_ANSI__TOKEN": tok})
+        _DS_SECRET_VARS.add("DS_TEST_CRLF__PEM")
+        _DS_KNOWN_VARS.add("DS_TEST_CRLF__PEM")
+        set_ds_env_values({
+            "DS_TEST_ANSI__TOKEN": tok,
+            "DS_TEST_CRLF__PEM": pem_secret,
+        })
         raw = f"token=\x1b[32m{tok[:8]}\x1b[0m{tok[8:]}\n".encode("utf-8")
         cleaned = _scrub_and_clean_terminal(raw)
         assert tok not in cleaned
         assert "[DS_TEST_ANSI__TOKEN]" in cleaned
+
+        # CRLF-encoded multi-line secret with NO ANSI escapes must also be scrubbed.
+        crlf_raw = ("key=" + pem_secret.replace("\n", "\r\n") + "\r\n").encode("utf-8")
+        crlf_cleaned = _scrub_and_clean_terminal(crlf_raw)
+        assert "CRLFPEMSECRET" not in crlf_cleaned
+        assert "[DS_TEST_CRLF__PEM]" in crlf_cleaned
     finally:
         _reset_registered_ds_vars()
         for k in list(os.environ):

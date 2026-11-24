@@ -216,9 +216,10 @@ def _clean_terminal_output(text: str) -> str:
     """Normalize terminal progress-bar overwrites and ANSI color/cursor escapes.
 
     Strips ANSI CSI/OSC sequences and collapses carriage-return (`\\r`) progress
-    updates (keeping the final non-empty segment per line while preserving CRLF
-    line endings) so progress spam from installers, compilers, and test runners
-    does not waste context tokens or push real errors out of truncation bounds.
+    updates (keeping the final non-empty segment per line while preserving
+    CRLF-separated lines by normalizing `\\r\\n` to `\\n`) so progress spam from
+    installers, compilers, and test runners does not waste context tokens or
+    push real errors out of truncation bounds.
     """
     if "\x1b" in text:
         text = _ANSI_OSC_RE.sub("", text)
@@ -238,12 +239,11 @@ def _clean_terminal_output(text: str) -> str:
 
 
 def _scrub_and_clean_terminal(raw: bytes) -> str:
-    """Decode bytes, scrub secrets before and after ANSI stripping, and clean progress spam."""
+    """Decode bytes, scrub secrets before and after terminal normalization."""
     text = raw.decode("utf-8", errors="replace")
-    had_esc = "\x1b" in text
     scrubbed = scrub_output(text)
     cleaned = _clean_terminal_output(scrubbed)
-    if had_esc:
+    if cleaned != scrubbed:
         cleaned = scrub_output(cleaned)
     return cleaned
 
@@ -348,11 +348,19 @@ async def handle_bash(session: "ChatSession", tc_input: dict) -> ToolOutcome:
     else:
         shell_bin = "/bin/bash" if Path("/bin/bash").exists() else "/bin/sh"
         # Run the user command inside a child shell whose $PPID is the disposable
-        # outer session leader (not Anton's host Python PID). The trailing
-        # `exit "$rc"` prevents GNU bash's tail-call `exec` optimization so a
-        # command running `kill -INT $PPID` can never terminate Anton itself,
-        # while keeping the entire tree inside proc.pid's session for killpg().
-        argv = [shell_bin, "-c", 'rc=0; "$1" -c "$2" || rc=$?; exit "$rc"', "_", shell_bin, command]
+        # outer session leader (not Anton's host Python PID). Using a non-empty
+        # `trap ":" INT TERM` (NOT `""`/SIG_IGN, so execve resets both to SIG_DFL
+        # in the inner shell) keeps the outer shell waiting for the inner command
+        # on both `kill -INT $PPID` and graceful `SIGTERM` timeouts across bash
+        # and dash, while the trailing `exit "$rc"` defeats tail-call `exec`.
+        argv = [
+            shell_bin,
+            "-c",
+            'trap ":" INT TERM; rc=0; "$1" -c -- "$2" || rc=$?; exit "$rc"',
+            "_",
+            shell_bin,
+            command,
+        ]
         spawn_kwargs = {"start_new_session": True}
 
     t0 = time.monotonic()
@@ -487,6 +495,10 @@ async def handle_bash(session: "ChatSession", tc_input: dict) -> ToolOutcome:
                 _kill_proc(force=True)
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(exited.wait(), timeout=2.0)
+            else:
+                # Reap any SIGTERM-ignoring grandchildren left in the timed-out
+                # process group even if the outer/inner shell exited cleanly.
+                _kill_proc(force=True)
 
         # Give buffered output from the exited shell a brief window to flush,
         # then let the reader exit and close its pipe cleanly if a background
