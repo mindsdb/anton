@@ -213,6 +213,29 @@ _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
 _REPEAT_LINE_COLLAPSE_THRESHOLD = 5
+_BINARY_OUTPUT_MIN_CHARS = 512
+_BINARY_OUTPUT_MAX_RATIO = 0.15
+
+
+def _is_binary_text(text: str) -> tuple[bool, int]:
+    """Return ``(is_binary, non_text_pct)`` for normalized terminal output.
+
+    Valid UTF-8 text (including non-ASCII scripts/symbols) has zero ``\\ufffd``
+    replacement characters and zero non-whitespace C0 control characters, while
+    raw binary files (PDFs, images, archives, compiled objects) dumped to stdout
+    produce a high density of invalid UTF-8 bytes and C0 controls.
+    """
+    n = len(text)
+    if n < _BINARY_OUTPUT_MIN_CHARS:
+        return False, 0
+    non_text = 0
+    for ch in text:
+        if ch == "\ufffd" or (ord(ch) < 32 and ch not in "\t\n\r"):
+            non_text += 1
+    ratio = non_text / n
+    if ratio > _BINARY_OUTPUT_MAX_RATIO:
+        return True, int(round(ratio * 100.0))
+    return False, 0
 
 
 def _clean_terminal_output(text: str) -> str:
@@ -266,6 +289,16 @@ def _scrub_and_clean_terminal(raw: bytes) -> str:
     """Decode bytes, scrub secrets before and after terminal normalization."""
     text = raw.decode("utf-8", errors="replace")
     scrubbed = scrub_output(text)
+    probe = scrubbed
+    if "\x1b" in probe:
+        probe = _ANSI_OSC_RE.sub("", probe)
+        probe = _ANSI_CSI_RE.sub("", probe)
+    is_bin, non_text_pct = _is_binary_text(probe)
+    if is_bin:
+        return (
+            f"[binary output suppressed: {len(raw):,} bytes captured ({non_text_pct}% non-text). "
+            "Use 'file', 'strings', 'xxd', or a dedicated parser/Python library instead of dumping binary data to stdout.]"
+        )
     cleaned = _clean_terminal_output(scrubbed)
     if cleaned != scrubbed:
         cleaned = scrub_output(cleaned)
@@ -1282,7 +1315,8 @@ BASH_TOOL = ToolDef(
         "Prefer this for CLI tools, git, compilers, builds, tests, package installation, "
         "system inspection, and service management. Non-interactive (stdin is /dev/null). "
         "Combine related inspection or verification checks into one compound command rather "
-        "than separate round-trips, and pass non-interactive flags for installs/builds. "
+        "than separate round-trips, pass non-interactive and parallel build flags (e.g. `make -j$(nproc)`) "
+        "where supported, and never `cat` binary files (PDFs, images, archives — inspect with `file` or parse with dedicated tools). "
         "Output uses head+tail truncation up to 16,000 characters so errors at the end are preserved."
     ),
     input_schema={

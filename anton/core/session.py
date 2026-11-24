@@ -2207,12 +2207,15 @@ class ChatSession:
         # per turn in `_turn_stream_inner` so stream-drop retries never
         # duplicate a checkpoint.
         self._pivot_checkpoints_fired: set[int] = set()
-        # Per-turn SHA-256 repeat-output stagnation tracker (hash-only so no
-        # raw outputs or secrets are retained); reset per turn in
-        # `_turn_stream_inner`.
+        # Per-turn SHA-256 repeat-output stagnation and file-edit churn trackers
+        # (hash-only so no raw paths, outputs, or secrets are retained); reset
+        # per turn in `_turn_stream_inner` and after compaction/truncation.
         self._stagnation_counts: dict[str, int] = {}
         self._stagnation_nudged: set[str] = set()
         self._stagnation_escalation_sent: bool = False
+        self._file_edit_counts: dict[str, int] = {}
+        self._file_churn_nudged: set[str] = set()
+        self._file_churn_escalated: set[str] = set()
         # Verifier-forced continuations this turn has run, against
         # `max_continuations`. Per turn for the same reason: a retry must
         # not hand out a fresh set. Reset per turn in turn_stream.
@@ -4162,7 +4165,7 @@ class ChatSession:
                         elif block.get("type") == "tool_result":
                             lines.append(
                                 f"[tool_result]: "
-                                f"{_clip_keep_cause(str(block.get('content', '')), 800)}"
+                                f"{_render_tool_result_content(block.get('content', ''), 800)}"
                             )
 
         old_text = "\n".join(lines)
@@ -4365,10 +4368,13 @@ class ChatSession:
         # The conversation is written to cache again anyway, so memory can catch up.
         self._drop_memory_pin()
         # Earlier reads/checks were just folded into a summary, so clear repeat
-        # counters to avoid nudging legitimate post-compaction re-inspections.
+        # and file-churn counters to avoid nudging legitimate post-compaction work.
         self._stagnation_counts.clear()
         self._stagnation_nudged.clear()
         self._stagnation_escalation_sent = False
+        self._file_edit_counts.clear()
+        self._file_churn_nudged.clear()
+        self._file_churn_escalated.clear()
         return True
 
     def _compact_scratchpads(self) -> bool:
@@ -4776,6 +4782,9 @@ class ChatSession:
         self._stagnation_counts.clear()
         self._stagnation_nudged.clear()
         self._stagnation_escalation_sent = False
+        self._file_edit_counts.clear()
+        self._file_churn_nudged.clear()
+        self._file_churn_escalated.clear()
 
     async def plan_with_recovery(
         self,
@@ -6189,6 +6198,20 @@ class ChatSession:
         calls_by_id = {tc.id: tc for tc in tool_calls}
         newly_stagnated_tool: str | None = None
         escalate_reason: str | None = None
+        seen_edit_paths_this_round: set[str] = set()
+        churn_nudge_candidate: tuple[str, str, int] | None = None
+        churn_escalate_candidate: tuple[str, str, int] | None = None
+        ws_root_str: str | None = None
+        ws = getattr(self, "_workspace", None)
+        if ws is not None:
+            raw_ws = getattr(ws, "base", None) or getattr(ws, "root", None) or getattr(ws, "path", None)
+            if isinstance(raw_ws, (str, os.PathLike)):
+                ws_root_str = os.fspath(raw_ws)
+        if ws_root_str is None:
+            s = getattr(self, "_settings", None)
+            raw_wp = getattr(s, "workspace_path", None) if s is not None else None
+            if isinstance(raw_wp, (str, os.PathLike)):
+                ws_root_str = os.fspath(raw_wp)
         for block in tuple(tool_results):
             if not isinstance(block, dict) or block.get("type") != "tool_result":
                 continue
@@ -6211,6 +6234,32 @@ class ChatSession:
                     result_str = str(raw_content)
 
             inp = tc.input if isinstance(tc.input, dict) else {}
+            if (
+                tc.name in ("edit_file", "write_file")
+                and not block.get("is_error")
+                and not result_str.startswith("Error:")
+            ):
+                raw_path = inp.get("path")
+                if isinstance(raw_path, str) and raw_path.strip():
+                    stripped_path = raw_path.strip()
+                    if ws_root_str and not os.path.isabs(stripped_path):
+                        norm_path = os.path.normpath(os.path.join(ws_root_str, stripped_path))
+                    else:
+                        norm_path = os.path.normpath(stripped_path)
+                    path_sig = hashlib.sha256(norm_path.encode("utf-8", "replace")).hexdigest()
+                    if path_sig not in seen_edit_paths_this_round:
+                        seen_edit_paths_this_round.add(path_sig)
+                        if path_sig in self._file_edit_counts or len(self._file_edit_counts) < 512:
+                            edit_cnt = self._file_edit_counts.get(path_sig, 0) + 1
+                            self._file_edit_counts[path_sig] = edit_cnt
+                            label = os.path.basename(norm_path) or stripped_path
+                            if edit_cnt >= 12 and path_sig not in self._file_churn_escalated:
+                                if churn_escalate_candidate is None:
+                                    churn_escalate_candidate = (path_sig, label, edit_cnt)
+                            elif edit_cnt >= 6 and path_sig not in self._file_churn_nudged:
+                                if churn_nudge_candidate is None:
+                                    churn_nudge_candidate = (path_sig, label, edit_cnt)
+                continue
             if tc.name == "bash":
                 target = f"{' '.join(str(inp.get('command', '')).split())}|{inp.get('workdir', '')}"
             elif tc.name == "scratchpad":
@@ -6279,6 +6328,35 @@ class ChatSession:
                     "same input just produced identical output for the 3rd time. Stop "
                     "repeating this cycle — inspect the underlying state or assumptions "
                     "from first principles, or switch to a fundamentally different approach."
+                ),
+            })
+            return True
+        if churn_escalate_candidate is not None:
+            path_sig, label, edit_cnt = churn_escalate_candidate
+            self._file_churn_escalated.add(path_sig)
+            self._file_churn_nudged.add(path_sig)
+            tool_results.append({
+                "type": "text",
+                "text": (
+                    f"{ANTON_NOTE} File-churn escalation: '{label}' has been modified "
+                    f"{edit_cnt} times in this turn without finishing. Stop making small "
+                    "incremental patches to the same design — step back and either test "
+                    "one fundamentally simpler or different approach, or verify your best "
+                    "state cleanly and report any concrete blocker."
+                ),
+            })
+            return True
+        if churn_nudge_candidate is not None:
+            path_sig, label, edit_cnt = churn_nudge_candidate
+            self._file_churn_nudged.add(path_sig)
+            tool_results.append({
+                "type": "text",
+                "text": (
+                    f"{ANTON_NOTE} File-churn check: '{label}' has now been modified "
+                    f"{edit_cnt} times in this turn without finishing. Pause before another "
+                    "incremental tweak — re-read the exact requirements and failing output "
+                    "from first principles, inspect the actual data or intermediate state, "
+                    "and verify your core design assumption rather than patching symptoms."
                 ),
             })
             return True
@@ -6873,6 +6951,9 @@ class ChatSession:
         self._stagnation_counts = {}
         self._stagnation_nudged = set()
         self._stagnation_escalation_sent = False
+        self._file_edit_counts = {}
+        self._file_churn_nudged = set()
+        self._file_churn_escalated = set()
         self._compacted_this_turn = False
         self._last_compaction_round = -1
         self._compaction_failed_this_turn = False

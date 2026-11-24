@@ -199,8 +199,10 @@ class ChatSystemPromptBuilder:
                 "- `bash`: Run shell commands directly in the workspace (git, builds, compilers, "
                 "tests, CLI utilities, package managers, services, system inspection). "
                 "Non-interactive (stdin is /dev/null). Prefer `bash` over wrapping shell commands "
-                "inside Python `scratchpad`, and combine sequential shell steps with `&&` instead "
-                "of many tiny single-command turns."
+                "inside Python `scratchpad`, combine sequential shell steps with `&&` instead "
+                "of many tiny single-command turns, use parallel build flags (e.g. `make -j$(nproc)`) "
+                "for multi-file builds, and inspect binary files (PDFs, images, archives) with `file` "
+                "or dedicated parsers rather than `cat`."
             )
         if "edit_file" in reg:
             lines.append(
@@ -210,7 +212,7 @@ class ChatSystemPromptBuilder:
         if "write_file" in reg:
             lines.append(
                 "- `write_file`: Create new workspace files or write complete files cleanly at "
-                "their target paths."
+                "their target paths (batch independent file writes in one response)."
             )
         read_tools = [n for n in ("read_text_file", "grep_search", "find_files") if n in reg]
         if read_tools:
@@ -228,10 +230,11 @@ class ChatSystemPromptBuilder:
                 "than guessing from a downscaled overview) instead of writing OCR or vision scripts."
             )
         lines.append(
-            "- Inspect first to gather facts: on your first turn, immediately run a quick "
-            "workspace/file/environment inspection before deep planning; batch independent "
-            "read/search/edit calls in one response, and iterate in tight edit-and-run cycles "
-            "(testing small prototypes directly instead of deriving large implementations in thought)."
+            "- Inspect first to gather facts: even when the request gives a complete spec, "
+            "immediately run a fast workspace/file/environment inspection on turn 1 before deep "
+            "planning; batch independent read/search/write/edit calls in one response, and iterate "
+            "in tight edit-and-run cycles (testing small probes directly instead of deriving large "
+            "implementations mentally)."
         )
         return "\nCODING & WORKSPACE TOOLS:\n" + "\n".join(lines) + "\n"
 

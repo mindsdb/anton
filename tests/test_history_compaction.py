@@ -1023,3 +1023,94 @@ class TestProactiveAbsoluteTokenCeiling:
         assert session2._stagnation_counts == {}
         assert session2._stagnation_nudged == set()
         assert session2._stagnation_escalation_sent is False
+
+    async def test_compaction_renders_multimodal_tool_result_without_base64(self):
+        """Compaction must render multimodal tool_result blocks via
+        `_render_tool_result_content` so base64 image payloads never pollute
+        the summarizer input and trailing text blocks survive."""
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nChecked chart."))
+        fake_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" * 40
+        history = [
+            {"role": "user", "content": "Inspect the plot."},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "read_image", "input": {"file_path": "plot.png"}}
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": fake_b64}},
+                            {"type": "text", "text": "Image dimensions 800x600 showing peak at x=42."},
+                        ],
+                    }
+                ],
+            },
+            *_alternating_history(8, "z" * 60),
+        ]
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+        session._file_edit_counts["dummy"] = 5
+        session._file_churn_nudged.add("dummy")
+        ok = await session._summarize_history()
+        assert ok is True
+        sent_text = mock_llm.summarize.call_args.kwargs["messages"][0]["content"]
+        assert "iVBORw0KGgo" not in sent_text
+        assert "peak at x=42" in sent_text
+        assert session._file_edit_counts == {}
+        assert session._file_churn_nudged == set()
+
+    def test_file_edit_churn_check_escalation_and_reset(self):
+        from anton.core.llm.provider import ToolCall
+
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        outcomes = []
+        notes = []
+        # Rounds 1..13 modifying the same file (mixing `./solver.py` and `solver.py`,
+        # edit_file + write_file, plus a round with 2 parallel edits counting as 1).
+        for r in range(1, 14):
+            if r == 2:
+                calls = [
+                    ToolCall(id="e2a", name="edit_file", input={"path": "./solver.py", "old_string": "a", "new_string": "b"}),
+                    ToolCall(id="e2b", name="edit_file", input={"path": "solver.py", "old_string": "c", "new_string": "d"}),
+                ]
+                tr = [
+                    {"type": "tool_result", "tool_use_id": "e2a", "content": "Edited solver.py"},
+                    {"type": "tool_result", "tool_use_id": "e2b", "content": "Edited solver.py"},
+                ]
+            elif r == 4:
+                calls = [ToolCall(id="w4", name="write_file", input={"path": "solver.py", "content": "x = 1"})]
+                tr = [{"type": "tool_result", "tool_use_id": "w4", "content": "Wrote solver.py (5 bytes)"}]
+            else:
+                calls = [ToolCall(id=f"e{r}", name="edit_file", input={"path": "solver.py", "old_string": str(r), "new_string": str(r + 1)})]
+                tr = [{"type": "tool_result", "tool_use_id": f"e{r}", "content": f"Edited solver.py ({r})"}]
+            fired = session._record_and_maybe_nudge_stagnation(calls, tr)
+            outcomes.append(fired)
+            notes.append(tr[-1]["text"] if tr[-1].get("type") == "text" else "")
+
+        # Silent on 1..5, check on 6, silent on 7..11, escalation on 12, silent on 13.
+        expected = [False] * 13
+        expected[5] = True
+        expected[11] = True
+        assert outcomes == expected
+        assert "File-churn check" in notes[5] and "solver.py" in notes[5]
+        assert "File-churn escalation" in notes[11] and "12 times" in notes[11]
+
+        # Failed edit_file does not increment file-churn counter.
+        err_call = ToolCall(id="ef", name="edit_file", input={"path": "other.py", "old_string": "missing", "new_string": "x"})
+        for _ in range(7):
+            tr_err = [{"type": "tool_result", "tool_use_id": "ef", "content": "Error: old_string not found"}]
+            session._record_and_maybe_nudge_stagnation([err_call], tr_err)
+        assert len(session._file_edit_counts) == 1  # only solver.py tracked
+
+        # hard_truncate_history resets file-churn state cleanly.
+        session._history = _alternating_history(10, "k" * 80)
+        session.hard_truncate_history(keep=4)
+        assert session._file_edit_counts == {}
+        assert session._file_churn_nudged == set()
+        assert session._file_churn_escalated == set()

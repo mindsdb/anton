@@ -1194,6 +1194,20 @@ def test_bash_terminal_output_cleans_ansi_and_progress_and_scrubs_colored_secret
         crlf_cleaned = _scrub_and_clean_terminal(crlf_raw)
         assert "CRLFPEMSECRET" not in crlf_cleaned
         assert "[DS_TEST_CRLF__PEM]" in crlf_cleaned
+
+        # Raw binary stdout (>=512 chars, >15% non-text) is cleanly suppressed with zero secret leak.
+        bin_raw = b"%PDF-1.4\n" + tok.encode("utf-8") + b"\n" + bytes(range(128, 256)) * 8 + b"\x00\x01\x02" * 100
+        bin_cleaned = _scrub_and_clean_terminal(bin_raw)
+        assert bin_cleaned.startswith("[binary output suppressed:")
+        assert tok not in bin_cleaned
+
+        # Valid multi-byte UTF-8, ANSI logs, and short (<512 char) binary probes pass through cleanly.
+        utf8_text = "".join(f"你好世界 {i} — café résumé — αβγδ 🚀\n" for i in range(40)).encode("utf-8")
+        assert _scrub_and_clean_terminal(utf8_text) == utf8_text.decode("utf-8")
+        ansi_text = ("\x1b[32mPASS\x1b[0m test_ok\n" * 40).encode("utf-8")
+        assert "[binary output suppressed:" not in _scrub_and_clean_terminal(ansi_text)
+        short_bin = b"\x00\x01\x02hello" * 10
+        assert "[binary output suppressed:" not in _scrub_and_clean_terminal(short_bin)
     finally:
         _reset_registered_ds_vars()
         for k in list(os.environ):
