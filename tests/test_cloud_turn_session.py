@@ -907,8 +907,8 @@ def test_tool_allowlist_none_preserves_desktop_tools(tmp_path):
     assert {"launch_backend", "select_path", "scratchpad", "create_artifact"} <= names
 
 
-async def test_scratchpad_inherits_parent_env(tmp_path, monkeypatch):
-    """The scratchpad subprocess inherits the parent env (no sanitizing)."""
+async def test_the_bare_factorys_scratchpad_gets_only_allowlisted_parent_names(tmp_path, monkeypatch):
+    """The factory the pod passes bare filters the parent env: PATH stays, an unlisted name goes."""
     monkeypatch.setenv("MY_DESKTOP_SENTINEL", "DESKTOP-VISIBLE")
     pad = local_scratchpad_runtime_factory(
         name="desktop-env", coding_provider="anthropic", coding_model="",
@@ -917,10 +917,11 @@ async def test_scratchpad_inherits_parent_env(tmp_path, monkeypatch):
     await pad.start()
     try:
         cell = await pad.execute(
-            "import os; print(os.environ.get('MY_DESKTOP_SENTINEL', 'MISSING'))"
+            "import os; print(os.environ.get('MY_DESKTOP_SENTINEL', 'MISSING'), "
+            "os.environ.get('PATH') == " + repr(os.environ["PATH"]) + ")"
         )
         assert cell.error is None, cell.error
-        assert cell.stdout.strip() == "DESKTOP-VISIBLE"
+        assert cell.stdout.strip() == "MISSING True"
     finally:
         await pad.close()
 
