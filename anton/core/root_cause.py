@@ -165,6 +165,10 @@ _SENTINEL_REASONS = {
     # A cell held for the user's approval and not approved. The user's call,
     # never an environment wall; the model is told to report it, not retry.
     "write_not_approved": (TIER_SELF, "invalid_argument"),
+    # A page-builder step that would have needed the user's approval, refused
+    # with no card because the page builder only reads. The builder's own
+    # choice of step, never an environment wall; it is told not to retry.
+    "write_refused_read_only": (TIER_SELF, "invalid_argument"),
     # `read_image`, ENG-2248: both are the agent's own file choice, and both
     # messages tell it what to do instead (use a real image / resize).
     "not_an_image": (TIER_SELF, "invalid_argument"),

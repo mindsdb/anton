@@ -99,8 +99,8 @@ You do exactly the job your task section describes, then call `finish`.
 
 ALWAYS-AVAILABLE TOOLS:
 - `scratchpad(action, name, ...)` — drive a persistent Python scratchpad
-  (`exec`, `view`, `dump`, `install`, `reset`, `remove`). Use it to reach the
-  real data described in the brief's `## Data` section.
+  (`exec`, `view`, `dump`, `install`). Use it to reach the real data described
+  in the brief's `## Data` section.
 - `finish(summary)` — terminate with a one-line summary.
 
 SCRATCHPAD DISCIPLINE (the same rules the main agent works under):
@@ -1492,6 +1492,10 @@ def prd_section(state) -> str:
 
 KNOWN_DATA_HEADER = "## Known data (passed in by the calling agent)"
 KNOWN_DATA_FOOTER = "--- end of known data ---"
+# What a page-builder step's prompt says when write approval is on: the write
+# gate refuses, with no card, a builder cell that would need one
+# (`hold_unapproved_write`).
+READ_ONLY_CELLS = "Your cells only read: a cell that would need the user's approval does not run."
 
 
 def known_data_section(state) -> str:
@@ -1597,14 +1601,20 @@ def build_fetch_data_system_prompt(
     project_rules: str = "",
     artifact_skills: str = "",
     user_language: str = "",
+    read_only: bool = False,
 ) -> str:
+    """The fetch node's system prompt. `read_only` is true when write
+    approval is on, so the write gate refuses a builder cell that would need
+    the user's approval (`hold_unapproved_write`)."""
     parts = [
         _ROLE_COMMON,
         _DATA_CONTEXT_HEADER
         + "You are the `fetch_data_sample` node. Use the `scratchpad` tool to "
         "run Python that pulls a small SAMPLE of the required data (query the "
         "DB, call the API, read the file). Confirm the shape and types. Do NOT "
-        "write any artifact files.\n\n"
+        "write any artifact files."
+        + (" " + READ_ONLY_CELLS if read_only else "")
+        + "\n\n"
         "Fetch ONLY WHAT IS MISSING. `## Data gathered so far` may already show "
         "cells the main agent ran — do not repeat them.\n\n"
         "Work in the SAME scratchpad the brief names, not a new one: a fresh "

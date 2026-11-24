@@ -45,8 +45,8 @@ async def test_collection_completes_in_one_call_only_after_successful_fresh_data
 
     if failure == "stale":
         (tmp_path / "observed-data.json").write_text('{"amount":42}')
-    async def execute(session, inp):
-        assert "complete_static_artifact" not in inp
+    async def execute(session, inp, *, origin):
+        assert "complete_static_artifact" not in inp and origin == "page_builder"
         if failure not in {"stale", "failed-exec", "refused"}:
             (tmp_path / "observed-data.json").write_text('not JSON' if failure == "invalid" else '{"amount":42}')
         return ToolOutcome("source rows", ok=failure != "failed-exec",
@@ -82,3 +82,37 @@ def test_ask_first_and_live_apps_never_offer_automatic_static_completion(tmp_pat
         state = GenState(session=SimpleNamespace(), artifact_type=artifact_type, artifact_path=tmp_path,
                          slug="page", act_first=act_first)
         assert not static_gathering.enabled(state)
+
+
+async def test_a_successful_completion_after_a_refused_step_in_the_same_response_waits_a_round(tmp_path, monkeypatch):
+    """A step the page builder's read-only rule refused is no failure to
+    fix, but the model reads its result before completion."""
+    import anton.core.tools.tool_handlers as handlers
+    from anton.core.utils.scratchpad import WRITE_REFUSED_READ_ONLY, ReadOnlyRefusal
+
+    async def execute(session, inp, *, origin):
+        if inp["code"] == "update_sites()":
+            return ReadOnlyRefusal("Not run: the page builder only reads data", ok=True,
+                                   reason=WRITE_REFUSED_READ_ONLY, change="change data in a connected source")
+        (tmp_path / "observed-data.json").write_text('{"amount":42}')
+        return ToolOutcome("source rows", ok=True)
+    monkeypatch.setattr(handlers, "handle_scratchpad", execute)
+    completion = {"summary": "Scoped revenue", "data_sources": ["warehouse"]}
+    responses = iter([
+        LLMResponse(content="", tool_calls=[
+            ToolCall(id="write", name="scratchpad", input={"action": "exec", "name": "data", "code": "update_sites()"}),
+            ToolCall(id="exec", name="scratchpad", input={"action": "exec", "name": "data", "code": "fetch_and_validate()",
+                                                          "complete_static_artifact": completion})]),
+        LLMResponse(content="", tool_calls=[ToolCall(id="finish", name="finish_gathering", input={
+            "summary": "from the validated rows", "artifact_type": "html-app", "data_sources": ["warehouse"]})]),
+    ])
+    async def response(**kwargs):
+        return next(responses)
+    session = SimpleNamespace(_llm=StreamingLLM(plan=AsyncMock(side_effect=response), code=AsyncMock(side_effect=response)),
+                              question_count=0, elicitor=None, emit=AsyncMock())
+    state = GenState(session=session, artifact_type="html-app", artifact_path=tmp_path, slug="revenue", act_first=True)
+    await engine.run_gathering_loop(state)
+    assert "Collection remains open: a step in this response did not run" in state.messages[2]["content"][1]["content"]
+    assert state.gathering_complete and session._llm.code.call_count == 1
+    assert [e["code"] for e in state.scratchpad_execs] == ["fetch_and_validate()"]
+    assert not state.unverified_sources

@@ -18,6 +18,7 @@ block. The path sandbox lives here so the engine doesn't have to repeat the
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from anton.core.tools.text_file import (
     DEFAULT_LINE_COUNT,
@@ -25,6 +26,9 @@ from anton.core.tools.text_file import (
     count_lines,
     next_line_number,
 )
+
+if TYPE_CHECKING:
+    from .state import SkippedStep
 
 
 # ── Tool-call protocol helpers shared by both loops ─────────────────────────
@@ -89,6 +93,24 @@ def unwrap_outcome(result):
     from anton.core.tools.registry import ToolOutcome
 
     return result.content if isinstance(result, ToolOutcome) else result
+
+
+def skipped_step(*, outcome, inp: dict) -> SkippedStep | None:
+    """The step a scratchpad result says the write gate refused because the
+    page builder only reads (`ReadOnlyRefusal`), named by the call's own
+    one-line description; None for any other result. A refused reset or
+    removal of a scratchpad skips no data, so it is none."""
+    from anton.core.utils.scratchpad import ReadOnlyRefusal
+
+    from .state import SkippedStep
+
+    if not isinstance(outcome, ReadOnlyRefusal):
+        return None
+    description = inp.get("one_line_description")
+    return SkippedStep(
+        description=" ".join(description.split()) if isinstance(description, str) else "",
+        change=outcome.change,
+    )
 
 
 def result_text(content) -> str:

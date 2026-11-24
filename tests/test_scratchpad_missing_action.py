@@ -95,7 +95,8 @@ async def test_handle_scratchpad_runs_a_call_with_code_and_no_action_as_exec(mon
     """The generator's own loops call `handle_scratchpad` directly."""
     seen: list[dict] = []
 
-    async def fake_prepare(session, tc_input):
+    async def fake_prepare(session, tc_input, *, origin):
+        assert origin == "chat"
         seen.append(tc_input)
         return ToolOutcome(content="prepared", ok=True, reason="")
 
