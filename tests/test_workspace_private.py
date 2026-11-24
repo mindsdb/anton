@@ -336,23 +336,33 @@ def test_windows_logs_a_failed_icacls_call_and_tries_again_next_time(
 
 
 def _acl(path: Path) -> tuple[bool, set[str]]:
-    """Whether ``path``'s access list ignores its parent's, and the SIDs its rules name."""
+    """Whether ``path``'s access list ignores its parent's, and the SIDs its rules name.
+
+    Windows PowerShell 5.1 runs with the inherited PSModulePath removed: a
+    PowerShell 7 parent, such as a CI step's shell, puts its own module folders
+    there, and Get-Acl then fails to load. The errors are made terminating, so
+    a failed read fails the test instead of reading as an empty list.
+    """
     script = (
+        "$ErrorActionPreference = 'Stop'; "
         "$acl = Get-Acl -LiteralPath $env:ANTON_ACL_PATH; "
         "$sids = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) "
         "| ForEach-Object { $_.IdentityReference.Value }); "
-        "@{ protected = $acl.AreAccessRulesProtected; sids = $sids } | ConvertTo-Json -Compress"
+        # Joined, because 5.1 can serialize an array inside a hashtable as an object.
+        "@{ protected = $acl.AreAccessRulesProtected; sids = ($sids -join ',') } | ConvertTo-Json -Compress"
     )
-    out = subprocess.run(
+    done = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        env={**os.environ, "ANTON_ACL_PATH": str(path)},
+        env={
+            **{key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"},
+            "ANTON_ACL_PATH": str(path),
+        },
         capture_output=True,
         text=True,
-        check=True,
-    ).stdout
-    data = json.loads(out)
-    sids = data["sids"]
-    return bool(data["protected"]), {sids} if isinstance(sids, str) else set(sids)
+    )
+    assert done.returncode == 0, done.stderr
+    data = json.loads(done.stdout)
+    return bool(data["protected"]), {sid for sid in data["sids"].split(",") if sid}
 
 
 _windows_only = pytest.mark.skipif(sys.platform != "win32", reason="reads a real Windows access list")
