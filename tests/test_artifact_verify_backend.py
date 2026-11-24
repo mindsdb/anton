@@ -404,14 +404,15 @@ async def test_verify_backend_reports_import_error(tmp_path: Path):
 # The launcher's PYTHONPATH injection (anton_state exposed via a private dir)
 # must reach the introspection subprocess too. The backend asserts it at import
 # time: in the dev venv `import anton_state` would succeed even without the
-# injection (site-packages has it), so the assert is what actually proves the
-# env went through.
+# injection (site-packages has it), so the assert checks that the package came
+# from the first PYTHONPATH entry, which proves the env went through.
 BACKEND_CHECKS_INJECTION = BACKEND_OK.replace(
     "import os, argparse",
     "import os, argparse\n"
-    'assert "anton_state_pp" in os.environ.get("PYTHONPATH", ""), '
-    '"anton_state PYTHONPATH injection missing"\n'
-    "import anton_state",
+    "import anton_state\n"
+    'assert os.path.dirname(os.path.dirname(anton_state.__file__)) == '
+    'os.environ.get("PYTHONPATH", "").split(os.pathsep)[0], '
+    '"anton_state PYTHONPATH injection missing"',
 )
 
 STATEFUL_BACKEND_OK = '''

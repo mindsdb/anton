@@ -1328,16 +1328,10 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
 
 def _persist_first_run_done(settings) -> None:
     """Write ANTON_FIRST_RUN_DONE=true to ~/.anton/.env."""
-    from pathlib import Path
+    from anton.utils.private_dir import anton_home
+    from anton.workspace import append_env_flag
 
-    env_path = Path.home() / ".anton" / ".env"
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
-    if "ANTON_FIRST_RUN_DONE" not in existing:
-        with env_path.open("a", encoding="utf-8") as f:
-            if existing and not existing.endswith("\n"):
-                f.write("\n")
-            f.write("ANTON_FIRST_RUN_DONE=true\n")
+    append_env_flag(env_path=anton_home() / ".env", key="ANTON_FIRST_RUN_DONE")
     settings.first_run_done = True
 
 

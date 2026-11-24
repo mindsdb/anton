@@ -160,6 +160,8 @@ When you run `anton` in a directory:
 - `.anton/memory/lessons.md` — factual knowledge: things I've learned (stock API quirks, dashboard patterns, data fetching notes).
 - `.anton/memory/topics/*` — topic-specific lessons: deeper notes organized by subject (dashboard-visualization, stock-data-api, etc.).
 
+Only your account can open `.anton/` and the global `~/.anton/`. On macOS and Linux anton creates each folder at `0700` and tightens an older one to `0700` when it starts, and it keeps `~/.anton/.env` at `0600`. On Windows each of these folders gets an access list that names only SYSTEM, Administrators and the folder's owner, so a project outside your profile, such as `C:\src\app`, doesn't share its `.anton/` with other local accounts.
+
 Override the working folder:
 ```bash
 anton --folder /path/to/workspace
@@ -454,7 +456,7 @@ Every push to `staging` publishes a **release candidate** through [`.github/work
 
 ### Running the test suite
 
-CI runs four unit-test shards on separate runners while stub E2E runs alongside them. Each shard collects the full unit suite, then selects whole files using a stable hash of their repository-relative paths. Separate checkouts keep the shared scratchpad workspaces isolated. The `run-tests` check requires every shard, stub E2E and the Windows installer tests to succeed; failed or skipped jobs cannot pass the gate. Test durations are printed for the slowest 20 cases.
+CI runs four unit-test shards on separate runners while stub E2E runs alongside them. Each shard collects the full unit suite, then selects whole files using a stable hash of their repository-relative paths. Separate checkouts keep the shared scratchpad workspaces isolated. The `run-tests` check requires every shard, stub E2E and the Windows job (the installer tests and the `.anton` access-list check) to succeed; failed or skipped jobs cannot pass the gate. Test durations are printed for the slowest 20 cases.
 
 Without shard options, pytest still runs the full selected suite. To reproduce one CI shard:
 

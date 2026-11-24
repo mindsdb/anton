@@ -93,6 +93,9 @@ jobs:
       - name: Check a cell's environment on Windows
         run: uv run --locked --group dev pytest tests/test_agent_env.py tests/test_cell_env.py -v -rs
 
+      - name: Check a project's .anton folder is owner-only
+        run: uv run --locked --group dev pytest tests/test_workspace_private.py -v -rs
+
   # Preserve the required check name, and fail even if a dependency was skipped.
   run-tests:
     if: always()

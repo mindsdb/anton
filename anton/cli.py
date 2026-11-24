@@ -367,16 +367,10 @@ def _ensure_terms_consent(console: Console, settings) -> None:
         raise typer.Exit(0)
 
     # Persist consent to ~/.anton/.env
-    env_path = Path.home() / ".anton" / ".env"
-    env_path.parent.mkdir(parents=True, exist_ok=True)
+    from anton.utils.private_dir import anton_home
+    from anton.workspace import append_env_flag
 
-    # Append if file exists, otherwise create
-    existing = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
-    if "ANTON_TERMS_CONSENT" not in existing:
-        with env_path.open("a", encoding="utf-8") as f:
-            if existing and not existing.endswith("\n"):
-                f.write("\n")
-            f.write("ANTON_TERMS_CONSENT=true\n")
+    append_env_flag(env_path=anton_home() / ".env", key="ANTON_TERMS_CONSENT")
 
     settings.terms_consent = True
 
@@ -624,6 +618,25 @@ def _reconcile_publish_identity(settings) -> bool:
     return True
 
 
+def _secure_anton_home() -> None:
+    """Make ~/.anton and its .env private to this user before anything writes there.
+
+    Creates ~/.anton at 0700, or tightens one an earlier version left at
+    0755, and tightens its .env to 0600. A symbolic link at ~/.anton is left
+    as it is, and so is the .env behind it. Never fatal, for the reason given
+    at its call site: an OSError here would stop every `anton` command on a
+    container with no writable home.
+    """
+    from anton.utils.private_dir import anton_home, tighten_private_file
+
+    try:
+        home = anton_home()
+        if not home.is_symlink():
+            tighten_private_file(home / ".env")
+    except OSError as exc:
+        console.print(f"[anton.muted]  Could not make ~/.anton private: {escape(str(exc))}[/]")
+
+
 def _ensure_workspace(settings) -> None:
     """Check workspace state and initialize if needed.
 
@@ -672,6 +685,8 @@ def main(
 
     settings = AntonSettings()
     settings.resolve_workspace(folder)
+
+    _secure_anton_home()
 
     # Must run before anything reads a key off `settings`, and before
     # `_ensure_workspace` promotes the project vault into os.environ.

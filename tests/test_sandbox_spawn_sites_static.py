@@ -68,6 +68,8 @@ ALLOWLIST = (
      "the venv health check under a policy"),
     ("core/backends/local.py", "LocalScratchpadRuntime._add_windows_firewall_rule", "subprocess.run", HOST,
      "netsh on Windows, which has no sandbox"),
+    ("utils/private_dir.py", "_apply_owner_only_acl", "subprocess.run", HOST,
+     "icacls on Windows, which has no sandbox, giving a private folder its owner-only access list"),
     ("core/backends/local.py", "LocalScratchpadRuntime._start_process.spawn", "asyncio.create_subprocess_exec", LAUNCHER,
      "the cell, with no policy"),
     ("core/backends/local.py", "LocalScratchpadRuntime._start_process.spawn", "asyncio.create_subprocess_exec", LAUNCHER,

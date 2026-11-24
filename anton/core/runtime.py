@@ -108,6 +108,7 @@ async def build_chat_session(
     from anton.core.memory.hippocampus import Hippocampus
     from anton.core.session import ChatSession, ChatSessionConfig, SystemPromptContext
     from anton.memory.history_store import HistoryStore
+    from anton.utils.private_dir import anton_home
     from anton.workspace import Workspace
 
     try:
@@ -136,8 +137,8 @@ async def build_chat_session(
     llm_client = LLMClient.from_settings(settings)
     self_awareness = SelfAwarenessContext(context_dir)
 
-    global_memory_dir = Path.home() / ".anton" / "memory"
-    global_memory_dir.mkdir(parents=True, exist_ok=True)
+    global_memory_dir = anton_home() / "memory"
+    global_memory_dir.mkdir(exist_ok=True)
     cortex = Cortex(
         global_hc=Hippocampus(global_memory_dir),
         project_hc=Hippocampus(project_memory_dir),

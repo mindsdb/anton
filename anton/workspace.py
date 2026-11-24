@@ -16,6 +16,7 @@ from pathlib import Path
 
 from anton.config.settings import AntonSettings
 from anton.utils.nofollow import create_text_nofollow, make_dirs_nofollow, read_text_nofollow
+from anton.utils.private_dir import make_private_dir
 
 ANTON_MD_TEMPLATE = """\
 # Anton Workspace
@@ -79,19 +80,42 @@ def vault_key(env_path: Path, key: str = "ANTON_MINDS_API_KEY") -> str | None:
         return None
 
 
-def _write_private(path: Path, text: str) -> None:
-    """Write `text` to `path`, readable and writable only by its owner.
+def _open_private(*, path: Path, flags: int) -> int:
+    """``os.open`` for a secrets file: created 0600, an existing one tightened to 0600 first.
 
     The file holds secrets, so it is created 0600 rather than under the
     process umask. An existing file is tightened before the write, so a
     mode an earlier version left behind does not outlive the next secret.
-    UTF-8, not the host locale, to match how the file is read back.
     """
     if path.exists():
         os.chmod(path, _SECRET_FILE_MODE)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _SECRET_FILE_MODE)
+    return os.open(path, flags | os.O_CREAT, _SECRET_FILE_MODE)
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write `text` to `path`, readable and writable only by its owner.
+
+    UTF-8, not the host locale, to match how the file is read back.
+    """
+    fd = _open_private(path=path, flags=os.O_WRONLY | os.O_TRUNC)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
+
+
+def append_env_flag(*, env_path: Path, key: str) -> None:
+    """Add ``<key>=true`` to the .env at ``env_path`` unless the file already names ``key``.
+
+    Appends rather than rewrites, so a line another process wrote meanwhile
+    survives, and goes through `_open_private`, so the file ends 0600.
+    """
+    existing = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
+    if key in existing:
+        return
+    fd = _open_private(path=env_path, flags=os.O_WRONLY | os.O_APPEND)
+    with os.fdopen(fd, "a", encoding="utf-8") as handle:
+        if existing and not existing.endswith("\n"):
+            handle.write("\n")
+        handle.write(f"{key}=true\n")
 
 
 class Workspace:
@@ -194,12 +218,15 @@ class Workspace:
     def _initialize_once(self, *, create_anton_md: bool = True, refuse_links: bool = False) -> list[str]:
         actions: list[str] = []
 
-        # Create .anton/ directory and memory subdirectory
+        # Create .anton/ directory and memory subdirectory. `.anton` holds the
+        # project's memory, conversation records and .env, so it is private
+        # to the current user, and one that already exists is made so.
         if refuse_links:
             self._base.mkdir(parents=True, exist_ok=True)
+            make_private_dir(self._anton_dir)
             make_dirs_nofollow(self._base, self._anton_dir / "memory")
         else:
-            self._anton_dir.mkdir(parents=True, exist_ok=True)
+            make_private_dir(self._anton_dir)
             (self._anton_dir / "memory").mkdir(exist_ok=True)
         actions.append(f"Created {self._anton_dir}")
 
@@ -360,7 +387,7 @@ class Workspace:
         if "\n" in value or "\r" in value:
             raise ValueError(f"{key} must not contain a newline")
 
-        self._anton_dir.mkdir(parents=True, exist_ok=True)
+        make_private_dir(self._anton_dir)
 
         # Read existing lines
         lines: list[str] = []

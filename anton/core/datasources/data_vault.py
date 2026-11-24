@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from anton.utils.private_dir import anton_home
+
 logger = logging.getLogger(__name__)
 
 
@@ -231,6 +233,9 @@ class LocalDataVault:
         return self._dir / f"{_sanitize(engine)}-{_sanitize(name)}"
 
     def _ensure_dir(self) -> None:
+        if self._dir.parent == Path.home() / ".anton":
+            # The default folder: ~/.anton above it holds keys and memory too.
+            anton_home()
         self._dir.mkdir(parents=True, exist_ok=True)
         self._dir.chmod(0o700)
 

@@ -249,7 +249,7 @@ async def test_the_verifier_checks_are_unchanged(tmp_path, monkeypatch, parent_e
         scratchpad_pool=_VerifierPool("/venv/bin/python"), slug="x", artifact_path=artifact
     )
 
-    pythonpath = str(Path(tempfile.gettempdir()) / "anton_state_pp")
+    pythonpath = str(Path(tempfile.gettempdir()) / f"anton_state_pp-{os.getuid()}")
     assert calls == [
         (
             ("/venv/bin/python", "-I", "-B", "-X", "utf8", "-c", verifiers._SYNTAX_CHECK_SCRIPT),
@@ -301,7 +301,7 @@ async def test_the_backend_launch_is_unchanged(tmp_path, monkeypatch, parent_env
     env.update(
         FROM_DOTENV="1",
         DS_PG_MAIN__PASSWORD="artifact-ds",
-        PYTHONPATH=str(Path(tempfile.gettempdir()) / "anton_state_pp"),
+        PYTHONPATH=str(Path(tempfile.gettempdir()) / f"anton_state_pp-{os.getuid()}"),
         PYTHONDONTWRITEBYTECODE="1",
     )
     assert set(kwargs) == {"cwd", "stdout", "stderr", "stdin", "preexec_fn", "env"}
