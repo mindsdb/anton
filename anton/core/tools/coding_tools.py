@@ -1199,6 +1199,8 @@ BASH_TOOL = ToolDef(
         "Execute a shell command directly in the workspace (or optional `workdir`). "
         "Prefer this for CLI tools, git, compilers, builds, tests, package installation, "
         "system inspection, and service management. Non-interactive (stdin is /dev/null). "
+        "Combine related inspection or verification checks into one compound command rather "
+        "than separate round-trips, and pass non-interactive flags for installs/builds. "
         "Output uses head+tail truncation up to 16,000 characters so errors at the end are preserved."
     ),
     input_schema={

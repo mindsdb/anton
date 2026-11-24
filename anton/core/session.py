@@ -2210,6 +2210,7 @@ class ChatSession:
         # `_turn_stream_inner`.
         self._stagnation_counts: dict[str, int] = {}
         self._stagnation_nudged: set[str] = set()
+        self._stagnation_escalation_sent: bool = False
         # Verifier-forced continuations this turn has run, against
         # `max_continuations`. Per turn for the same reason: a retry must
         # not hand out a fresh set. Reset per turn in turn_stream.
@@ -4365,6 +4366,7 @@ class ChatSession:
         # counters to avoid nudging legitimate post-compaction re-inspections.
         self._stagnation_counts.clear()
         self._stagnation_nudged.clear()
+        self._stagnation_escalation_sent = False
         return True
 
     def _compact_scratchpads(self) -> bool:
@@ -6177,7 +6179,8 @@ class ChatSession:
                 return False
 
         calls_by_id = {tc.id: tc for tc in tool_calls}
-        nudge_text: str | None = None
+        newly_stagnated_tool: str | None = None
+        escalate_reason: str | None = None
         for block in tuple(tool_results):
             if not isinstance(block, dict) or block.get("type") != "tool_result":
                 continue
@@ -6230,16 +6233,46 @@ class ChatSession:
                 continue
             count = self._stagnation_counts.get(sig, 0) + 1
             self._stagnation_counts[sig] = count
-            if nudge_text is None and count >= 3 and sig not in self._stagnation_nudged:
+            just_hit_three = False
+            if count >= 3 and sig not in self._stagnation_nudged:
                 self._stagnation_nudged.add(sig)
-                nudge_text = (
-                    f"{ANTON_NOTE} Stagnation check: '{tc.name}' with the same input "
-                    "just produced identical output for the 3rd time. Stop repeating "
-                    "this cycle — inspect the underlying state or assumptions from "
-                    "first principles, or switch to a fundamentally different approach."
-                )
-        if nudge_text is not None:
-            tool_results.append({"type": "text", "text": nudge_text})
+                just_hit_three = True
+                if newly_stagnated_tool is None:
+                    newly_stagnated_tool = tc.name
+            if not self._stagnation_escalation_sent and escalate_reason is None:
+                if count >= 5:
+                    escalate_reason = (
+                        f"'{tc.name}' with the same input has now produced identical "
+                        f"output {count} times"
+                    )
+                elif just_hit_three and len(self._stagnation_nudged) >= 3:
+                    escalate_reason = (
+                        f"you have now hit {len(self._stagnation_nudged)} separate "
+                        "repeated-output stagnation loops in this turn"
+                    )
+        if escalate_reason is not None:
+            self._stagnation_escalation_sent = True
+            tool_results.append({
+                "type": "text",
+                "text": (
+                    f"{ANTON_NOTE} Stagnation escalation: {escalate_reason}. "
+                    "Do not continue repeating stalled attempts. Pause to assess what "
+                    "is confirmed vs blocked: either test ONE genuinely new root-cause "
+                    "hypothesis and verify it cleanly, or conclude concisely with your "
+                    "best verified state and the concrete blocker."
+                ),
+            })
+            return True
+        if newly_stagnated_tool is not None:
+            tool_results.append({
+                "type": "text",
+                "text": (
+                    f"{ANTON_NOTE} Stagnation check: '{newly_stagnated_tool}' with the "
+                    "same input just produced identical output for the 3rd time. Stop "
+                    "repeating this cycle — inspect the underlying state or assumptions "
+                    "from first principles, or switch to a fundamentally different approach."
+                ),
+            })
             return True
         return False
 
@@ -6831,6 +6864,7 @@ class ChatSession:
         self._pivot_checkpoints_fired = set()
         self._stagnation_counts = {}
         self._stagnation_nudged = set()
+        self._stagnation_escalation_sent = False
         self._compacted_this_turn = False
         self._last_compaction_round = -1
         self._compaction_failed_this_turn = False

@@ -806,6 +806,7 @@ class TestProactiveAbsoluteTokenCeiling:
             ))
             session._stagnation_counts["abc"] = 2
             session._stagnation_nudged.add("abc")
+            session._stagnation_escalation_sent = True
             assert await session._summarize_history() is True
             assert mock_llm.summarize.await_count == 2
             assert mock_llm.summarize.await_args_list[0].kwargs["max_tokens"] == 8192
@@ -815,6 +816,7 @@ class TestProactiveAbsoluteTokenCeiling:
             # re-inspections aren't falsely nudged.
             assert session._stagnation_counts == {}
             assert session._stagnation_nudged == set()
+            assert session._stagnation_escalation_sent is False
 
         # content_filter refusal must not trigger a futile duplicate retry.
         mock_cf = make_mock_llm()
@@ -944,8 +946,47 @@ class TestProactiveAbsoluteTokenCeiling:
         # 3. Guard: skipped when unanswered question is pending.
         session._stagnation_counts.clear()
         session._stagnation_nudged.clear()
+        session._stagnation_escalation_sent = False
         session._unanswered_question = "Need input?"
         for _ in range(3):
             raw_q = f"(exit 1, 0.4s)\n{body}"
             tr_q = [{"type": "tool_result", "tool_use_id": "tc_1", "content": raw_q}]
             assert session._record_and_maybe_nudge_stagnation([tc], tr_q, raw_outputs={"tc_1": raw_q}) is False
+
+    def test_stagnation_escalation_on_fifth_repeat_and_third_distinct_loop(self):
+        from anton.core.llm.provider import ToolCall
+
+        # Case A: Same stagnant call repeated 5 times escalates once (and stays quiet on 6th).
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        tc = ToolCall(id="tc_1", name="bash", input={"command": "pytest -q"})
+        body = "FAILED tests/test_core.py::test_calc - AssertionError: 1 != 2"
+        outcomes = []
+        notes = []
+        for attempt in range(1, 7):
+            raw = f"(exit 1, 0.{attempt}s)\n{body}"
+            tr = [{"type": "tool_result", "tool_use_id": "tc_1", "content": raw}]
+            fired = session._record_and_maybe_nudge_stagnation([tc], tr, raw_outputs={"tc_1": raw})
+            outcomes.append(fired)
+            notes.append(tr[1]["text"] if len(tr) > 1 else "")
+        assert outcomes == [False, False, True, False, True, False]
+        assert "Stagnation check" in notes[2]
+        assert "Stagnation escalation" in notes[4]
+        assert "5 times" in notes[4]
+
+        # Case B: Three separate stagnant loops trigger escalation on the 3rd loop, once.
+        session2 = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        loop_notes = []
+        for idx in range(1, 5):
+            call = ToolCall(id=f"c_{idx}", name="bash", input={"command": f"make target_{idx}"})
+            raw = f"(exit 2, 0.5s)\nmake: *** No rule to make target 'target_{idx}'. Stop."
+            for rep in range(3):
+                tr = [{"type": "tool_result", "tool_use_id": call.id, "content": raw}]
+                fired = session2._record_and_maybe_nudge_stagnation([call], tr, raw_outputs={call.id: raw})
+                if rep == 2:
+                    loop_notes.append((fired, tr[1]["text"] if len(tr) > 1 else ""))
+        assert loop_notes[0][0] is True and "Stagnation check" in loop_notes[0][1]
+        assert loop_notes[1][0] is True and "Stagnation check" in loop_notes[1][1]
+        assert loop_notes[2][0] is True and "Stagnation escalation" in loop_notes[2][1]
+        assert "3 separate" in loop_notes[2][1]
+        # After escalation is already sent, a 4th distinct loop still gets a normal check (not a 2nd escalation).
+        assert loop_notes[3][0] is True and "Stagnation check" in loop_notes[3][1]
