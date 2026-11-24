@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _EMAIL_SPLIT_RE = re.compile(r"[\s,;]+")
 
+# The public-website access mode. Only the owner's save in cowork-server
+# creates one; this module carries it but never offers it to a person or agent.
+WEBSITE_MODE = "website"
+
 
 def normalize_emails(values) -> list[str]:
     """Strip + lowercase + de-dupe, preserving first-seen order."""
@@ -43,6 +47,9 @@ def resolve_access(
     emails, no org and no owner_only) degrades to ``public`` — a server-side
     safety net for programmatic callers; interactive callers must gate empty
     input earlier.
+    ``website`` is kept as is: no other field travels with it, a
+    ``confirmed_by_owner: True`` in ``access`` is passed through in
+    ``effective_access`` only, and the versions are not changed.
     NOTE: with ``access=None`` and ``password=None`` the mode defaults to
     ``public`` — the prior mode is NOT inherited (``previous`` only feeds the
     version counters). Callers that want to preserve a prior non-public mode
@@ -59,6 +66,15 @@ def resolve_access(
     prev_access_version = prev.get("access_version", 0) or 0
     pwd_version = prev_pwd_version or 1
     access_version = prev_access_version or 1
+
+    if mode == WEBSITE_MODE:
+        effective: dict = {"mode": WEBSITE_MODE}
+        # Sent once, never stored: a republish rebuilt from the entry must not
+        # be able to create a website (the upload service keeps an existing
+        # site without it).
+        if (access or {}).get("confirmed_by_owner") is True:
+            effective["confirmed_by_owner"] = True
+        return effective, pwd_version, access_version, {"mode": WEBSITE_MODE, "requires_password": False}
 
     if mode == "password":
         pw = ((access or {}).get("password") or password or "").strip() or None
@@ -162,6 +178,9 @@ def access_from_owner_side(entry: Any) -> dict:
             # degrades to public — silently un-privating the artifact.
             "owner_only": bool(entry.get("owner_only")),
         }
+    if mode == WEBSITE_MODE:
+        # Never rebuilds confirmed_by_owner, even when the entry carries one.
+        return {"mode": WEBSITE_MODE}
     return {"mode": "public"}
 
 

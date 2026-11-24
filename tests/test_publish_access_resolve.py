@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from anton.publish_access import (
+    WEBSITE_MODE,
     access_from_owner_side,
     normalize_emails,
     parse_emails,
@@ -205,6 +206,66 @@ def test_access_from_owner_side_public_and_legacy():
     assert access_from_owner_side({}) == {"mode": "public"}
 
 
+def test_website_mode_constant():
+    assert WEBSITE_MODE == "website"
+
+
+def test_resolve_website_is_kept():
+    eff, pwd_v, acc_v, owner = resolve_access(None, {"mode": "website"}, None)
+    assert eff == {"mode": "website"}
+    assert owner == {"mode": "website", "requires_password": False}
+    assert (pwd_v, acc_v) == (1, 1)
+
+
+def test_resolve_website_passes_the_owner_confirmation_but_never_stores_it():
+    eff, _, _, owner = resolve_access(None, {"mode": "website", "confirmed_by_owner": True}, None)
+    assert eff == {"mode": "website", "confirmed_by_owner": True}
+    assert owner == {"mode": "website", "requires_password": False}
+
+
+@pytest.mark.parametrize("value", [False, "true", 1, None])
+def test_resolve_website_ignores_a_confirmation_that_is_not_true(value):
+    eff, _, _, _ = resolve_access(None, {"mode": "website", "confirmed_by_owner": value}, None)
+    assert eff == {"mode": "website"}
+
+
+def test_resolve_website_drops_every_other_field():
+    eff, _, _, owner = resolve_access(
+        "hunter2",
+        {"mode": "website", "password": "x", "emails": ["a@x.com"], "org_allowed": True, "owner_only": True},
+        None,
+    )
+    assert eff == {"mode": "website"}
+    assert owner == {"mode": "website", "requires_password": False}
+
+
+def test_resolve_website_leaves_the_versions_untouched():
+    prev = {
+        "mode": "password", "requires_password": True, "access_password": "old",
+        "pwd_version": 3, "access_version": 2,
+    }
+    _, pwd_v, acc_v, _ = resolve_access(None, {"mode": "website"}, prev)
+    assert (pwd_v, acc_v) == (3, 2)
+
+
+def test_access_from_owner_side_website():
+    assert access_from_owner_side({"mode": "website", "requires_password": False}) == {"mode": "website"}
+
+
+def test_access_from_owner_side_website_never_rebuilds_the_owner_confirmation():
+    """An entry is writable by the agent's code, so a stored confirmation must
+    not reach the next publish."""
+    entry = {"mode": "website", "confirmed_by_owner": True, "report_id": "r", "url": "u"}
+    assert access_from_owner_side(entry) == {"mode": "website"}
+
+
+def test_keep_republish_of_a_website_stays_a_website_without_confirmation():
+    _, _, _, owner = resolve_access(None, {"mode": "website", "confirmed_by_owner": True}, None)
+    eff, _, _, owner2 = resolve_access(None, access_from_owner_side(owner), owner)
+    assert eff == {"mode": "website"}
+    assert owner2 == {"mode": "website", "requires_password": False}
+
+
 def test_resolve_target_static_html(tmp_path):
     root = tmp_path / "artifacts"
     art = root / "sales"
@@ -333,3 +394,17 @@ async def test_prompt_access_restricted_mixed_input_reprompts():
 async def test_prompt_access_cancel_at_mode():
     fp = _FakePrompt([None])
     assert await prompt_access(fp) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow_keep", [False, True])
+async def test_prompt_access_never_offers_website(allow_keep):
+    offered = []
+
+    async def fake_prompt(label, *, choices=None, **kwargs):
+        offered.append(choices)
+        return None
+
+    previous = {"mode": "website", "requires_password": False, "report_id": "r"}
+    assert await prompt_access(fake_prompt, previous=previous, allow_keep=allow_keep) is None
+    assert WEBSITE_MODE not in offered[0]
