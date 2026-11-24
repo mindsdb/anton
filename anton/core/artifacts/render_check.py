@@ -860,7 +860,7 @@ OLDER_SCREENSHOT_PLACEHOLDER = (
 )
 OLDER_TOOL_IMAGE_PLACEHOLDER = (
     "[An older image attachment was omitted to keep the conversation compact; "
-    "call read_image again if you need to re-inspect it.]"
+    "re-read or re-capture it if you need to re-inspect it.]"
 )
 # Left by `drop_refused_screenshots`. `confirm_refused_screenshots` turns it
 # into the note below once a request goes through without the screenshots.

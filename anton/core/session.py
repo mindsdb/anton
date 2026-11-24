@@ -304,6 +304,10 @@ _STRATEGY_PIVOT_CHECKPOINTS: dict[int, str] = {
     ),
 }
 
+# Normalizes `handle_bash`'s leading `(exit <rc>, <secs>s...)` header so
+# per-run wall-clock jitter never defeats repeat-output stagnation hashing.
+_BASH_ELAPSED_HEADER_RE = re.compile(r"^\(exit (-?\d+), \d+(?:\.\d+)?s(, no output)?\)")
+
 
 logger = logging.getLogger(__name__)
 
@@ -4216,12 +4220,16 @@ class ChatSession:
             # Reasoning models occasionally emit an empty visible message on the
             # first compaction attempt (e.g., hidden thinking consuming tokens or
             # a short empty stop). Retry once with an explicit direct-output cue
-            # (and up to 2x budget capped by client ceiling if truncated) before
-            # giving up on compaction for the turn.
-            if not (summary_response.content or "").strip():
+            # (and up to 2x budget capped by client ceiling if truncated across
+            # any provider dialect via `looks_truncated`) before giving up on
+            # compaction for the turn. Skip retry on content_filter refusals.
+            if (
+                not (summary_response.content or "").strip()
+                and summary_response.stop_reason != "content_filter"
+            ):
                 retry_budget = (
                     min(_SUMMARY_OUTPUT_BUDGET * 2, self._client_max_tokens())
-                    if summary_response.stop_reason == "max_tokens"
+                    if looks_truncated(summary_response, output_budget_tokens)
                     else output_budget_tokens
                 )
                 logger.info(
@@ -4353,6 +4361,10 @@ class ChatSession:
             self._last_compaction = {"summary": summary_body, "covered_through": covered}
         # The conversation is written to cache again anyway, so memory can catch up.
         self._drop_memory_pin()
+        # Earlier reads/checks were just folded into a summary, so clear repeat
+        # counters to avoid nudging legitimate post-compaction re-inspections.
+        self._stagnation_counts.clear()
+        self._stagnation_nudged.clear()
         return True
 
     def _compact_scratchpads(self) -> bool:
@@ -6143,13 +6155,19 @@ class ChatSession:
         return True
 
     def _record_and_maybe_nudge_stagnation(
-        self, tool_calls: list[ToolCall], tool_results: list[dict]
+        self,
+        tool_calls: list[ToolCall],
+        tool_results: list[dict],
+        *,
+        raw_outputs: dict[str, str] | None = None,
     ) -> bool:
         """Detect exact repeated (tool, input, output) cycles and inject one nudge.
 
-        Stores only SHA-256 digests (never raw tool arguments or outputs) and
-        piggy-backs an `ANTON_NOTE` block inside `tool_results` (zero extra LLM
-        call, zero prefix-cache invalidation, filtered from verifier views).
+        Stores only SHA-256 digests (never raw tool arguments or outputs), hashes
+        pre-nudge outputs (so resilience/circuit-breaker suffixes don't perturb
+        signatures), normalizes `bash` elapsed-time headers, and piggy-backs an
+        `ANTON_NOTE` block inside `tool_results` (zero extra LLM call, zero
+        prefix-cache invalidation, filtered from verifier views).
         """
         if self._unanswered_question is not None:
             return False
@@ -6159,23 +6177,27 @@ class ChatSession:
                 return False
 
         calls_by_id = {tc.id: tc for tc in tool_calls}
-        nudged_this_round = False
-        for block in tool_results:
+        nudge_text: str | None = None
+        for block in tuple(tool_results):
             if not isinstance(block, dict) or block.get("type") != "tool_result":
                 continue
-            tc = calls_by_id.get(block.get("tool_use_id"))
+            tc_id = block.get("tool_use_id")
+            tc = calls_by_id.get(tc_id)
             if tc is None:
                 continue
-            raw_content = block.get("content", "")
-            if isinstance(raw_content, list):
-                text_parts = [
-                    str(b.get("text", ""))
-                    for b in raw_content
-                    if isinstance(b, dict) and b.get("type") == "text"
-                ]
-                result_str = "\n".join(text_parts)
+            if raw_outputs is not None and tc_id in raw_outputs:
+                result_str = raw_outputs[tc_id]
             else:
-                result_str = str(raw_content)
+                raw_content = block.get("content", "")
+                if isinstance(raw_content, list):
+                    text_parts = [
+                        str(b.get("text", ""))
+                        for b in raw_content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    ]
+                    result_str = "\n".join(text_parts)
+                else:
+                    result_str = str(raw_content)
 
             inp = tc.input if isinstance(tc.input, dict) else {}
             if tc.name == "bash":
@@ -6187,11 +6209,17 @@ class ChatSession:
             elif tc.name in ("grep_search", "find_files"):
                 target = f"{inp.get('pattern', '')}|{inp.get('path', '')}|{inp.get('glob', '')}"
             elif tc.name == "edit_file" and result_str.startswith("Error:"):
-                target = f"{inp.get('path', '')}|{len(str(inp.get('old_string', '')))}"
+                if "edits" in inp and inp.get("edits") is not None:
+                    edits_key = json.dumps(inp.get("edits"), sort_keys=True, default=str)
+                else:
+                    edits_key = str(inp.get("old_string", ""))
+                target = f"{inp.get('path', '')}|{edits_key}"
             else:
                 continue
 
             norm_out = " ".join(result_str.split())
+            if tc.name == "bash":
+                norm_out = _BASH_ELAPSED_HEADER_RE.sub(r"(exit \1\2)", norm_out, count=1)
             if len(norm_out) < 20:
                 continue
 
@@ -6202,19 +6230,18 @@ class ChatSession:
                 continue
             count = self._stagnation_counts.get(sig, 0) + 1
             self._stagnation_counts[sig] = count
-            if not nudged_this_round and count >= 3 and sig not in self._stagnation_nudged:
+            if nudge_text is None and count >= 3 and sig not in self._stagnation_nudged:
                 self._stagnation_nudged.add(sig)
-                tool_results.append({
-                    "type": "text",
-                    "text": (
-                        f"{ANTON_NOTE} Stagnation check: '{tc.name}' with the same input "
-                        "just produced identical output for the 3rd time. Stop repeating "
-                        "this cycle — inspect the underlying state or assumptions from "
-                        "first principles, or switch to a fundamentally different approach."
-                    ),
-                })
-                nudged_this_round = True
-        return nudged_this_round
+                nudge_text = (
+                    f"{ANTON_NOTE} Stagnation check: '{tc.name}' with the same input "
+                    "just produced identical output for the 3rd time. Stop repeating "
+                    "this cycle — inspect the underlying state or assumptions from "
+                    "first principles, or switch to a fundamentally different approach."
+                )
+        if nudge_text is not None:
+            tool_results.append({"type": "text", "text": nudge_text})
+            return True
+        return False
 
     def _track_memory_write(self, task: asyncio.Task) -> None:
         """Register fire-and-forget memory encoding so a host that tears down at
@@ -8015,6 +8042,7 @@ class ChatSession:
                             await asyncio.gather(*_pending, return_exceptions=True)
 
                 tool_results: list[dict] = []
+                pre_nudge_outputs: dict[str, str] = {}
                 for tc in llm_response.tool_calls:
                     # Nothing runs after a question nobody answered, whatever the
                     # model sent with it. Refuse before inspecting its arguments.
@@ -8528,6 +8556,7 @@ class ChatSession:
                             tool=tc.name,
                         )
                     self._record_root_cause(tool_ok, tool_reason, result_text)
+                    pre_nudge_outputs[tc.id] = result_text
                     result_text = self._apply_error_tracking(
                         result_text, tc.name, error_streak, resilience_nudged,
                         ok=tool_ok,
@@ -8569,7 +8598,9 @@ class ChatSession:
                 self._acc_maybe_nudge(tool_results)
                 self._maybe_append_strategy_pivot_checkpoint(tool_results)
                 self._record_and_maybe_nudge_stagnation(
-                    llm_response.tool_calls, tool_results
+                    llm_response.tool_calls,
+                    tool_results,
+                    raw_outputs=pre_nudge_outputs,
                 )
 
                 # Only on turns with MCP tools: without them the scratchpad is

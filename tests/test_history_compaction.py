@@ -783,30 +783,54 @@ class TestProactiveAbsoluteTokenCeiling:
         assert session._pivot_checkpoints_fired == {25}
 
     async def test_empty_summary_retries_once_and_recovers(self):
-        """A transient empty summary response (e.g., reasoning model emitting
-        empty visible content) retries once before failing compaction, and
-        doubles budget capped by client max_tokens if truncated."""
-        mock_llm = make_mock_llm()
-        mock_llm.max_tokens = 12_000
-        mock_llm.summarize = AsyncMock(
-            side_effect=[
-                LLMResponse(
-                    content="",
-                    usage=Usage(input_tokens=100, output_tokens=8192),
-                    stop_reason="max_tokens",
-                ),
-                _summarize_response("## Goal\nRecovered on retry"),
-            ]
+        """A transient empty summary response retries once before failing
+        compaction, doubling budget across both Anthropic (`max_tokens`) and
+        OpenAI/MindsHub (`length`) truncation dialects, and skipping retry on
+        `content_filter` refusals."""
+        for reason in ("max_tokens", "length"):
+            mock_llm = make_mock_llm()
+            mock_llm.max_tokens = 12_000
+            mock_llm.summarize = AsyncMock(
+                side_effect=[
+                    LLMResponse(
+                        content="",
+                        usage=Usage(input_tokens=100, output_tokens=8192),
+                        stop_reason=reason,
+                    ),
+                    _summarize_response(f"## Goal\nRecovered from {reason}"),
+                ]
+            )
+            session = ChatSession(ChatSessionConfig(
+                llm_client=mock_llm,
+                initial_history=_alternating_history(10, "x" * 100),
+            ))
+            session._stagnation_counts["abc"] = 2
+            session._stagnation_nudged.add("abc")
+            assert await session._summarize_history() is True
+            assert mock_llm.summarize.await_count == 2
+            assert mock_llm.summarize.await_args_list[0].kwargs["max_tokens"] == 8192
+            assert mock_llm.summarize.await_args_list[1].kwargs["max_tokens"] == 12_000
+            assert f"Recovered from {reason}" in session._history[0]["content"]
+            # Successful compaction clears stagnation counters so post-compaction
+            # re-inspections aren't falsely nudged.
+            assert session._stagnation_counts == {}
+            assert session._stagnation_nudged == set()
+
+        # content_filter refusal must not trigger a futile duplicate retry.
+        mock_cf = make_mock_llm()
+        mock_cf.summarize = AsyncMock(
+            return_value=LLMResponse(
+                content="",
+                usage=Usage(input_tokens=100, output_tokens=0),
+                stop_reason="content_filter",
+            )
         )
-        session = ChatSession(ChatSessionConfig(
-            llm_client=mock_llm,
+        session_cf = ChatSession(ChatSessionConfig(
+            llm_client=mock_cf,
             initial_history=_alternating_history(10, "x" * 100),
         ))
-        assert await session._summarize_history() is True
-        assert mock_llm.summarize.await_count == 2
-        assert mock_llm.summarize.await_args_list[0].kwargs["max_tokens"] == 8192
-        assert mock_llm.summarize.await_args_list[1].kwargs["max_tokens"] == 12_000
-        assert "Recovered on retry" in session._history[0]["content"]
+        assert await session_cf._summarize_history() is False
+        assert mock_cf.summarize.await_count == 1
 
     def test_drop_older_tool_images_batches_and_preserves_other_images(self):
         from anton.core.artifacts.render_check import (
@@ -870,33 +894,58 @@ class TestProactiveAbsoluteTokenCeiling:
 
         session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
         tc = ToolCall(id="tc_1", name="bash", input={"command": "pytest -q"})
-        same_fail = "FAILED tests/test_core.py::test_calc - AssertionError: 1 != 2"
+        body = "FAILED tests/test_core.py::test_calc - AssertionError: 1 != 2"
 
-        # Calls 1 and 2 do not nudge.
-        for _ in range(2):
-            tr = [{"type": "tool_result", "tool_use_id": "tc_1", "content": same_fail}]
-            assert session._record_and_maybe_nudge_stagnation([tc], tr) is False
-            assert len(tr) == 1
-
-        # Changing output does not trigger stagnation.
-        tr_diff = [{"type": "tool_result", "tool_use_id": "tc_1", "content": "FAILED tests/test_core.py::test_other - ValueError: bad"}]
-        assert session._record_and_maybe_nudge_stagnation([tc], tr_diff) is False
-
-        # 3rd identical output triggers exactly one stagnation nudge.
-        tr3 = [{"type": "tool_result", "tool_use_id": "tc_1", "content": same_fail}]
-        assert session._record_and_maybe_nudge_stagnation([tc], tr3) is True
-        assert len(tr3) == 2
-        assert "Stagnation check" in tr3[1]["text"]
+        # 1. Varying `handle_bash` elapsed-time headers `(exit 1, X.Ys)` still
+        # normalize to the same signature, AND passing pre-nudge outputs through
+        # `_apply_error_tracking` fires on the 3rd identical failure (not 4th!).
+        error_streak: dict[str, int] = {}
+        resilience_nudged: set[str] = set()
+        for attempt, elapsed in enumerate(("1.2s", "1.5s", "1.3s"), start=1):
+            raw = f"(exit 1, {elapsed})\n{body}"
+            tracked = session._apply_error_tracking(
+                raw, "bash", error_streak, resilience_nudged, ok=False
+            )
+            tr = [{"type": "tool_result", "tool_use_id": "tc_1", "content": tracked}]
+            fired = session._record_and_maybe_nudge_stagnation(
+                [tc], tr, raw_outputs={"tc_1": raw}
+            )
+            if attempt < 3:
+                assert fired is False
+                assert len(tr) == 1
+            else:
+                assert fired is True
+                assert len(tr) == 2
+                assert "Stagnation check" in tr[1]["text"]
 
         # 4th repeat for same signature does not duplicate the nudge.
-        tr4 = [{"type": "tool_result", "tool_use_id": "tc_1", "content": same_fail}]
-        assert session._record_and_maybe_nudge_stagnation([tc], tr4) is False
+        raw4 = f"(exit 1, 2.7s)\n{body}"
+        tr4 = [{"type": "tool_result", "tool_use_id": "tc_1", "content": raw4}]
+        assert session._record_and_maybe_nudge_stagnation([tc], tr4, raw_outputs={"tc_1": raw4}) is False
         assert len(tr4) == 1
 
-        # Guard: skipped when unanswered question is pending.
+        # Different exit code does not collide with the exit-1 signature.
+        raw_rc2 = f"(exit 2, 1.2s)\n{body}"
+        tr_rc2 = [{"type": "tool_result", "tool_use_id": "tc_1", "content": raw_rc2}]
+        assert session._record_and_maybe_nudge_stagnation([tc], tr_rc2, raw_outputs={"tc_1": raw_rc2}) is False
+
+        # 2. `edit_file` batch `edits=[...]` mode canonicalizes edits cleanly:
+        # distinct batches do not collide, while 3 identical failing batches fire.
+        tc_e1 = ToolCall(id="e1", name="edit_file", input={"path": "a.py", "edits": [{"old_string": "foo", "new_string": "bar"}]})
+        tc_e2 = ToolCall(id="e2", name="edit_file", input={"path": "a.py", "edits": [{"old_string": "baz", "new_string": "qux"}]})
+        err_msg = "Error: edits[0].old_string not found in a.py. No changes were written."
+        for call in (tc_e1, tc_e1, tc_e2):
+            tr_e = [{"type": "tool_result", "tool_use_id": call.id, "content": err_msg}]
+            assert session._record_and_maybe_nudge_stagnation([call], tr_e, raw_outputs={call.id: err_msg}) is False
+        tr_e3 = [{"type": "tool_result", "tool_use_id": tc_e1.id, "content": err_msg}]
+        assert session._record_and_maybe_nudge_stagnation([tc_e1], tr_e3, raw_outputs={tc_e1.id: err_msg}) is True
+        assert "Stagnation check" in tr_e3[1]["text"]
+
+        # 3. Guard: skipped when unanswered question is pending.
         session._stagnation_counts.clear()
         session._stagnation_nudged.clear()
         session._unanswered_question = "Need input?"
         for _ in range(3):
-            tr_q = [{"type": "tool_result", "tool_use_id": "tc_1", "content": same_fail}]
-            assert session._record_and_maybe_nudge_stagnation([tc], tr_q) is False
+            raw_q = f"(exit 1, 0.4s)\n{body}"
+            tr_q = [{"type": "tool_result", "tool_use_id": "tc_1", "content": raw_q}]
+            assert session._record_and_maybe_nudge_stagnation([tc], tr_q, raw_outputs={"tc_1": raw_q}) is False
