@@ -556,6 +556,10 @@ class HostToolSpecV1:
     #: Added to the system prompt the way ``ToolDef.prompt`` is.
     prompt: str | None = None
     timeout_s: int = DEFAULT_HOST_TOOL_TIMEOUT_S
+    #: The tool waits until the agent recalls this skill, as ``ToolDef.unlock_skill``.
+    #: The host sends that skill in the turn's ``skills`` block, under this
+    #: slug and with this frontmatter ``name``: the recall unlocks by the name.
+    unlock_skill: str | None = None
 
 
 def _host_tool_spec(entry: object) -> HostToolSpecV1 | str:
@@ -579,7 +583,10 @@ def _host_tool_spec(entry: object) -> HostToolSpecV1 | str:
         timeout_s = DEFAULT_HOST_TOOL_TIMEOUT_S
     if not _positive_int(timeout_s) or timeout_s > MAX_HOST_TOOL_TIMEOUT_S:
         return "invalid_timeout"
-    return HostToolSpecV1(name, description, input_schema, prompt or None, timeout_s)
+    unlock_skill = entry.get("unlock_skill")
+    if unlock_skill is not None and not _is_skill_name(unlock_skill):
+        return "invalid_unlock_skill"
+    return HostToolSpecV1(name, description, input_schema, prompt or None, timeout_s, unlock_skill)
 
 
 def parse_host_tools(value: object, conversation_id: str) -> tuple[HostToolSpecV1, ...]:
