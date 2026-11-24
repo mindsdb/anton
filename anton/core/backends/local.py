@@ -292,17 +292,23 @@ def _clip_stdout(
     and apply Anton's left-edge defenses (`exact_secret_suffix_at_start` +
     `_without_orphan_region`) to the left-cut tail so orphaned values cannot leak.
     """
-    def _clean_and_rescrub(s: str) -> str:
-        from anton.core.tools.coding_tools import _clean_terminal_output
+    from anton.core.tools.coding_tools import (
+        _collapse_terminal_noise,
+        _strip_ansi_and_crlf,
+    )
 
-        cleaned = _clean_terminal_output(s)
-        if cleaned != s:
-            cleaned = scrub_output(cleaned)
-        return cleaned
+    def _scrub_ansi_crlf(s: str) -> str:
+        first = scrub_output(s)
+        norm = _strip_ansi_and_crlf(first)
+        return scrub_output(norm) if norm != first else first
 
-    text = scrub_output(raw)
+    def _collapse_and_rescrub(s: str) -> str:
+        collapsed = _collapse_terminal_noise(s)
+        return scrub_output(collapsed) if collapsed != s else s
+
+    text = _scrub_ansi_crlf(raw)
     if total <= len(raw):
-        text = _clean_and_rescrub(text)
+        text = _collapse_and_rescrub(text)
     if total > MAX_OUTPUT:
         if total <= len(raw):
             # Full output was scrubbed intact with no cut edges.
@@ -316,11 +322,17 @@ def _clip_stdout(
         else:
             unsafe_edge = max(STDOUT_SCRUB_MARGIN, longest_exact_secret())
             head_limit = HEAD_OUTPUT if raw_tail is not None else MAX_OUTPUT
-            keep_head = min(head_limit, max(len(text) - unsafe_edge, 0))
-            if keep_head:
+            right_drop = unsafe_edge + max(len(text) - len(raw), 0)
+            keep_head = min(head_limit, max(len(text) - right_drop, 0))
+            head_slice = text[:keep_head] if keep_head else ""
+            if head_slice:
+                prefix_drop = exact_secret_prefix_at_end(head_slice)
+                if prefix_drop:
+                    head_slice = head_slice[:-prefix_drop]
+            if head_slice:
                 tail_part = ""
                 if raw_tail:
-                    tail_text = scrub_output(raw_tail)
+                    tail_text = _scrub_ansi_crlf(raw_tail)
                     if total > len(raw_tail):
                         left_drop = unsafe_edge + max(len(tail_text) - len(raw_tail), 0)
                         safe_tail = tail_text[left_drop:] if len(tail_text) > left_drop else ""
@@ -329,10 +341,16 @@ def _clip_stdout(
                             safe_tail = _without_orphan_region(safe_tail)
                     else:
                         safe_tail = tail_text
-                    max_tail = min(TAIL_OUTPUT, max(total - keep_head, 0))
+                    max_tail = min(TAIL_OUTPUT, max(total - len(head_slice), 0))
                     if max_tail > 0 and safe_tail:
-                        tail_part = _clean_and_rescrub(safe_tail[-max_tail:])
-                head_part = _clean_and_rescrub(text[:keep_head])
+                        if len(safe_tail) > max_tail:
+                            tail_slice = safe_tail[-max_tail:]
+                            tail_slice = tail_slice[exact_secret_suffix_at_start(tail_slice) :]
+                            tail_slice = _without_orphan_region(tail_slice)
+                        else:
+                            tail_slice = safe_tail
+                        tail_part = _collapse_and_rescrub(tail_slice)
+                head_part = _collapse_and_rescrub(head_slice)
                 text = format_truncated_stdout(head_part, tail_part, total)
             else:
                 text = f"... (output withheld: it could not be scrubbed safely, {total} chars total)"

@@ -1211,6 +1211,7 @@ def test_bash_terminal_output_cleans_ansi_and_progress_and_scrubs_colored_secret
 
         # Scratchpad `_clip_stdout` also cleans ANSI, progress bars, and repeat spam while re-scrubbing secrets.
         from anton.core.backends.local import _clip_stdout
+        from anton.core.backends.wire import HEAD_OUTPUT, STDOUT_SCRUB_MARGIN, TAIL_OUTPUT
 
         pad_raw = (
             f"tok=\x1b[32m{tok[:8]}\x1b[0m{tok[8:]}\n"
@@ -1222,6 +1223,62 @@ def test_bash_terminal_output_cleans_ansi_and_progress_and_scrubs_colored_secret
         assert tok not in pad_out
         assert "[DS_TEST_ANSI__TOKEN]" in pad_out
         assert "100%\nepoch warn\n... (repeated 5 more times)\ndone" in pad_out
+
+        # Cut-edge (`total > len(raw)`) security tests against ANSI/CRLF-split secrets:
+        # (i) ANSI-split DS_* secret straddling `keep_head`
+        ansi_tok = f"\x1b[32m{tok[:8]}\x1b[0m{tok[8:]}"
+        full_i = ("A" * (HEAD_OUTPUT - 10)) + ansi_tok + ("B" * 20_000)
+        out_i = _clip_stdout(
+            full_i[: HEAD_OUTPUT + STDOUT_SCRUB_MARGIN],
+            total=len(full_i),
+            cwd_note="",
+            raw_tail=full_i[-(TAIL_OUTPUT + STDOUT_SCRUB_MARGIN) :],
+        )
+        assert tok[:8] not in out_i and tok[8:] not in out_i
+
+        # (ii) CRLF-split multiline PEM secret straddling `keep_head`
+        crlf_pem = pem_secret.replace("\n", "\r\n")
+        full_ii = ("P" * (HEAD_OUTPUT - 30)) + crlf_pem + ("Q" * 20_000)
+        out_ii = _clip_stdout(
+            full_ii[: HEAD_OUTPUT + STDOUT_SCRUB_MARGIN],
+            total=len(full_ii),
+            cwd_note="",
+            raw_tail=full_ii[-(TAIL_OUTPUT + STDOUT_SCRUB_MARGIN) :],
+        )
+        assert "CRLFPEMSECRET" not in out_ii and "BEGIN PRIVATE KEY" not in out_ii
+
+        # (iii) Unquoted ANSI-colored access_token straddling `keep_head` and `-max_tail`
+        unq_secret = "SecretTok_Unquoted_9988776655"
+        ansi_unq = f"access_token=\x1b[32m{unq_secret}\x1b[0m"
+        full_iii = (
+            ("X" * (HEAD_OUTPUT - 18))
+            + ansi_unq
+            + ("Y" * 15_000)
+            + ansi_unq
+            + "\nline1\nline2\nline3\n"
+            + ("Z" * (TAIL_OUTPUT - 60))
+            + "\nEND_III"
+        )
+        out_iii = _clip_stdout(
+            full_iii[: HEAD_OUTPUT + STDOUT_SCRUB_MARGIN],
+            total=len(full_iii),
+            cwd_note="",
+            raw_tail=full_iii[-(TAIL_OUTPUT + STDOUT_SCRUB_MARGIN) :],
+        )
+        assert "SecretTok_Unquoted" not in out_iii and "9988776655" not in out_iii
+        assert "END_III" in out_iii
+
+        # (iv) ANSI-split DS_* secret right at `left_drop` in `raw_tail`
+        tail_prefix = "M" * (STDOUT_SCRUB_MARGIN - 6)
+        raw_tail_iv = tail_prefix + ansi_tok + "\nl1\nl2\nl3\nTAIL_SAFE_LINE\n" + ("N" * 500)
+        full_iv_total = 30_000
+        out_iv = _clip_stdout(
+            "H" * (HEAD_OUTPUT + STDOUT_SCRUB_MARGIN),
+            total=full_iv_total,
+            cwd_note="",
+            raw_tail=raw_tail_iv,
+        )
+        assert tok[:8] not in out_iv and tok[8:] not in out_iv and "TAIL_SAFE_LINE" in out_iv
     finally:
         _reset_registered_ds_vars()
         for k in list(os.environ):

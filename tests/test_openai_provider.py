@@ -915,79 +915,187 @@ class TestTCPKeepalive:
         _enable_tcp_keepalive(fake_sdk)  # must not raise or mutate MockTransport
         assert isinstance(mock_http._transport, httpx2.MockTransport)
 
-    async def test_session_affinity_routing_opaque_and_scoped(self):
+
+class TestSessionAffinityRouting:
+    async def test_mindshub_and_local_complete_and_stream_cross_instance_stickiness(self):
         from anton.core.llm.tracing import TraceContext, reset_trace_context, set_trace_context
 
-        # Chat Completions path sends opaque `user` + `x-session-id` + `x-session-affinity`
-        provider = OpenAIProvider(api_key="sk-test", base_url="https://api.example.com/v1")
+        fake_msg = SimpleNamespace(content="ok", tool_calls=None)
+        fake_choice = SimpleNamespace(message=fake_msg, finish_reason="stop")
+        fake_usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, prompt_tokens_details=None)
+
+        async def _fake_stream_chunks():
+            yield SimpleNamespace(
+                model="kimi-k3",
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="hi", tool_calls=None), finish_reason="stop")],
+                usage=fake_usage,
+            )
+
+        # Two separate OpenAIProvider instances (Cowork per-turn pattern) must hash
+        # the same TraceContext.session_id to the exact same opaque affinity key.
+        p1 = OpenAIProvider(api_key="sk-test", base_url="https://api.mindshub.ai/v1")
+        p2 = OpenAIProvider(api_key="sk-test", base_url="http://127.0.0.1:4011/v1")
         try:
-            mock_client = AsyncMock()
-            fake_msg = SimpleNamespace(content="ok", tool_calls=None)
-            fake_choice = SimpleNamespace(message=fake_msg, finish_reason="stop")
-            fake_usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, prompt_tokens_details=None)
-            mock_client.chat.completions.create = AsyncMock(
+            mock1 = AsyncMock()
+            mock1.chat.completions.create = AsyncMock(
                 return_value=SimpleNamespace(choices=[fake_choice], usage=fake_usage, model="kimi-k3")
             )
-            provider._client = mock_client
+            p1._client = mock1
 
-            tok1 = set_trace_context(TraceContext(session_id="secret-conv-A"))
-            try:
-                await provider.complete(model="kimi-k3", system="s", messages=[{"role": "user", "content": "hi"}])
-                kw1 = mock_client.chat.completions.create.call_args.kwargs
-                await provider.complete(model="kimi-k3", system="s", messages=[{"role": "user", "content": "hi2"}])
-                kw2 = mock_client.chat.completions.create.call_args.kwargs
-            finally:
-                reset_trace_context(tok1)
+            mock2 = AsyncMock()
+            mock2.chat.completions.create = AsyncMock(side_effect=lambda **kw: _fake_stream_chunks())
+            p2._client = mock2
 
-            tok2 = set_trace_context(TraceContext(session_id="secret-conv-B"))
+            tok_a = set_trace_context(TraceContext(session_id="secret-conv-A"))
             try:
-                await provider.complete(model="kimi-k3", system="s", messages=[{"role": "user", "content": "hi"}])
-                kw3 = mock_client.chat.completions.create.call_args.kwargs
+                await p1.complete(model="kimi-k3", system="s", messages=[{"role": "user", "content": "hi"}])
+                kw1 = mock1.chat.completions.create.call_args.kwargs
+                events = [e async for e in p2.stream(model="kimi-k3", system="s", messages=[{"role": "user", "content": "hi2"}])]
+                assert events
+                kw2 = mock2.chat.completions.create.call_args.kwargs
             finally:
-                reset_trace_context(tok2)
+                reset_trace_context(tok_a)
+
+            tok_b = set_trace_context(TraceContext(session_id="secret-conv-B"))
+            try:
+                await p1.complete(model="kimi-k3", system="s", messages=[{"role": "user", "content": "hi"}])
+                kw3 = mock1.chat.completions.create.call_args.kwargs
+            finally:
+                reset_trace_context(tok_b)
 
             assert kw1["user"].startswith("anton-")
             assert "secret-conv-A" not in kw1["user"]
-            assert kw1["user"] == kw2["user"]
-            assert kw1["user"] != kw3["user"]
+            assert kw1["user"] == kw2["user"]  # cross-instance Cowork stickiness
+            assert kw1["user"] != kw3["user"]  # distinct conversations isolated
+            assert kw1["extra_headers"]["Langfuse-Session-Id"] == "secret-conv-A"
             assert kw1["extra_headers"]["x-session-id"] == kw1["user"]
             assert kw1["extra_headers"]["x-session-affinity"] == kw1["user"]
+            assert kw2["extra_headers"]["x-session-id"] == kw2["user"]
+            assert kw2["extra_headers"]["x-session-affinity"] == kw2["user"]
+            assert "Langfuse-Session-Id" not in kw2["extra_headers"]
         finally:
+            await p1.aclose()
+            await p2.aclose()
+
+    async def test_third_party_endpoints_receive_no_unsolicited_affinity_by_default(self, monkeypatch):
+        from anton.core.llm.tracing import TraceContext, reset_trace_context, set_trace_context
+
+        monkeypatch.delenv("ANTON_SESSION_AFFINITY", raising=False)
+        monkeypatch.delenv("ANTON_LANGFUSE_HEADERS", raising=False)
+
+        fake_msg = SimpleNamespace(content="ok", tool_calls=None)
+        fake_choice = SimpleNamespace(message=fake_msg, finish_reason="stop")
+        fake_usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, prompt_tokens_details=None)
+
+        for url in (
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "https://api.mistral.ai/v1",
+            "https://api.example.com/v1",
+        ):
+            provider = OpenAIProvider(api_key="sk-test", base_url=url)
+            try:
+                mock_client = AsyncMock()
+                mock_client.chat.completions.create = AsyncMock(
+                    return_value=SimpleNamespace(choices=[fake_choice], usage=fake_usage, model="m")
+                )
+                provider._client = mock_client
+                tok = set_trace_context(TraceContext(session_id="private-conv-1"))
+                try:
+                    await provider.complete(model="m", system="s", messages=[{"role": "user", "content": "hi"}])
+                    kw = mock_client.chat.completions.create.call_args.kwargs
+                finally:
+                    reset_trace_context(tok)
+                assert "user" not in kw
+                assert "extra_headers" not in kw
+            finally:
+                await provider.aclose()
+
+        # Explicit opt-in enables affinity on a custom gateway and retries cleanly on 400 `user` refusal.
+        monkeypatch.setenv("ANTON_SESSION_AFFINITY", "1")
+        import openai
+        from anton.core.llm import openai as openai_mod
+        import httpx2
+
+        opt_url = "https://custom-gateway.example.com/v1"
+        openai_mod._CHAT_USER_REFUSED.discard((opt_url, "strict-m"))
+        provider = OpenAIProvider(api_key="sk-test", base_url=opt_url)
+        try:
+            req = httpx2.Request("POST", f"{opt_url}/chat/completions")
+            bad_resp = httpx2.Response(400, request=req, json={"error": {"message": "Unknown field 'user'", "param": "user"}})
+            bad_err = openai.BadRequestError("Unknown field 'user'", response=bad_resp, body=bad_resp.json())
+            seen_kwargs = []
+
+            async def _create(**kw):
+                seen_kwargs.append(dict(kw))
+                if "user" in kw:
+                    raise bad_err
+                return SimpleNamespace(choices=[fake_choice], usage=fake_usage, model="strict-m")
+
+            await provider._client.close()
+            provider._client = SimpleNamespace(
+                chat=SimpleNamespace(completions=SimpleNamespace(create=_create)),
+                close=AsyncMock(),
+            )
+            await provider.complete(model="strict-m", system="s", messages=[{"role": "user", "content": "hi"}])
+            assert len(seen_kwargs) == 2
+            assert "user" in seen_kwargs[0] and "user" not in seen_kwargs[1]
+            assert (opt_url, "strict-m") in openai_mod._CHAT_USER_REFUSED
+        finally:
+            openai_mod._CHAT_USER_REFUSED.discard((opt_url, "strict-m"))
             await provider.aclose()
 
-        # Direct OpenAI Responses path sets `prompt_cache_key` without adding `extra_headers`
+    async def test_responses_api_prompt_cache_key_and_400_refusal_fallback(self):
+        import openai
+        from anton.core.llm import openai as openai_mod
+        from anton.core.llm.tracing import TraceContext, reset_trace_context, set_trace_context
+        import httpx2
+
+        model = "gpt-5-cache-key-test"
+        openai_mod._PROMPT_CACHE_KEY_REFUSED.discard(("", model))
         oai = OpenAIProvider(api_key="sk-test", flavor=OpenAIProvider.FLAVOR_OPENAI)
         try:
-            tok3 = set_trace_context(TraceContext(session_id="secret-conv-C"))
+            tok = set_trace_context(TraceContext(session_id="secret-conv-C"))
             try:
                 rkw = oai._build_responses_kwargs(
-                    model="gpt-5", system="s", messages=[{"role": "user", "content": "hi"}],
+                    model=model, system="s", messages=[{"role": "user", "content": "hi"}],
                     tools=None, tool_choice=None, max_tokens=100, native_web_tools=None,
                 )
             finally:
-                reset_trace_context(tok3)
+                reset_trace_context(tok)
             assert rkw["prompt_cache_key"].startswith("anton-")
             assert "secret-conv-C" not in rkw["prompt_cache_key"]
             assert "extra_headers" not in rkw
-        finally:
-            await oai.aclose()
 
-        # MindsHub Chat Completions merges affinity headers alongside Langfuse trace headers
-        mh = OpenAIProvider(api_key="sk-test", base_url="https://api.mindshub.ai/v1")
-        try:
-            mock_mh = AsyncMock()
-            mock_mh.chat.completions.create = AsyncMock(
-                return_value=SimpleNamespace(choices=[fake_choice], usage=fake_usage, model="kimi-k3")
+            # Simulate HTTP 400 refusing `prompt_cache_key`: retries without it and caches refusal.
+            req = httpx2.Request("POST", "https://api.openai.com/v1/responses")
+            bad_resp = httpx2.Response(
+                400, request=req, json={"error": {"message": "Unsupported parameter: 'prompt_cache_key'", "param": "prompt_cache_key"}}
             )
-            mh._client = mock_mh
-            tok4 = set_trace_context(TraceContext(session_id="conv-mh-1"))
-            try:
-                await mh.complete(model="kimi-k3", system="s", messages=[{"role": "user", "content": "hi"}])
-                mh_kw = mock_mh.chat.completions.create.call_args.kwargs
-            finally:
-                reset_trace_context(tok4)
-            assert mh_kw["extra_headers"]["Langfuse-Session-Id"] == "conv-mh-1"
-            assert mh_kw["extra_headers"]["x-session-affinity"] == mh_kw["user"]
-            assert "conv-mh-1" not in mh_kw["user"]
+            bad_err = openai.BadRequestError("Unsupported parameter: 'prompt_cache_key'", response=bad_resp, body=bad_resp.json())
+            seen = []
+
+            async def _resp_create(**kw):
+                seen.append(dict(kw))
+                if "prompt_cache_key" in kw:
+                    raise bad_err
+                return SimpleNamespace(status="completed", output=[], usage=None)
+
+            await oai._client.close()
+            oai._client = SimpleNamespace(
+                responses=SimpleNamespace(create=_resp_create),
+                close=AsyncMock(),
+            )
+            res = await oai._create_response(rkw)
+            assert res.status == "completed"
+            assert len(seen) == 2
+            assert "prompt_cache_key" in seen[0] and "prompt_cache_key" not in seen[1]
+            assert ("", model) in openai_mod._PROMPT_CACHE_KEY_REFUSED
+            # Subsequent build omits prompt_cache_key directly.
+            rkw2 = oai._build_responses_kwargs(
+                model=model, system="s", messages=[{"role": "user", "content": "hi"}],
+                tools=None, tool_choice=None, max_tokens=100, native_web_tools=None,
+            )
+            assert "prompt_cache_key" not in rkw2
         finally:
-            await mh.aclose()
+            openai_mod._PROMPT_CACHE_KEY_REFUSED.discard(("", model))
+            await oai.aclose()

@@ -236,29 +236,32 @@ def _is_binary_text(text: str) -> tuple[bool, int]:
     return False, 0
 
 
-def _clean_terminal_output(text: str) -> str:
-    """Normalize terminal progress-bar overwrites, ANSI escapes, and log spam.
+def _strip_ansi_and_crlf(text: str) -> str:
+    """Strip ANSI CSI/OSC escape sequences and normalize CRLF to LF.
 
-    Strips ANSI CSI/OSC sequences, collapses carriage-return (`\\r`) progress
-    updates (keeping the final non-empty segment per line while preserving
-    CRLF-separated lines by normalizing `\\r\\n` to `\\n`), and collapses runs
-    of 5+ identical consecutive non-empty lines so repetitive warning/progress
-    floods do not waste context tokens or push real errors out of truncation bounds.
+    Separated from line collapsing so callers that slice long stdout can run
+    this pass *before* scrubbing and cut-edge trimming (reassembling any
+    ANSI-split or CRLF-split secrets before truncation).
     """
     if "\x1b" in text:
         text = _ANSI_OSC_RE.sub("", text)
         text = _ANSI_CSI_RE.sub("", text)
-    if "\r" in text:
+    if "\r\n" in text:
         text = text.replace("\r\n", "\n")
-        if "\r" in text:
-            cleaned_lines: list[str] = []
-            for line in text.split("\n"):
-                if "\r" in line:
-                    parts = [p for p in line.split("\r") if p]
-                    cleaned_lines.append(parts[-1] if parts else "")
-                else:
-                    cleaned_lines.append(line)
-            text = "\n".join(cleaned_lines)
+    return text
+
+
+def _collapse_terminal_noise(text: str) -> str:
+    """Collapse carriage-return progress overwrites and runs of 5+ identical lines."""
+    if "\r" in text:
+        cleaned_lines: list[str] = []
+        for line in text.split("\n"):
+            if "\r" in line:
+                parts = [p for p in line.split("\r") if p]
+                cleaned_lines.append(parts[-1] if parts else "")
+            else:
+                cleaned_lines.append(line)
+        text = "\n".join(cleaned_lines)
     if "\n" in text:
         lines = text.split("\n")
         if len(lines) >= _REPEAT_LINE_COLLAPSE_THRESHOLD:
@@ -281,6 +284,11 @@ def _clean_terminal_output(text: str) -> str:
             if len(out_lines) < n:
                 text = "\n".join(out_lines)
     return text
+
+
+def _clean_terminal_output(text: str) -> str:
+    """Normalize terminal progress-bar overwrites, ANSI escapes, and log spam."""
+    return _collapse_terminal_noise(_strip_ansi_and_crlf(text))
 
 
 def _scrub_and_clean_terminal(raw: bytes) -> str:
