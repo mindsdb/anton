@@ -1249,12 +1249,9 @@ ASK_USER_TOOL = ToolDef(
 )
 
 
-# With "Act first, ask later" on, the card's own wording ("use this whenever the
-# answers form a short closed set") reads as a licence to ask, and a new user's
-# "fix my laptop" got an operating-system card as the agent's first move, which
-# ended the turn with nothing done when they left. So under act_first the tool
-# says that WHETHER to ask is the conversation discipline's call, and that a card
-# carries the agent's default. Ask-first sessions keep the tool as it was.
+# Under act_first, "use this whenever the answers form a short closed set" reads as
+# a licence to ask, so the card defers WHETHER to ask to the conversation discipline
+# and carries the agent's default. Ask-first sessions keep the card as it was.
 ASK_USER_ACT_FIRST_DESCRIPTION = (
     "Whether to ask at all is decided by the conversation discipline, not by this "
     "tool: a short list of possible answers is not by itself a reason to ask."
