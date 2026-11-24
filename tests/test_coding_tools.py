@@ -1153,13 +1153,18 @@ def test_bash_terminal_output_cleans_ansi_and_progress_and_scrubs_colored_secret
     assert _clean_terminal_output("\x1b[31mERROR:\x1b[0m failed\r\nok") == "ERROR: failed\nok"
     assert _clean_terminal_output("\x1b]0;window title\x07line1\n0%\r50%\r100%\n") == "line1\n100%\n"
     assert _clean_terminal_output("keep1\r\nkeep2\r\n") == "keep1\nkeep2\n"
-    # Runs of 1..4 identical lines and blank lines stay verbatim; 5+ collapse cleanly.
-    four_same = "\n".join(["warn: x"] * 4) + "\n\n\n\n\n\nend"
+    # Runs of 1..4 identical lines and blank/whitespace-only spacer lines stay verbatim; 5+ collapse cleanly.
+    four_same = "\n".join(["warn: x"] * 4) + "\n   \n   \n   \n   \n   \n\n\n\n\nend"
     assert _clean_terminal_output(four_same) == four_same
+    five_same = "\n".join(["exact-boundary"] * 5)
+    assert _clean_terminal_output(five_same) == "exact-boundary\n... (repeated 4 more times)"
     seven_same = "start\n" + "\n".join(["WARNING: deprecated API"] * 7) + "\ndone"
     assert _clean_terminal_output(seven_same) == (
         "start\nWARNING: deprecated API\n... (repeated 6 more times)\ndone"
     )
+    # ANSI-colored identical lines collapse cleanly after ANSI stripping.
+    ansi_flood = "\n".join(f"\x1b[33mretry {i % 1}\x1b[0m" for i in range(6))
+    assert _clean_terminal_output(ansi_flood) == "retry 0\n... (repeated 5 more times)"
 
     # Both ANSI-wrapped and CRLF-encoded multi-line registered secrets must be scrubbed.
     prev_ds = {k: v for k, v in os.environ.items() if k.startswith("DS_")}

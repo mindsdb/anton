@@ -247,7 +247,7 @@ def _clean_terminal_output(text: str) -> str:
             while i < n:
                 line = lines[i]
                 j = i + 1
-                if line:
+                if line.strip():
                     while j < n and lines[j] == line:
                         j += 1
                 run_len = j - i

@@ -891,6 +891,32 @@ class TestProactiveAbsoluteTokenCeiling:
         assert render_msg["content"][0]["content"][1]["type"] == "image"
         assert tool_images_refused(history) is False
 
+        # Unseen current-round parallel batch protection: 2 prior images + a brand-new
+        # 4-image parallel batch in messages[-1] (total 6 >= trigger_at) must evict
+        # only the 2 older seen images and keep all 4 new images intact.
+        parallel_batch_msg = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": f"tc_batch_{k}",
+                    "content": [
+                        {"type": "text", "text": f"Batch image {k}"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": f"BATCH_{k}"}},
+                    ],
+                }
+                for k in range(4)
+            ],
+        }
+        batch_history = [_img_msg(0), _img_msg(1), parallel_batch_msg]
+        assert drop_older_tool_images(batch_history) == 2
+        assert batch_history[0]["content"][0]["content"][1] == {"type": "text", "text": OLDER_TOOL_IMAGE_PLACEHOLDER}
+        assert batch_history[1]["content"][0]["content"][1] == {"type": "text", "text": OLDER_TOOL_IMAGE_PLACEHOLDER}
+        for k in range(4):
+            blk = parallel_batch_msg["content"][k]["content"][1]
+            assert blk["type"] == "image"
+            assert blk["source"]["data"] == f"BATCH_{k}"
+
     def test_stagnation_detector_fires_once_on_third_identical_cycle(self):
         from anton.core.llm.provider import ToolCall
 

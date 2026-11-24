@@ -974,17 +974,25 @@ def drop_older_tool_images(
     often compares 2-5 images side by side, and mutating history on every call
     would bust provider KV prefix caching. This helper is therefore a no-op
     until at least ``trigger_at`` live tool-image blocks accumulate; once hit,
-    it keeps the ``keep_recent`` newest images and replaces older ones in
-    batches, leaving render screenshots and user-attached images untouched.
+    it keeps at least the ``keep_recent`` newest images — and never evicts
+    unseen tool images in the newest message (`messages[-1]`, e.g. a 4-image
+    parallel `read_image` batch) — replacing older ones in batches while
+    leaving render screenshots and user-attached images untouched.
     """
-    if keep_recent < 1 or trigger_at <= keep_recent:
+    if keep_recent < 1 or trigger_at <= keep_recent or not messages:
         return 0
     sites = _tool_image_sites(
         messages, wanted=lambda b: b.get("type") in ("image", "image_url")
     )
     if len(sites) < trigger_at:
         return 0
-    return _replace_blocks(sites[:-keep_recent], OLDER_TOOL_IMAGE_PLACEHOLDER)
+    newest_blocks = {id(b) for b in _tool_results(messages[-1:])}
+    evict = [
+        (block, idx)
+        for block, idx in sites[:-keep_recent]
+        if id(block) not in newest_blocks
+    ]
+    return _replace_blocks(evict, OLDER_TOOL_IMAGE_PLACEHOLDER)
 
 
 def drop_refused_screenshots(messages: list[dict]) -> int:
