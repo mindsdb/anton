@@ -222,8 +222,10 @@ class ChatSystemPromptBuilder:
             )
         if "read_image" in reg:
             lines.append(
-                "- `read_image`: Inspect image files, plots, or screenshots directly (batchable) "
-                "instead of writing OCR or vision scripts."
+                "- `read_image`: Inspect image files, plots, or screenshots directly (batch "
+                "2–4 in parallel, stitch 5+ frames/pages into a labelled contact-sheet grid "
+                "to avoid serial turns, and zoom/crop into fine text or small details rather "
+                "than guessing from a downscaled overview) instead of writing OCR or vision scripts."
             )
         lines.append(
             "- Inspect first to gather facts: on your first turn, immediately run a quick "

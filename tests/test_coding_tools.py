@@ -1117,7 +1117,7 @@ def test_bash_isolates_ppid_from_host_signals():
             to_res = await handle_bash(
                 sess,
                 {
-                    "command": f"trap '' TERM; echo $$ > {pidfile}; exec sleep 30",
+                    "command": f'trap "" TERM; echo $$ > "{pidfile}"; exec sleep 30',
                     "timeout_seconds": 1,
                 },
             )
@@ -1153,6 +1153,13 @@ def test_bash_terminal_output_cleans_ansi_and_progress_and_scrubs_colored_secret
     assert _clean_terminal_output("\x1b[31mERROR:\x1b[0m failed\r\nok") == "ERROR: failed\nok"
     assert _clean_terminal_output("\x1b]0;window title\x07line1\n0%\r50%\r100%\n") == "line1\n100%\n"
     assert _clean_terminal_output("keep1\r\nkeep2\r\n") == "keep1\nkeep2\n"
+    # Runs of 1..4 identical lines and blank lines stay verbatim; 5+ collapse cleanly.
+    four_same = "\n".join(["warn: x"] * 4) + "\n\n\n\n\n\nend"
+    assert _clean_terminal_output(four_same) == four_same
+    seven_same = "start\n" + "\n".join(["WARNING: deprecated API"] * 7) + "\ndone"
+    assert _clean_terminal_output(seven_same) == (
+        "start\nWARNING: deprecated API\n... (repeated 6 more times)\ndone"
+    )
 
     # Both ANSI-wrapped and CRLF-encoded multi-line registered secrets must be scrubbed.
     prev_ds = {k: v for k, v in os.environ.items() if k.startswith("DS_")}

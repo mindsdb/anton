@@ -212,14 +212,17 @@ _ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
-def _clean_terminal_output(text: str) -> str:
-    """Normalize terminal progress-bar overwrites and ANSI color/cursor escapes.
+_REPEAT_LINE_COLLAPSE_THRESHOLD = 5
 
-    Strips ANSI CSI/OSC sequences and collapses carriage-return (`\\r`) progress
+
+def _clean_terminal_output(text: str) -> str:
+    """Normalize terminal progress-bar overwrites, ANSI escapes, and log spam.
+
+    Strips ANSI CSI/OSC sequences, collapses carriage-return (`\\r`) progress
     updates (keeping the final non-empty segment per line while preserving
-    CRLF-separated lines by normalizing `\\r\\n` to `\\n`) so progress spam from
-    installers, compilers, and test runners does not waste context tokens or
-    push real errors out of truncation bounds.
+    CRLF-separated lines by normalizing `\\r\\n` to `\\n`), and collapses runs
+    of 5+ identical consecutive non-empty lines so repetitive warning/progress
+    floods do not waste context tokens or push real errors out of truncation bounds.
     """
     if "\x1b" in text:
         text = _ANSI_OSC_RE.sub("", text)
@@ -235,6 +238,27 @@ def _clean_terminal_output(text: str) -> str:
                 else:
                     cleaned_lines.append(line)
             text = "\n".join(cleaned_lines)
+    if "\n" in text:
+        lines = text.split("\n")
+        if len(lines) >= _REPEAT_LINE_COLLAPSE_THRESHOLD:
+            out_lines: list[str] = []
+            i = 0
+            n = len(lines)
+            while i < n:
+                line = lines[i]
+                j = i + 1
+                if line:
+                    while j < n and lines[j] == line:
+                        j += 1
+                run_len = j - i
+                if run_len >= _REPEAT_LINE_COLLAPSE_THRESHOLD:
+                    out_lines.append(line)
+                    out_lines.append(f"... (repeated {run_len - 1} more times)")
+                else:
+                    out_lines.extend(lines[i:j])
+                i = j
+            if len(out_lines) < n:
+                text = "\n".join(out_lines)
     return text
 
 

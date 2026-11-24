@@ -752,9 +752,13 @@ READ_IMAGE_TOOL = ToolDef(
         "whenever the user references a path to an image file (PNG, JPG, "
         "JPEG, GIF, WEBP, BMP) and you need to actually view the picture to "
         "answer. Pass `file_path` as an absolute path or a path relative to "
-        "the current working directory. The image will appear in your next "
-        "turn as a vision input — do not call this tool again for the same "
-        "path within one turn."
+        "the current working directory. Safe to batch in parallel (e.g. 2–4 "
+        "images in one response); when scanning many frames, pages, or plots "
+        "(5+), stitch them into a labelled contact-sheet grid to inspect in "
+        "one call, and crop/zoom into readable high-resolution regions when "
+        "reading fine text or dense details. The image will appear in your "
+        "next turn as a vision input — do not call this tool again for the "
+        "same path within one turn."
     ),
     input_schema={
         "type": "object",
