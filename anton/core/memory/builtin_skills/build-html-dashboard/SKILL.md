@@ -7,6 +7,8 @@ description: 'ONLY for writing dashboard or chart HTML BY HAND. NOT needed on th
   before rewriting the code of a generated dashboard, or when generate_artifact failed and
   the user asked you to continue manually: it is the output contract — self-contained file
   rules, Apache ECharts setup, dark theme, layout/design standards, large-dataset handling.
+  Also recall it to write an inline chart (create_artifact with display="inline"): its
+  Inline section says how that page differs.
   Not needed to repair a page generate_artifact returned as browser_check_failed: that
   result''s instruction says how.'
 metadata:
@@ -22,7 +24,7 @@ For an Earth map or globe, follow the always-available MAPS AND GLOBES guidance:
 
 BUILD THE DASHBOARD — use multiple scratchpad cells, but produce ONE single self-contained HTML file:
 
-Before the first write, call `create_artifact(type="html-app", name=..., description=..., primary="index.html")` and use the returned `<artifact_path>` for every file you write. All paths below referring to "the output directory" mean `<artifact_path>`. The final dashboard MUST be a single .html file with all data, CSS, JS and images inlined, with no exception: the web app preview shows only the page itself, so a separate file next to it (`dashboard_data.js`, `logo.png`) does not load there, whatever its size. Build every page this way so it renders on every deployment. Keep the whole page under 8 MB; a larger page cannot be checked in a browser.
+Before the first write, call `create_artifact(type="html-app", name=..., description=..., primary="index.html")` (with `display="inline"` for a chart shown inside the chat reply: see INLINE at the end) and use the returned `<artifact_path>` for every file you write. All paths below referring to "the output directory" mean `<artifact_path>`. The final dashboard MUST be a single .html file with all data, CSS, JS and images inlined, with no exception: the web app preview shows only the page itself, so a separate file next to it (`dashboard_data.js`, `logo.png`) does not load there, whatever its size. Build every page this way so it renders on every deployment. Keep the whole page under 8 MB; a larger page cannot be checked in a browser.
 
   REROUND DISCIPLINE (critical — most "round-cap exhaustion" failures we've seen on real dashboards come from drifting off one or more of these):
   1. ONE scratchpad, ONE name. Pick a name on the first cell (e.g. `dash`) and reuse it for the entire build. Switching names (`build_pres` → `write_html` → `pres1` …) creates *separate isolated environments* — variables in one don't exist in another — and burns rounds on recovery.
@@ -146,3 +148,12 @@ Responsive layout (critical — dashboards must work on phones too):
 - Numbers, ids and dates never break inside a value: `white-space: nowrap` on those cells. Never `overflow-wrap: anywhere` or `word-break: break-all` on table cells.
 - A map fits its projection to the plotted points (with a margin), not the whole world, when they sit in one region. At phone width its labels and legend stay inside the view and no smaller than 11 px: shorten or drop labels that would overlap.
 - Default to one column on narrow viewports unless the user explicitly asks for a fixed multi-column layout (e.g. for a printable PDF).
+
+INLINE (display="inline") — a small interactive chart shown live inside the chat reply:
+Register it with `create_artifact(type="html-app", primary="index.html", display="inline", ...)` and write it yourself; generate_artifact builds full pages. Everything above still holds (one self-contained file, the HOST CONTRACT with its view helper, SECURITY, chart rules) except where these rules differ:
+- FITS IN A MESSAGE: one chart and its controls (range tabs such as 1D/5D/1M, a series toggle, a select), or two small linked views. No page header, KPI rows, multi-section layout, tabbed pages or long tables. The insight list is one line. Build it in one or two cells; REROUND DISCIPLINE is for full dashboards.
+- HEIGHT: the host measures the page and sizes the frame to it, so the page sizes to its content: aim for 600 px tall or less. No `100vh`, `height: 100%` on `html`/`body`, `position: fixed`, or a wrapper with its own scrolling (`overflow: auto`/`scroll`). `body { margin: 0; }`, chart container `width: 100%; height: 320px` (420 px at most), and the resize hook from Responsive layout.
+- THEME: the host sets `data-theme="light"` or `"dark"` and `color-scheme` on `<html>`, and changes them live when the app's theme changes. Style from CSS custom properties, not the fixed #0d1117 theme: light tokens on `:root`, dark ones on `:root[data-theme="dark"]`, and the same dark tokens under `@media (prefers-color-scheme: dark) { :root:not([data-theme]) { ... } }` for the moment before the host sets it. Keep the page background transparent so it sits in the reply. Start ECharts with `echarts.init(el, dark ? 'dark' : null)` and `backgroundColor: 'transparent'`, reading colours from the tokens (`getComputedStyle(document.documentElement).getPropertyValue('--fg')`). Watch the attribute with `new MutationObserver(redraw).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })`, where `redraw` disposes the chart and starts it again in the new theme with the current range and toggles.
+- NO NETWORK: the frame makes no requests, so all data is inline as `const D = ...;` and nothing calls `fetch`, `XMLHttpRequest`, `d3.json` or `EventSource`. No web fonts, external images, map atlases or tiles, and no Tailwind: style with a `<style>` block. The one external resource is the pinned ECharts script `https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js`, the same `<script src>` every html-app preview loads; no other library.
+- SMALL DATA: aggregate in the scratchpad to what the chart shows, a few hundred points per view at most, with every range a tab offers computed ahead, and keep the file under 200 KB. Larger data, or a page the user will keep and reopen, is a full artifact without `display`.
+- No `localStorage` state to keep: the chart starts in its default view every time.

@@ -287,6 +287,12 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "document. The renderer uses it to decide what to open by default. "
         "Skip when you don't know yet — the renderer falls back to a "
         "heuristic, and you can set it later via `update_artifact`.\n\n"
+        "Pass `display: \"inline\"` (html-app only) for a small interactive "
+        "chart that shows live inside your chat reply instead of as a card: "
+        "range tabs, toggles or linked views that a chart block cannot do, on "
+        "data that fits in a message. You write that page yourself: call "
+        "`recall_skill(\"build-html-dashboard\")` and follow its Inline section. "
+        "Omit it for anything the user opens, keeps or that holds a lot of data.\n\n"
         "To MODIFY an existing artifact instead of creating a new one, call "
         "`list_artifacts` to find it; its folder is `<root>/<slug>`."
     ),
@@ -317,6 +323,14 @@ CREATE_ARTIFACT_TOOL = ToolDef(
                 "type": "string",
                 "description": "Relative path of the entry-point file you'll write (e.g. \"index.html\"). Optional — skip if you don't know yet.",
             },
+            "display": {
+                "type": "string",
+                "enum": ["inline"],
+                "description": (
+                    "\"inline\" shows this html-app live inside the chat reply (a small "
+                    "interactive chart). Omit for the usual artifact card."
+                ),
+            },
         },
         "required": ["name", "description", "type"],
     },
@@ -341,7 +355,9 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
         "`backend.py` so metadata.json "
         "captures which connections the deployable depends on. Slugs must match "
         "existing vault connections (see `Connected Data Sources` in the system "
-        "prompt). Pass `[]` to clear."
+        "prompt). Pass `[]` to clear.\n"
+        "- `display`: `\"inline\"` shows an html-app live inside the chat reply; "
+        "empty string goes back to the usual card."
     ),
     input_schema={
         "type": "object",
@@ -370,6 +386,11 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
                     "description": "Connection slug, e.g. \"postgres-prod_db\".",
                 },
             },
+            "display": {
+                "type": "string",
+                "enum": ["inline", ""],
+                "description": "\"inline\" to show an html-app inside the chat reply; empty string for the usual card.",
+            },
         },
         "required": ["slug"],
     },
@@ -382,7 +403,8 @@ LIST_ARTIFACTS_TOOL = ToolDef(
     description=(
         "List the artifacts in this workspace, newest first. An artifact's folder "
         "is `<root>/<slug>`, and paths in the result are relative to it. Without "
-        "`match` you get a summary (name, type, updatedAt, description, primary); "
+        "`match` you get a summary (name, type, updatedAt, description, primary, "
+        "and display when the artifact is shown inline); "
         "with `match` the full record, including id, files and service_files "
         "(housekeeping and generation files, not what was built)."
     ),

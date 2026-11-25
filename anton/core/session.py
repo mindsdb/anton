@@ -57,7 +57,7 @@ from anton.core.llm.liveness import (
     arm_turn_tracker,
     disarm_turn_tracker,
 )
-from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
+from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext, renders_chart_blocks
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
 from anton.core.root_cause import classify as classify_root_cause
@@ -3368,6 +3368,8 @@ class ChatSession:
             workspace_context=workspace_ctx,
             # ENG-4149. Fixed for the session, so it sits with the stable lines.
             ui_locale_context=ui_locale_line(getattr(self, "_ui_locale", None)),
+            # ENG-4684. Fixed for the session like the surface it comes from.
+            chart_blocks=renders_chart_blocks(getattr(self, "_surface", None)),
         )
 
         return prompt

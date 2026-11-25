@@ -547,13 +547,12 @@ Changing a report's content or adding sections needs neither: use report_tools \
 """
 
 
-# TODO: Should we remove mentions of the terminal here?
 VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT = """\
-Do NOT proactively create HTML dashboards, charts, or browser-based visualizations. \
-All analysis output should be formatted for the CLI terminal.
+Do NOT proactively create HTML dashboards, chart artifacts, or browser-based visualizations. \
+Format all analysis output as markdown for the chat.
 
 - Present all results as well-formatted markdown: tables, bullet points, headers, and \
-inline numbers. The terminal is the primary display — make it look great there.
+inline numbers. The chat is the primary display — make it look great there.
 - Use markdown tables for tabular data. Keep columns aligned and readable.
 - Use bold/headers for section structure. Use bullet points for lists.
 - For large datasets, summarize the top N and offer to show more.
@@ -570,6 +569,69 @@ repair as that result's `instruction` says, with no skill call. \
 Fallback only if `create_artifact` is unavailable: save to `{output_dir}` \
 (create it if needed).\
 """
+
+
+# Charts drawn inside the chat reply (ENG-4684). Added to whichever
+# visualization variant is in force, and only where the host renders chart
+# blocks and inline artifacts (`ChatSystemPromptBuilder` gets `chart_blocks`
+# from the session's surface): in a terminal a ```chartjs fence is raw JSON.
+# Kept out of the `.format` templates above because the examples hold braces.
+IN_REPLY_VISUALS_PROACTIVE_HEAD = """\
+IN-REPLY VISUALS: this chat draws charts inside your reply. When a visual makes \
+the answer clearer, show one, and pick the lightest option that works. For a \
+single chart or diagram this comes before the artifact routing above, which is \
+option 3.\
+"""
+
+IN_REPLY_VISUALS_ON_REQUEST_HEAD = """\
+IN-REPLY VISUALS: this chat draws charts inside your reply. You do not build \
+artifacts unprompted here, so: add a chart block when a trend, comparison, distribution or flow is \
+the point of the answer, and build an inline or full artifact only when the user \
+asks for an interactive chart, a dashboard or a file. When the user asks for a \
+chart, pick the lightest option that works; this comes before the artifact \
+routing above, which is option 3.\
+"""
+
+IN_REPLY_VISUALS_PROMPT = """\
+1. CHART BLOCK (the default for one chart or diagram): a fenced block in your \
+markdown reply, drawn in place.
+   - ```chartjs holds one Chart.js config as pure JSON: double-quoted keys, no \
+functions, callbacks, formatters or comments. Types: line, bar, pie, doughnut, \
+scatter, bubble, radar, polarArea.
+   - ```mermaid holds Mermaid text: flowchart, sequence, state, ER, gantt, timeline.
+   Limits per block: at most ~500 data points in total, 5 datasets and ~50 KB; \
+Mermaid at most ~100 nodes. Aggregate or sample in the scratchpad first, to \
+about 100 points (weekly buckets, top 10 plus "Other"), never thousands of raw \
+rows. Title the chart and put units in the axis or dataset labels.
+2. INLINE ARTIFACT: the chart needs interaction a chart block cannot give \
+(range tabs like 1D/5D/1M, toggles, linked views) and still fits in a message. \
+`create_artifact(type="html-app", primary="index.html", display="inline", ...)`, \
+then `recall_skill("build-html-dashboard")` and write the page yourself by its \
+Inline section, not with generate_artifact. It renders live inside your reply, \
+sandboxed and with no network, so every byte of data is in the page.
+3. FULL ARTIFACT: large data, multi-chart dashboards, reports, anything the \
+user will reopen or share: the usual html-app artifact flow, unchanged.
+Decide in order: (a) the user asked for no charts, text only or just the data: \
+draw nothing. (b) One chart or diagram of small or aggregated data: chart block. \
+(c) Needs interaction but fits in a message: inline artifact. (d) Anything \
+else: full artifact.
+A chart sits beside the narration, not instead of it: keep the key numbers in \
+text and tables, and use at most two chart blocks in a reply.
+```chartjs
+{"type":"bar","data":{"labels":["Q1","Q2","Q3","Q4"],"datasets":[{"label":"Revenue (USD k)","data":[120,135,128,160]}]},"options":{"plugins":{"title":{"display":true,"text":"Revenue by quarter"}}}}
+```
+```mermaid
+flowchart LR
+  Lead --> Trial --> Paid
+  Trial --> Churned
+```\
+"""
+
+
+def in_reply_visuals(*, proactive: bool) -> str:
+    """The IN-REPLY VISUALS block for the proactive-dashboards setting."""
+    head = IN_REPLY_VISUALS_PROACTIVE_HEAD if proactive else IN_REPLY_VISUALS_ON_REQUEST_HEAD
+    return f"{head}\n{IN_REPLY_VISUALS_PROMPT}"
 
 
 NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT = cut_spans(

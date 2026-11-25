@@ -150,6 +150,7 @@ _SENTINEL_REASONS = {
     "out_of_repairs": (TIER_SELF, "invalid_argument"),
     "invalid_type": (TIER_SELF, "invalid_argument"),
     "invalid_port": (TIER_SELF, "invalid_argument"),
+    "invalid_display": (TIER_SELF, "invalid_argument"),
     "invalid_health_timeout": (TIER_SELF, "invalid_argument"),
     "invalid_datasources": (TIER_SELF, "invalid_argument"),
     # A refused package spec (flag/URL/path-shaped entry) is the agent's own

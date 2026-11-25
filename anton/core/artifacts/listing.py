@@ -14,8 +14,8 @@ from pathlib import Path
 from anton.core.artifacts.internal_files import NON_CONTENT_NAMES
 from anton.core.artifacts.models import Artifact
 
-FIELDS = ("id", "name", "type", "updatedAt", "description", "primary", "files", "service_files")
-SUMMARY_FIELDS = ("name", "type", "updatedAt", "description", "primary")
+FIELDS = ("id", "name", "type", "updatedAt", "description", "primary", "display", "files", "service_files")
+SUMMARY_FIELDS = ("name", "type", "updatedAt", "description", "primary", "display")
 
 LEGEND = "Artifact folder = <root>/<slug>; primary and file paths are relative to it."
 SIZE_LEGEND = "The number before a file path is its size in bytes."
@@ -77,6 +77,11 @@ def _entry(artifact: Artifact, folder: Path, fields: Sequence[str]) -> list[str]
             lines.append(f"{field}: {_one_line(getattr(artifact, field))}")
         elif field == "primary":
             lines.append(f"primary: {_escape(artifact.primary) if artifact.primary else '-'}")
+        elif field == "display":
+            # Only an artifact shown inline says so: the usual card is the
+            # default, and a `display: -` line on every entry costs tokens.
+            if artifact.display:
+                lines.append(f"display: {artifact.display}")
         elif field == "files":
             entries = [(f.path, f.bytes) for f in artifact.files if not _hidden(f.path)]
             lines += _file_lines("files", entries)
