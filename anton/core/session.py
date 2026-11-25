@@ -1417,6 +1417,14 @@ def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
 # context window compaction just freed.
 _SUMMARY_OUTPUT_BUDGET = 8192
 
+# A reply with none of these headings is not a record: a model can answer as
+# the agent ("Let me re-read the files") instead, and keeping that loses the task.
+_SUMMARY_HEADINGS = r"(?:Goal|Constraints|Completed|Active state|Blocked|Decisions|Remaining)"
+_SUMMARY_SECTION = re.compile(
+    rf"^\s*(?:(?:#{{1,6}}|\*\*)\s*(?:\d+[.)]\s*)?{_SUMMARY_HEADINGS}\b|(?:\d+[.)]\s*)?{_SUMMARY_HEADINGS}\s*:)",
+    re.M | re.I,
+)
+
 # A structured, in-place-updated STATE RECORD rather than a freeform blob, so
 # "Remaining" work survives compaction instead of being flattened into prose.
 _SUMMARY_SYSTEM_PROMPT = (
@@ -4072,15 +4080,15 @@ class ChatSession:
                 )
             # An empty 200 reaches here: `raise_on_empty_response` returns early
             # on any truthy stop_reason, so a cut-off-before-any-text generation
-            # is a "success" carrying no record. Whitespace-only counts as empty,
-            # same as every other content check in this file.
-            if not (summary_response.content or "").strip():
+            # is a "success" carrying no record. A reply with no record heading
+            # counts as empty too (see `_SUMMARY_SECTION`).
+            if not _SUMMARY_SECTION.search(summary_response.content or ""):
                 if not last_resort:
                     # Proactive: nothing is broken yet, so decline rather than
                     # replace real turns with a fact-free line that can never
                     # self-heal (ENG-1274).
                     logger.warning(
-                        "history summarization: empty record (stop_reason=%s) — "
+                        "history summarization: no state record (stop_reason=%s), "
                         "keeping %d turns intact",
                         summary_response.stop_reason,
                         len(old_turns),
@@ -4090,7 +4098,7 @@ class ChatSession:
                 # behind a factual marker keeps the newest ~40%; declining sends
                 # the retry into `hard_truncate_history`, which keeps 4 messages.
                 logger.warning(
-                    "history summarization: empty record (stop_reason=%s) — "
+                    "history summarization: no state record (stop_reason=%s), "
                     "folding %d turns behind a marker to survive the overflow",
                     summary_response.stop_reason,
                     len(old_turns),
@@ -4134,7 +4142,8 @@ class ChatSession:
             "Compacted record of earlier conversation, for REFERENCE ONLY — not a new "
             "request. The most recent user message takes priority; if the user changed "
             "direction, narrowed scope, or cancelled something, follow that and do NOT "
-            "resume superseded work described below.\n\n"
+            "resume superseded work described below. Do not repeat approaches already "
+            "recorded under Completed or Blocked; work on what is under Remaining.\n\n"
             f"{summary}"
         )
         summary_msg = {"role": "user", "content": summary_body}
