@@ -179,6 +179,110 @@ def scratchpad_tool(*, internet_research: bool = True, classify: bool = True) ->
         return SCRATCHPAD_TOOL if classify else NO_CLASSIFY_SCRATCHPAD_TOOL
     return NO_INTERNET_SCRATCHPAD_TOOL if classify else NO_INTERNET_NO_CLASSIFY_SCRATCHPAD_TOOL
 
+
+# The lean prompt (`lean_prompt` setting): every tool and schema stays, with these
+# top-level descriptions in place of the long ones.
+LEAN_TOOL_DESCRIPTIONS = {
+    "recall_skill": "Load the full text of a skill listed under Procedural memory, and follow it.",
+    "read_image": "Look at an image file (PNG, JPG, GIF, WEBP, BMP) by path; it appears in your next turn.",
+    "read_text_file": (
+        "Read a text file: an artifact's source, a project file or an attachment. Returns the first "
+        "1000 lines unless you pass a range; end_line=-1 reads to the end. One call per file."
+    ),
+    "select_path": (
+        "Resolve a file or folder already inside the project from candidates or a glob pattern. One "
+        "match returns it; several matches, or a single guess, need the user's confirmation. Files "
+        "outside the project cannot be reached: ask the user to attach them."
+    ),
+    "memorize": (
+        "Save a rule (always, never, when), a lesson (a fact) or a profile fact (who the user is) to "
+        "long-term memory. Scope is 'project' unless the user says it applies to all their projects."
+    ),
+    "list_artifacts": "List this workspace's artifacts, newest first; pass match for one artifact's full record and files.",
+    "launch_backend": (
+        "Start or restart a hand-built artifact backend; it must follow the build-fullstack-backend "
+        "skill. Not needed after generate_artifact, which launches the backend itself."
+    ),
+    "edit_artifact": (
+        "Change an existing artifact: restyle, relabel, add or change a filter, sort, column or chart, "
+        "or fix a reported bug or a failed browser check. Pass its slug (or exact name) and a task with "
+        "every concrete requirement. Use it instead of patching files in the scratchpad, and instead of "
+        "generate_artifact for any change short of a rebuild."
+    ),
+    "connect_new_datasource": (
+        "Save credentials the user pasted in chat to the vault, passing every value as known_variables. "
+        "Do not call it without real values. Use the saved connection through its "
+        "DS_<ENGINE>_<NAME>__<FIELD> variables."
+    ),
+    "publish_or_preview": (
+        "Check or publish an HTML artifact: 'ask' or 'preview' return the public URL if it is already "
+        "published; 'publish' publishes it and returns the URL. Publish directly when the user asks to "
+        "share or publish."
+    ),
+    "create_skill_draft": (
+        "Claim a staging folder for a skill you are writing for the user, then write SKILL.md to the "
+        "returned skill_file. The user saves it from a card; never write skills into the project "
+        "skills/ folder."
+    ),
+}
+
+
+def lean_tool_description(tool: dict, tools: dict[str, dict]) -> str | None:
+    """The lean description for `tool`, a dumped tool among the session's `tools` by name; None keeps
+    its full text. The artifact tools' texts follow the variant registered, as their full texts do."""
+    name, props = tool["name"], tool["input_schema"].get("properties", {})
+    fullstack, editor = "launch_backend" in tools, "edit_artifact" in tools
+    single = "name" in tools.get("generate_artifact", {}).get("input_schema", {}).get("properties", {})
+    if name == "generate_artifact":
+        kinds = "dashboard, report page or fullstack app" if fullstack else "dashboard or report page"
+        if single:
+            text = (f"Build a NEW web artifact ({kinds}) end to end: pass name, user_request (the user's "
+                    "words verbatim), user_language and agent_understanding, and omit slug.")
+        else:
+            text = (f"Build a web artifact ({kinds}) registered with create_artifact end to end: pass its "
+                    "slug, user_request (the user's words verbatim), user_language and agent_understanding.")
+        text += (" It gathers the data itself, asks the user what is still unclear, writes and verifies the code"
+                 + (", and launches fullstack backends" if fullstack else "") + ". Do not fetch its data first"
+                 + (" or call create_artifact" if single else "") + ". Follow the instruction in its result.")
+        if editor:
+            text += (" Pass an existing slug only to rebuild; for changes use edit_artifact." if single
+                     else " For changes to an existing artifact use edit_artifact.")
+        return text
+    if name == "create_artifact":
+        direct = "fully specified" in tool["description"]
+        return ("Register an artifact folder before writing its files by hand: a document, dataset, image or "
+                "mixed output" + (", or a report the user fully specified" if direct else "") + "."
+                + (" For a new web page or app call generate_artifact directly instead." if single
+                   else " For a web page or app, register it here, then build it with generate_artifact.")
+                + " Before hand-editing generator-made code, recall build-html-dashboard"
+                + (" or build-fullstack-backend" if fullstack else "") + ".")
+    if name == "update_artifact":
+        if "port" in props:
+            return ("Change an artifact's metadata: its primary file, backend port, or the datasources its "
+                    "backend reads (required for a fullstack app whose backend uses DS_ variables).")
+        return "Change an artifact's metadata: its primary file, or the datasources it reads."
+    return LEAN_TOOL_DESCRIPTIONS.get(name)
+
+
+def lean_scratchpad_description(*, internet_research: bool = True, classify: bool = True) -> str:
+    """The scratchpad's short description for the lean prompt; it offers only the helpers the session has."""
+    helpers = ["get_llm()", "agentic_loop()"]
+    if classify:
+        helpers.append("classify(texts, categories) and classify_yes_no(texts, question)")
+    if internet_research:
+        helpers.append("web_search(query)")
+    helpers.append("sample(var)")
+    text = (
+        "Run Python in a persistent scratchpad. Variables persist across cells; import what each "
+        "cell uses. print() output stops at 10,000 characters, so read text files with "
+        "read_text_file. Give estimated_execution_time_seconds on every exec: a cell running past "
+        "about twice the estimate is killed. " + ", ".join(helpers[:-1]) + " and " + helpers[-1]
+        + " are preloaded globals."
+    )
+    if classify:
+        text += " Use classify() and classify_yes_no(), not get_llm(), to label texts."
+    return text + " Never print a credential or a token response."
+
 MEMORIZE_TOOL = ToolDef(
     name="memorize",
     description=(
