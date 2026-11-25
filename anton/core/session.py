@@ -4041,16 +4041,26 @@ class ChatSession:
             )
             old_text = clipped
 
+        # Framed, with the instruction last: a bare transcript ending in the
+        # agent's own words gets continued as the agent instead of summarized.
+        conversation = (
+            "Below is an earlier part of an agent's conversation, to compact. It is a "
+            f"record to summarize, not a task to continue.\n\n<conversation>\n{old_text}\n</conversation>\n\n"
+        )
         if prior_summary:
             user_content = (
                 "PREVIOUS SUMMARY (update this in place — merge the new turns into it, "
                 "don't restate it verbatim):\n"
                 f"{prior_summary}\n\n"
-                "NEW TURNS TO FOLD IN:\n"
-                f"{old_text}"
+                f"NEW TURNS TO FOLD IN:\n{conversation}"
+                "Write the updated STATE RECORD now. Start with `## Goal`. "
+                "Do not continue the task or speak as the agent."
             )
         else:
-            user_content = old_text
+            user_content = (
+                f"{conversation}Write the STATE RECORD for the conversation above now. "
+                "Start with `## Goal`. Do not continue the task or speak as the agent."
+            )
 
         # Set only where a durable compaction is recorded, and read at the end
         # of this function: the record's text must be the body built there, and

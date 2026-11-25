@@ -109,6 +109,24 @@ class TestLastCompaction:
         assert recent[0]["role"] == "assistant"
         assert session.history[1:] == recent
 
+    @pytest.mark.parametrize("prior", [None, f"{_COMPACTED_MARKER}\n## Goal\nolder record"])
+    async def test_the_turns_are_framed_as_a_record_with_the_instruction_last(self, prior):
+        """A transcript ending in the agent's own words, with the instruction only
+        in the system prompt, gets continued by some models instead of summarized."""
+        history = _alternating_history(10, "x" * 50)
+        if prior:
+            history[0] = _msg("user", prior)
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nship it"))
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+
+        assert await session._summarize_history() is True
+
+        sent = mock_llm.summarize.call_args.kwargs["messages"][0]["content"]
+        start, end = sent.index("<conversation>"), sent.rindex("</conversation>")
+        assert start < sent.index("x" * 50) < end
+        assert sent[end + len("</conversation>"):].strip()
+
     async def test_budget_ignores_the_larger_stream_budget(self):
         """Compaction is a non-streamed call: it stays under the client's own
         max_tokens even when streamed calls get more room."""
