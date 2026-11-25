@@ -3937,13 +3937,10 @@ class ChatSession:
             )
             if not has_tool_result:
                 break
-            # This user message has tool_results — keep it (and its paired
-            # assistant message) in the recent portion.
+            # Cut before its assistant message so the pair stays in the recent
+            # portion. One step: a second lands on the previous tool_result and
+            # walks a tool loop back to the start, so nothing is ever compacted.
             compacted_count -= 1
-            # Also pull back over the preceding assistant message so the
-            # pair stays together.
-            if compacted_count > 1 and self._history[compacted_count].get("role") == "assistant":
-                compacted_count -= 1
 
         if compacted_count < 2:
             return False

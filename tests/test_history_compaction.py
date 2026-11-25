@@ -89,6 +89,26 @@ class TestLastCompaction:
 
         assert await session._summarize_history() is True
 
+    @pytest.mark.parametrize("pairs", range(3, 12))
+    async def test_a_tool_loop_compacts_at_every_length_without_splitting_a_pair(self, pairs):
+        history = [_msg("user", "do the task")]
+        for i in range(pairs):
+            history.append({"role": "assistant", "content": [
+                {"type": "tool_use", "id": f"t{i}", "name": "scratchpad", "input": {"code": "x" * 50}},
+            ]})
+            history.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": f"t{i}", "content": "y" * 50},
+            ]})
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\ndo the task"))
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+
+        assert await session._summarize_history() is True
+
+        recent = history[session.last_compaction["covered_through"]:]
+        assert recent[0]["role"] == "assistant"
+        assert session.history[1:] == recent
+
     async def test_budget_ignores_the_larger_stream_budget(self):
         """Compaction is a non-streamed call: it stays under the client's own
         max_tokens even when streamed calls get more room."""
