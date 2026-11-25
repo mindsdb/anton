@@ -336,6 +336,68 @@ class TestContextCompaction:
 
         assert session._summarize_history.call_count <= 2
 
+    @staticmethod
+    def _tool_rounds_session(rounds: int, usage: Usage) -> ChatSession:
+        left = rounds
+
+        async def _plan_stream(**kwargs):
+            nonlocal left
+            left -= 1
+            if left > 0:
+                yield StreamComplete(response=LLMResponse(
+                    content="",
+                    tool_calls=[ToolCall(id=f"t{left}", name="no_such_tool", input={})],
+                    usage=usage,
+                    stop_reason="tool_use",
+                ))
+            else:
+                yield StreamComplete(response=LLMResponse(
+                    content="done", usage=usage, stop_reason="end_turn",
+                ))
+
+        session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm()))
+        session._llm.plan_stream = _plan_stream
+        session._llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — done"))
+        session._summarize_history = AsyncMock(return_value=True)
+        session._context_compaction_max_tokens = 80_000
+        return session
+
+    async def test_large_prompt_compacts_on_a_big_window(self):
+        """A prompt over the token ceiling compacts even at low window pressure."""
+        session = self._tool_rounds_session(1, Usage(input_tokens=90_000, context_pressure=0.09))
+
+        events = [e async for e in session.turn_stream("hello")]
+
+        assert session._summarize_history.call_count == 1
+        assert any(isinstance(e, StreamContextCompacted) for e in events)
+
+    async def test_ceiling_of_zero_is_off(self):
+        session = self._tool_rounds_session(1, Usage(input_tokens=90_000, context_pressure=0.09))
+        session._context_compaction_max_tokens = 0
+
+        _ = [e async for e in session.turn_stream("hello")]
+
+        session._summarize_history.assert_not_called()
+
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
+    async def test_too_little_history_does_not_stop_later_compaction(self):
+        session = self._tool_rounds_session(20, Usage(input_tokens=90_000))
+        session._summarize_history = AsyncMock(side_effect=[None, True])
+
+        _ = [e async for e in session.turn_stream("hello")]
+
+        assert session._summarize_history.call_count == 2
+
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
+    async def test_long_turn_compacts_again_after_the_cooldown(self):
+        short = self._tool_rounds_session(10, Usage(input_tokens=90_000))
+        _ = [e async for e in short.turn_stream("hello")]
+        long = self._tool_rounds_session(40, Usage(input_tokens=90_000))
+        _ = [e async for e in long.turn_stream("hello")]
+
+        assert short._summarize_history.call_count == 1
+        assert long._summarize_history.call_count >= 2
+
 
 class TestHardTruncateHistory:
     def _make_session(self) -> ChatSession:
