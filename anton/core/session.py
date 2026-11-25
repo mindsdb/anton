@@ -1374,6 +1374,10 @@ _SOLVABILITY_CLAUSE = (
 )
 
 
+
+# Most stream drops a single turn may retry, however far apart they are.
+_MAX_TURN_DROPS = 8
+
 def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
     """Clip ``text`` to ~``cap`` chars keeping both ends, biased to the tail.
 
@@ -6440,7 +6444,11 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        # Drops in a row, reset by each completed model call, so isolated
+        # drops across a long turn do not add up to a failure. The turn-wide
+        # count still caps a connection that keeps dropping.
         _drop_retries = 0
+        _turn_drops = 0
         # The one resend this turn allows after the model refused a request
         # over a render-check screenshot (see the handler below), and whether
         # it still waits for a request that goes through without them. The
@@ -6548,6 +6556,8 @@ class ChatSession:
             while True:
                 try:
                     async for event in self._stream_and_handle_tools(user_msg_str):
+                        if isinstance(event, StreamComplete):
+                            _drop_retries = 0
                         # The first model call after the drop sends the
                         # history without the dropped images; its completion
                         # shows they caused the refusal. Before the generator
@@ -6606,18 +6616,19 @@ class ChatSession:
                     # note, as for any provider blip.
                     if is_stream_drop(_agent_exc):
                         self._seal_dangling_tool_uses("interrupted by a transient provider error")
-                        if _drop_retries < _max_auto_retries:
+                        if _drop_retries < _max_auto_retries and _turn_drops < _MAX_TURN_DROPS:
                             delay = self._transient_backoff_delay(_drop_retries)
                             _drop_retries += 1
+                            _turn_drops += 1
                             if await self._backoff_sleep(delay):
                                 break
                             continue
                         _stamp_retry_terminal(
                             self._turn_cost, _agent_exc, "request_attempt_limit"
                         )
-                        raise self._attempt_limit_error(
-                            _agent_exc, _drop_retries + 1
-                        ) from _agent_exc
+                        # At the turn cap the in-a-row count may have just reset; report the turn's total.
+                        attempts = _drop_retries + 1 if _turn_drops < _MAX_TURN_DROPS else _turn_drops + 1
+                        raise self._attempt_limit_error(_agent_exc, attempts) from _agent_exc
 
                     # ENG-673: a mid-stream transient failure that had NO prior
                     # retry (overload smuggled into a 200, or a truncated stream).
