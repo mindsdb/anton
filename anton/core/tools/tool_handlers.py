@@ -2940,6 +2940,11 @@ async def handle_scratchpad(
         )
 
 
+# Largest file read_image reads. Above the API limit, since a BMP shrinks
+# when it is converted to PNG.
+_READ_IMAGE_MAX_FILE_BYTES = 64 * 1024 * 1024
+
+
 async def handle_read_image(
     session: "ChatSession", tc_input: dict
 ) -> "ToolOutcome":
@@ -2998,7 +3003,8 @@ async def handle_read_image(
             base = getattr(getattr(session, "_workspace", None), "base", None)
             root = Path(base) if base else Path.cwd()
             path = (root / path).resolve()
-        if policy is not None:
+        restricted = policy is None and getattr(session, "_tool_allowlist", None) is not None
+        if policy is not None or restricted:
             path = path.resolve()
     except (OSError, RuntimeError, ValueError) as exc:
         # Tier 2: the model supplied a path that will not parse.
@@ -3023,6 +3029,22 @@ async def handle_read_image(
             ok=False, reason="access_denied",
         )
 
+    # A host that narrows the tool set (the cloud pod) keeps image reads to what
+    # read_text_file may read there; the desktop passes no allowlist and reads as before.
+    if restricted:
+        from anton.core.tools import file_access
+
+        base, owned_roots = _read_roots(session)
+        if file_access.read_refusal(path, workspace=base, owned_roots=owned_roots) is not None:
+            return ToolOutcome(
+                content=(
+                    f"Error: access denied: {file_path} is outside the project, the "
+                    "artifacts and the conversation's attachments. If the user wants "
+                    "you to see this image, ask them to attach it to the conversation."
+                ),
+                ok=False, reason="access_denied",
+            )
+
     if not path.is_file():
         # Tier 2: the file is genuinely absent. Unlike `recall_skill`'s NO
         # MATCH, there is no listing the model can consult to self-correct and
@@ -3045,7 +3067,10 @@ async def handle_read_image(
         )
 
     try:
-        raw = path.read_bytes()
+        # Bounded, so a huge file is refused without being loaded into memory.
+        with path.open("rb") as f:
+            too_big = os.fstat(f.fileno()).st_size > _READ_IMAGE_MAX_FILE_BYTES
+            raw = b"" if too_big else f.read(_READ_IMAGE_MAX_FILE_BYTES + 1)
     except OSError as exc:
         # Tier 2: the read itself failed. `ok=False` is certain — the model got
         # no image. The CAUSE is not: this wraps a bare `except Exception`, so
@@ -3054,6 +3079,16 @@ async def handle_read_image(
         return ToolOutcome(
             content=f"Error: cannot read '{path}': {exc}",
             ok=False, reason="read_failed",
+        )
+
+    if too_big or len(raw) > _READ_IMAGE_MAX_FILE_BYTES:
+        return ToolOutcome(
+            content=(
+                f"Error: image is too large (over {human_size(_READ_IMAGE_MAX_FILE_BYTES)}); "
+                "the API limit is ~3.7 MB raw / 5 MB base64. "
+                "Resize the image and try again."
+            ),
+            ok=False, reason="image_too_large",
         )
 
     # The format the bytes show, not the extension: a JPEG saved as .png

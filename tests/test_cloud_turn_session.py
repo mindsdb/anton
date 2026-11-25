@@ -772,7 +772,7 @@ def test_the_tool_list_without_extra_tools_has_one_order_and_the_same_bytes_each
 
     assert first == second
     assert [tool["name"] for tool in json.loads(first)] == [
-        "scratchpad", "read_text_file", "memorize", "recall_skill", "create_skill_draft",
+        "scratchpad", "read_image", "read_text_file", "memorize", "recall_skill", "create_skill_draft",
         "create_artifact", "list_artifacts", "update_artifact",
     ]
 
@@ -1779,6 +1779,8 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
         "list_artifacts",
         "update_artifact",
         "read_text_file",
+        # Takes only a path and returns the picture.
+        "read_image",
         "memorize",
         "recall_skill",
         "create_skill_draft",

@@ -76,6 +76,9 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         "list_artifacts",
         "update_artifact",
         "read_text_file",
+        # Without it the model cannot see a workspace image, and generate_image
+        # already tells it to check its result with read_image.
+        "read_image",
         # Safe to list only because a cortex is always built — core registers
         # `memorize` with one, and an allowlist name matching no tool is fatal.
         "memorize",
