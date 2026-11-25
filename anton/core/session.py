@@ -150,7 +150,7 @@ from anton.core.tools.tool_defs import (
     scratchpad_tool as _scratchpad_tool_def,
     ToolDef,
 )
-from anton.core.interaction.elicit import Elicitor
+from anton.core.interaction.elicit import Elicitor, asks_approvals
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
     CELL_NOT_RUN_REASONS,
@@ -2320,7 +2320,8 @@ class ChatSession:
         # subtracted from the tool's reported elapsed time.
         self.answer_wait_s = 0.0
         # The write relay's control address (`write_relay_url`). With it, and
-        # an elicitor that can ask, the session offers `approve_held_write`.
+        # an elicitor that takes approval cards (`asks_approvals`), the
+        # session offers `approve_held_write`.
         # `isinstance` so a MagicMock settings object reads unset.
         relay_url = getattr(s, "write_relay_url", None)
         self._write_relay_url: str | None = (relay_url.strip() or None) if isinstance(relay_url, str) else None
@@ -3602,13 +3603,11 @@ class ChatSession:
             )
 
         # A request the write relay held: the tool reads it from the relay and
-        # asks the user on a card. Only with a relay to read and a way to ask,
-        # since without the card the tool could only refuse.
-        if (
-            self._write_relay_url is not None
-            and self.elicitor is not None
-            and "choice" in self.elicitor.supported_kinds
-        ):
+        # asks the user on an approval card. Only with a relay to read and an
+        # elicitor that takes approval cards, since without the card the tool
+        # could only refuse. An approvals-only elicitor (APPROVAL_KIND) gets
+        # this tool and none of the questions above.
+        if self._write_relay_url is not None and asks_approvals(elicitor=self.elicitor):
             self.tool_registry.register_tool(APPROVE_HELD_WRITE_TOOL)
 
         if self._cortex is not None or self._self_awareness is not None:
@@ -5356,7 +5355,8 @@ class ChatSession:
         """Whether a "choice" question can reach a person this turn: the same
         test `elicit` applies before publishing one. Inferred from what the
         host injects, so a host whose turn has no one to answer must not
-        inject an elicitor."""
+        inject an elicitor that lists "choice". An approvals-only elicitor
+        (APPROVAL_KIND) reads False here."""
         return (
             self.emitter is not None
             and self.elicitor is not None
