@@ -251,8 +251,7 @@ class TestContextCompaction:
         """A failed/no-op compaction (returns False) must not emit
         StreamContextCompacted and must leave _compacted_this_turn False —
         reverting the `if compacted:` guards to unconditional breaks this. It
-        also sets _compaction_failed_this_turn so the proactive check won't
-        re-fire for the rest of the turn (ENG-1274 #1)."""
+        also counts the failure so the proactive check won't re-fire every round."""
         async def _plan_stream(**kwargs):
             yield StreamComplete(
                 response=LLMResponse(content="Done", usage=Usage(context_pressure=0.9))
@@ -268,7 +267,7 @@ class TestContextCompaction:
         assert session._summarize_history.call_count == 1
         assert not any(isinstance(e, StreamContextCompacted) for e in events)
         assert session._compacted_this_turn is False
-        assert session._compaction_failed_this_turn is True
+        assert session._compaction_failures_this_turn == 1
 
     async def test_failed_compaction_overflow_plus_proactive_bounded(self):
         """Overflow (reactive path) followed by a high-pressure retry
@@ -295,7 +294,7 @@ class TestContextCompaction:
 
         assert session._summarize_history.call_count == 2
         assert not any(isinstance(e, StreamContextCompacted) for e in events)
-        assert session._compaction_failed_this_turn is True
+        assert session._compaction_failures_this_turn == 1
 
     # The unknown-tool dispatch path touches the AsyncMock llm client and
     # leaks one never-awaited coroutine per turn — a test-double artifact (the
@@ -304,7 +303,7 @@ class TestContextCompaction:
     async def test_failed_compaction_not_retried_across_tool_rounds(self):
         """Several tool rounds all above the pressure threshold must still
         yield at most one proactive compaction attempt. This is what actually
-        pins the `and not self._compaction_failed_this_turn` guard: remove it
+        pins the failure guard: remove it
         and the count climbs to one summarize call per round (ENG-1274 #1).
         `<=` rather than `==` so it isn't a tripwire on unrelated recovery-path
         changes."""
@@ -397,6 +396,25 @@ class TestContextCompaction:
 
         assert short._summarize_history.call_count == 1
         assert long._summarize_history.call_count >= 2
+
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
+    async def test_one_failed_summary_is_retried_after_the_cooldown(self):
+        session = self._tool_rounds_session(40, Usage(input_tokens=90_000))
+        session._summarize_history = AsyncMock(side_effect=[False, True, True])
+
+        events = [e async for e in session.turn_stream("hello")]
+
+        assert session._summarize_history.call_count >= 2
+        assert any(isinstance(e, StreamContextCompacted) for e in events)
+
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
+    async def test_two_failed_summaries_stop_compaction_for_the_turn(self):
+        session = self._tool_rounds_session(80, Usage(input_tokens=90_000))
+        session._summarize_history = AsyncMock(return_value=False)
+
+        _ = [e async for e in session.turn_stream("hello")]
+
+        assert session._summarize_history.call_count == 2
 
 
 class TestHardTruncateHistory:

@@ -1378,6 +1378,9 @@ _SOLVABILITY_CLAUSE = (
 # Tool rounds after a compaction before the next one, so a history that stays
 # large after compacting is not summarized again every round.
 _COMPACTION_COOLDOWN_ROUNDS = 15
+# A summarizer can miss its record once and succeed on the next try, so one
+# failure does not end compaction for a long turn.
+_MAX_COMPACTION_FAILURES = 2
 
 
 def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
@@ -2584,10 +2587,9 @@ class ChatSession:
         # at the start of each turn. Prevents double-summarization when
         # the post-recovery response still reports high pressure.
         self._compacted_this_turn = False
-        # Stops a *failed* proactive compaction from being re-attempted every
-        # tool round. A transient blip still gets a fresh attempt next
-        # turn (both flags reset per turn).
-        self._compaction_failed_this_turn = False
+        # Failed proactive compactions this turn. Past `_MAX_COMPACTION_FAILURES`
+        # none is attempted until the next turn.
+        self._compaction_failures_this_turn = 0
         # Tool round of this turn's latest compaction attempt, None before one.
         self._last_compaction_round: int | None = None
         # Backends launched via the launch_backend tool. Keyed by
@@ -3907,8 +3909,8 @@ class ChatSession:
         Returns True only if history was actually replaced, so callers don't
         set `_compacted_this_turn` or emit a StreamContextCompacted event for a
         compaction that didn't happen. A failed summarization returns False,
-        and proactive callers set `_compaction_failed_this_turn` so it isn't
-        re-attempted every round. Too little history to fold returns None,
+        and proactive callers count it in `_compaction_failures_this_turn` so it
+        isn't re-attempted every round. Too little history to fold returns None,
         which leaves a later round free to try once the history has grown.
 
         ``last_resort`` marks the reactive callers, which run *after* the
@@ -6505,7 +6507,7 @@ class ChatSession:
         self._round_cap_continued_rounds = 0
         self._turn_tool_rounds = 0
         self._compacted_this_turn = False
-        self._compaction_failed_this_turn = False
+        self._compaction_failures_this_turn = 0
         self._last_compaction_round = None
         self._turn_continuations = 0
         self._time_limit_continued_s = 0
@@ -7386,10 +7388,10 @@ class ChatSession:
     async def _compact_proactively(self, usage: Usage) -> AsyncIterator[StreamEvent]:
         """Compact history when the last call's prompt was large.
 
-        Not re-attempted after a failure in the same turn. After any attempt,
-        waits `_COMPACTION_COOLDOWN_ROUNDS` tool rounds before the next one.
+        Stops for the turn after `_MAX_COMPACTION_FAILURES` failures. After any
+        attempt, waits `_COMPACTION_COOLDOWN_ROUNDS` tool rounds before the next one.
         """
-        if self._compaction_failed_this_turn:
+        if self._compaction_failures_this_turn >= _MAX_COMPACTION_FAILURES:
             return
         if (
             self._last_compaction_round is not None
@@ -7411,7 +7413,7 @@ class ChatSession:
                 message="Context was getting long — older history has been summarized."
             )
         elif compacted is False:
-            self._compaction_failed_this_turn = True
+            self._compaction_failures_this_turn += 1
 
     async def _stream_and_handle_tools(
         self, user_message: str = ""
