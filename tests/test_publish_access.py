@@ -11,6 +11,7 @@ from unittest import mock
 import pytest
 
 from anton import publisher
+from anton.publish_access import WEBSITE_MODE
 from anton.publisher import (
     ArtifactOwnedByOtherUserError,
     ArtifactShareOrgRequiredError,
@@ -54,6 +55,40 @@ def test_restricted_mode_normalizes_and_excludes_secrets():
 def test_restricted_mode_defaults():
     out = build_access_payload({"mode": "restricted"}, access_version=1)
     assert out == {"mode": "restricted", "allowed_emails": [], "org_allowed": False, "access_version": 1}
+
+
+def test_website_mode():
+    assert build_access_payload({"mode": WEBSITE_MODE}) == {"mode": "website"}
+
+
+def test_website_mode_passes_the_owner_confirmation_through():
+    out = build_access_payload({"mode": WEBSITE_MODE, "confirmed_by_owner": True})
+    assert out == {"mode": "website", "confirmed_by_owner": True}
+
+
+@pytest.mark.parametrize("extra", [
+    {"password": "hunter2"},
+    {"emails": ["a@x.com"], "org_allowed": True, "owner_only": True},
+    {"confirmed_by_owner": False},
+    {"confirmed_by_owner": "true"},
+])
+def test_website_mode_sends_no_other_field(extra):
+    previous = {"mode": "password", "requires_password": True, "access_password": "hunter2"}
+    out = build_access_payload(
+        {"mode": WEBSITE_MODE, **extra}, pwd_version=5, access_version=7, previous=previous,
+    )
+    assert out == {"mode": "website"}
+
+
+def test_website_mode_never_takes_the_owner_confirmation_from_previous():
+    """cowork-server passes the pod-writable `.published.json` entry as
+    `previous`, so the flag must come from the caller's access only."""
+    out = build_access_payload(
+        {"mode": WEBSITE_MODE},
+        pwd_version=1, access_version=1,
+        previous={"mode": "website", "confirmed_by_owner": True},
+    )
+    assert out == {"mode": "website"}
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +267,16 @@ def test_publish_returns_no_hash_outside_password_mode(tmp_path: Path):
         access={"mode": "restricted", "emails": ["a@x.com"], "org_allowed": False},
     )
     assert "password_hash" not in result
+
+
+def test_publish_sends_website_access(tmp_path: Path):
+    payload = _capture_publish(tmp_path, access={"mode": WEBSITE_MODE, "confirmed_by_owner": True})
+    assert payload["access"] == {"mode": "website", "confirmed_by_owner": True}
+
+
+def test_publish_sends_a_kept_website_without_confirmation(tmp_path: Path):
+    payload = _capture_publish(tmp_path, access={"mode": WEBSITE_MODE})
+    assert payload["access"] == {"mode": "website"}
 
 
 # ---------------------------------------------------------------------------
