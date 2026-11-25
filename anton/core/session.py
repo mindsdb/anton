@@ -1378,6 +1378,8 @@ _SOLVABILITY_CLAUSE = (
 # Tool rounds after a compaction before the next one, so a history that stays
 # large after compacting is not summarized again every round.
 _COMPACTION_COOLDOWN_ROUNDS = 15
+# What a compaction keeps unsummarized, so a compacted history has a known size.
+_COMPACTION_RECENT_TOKENS = 30_000
 # A summarizer can miss its record once and succeed on the next try, so one
 # failure does not end compaction for a long turn.
 _MAX_COMPACTION_FAILURES = 2
@@ -3930,6 +3932,17 @@ class ChatSession:
         # Number of leading messages to fold into the summary; doubles as the
         # cut index (old = history[:compacted_count], recent = the rest).
         compacted_count = max(int(len(self._history) * 0.6), 1)
+        # In a tool loop the large results are the newest messages, so a cut by
+        # count can fold too little to act on. Also fold everything older than
+        # the newest `_COMPACTION_RECENT_TOKENS` (about 4 chars per token).
+        recent_chars, size_cut = 0, len(self._history)
+        while size_cut > 0:
+            content = self._history[size_cut - 1].get("content", "")
+            recent_chars += len(content) if isinstance(content, str) else len(str(content))
+            if recent_chars > _COMPACTION_RECENT_TOKENS * 4:
+                break
+            size_cut -= 1
+        compacted_count = max(compacted_count, size_cut)
         # Ensure we keep at least min_recent turns
         compacted_count = min(compacted_count, len(self._history) - min_recent)
         if compacted_count < 2:

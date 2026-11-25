@@ -109,6 +109,21 @@ class TestLastCompaction:
         assert recent[0]["role"] == "assistant"
         assert session.history[1:] == recent
 
+    async def test_large_recent_messages_are_folded_down_to_the_recent_budget(self):
+        """12 small messages then 8 large ones: a cut by message count folds too little to act."""
+        small = _alternating_history(12, "s" * 2_000)
+        large = [_msg("user" if i % 2 == 0 else "assistant", f"{i}" + "L" * 20_000) for i in range(8)]
+        history = small + large
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nship it"))
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+
+        assert await session._summarize_history() is True
+
+        kept = history[session.last_compaction["covered_through"]:]
+        assert len(kept) >= 4
+        assert sum(len(m["content"]) for m in kept) <= session_mod._COMPACTION_RECENT_TOKENS * 4
+
     @pytest.mark.parametrize("prior", [None, f"{_COMPACTED_MARKER}\n## Goal\nolder record"])
     async def test_the_turns_are_framed_as_a_record_with_the_instruction_last(self, prior):
         """A transcript ending in the agent's own words, with the instruction only
