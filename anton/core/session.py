@@ -126,7 +126,7 @@ from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
     APPROVE_HELD_WRITE_TOOL,
-    ASK_USER_TOOL,
+    ask_user_tool,
     CREATE_ARTIFACT_TOOL,
     CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     GENERATE_ARTIFACT_TOOL,
@@ -3643,14 +3643,11 @@ class ChatSession:
             # Copy, don't mutate: ToolDefs are module-level singletons and the
             # hint is per-host, so an in-place edit would leak across every
             # session sharing this process.
+            ask_user = ask_user_tool(self._act_first)
             self.tool_registry.register_tool(
                 replace(
-                    ASK_USER_TOOL,
-                    description=(
-                        ASK_USER_TOOL.description
-                        + "\n\n"
-                        + self.elicitor.answer_hint
-                    ),
+                    ask_user,
+                    description=ask_user.description + "\n\n" + self.elicitor.answer_hint,
                 )
             )
 
