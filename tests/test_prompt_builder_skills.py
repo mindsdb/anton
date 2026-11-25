@@ -171,3 +171,17 @@ def test_system_prompt_has_no_volatile_clock():
     prompt = _build_prompt(builder)
     assert "Current date and time" not in prompt
     assert "prefixed with the time they were sent" in prompt
+
+
+def test_a_tool_prompt_starts_its_own_paragraph():
+    from anton.core.tools.tool_defs import ToolDef
+
+    tool = ToolDef(name="t", description="d", input_schema={}, handler=None, prompt="TOOL NOTE: use t.")
+    prompt = ChatSystemPromptBuilder().build(
+        conversation_started="2026-07-31T12:00:00+00:00",
+        system_prompt_context=SystemPromptContext(runtime_context="test"),
+        proactive_dashboards=False,
+        output_dir="",
+        tool_defs=[tool],
+    )
+    assert "\n\nTOOL NOTE: use t." in prompt
