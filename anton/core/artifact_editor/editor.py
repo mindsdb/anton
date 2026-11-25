@@ -842,12 +842,12 @@ class ArtifactEditor:
                 lines[index] = "@" + line[2:].strip()
         patch = "\n".join(lines)
         try:
-            return parse_patch(patch)
+            return parse_patch(patch, known)
         except PatchParseError as exc:
             headerless = not any(line.startswith("@") and not line.startswith("@@") for line in lines)
             if (self.ws.kind == "html-app" and self.ws.primary and headerless
                     and ("before any file header" in str(exc) or "no file headers" in str(exc))):
-                return parse_patch(f"@{self.ws.primary}\n{patch}")
+                return parse_patch(f"@{self.ws.primary}\n{patch}", known)
             raise
 
     def _apply_diff(self, args: dict) -> _ToolResult:

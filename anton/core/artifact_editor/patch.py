@@ -37,7 +37,7 @@ returns the new text of every file it could fully place.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 
 __all__ = [
@@ -96,6 +96,8 @@ class FileEdit:
     path: str
     create: bool
     hunks: tuple[Hunk, ...]
+    # 1-based patch line of the header, 0 when unknown.
+    line: int = 0
 
 
 @dataclass(frozen=True)
@@ -184,22 +186,45 @@ class _Builder:
 class _File:
     path: str
     create: bool = False
+    line: int = 0
     hunks: list[Hunk] = field(default_factory=list)
     # For a created file: its literal content lines.
     content: list[str] | None = None
 
 
-def parse_patch(text: str) -> list[FileEdit]:
-    """Read a compact patch, an apply_patch (V4A) patch, or a unified diff."""
-    lines = _lines_of(text)
-    if _is_compact(lines):
-        files = _parse_compact(lines)
+def parse_patch(text: str, known: Collection[str] = ()) -> list[FileEdit]:
+    """Read a compact patch, an apply_patch (V4A) patch, or a unified diff.
+    ``known`` is the files that exist: only those can be named with spaces in
+    a compact header."""
+    lines, offset = _split(text)
+    if _is_compact(lines, known):
+        files = _parse_compact(lines, known, offset)
     else:
-        files = _parse_diff(lines)
+        files = _parse_diff(lines, offset)
+    if not files:
+        raise PatchParseError("no file headers in patch" + _first_line_note(lines, offset))
     return _finish(files)
 
 
+def _first_line_note(lines: Sequence[str], offset: int) -> str:
+    """Which line was looked at, so a model can fix a header it got wrong
+    instead of resending the same patch."""
+    for index, line in enumerate(lines):
+        if line.strip():
+            return (
+                f'. Line {index + offset + 1}, "{_clip(line)}", was not read as a file header. '
+                "A header is @path to edit an existing file or @+path to create one"
+            )
+    return ""
+
+
 def _lines_of(text: str) -> list[str]:
+    return _split(text)[0]
+
+
+def _split(text: str) -> tuple[list[str], int]:
+    """The patch's lines, and how many leading lines an outer fence took off
+    (to report line numbers of the patch as written)."""
     # Trailing blank lines are the patch text ending in a newline, not empty
     # context lines; counted as context they make every last hunk unmatchable.
     lines = [
@@ -212,13 +237,11 @@ def _lines_of(text: str) -> list[str]:
     if len(nonblank) >= 2:
         first, last = nonblank[0], nonblank[-1]
         if lines[first].strip().startswith("```") and lines[last].strip() == "```":
-            lines = lines[first + 1 : last]
-    return lines
+            return lines[first + 1 : last], first + 1
+    return lines, 0
 
 
 def _finish(files: list[_File]) -> list[FileEdit]:
-    if not files:
-        raise PatchParseError("no file headers in patch")
     edits = []
     for one in files:
         if one.create:
@@ -227,12 +250,12 @@ def _finish(files: list[_File]) -> list[FileEdit]:
             # lines, perhaps over several hunks; it is one literal body.
             for current in one.hunks:
                 content.extend(current.after)
-            edits.append(FileEdit(one.path, True, (Hunk(after=tuple(content)),)))
+            edits.append(FileEdit(one.path, True, (Hunk(after=tuple(content)),), one.line))
             continue
         # A hunk that collected nothing carries no instruction, and keeping
         # one would read as "replace this file with nothing".
         hunks = tuple(current for current in one.hunks if not current.empty)
-        edits.append(FileEdit(one.path, False, hunks))
+        edits.append(FileEdit(one.path, False, hunks, one.line))
     return edits
 
 
@@ -247,15 +270,13 @@ def _looks_like_path(text: str, *, spaced: bool = False) -> bool:
     file's header. A CSS file full of ``@media (...)`` and ``@import url(...)``,
     or TypeScript ``@Component({...})``, would otherwise cut the file short at
     its first at-rule and start a second file named after it. Real paths
-    carry no brackets, quotes or semicolons; the at-rules that matter all do.
-    With ``spaced``, a name with spaces counts when it ends in a file
-    extension, so a user's "Marsh Light.md" is a path while "@media screen" is
-    not. A bare ``@Component`` alone on a line would still be misread."""
+    carry no spaces, brackets, quotes or semicolons; the at-rules that matter
+    all do. A bare ``@Component`` alone on a line would still be misread."""
     if not text or len(text) > 200 or text.startswith("@"):
         return False
     if any(ch in text for ch in "\t(){}[]\"';,"):
         return False
-    return " " not in text or (spaced and _NAMED_FILE.search(text) is not None)
+    return spaced or " " not in text
 
 
 # "@END", "*** END ***", "EOF": bare end markers models add, which are not
@@ -296,7 +317,9 @@ def _is_separator(line: str) -> bool:
     return line.startswith(("@@", "***"))
 
 
-def _compact_header(line: str) -> tuple[str, str] | None:
+def _compact_header(
+    line: str, known: Collection[str] = (), *, new_spaced: bool = True
+) -> tuple[str, str] | None:
     """(mode, path) for a compact file header, else None."""
     if _is_trailer(line):
         return None
@@ -313,9 +336,15 @@ def _compact_header(line: str) -> tuple[str, str] | None:
     mode = " "
     if rest and rest[0] in "+->":
         mode, rest = rest[0], rest[1:]
-    if not _looks_like_path(rest, spaced=True):
+    path = _clean_path(rest)
+    if path in known:
+        return mode, path
+    # A new name with spaces only after "@+" with an extension, and never
+    # inside created content: any "@name ..." line would cut it short there.
+    spaced = new_spaced and mode == "+" and _NAMED_FILE.search(rest) is not None
+    if not _looks_like_path(rest, spaced=spaced):
         return None
-    return mode, _clean_path(rest)
+    return mode, path
 
 
 def _borrowed_header(line: str) -> tuple[str, str] | None:
@@ -342,15 +371,17 @@ def _borrowed_header(line: str) -> tuple[str, str] | None:
     return None
 
 
-def _is_compact(lines: Sequence[str]) -> bool:
+def _is_compact(lines: Sequence[str], known: Collection[str] = ()) -> bool:
     """Decided by the first line that says anything at all."""
     for line in lines:
         if line.strip():
-            return _compact_header(line) is not None
+            return _compact_header(line, known) is not None
     return False
 
 
-def _plus_only_follows(lines: Sequence[str], start: int) -> bool:
+def _plus_only_follows(
+    lines: Sequence[str], start: int, known: Collection[str] = ()
+) -> bool:
     """Whether the edit after a blank line is added lines and nothing else.
     Such an edit has nothing to place it by, so it can only be the rest of
     the addition before the blank."""
@@ -361,7 +392,7 @@ def _plus_only_follows(lines: Sequence[str], start: int) -> bool:
         if (
             not line.strip()
             or _is_separator(line)
-            or _compact_header(line) is not None
+            or _compact_header(line, known) is not None
             or _borrowed_header(line) is not None
         ):
             break
@@ -371,7 +402,9 @@ def _plus_only_follows(lines: Sequence[str], start: int) -> bool:
     return seen
 
 
-def _more_blocks_after(lines: Sequence[str], start: int) -> bool:
+def _more_blocks_after(
+    lines: Sequence[str], start: int, known: Collection[str] = ()
+) -> bool:
     """Whether anything from here on is patch syntax rather than whatever the
     model emitted once it had stopped writing one."""
     for line in lines[start:]:
@@ -379,7 +412,7 @@ def _more_blocks_after(lines: Sequence[str], start: int) -> bool:
             continue
         if (
             line.startswith(("*** ", "diff --git ", "--- ", "+++ "))
-            or _compact_header(line) is not None
+            or _compact_header(line, known) is not None
         ):
             return True
     return False
@@ -395,10 +428,12 @@ def _strip_uniform_plus(content: list[str]) -> list[str]:
     return [line.removeprefix("+") for line in content]
 
 
-def _created_content_ends(lines: Sequence[str], index: int) -> bool:
+def _created_content_ends(
+    lines: Sequence[str], index: int, known: Collection[str] = ()
+) -> bool:
     """Whether line ``index`` ends a created file's literal content."""
     line = lines[index]
-    if _compact_header(line) is not None:
+    if _compact_header(line, known, new_spaced=False) is not None:
         return True
     stripped = line.strip()
     if stripped.startswith(
@@ -409,7 +444,7 @@ def _created_content_ends(lines: Sequence[str], index: int) -> bool:
         # "EOF" / "END" close a heredoc in a shell script too; only the last
         # thing in the patch (or before the next header) is a trailer.
         for after in lines[index + 1 :]:
-            if _compact_header(after) is not None:
+            if _compact_header(after, known, new_spaced=False) is not None:
                 return True
             if after.strip():
                 return False
@@ -425,7 +460,9 @@ def _refuse(mode: str, path: str) -> PatchParseError:
     )
 
 
-def _parse_compact(lines: list[str]) -> list[_File]:
+def _parse_compact(
+    lines: list[str], known: Collection[str] = (), offset: int = 0
+) -> list[_File]:
     files: list[_File] = []
     current: _File | None = None
     active: _Builder | None = None
@@ -443,7 +480,7 @@ def _parse_compact(lines: list[str]) -> list[_File]:
     index = 0
     while index < len(lines):
         line = lines[index]
-        header = _compact_header(line)
+        header = _compact_header(line, known)
         if header is None and current is not None:
             header = _borrowed_header(line)
         if header is not None:
@@ -452,7 +489,7 @@ def _parse_compact(lines: list[str]) -> list[_File]:
             if mode in "->":
                 raise _refuse(mode, path)
             added = False
-            current = _File(path=path, create=mode == "+")
+            current = _File(path=path, create=mode == "+", line=index + offset + 1)
             files.append(current)
             if mode == "+":
                 # A created file's lines are literal, unprefixed content, so a
@@ -460,7 +497,7 @@ def _parse_compact(lines: list[str]) -> list[_File]:
                 # written down; and blank lines are content, not separators.
                 content = []
                 while index + 1 < len(lines) and not _created_content_ends(
-                    lines, index + 1
+                    lines, index + 1, known
                 ):
                     index += 1
                     content.append(lines[index])
@@ -480,7 +517,7 @@ def _parse_compact(lines: list[str]) -> list[_File]:
         # tokens after "*** End Patch"; read as a hunk it could not be placed,
         # and the retry was the same patch without the garbage.
         if _is_terminator(line):
-            if not _more_blocks_after(lines, index + 1):
+            if not _more_blocks_after(lines, index + 1, known):
                 break
             flush()
             added = False
@@ -501,7 +538,11 @@ def _parse_compact(lines: list[str]) -> list[_File]:
             continue
 
         if not line.strip():
-            if added and active is not None and _plus_only_follows(lines, index + 1):
+            if (
+                added
+                and active is not None
+                and _plus_only_follows(lines, index + 1, known)
+            ):
                 # A blank inside added code, left unprefixed, belongs to the
                 # addition. Split there, the rest is added lines alone, which
                 # can never be placed: a run lost a round to two new files'
@@ -534,8 +575,6 @@ def _parse_compact(lines: list[str]) -> list[_File]:
             active.add(" ", line)
         index += 1
     flush()
-    if not files:
-        raise PatchParseError("no file headers in patch")
     return files
 
 
@@ -561,7 +600,7 @@ def _diff_path(raw: str) -> str:
     return _clean_path(raw)
 
 
-def _parse_diff(lines: list[str]) -> list[_File]:
+def _parse_diff(lines: list[str], offset: int = 0) -> list[_File]:
     files: list[_File] = []
     current: _File | None = None
     active: _Builder | None = None
@@ -599,7 +638,9 @@ def _parse_diff(lines: list[str]) -> list[_File]:
             path = _diff_path(line[4:])
             if not path:
                 raise _refuse("-", pending or "a file")
-            current = _File(path=path, create=pending_create)
+            current = _File(
+                path=path, create=pending_create, line=position + offset + 1
+            )
             files.append(current)
             pending, pending_create = "", False
         elif line.startswith("*** End Patch"):
@@ -616,7 +657,11 @@ def _parse_diff(lines: list[str]) -> list[_File]:
             if not path:
                 current = None
                 continue
-            current = _File(path=path, create=line.startswith("*** Add File:"))
+            current = _File(
+                path=path,
+                create=line.startswith("*** Add File:"),
+                line=position + offset + 1,
+            )
             files.append(current)
             # "*** Add File:" is followed straight by its "+" lines with no
             # "@@"; start collecting now or the whole file is read as noise.
@@ -634,7 +679,9 @@ def _parse_diff(lines: list[str]) -> list[_File]:
                 files.append(current)
             pending = ""
             if current is None:
-                raise PatchParseError("a hunk appears before any file header")
+                raise PatchParseError(
+                    f"a hunk appears before any file header: line {position + offset + 1}"
+                )
             active = _Builder()
         elif active is None:
             pass  # preamble, index lines, trailing noise
@@ -647,8 +694,6 @@ def _parse_diff(lines: list[str]) -> list[_File]:
         else:
             close()
     close()
-    if not files:
-        raise PatchParseError("no file headers in patch")
     return files
 
 
@@ -682,7 +727,9 @@ def apply_patch(
     failures: dict[str, list[_Failure]] = {}
     missing: set[str] = set()
 
+    previous: FileEdit | None = None
     for edit in edits:
+        before, previous = previous, edit
         state = files.get(edit.path)
         if state is None and edit.path not in missing:
             raw = read(edit.path)
@@ -692,8 +739,7 @@ def apply_patch(
                     _Failure(
                         "no_such_file",
                         "no such file",
-                        f"{edit.path} does not exist. To create it, use @+{edit.path} "
-                        "followed by its whole content.",
+                        _no_such_file(edit, before),
                         index=-1,
                     )
                 )
@@ -730,6 +776,21 @@ def apply_patch(
         ]
     result.noop = not result.failed and not result.written
     return result
+
+
+def _no_such_file(edit: FileEdit, before: FileEdit | None) -> str:
+    where = f" (header on line {edit.line} of the patch)" if edit.line else ""
+    text = (
+        f"{edit.path} does not exist{where}. To create it, "
+        f"use @+{edit.path} followed by its whole content."
+    )
+    if before is not None and before.create and edit.line:
+        # The line may be the created file's own content, cut short there.
+        text += (
+            f" That line also ended {before.path}; if it belongs in {before.path}, "
+            f"write {before.path} again with @+ and its whole content."
+        )
+    return text
 
 
 @dataclass
