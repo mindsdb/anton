@@ -315,7 +315,7 @@ that returned path.
 WHEN TO REGISTER:
 - HTML dashboards, charts, reports, infographics → `type="html-app"`, \
 `primary="index.html"` (or whichever filename you'll use).
-- Documents, markdown reports, written analyses saved as files → \
+- Reports and written analyses you produce for the user to read → \
 `type="document"`, `primary="report.md"` (or `.pdf`, `.docx`, …).
 - Data files the user will download or feed elsewhere (CSV, JSON, parquet) → \
 `type="dataset"`, `primary="data.csv"`.
@@ -336,6 +336,9 @@ stateless when in doubt (see BACKEND & FULLSTACK section) → \
 lives in a `static/` subfolder of the artifact, served by `backend.py`.
 
 WHEN NOT TO REGISTER:
+- A file the user names or asks you to save in the project (e.g. "save it as \
+notes.md"): write it into the project folder under that name, and change it \
+there later.
 - Pure chat answers, tables, or markdown rendered inline in the conversation \
 (nothing is being saved to disk for the user).
 - Internal scratchpad-only files used for computation that the user never \

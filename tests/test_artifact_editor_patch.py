@@ -35,7 +35,7 @@ from anton.core.artifact_editor.patch import (
 def run(files: dict[str, str], patch: str) -> tuple[ApplyResult, dict[str, str]]:
     """Apply ``patch`` to an in-memory project; return the result and the
     project as it would be after writing ``result.written``."""
-    result = apply_patch(parse_patch(patch), files.get)
+    result = apply_patch(parse_patch(patch, known=files), files.get)
     return result, {**files, **result.written}
 
 
@@ -99,6 +99,56 @@ def test_compact_created_content_survives_at_rules():
     assert result.ok
     assert after["styles/app.css"] == css
     assert set(result.written) == {"styles/app.css"}
+
+
+def test_compact_edits_a_file_whose_name_has_spaces():
+    after = ok(
+        {"Marsh Light.md": "Meg walked Biscuit at dawn.\n"},
+        "@Marsh Light.md\n-Meg walked Biscuit at dawn.\n+Meg walked Barley at dawn.\n",
+    )
+    assert after["Marsh Light.md"] == "Meg walked Barley at dawn.\n"
+
+
+def test_compact_creates_a_file_whose_name_has_spaces():
+    after = ok({"keep.txt": "x\n"}, "@+Scene - Varley call.md\nThe phone rang.\n")
+    assert after["Scene - Varley call.md"] == "The phone rang.\n"
+
+
+def test_compact_edits_a_spaced_name_without_an_extension():
+    after = ok({"Marsh Light": "dawn\n"}, "@Marsh Light\n-dawn\n+dusk\n")
+    assert after["Marsh Light"] == "dusk\n"
+
+
+def test_compact_created_content_keeps_a_spaced_mention():
+    note = "# Thanks\nHello\n@alice see draft v2.md\nThe rest of the note.\n"
+    after = ok({"keep.txt": "x\n"}, "@+notes.md\n" + note)
+    assert after["notes.md"] == note
+
+
+def test_created_content_keeps_a_spaced_plus_line():
+    note = "# Thanks\n@+1 on draft v2.md\nThe rest\n"
+    after = ok({"keep.txt": "x\n"}, "@+notes.md\n" + note)
+    assert after["notes.md"] == note
+    assert "1 on draft v2.md" not in after
+
+
+def test_a_spaced_name_that_is_no_file_says_which_line():
+    with pytest.raises(PatchParseError, match='Line 2, "@Marsh Light", was not read'):
+        parse_patch("```\n@Marsh Light\n-dawn\n+dusk\n```")
+
+
+def test_a_missing_file_after_a_created_one_says_where_it_cut():
+    result, _ = run({"keep.txt": "x\n"}, "@+notes.md\nHello\n@todo.md\nrest\n")
+    [one] = diagnoses(result)
+    assert "header on line 3 of the patch" in one.message
+    assert "That line also ended notes.md" in one.message
+
+
+def test_compact_created_content_keeps_spaced_at_rules():
+    scss = "@include respond-to small\n@media screen and print\n.a { color: red; }\n"
+    result, after = run({"keep.txt": "x\n"}, "@+styles/app.scss\n" + scss)
+    assert result.ok
+    assert after["styles/app.scss"] == scss
 
 
 def test_compact_takes_several_edits_to_one_file():
