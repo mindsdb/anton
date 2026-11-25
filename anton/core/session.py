@@ -1374,9 +1374,9 @@ _SOLVABILITY_CLAUSE = (
 )
 
 
-
 # Most stream drops a single turn may retry, however far apart they are.
 _MAX_TURN_DROPS = 8
+
 
 def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
     """Clip ``text`` to ~``cap`` chars keeping both ends, biased to the tail.
