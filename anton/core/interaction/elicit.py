@@ -48,8 +48,13 @@ __all__ = [
 # `kind="choice"`, which is what hosts render; this names a capability, not a
 # request kind.
 #
-# cowork-server mirrors this value as a literal in
-# `cowork/harnesses/anton_harness/elicitor.py`, so renaming it breaks that host.
+# List it only on a session with write approval on: only the write gate
+# remembers an unanswered card (`WriteGate.unanswered`) and refuses the turn's
+# later cards without asking, so without it each card waits out its timeout.
+#
+# cowork-server reads this constant by name
+# (`cowork/harnesses/anton_harness/harness.py`), so renaming it turns the
+# capability off there.
 APPROVAL_KIND = "approval"
 
 # Shared across the outer agent and any sub-agent: the user does not care
@@ -264,8 +269,11 @@ async def elicit(
         return AskAnswer(status="unavailable")
     # An approval card also reaches an elicitor that lists APPROVAL_KIND
     # without "choice"; every other question needs its own kind listed.
+    # APPROVAL_KIND names a capability, never a request kind: a request whose
+    # kind is APPROVAL_KIND would publish no card, so it is refused here.
     approval = isinstance(request, ApprovalRequest) and APPROVAL_KIND in elicitor.supported_kinds
-    if request.kind not in elicitor.supported_kinds and not approval:
+    own_kind = request.kind != APPROVAL_KIND and request.kind in elicitor.supported_kinds
+    if not (approval or own_kind):
         return AskAnswer(status="unavailable")
     if not validate_request(request):
         return AskAnswer(status="unavailable")

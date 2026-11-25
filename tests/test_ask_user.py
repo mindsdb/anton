@@ -288,9 +288,10 @@ def _approval() -> ApprovalRequest:
     return ApprovalRequest(prompt="Approve this step?", options=_APPROVE_CANCEL)
 
 
-def test_the_approval_kind_is_the_value_cowork_server_mirrors():
-    """cowork-server lists this value as a literal in
-    `cowork/harnesses/anton_harness/elicitor.py`; a rename here breaks it."""
+def test_the_approval_kind_is_the_name_cowork_server_reads():
+    """cowork-server reads this constant by name in
+    `cowork/harnesses/anton_harness/harness.py`; a rename here turns the
+    capability off there."""
     assert APPROVAL_KIND == "approval"
 
 
@@ -310,12 +311,17 @@ async def test_an_approvals_only_elicitor_answers_an_approval_card(make_session)
 
 async def test_an_approvals_only_elicitor_refuses_every_other_question_before_begin(make_session):
     """A plain question shaped exactly like an approval card is still a
-    question: only an `ApprovalRequest` reaches this elicitor."""
+    question: only an `ApprovalRequest` reaches this elicitor. A question
+    whose kind is APPROVAL_KIND is no approval card either: that names a
+    capability, and such a question would publish no card."""
     elicitor = _ApprovalsOnly()
     session = _wired(make_session, elicitor)
     lookalike = AskRequest(prompt="Approve this step?", options=_APPROVE_CANCEL, allow_custom=False)
+    capability_as_kind = AskRequest(prompt="Approve this step?", kind=APPROVAL_KIND, options=_APPROVE_CANCEL)
 
-    for request in (_choice(), lookalike, AskRequest(prompt="Pick a folder", kind="path")):
+    for request in (
+        _choice(), lookalike, capability_as_kind, AskRequest(prompt="Pick a folder", kind="path"),
+    ):
         assert (await elicit(session, "q1", request)).status == "unavailable", request
     assert elicitor.calls == [], "no channel is opened for a question it can't take"
     assert _drain(session.emitter) == [], "no card is published"

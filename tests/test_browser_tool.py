@@ -2682,9 +2682,9 @@ class _Answers:
         pass
 
 
-def asking_session(host: FakeHost, elicitor) -> SimpleNamespace:
+def asking_session(host: FakeHost, elicitor, *, config: BrowserConfig | None = None) -> SimpleNamespace:
     """`make_session` with the stream and question budget `elicit()` reads."""
-    session = make_session(host, elicitor=elicitor)
+    session = make_session(host, elicitor=elicitor, config=config)
     session.emitter = object()
     session.question_count = 0
     session.answer_wait_s = 0.0
@@ -2703,6 +2703,21 @@ async def test_an_approvals_only_elicitor_gets_the_browser_step_card_and_approve
     assert result.ok is True and result.content.startswith("Done: click [7].")
     assert elicitor.question_ids == _cards(session) == ["browser:approve:t-1:pa-1"]
     assert host.posted("/action")[-1] == {"action": "click", "element": 7, "include_page": True, "pending_id": "pa-1"}
+
+
+async def test_an_approvals_only_elicitor_gets_the_desktop_step_card_and_approve_posts_once():
+    """The desktop browser holds nothing, so the tool's own card (`_gate`) is
+    the one it gets, and it reaches an approvals-only elicitor through the
+    real `elicit()`."""
+    host = FakeHost(pages=[CHECKOUT])
+    elicitor = _Answers(APPROVAL_KIND, value="approve")
+    session = asking_session(host, elicitor, config=BrowserConfig(base_url=LOOPBACK, profile=SID, token="k"))
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 7}})
+    assert result.ok is True and result.content.startswith("Done: click [7].")
+    cards = _cards(session)
+    assert len(cards) == 1 and cards[0].startswith("write:")
+    assert elicitor.question_ids == cards
+    assert host.posted("/action") == [{"action": "click", "element": 7, "include_page": True}]
 
 
 async def test_an_approvals_only_elicitor_gets_no_browser_question():
