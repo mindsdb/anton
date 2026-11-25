@@ -186,10 +186,15 @@ class PublishJobFailed(RuntimeError):
 
     `status_code`/`message` are what the synchronous /upload would have
     answered for the same failure, so callers can map them the same way.
+    `code` is the machine-readable error code from the job status, if any.
     """
 
-    def __init__(self, status_code: int, message: str, *, job_id: str, report_id: str | None = None):
+    def __init__(
+        self, status_code: int, message: str, *, job_id: str, report_id: str | None = None,
+        code: str | None = None,
+    ):
         self.status_code = status_code
+        self.code = code
         self.message = message
         self.job_id = job_id
         self.report_id = report_id
@@ -296,6 +301,7 @@ def _wait_for_publish_job(
                 raise PublishJobFailed(
                     int(err.get("status_code") or 500), str(err.get("message") or "unknown error"),
                     job_id=job_id, report_id=job.get("report_id") or report_id,
+                    code=err.get("code") if isinstance(err.get("code"), str) else None,
                 )
             poll = _poll_interval(job.get("poll_after_s"), poll)
 
