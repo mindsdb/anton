@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from anton.core.interaction.elicit import AskAnswer
+from anton.core.interaction.elicit import APPROVAL_KIND, AskAnswer
 from anton.core.llm.provider import StreamAskUser, StreamTaskProgress
 from anton.core.session import (
     _HANDBACK_NOT_USER_CLAUSE,
@@ -382,18 +382,28 @@ class _PathOnlyElicitor(_ScriptedElicitor):
     supported_kinds = ("path",)
 
 
+class _ApprovalsOnlyElicitor(_ScriptedElicitor):
+    """What a host lists for a turn nobody is known to be watching: approval
+    cards only, so no "Keep going" question."""
+
+    supported_kinds = (APPROVAL_KIND,)
+
+
 async def test_a_turn_that_cannot_ask_stops_at_the_limit_whatever_the_message_says(workspace):
     """An unattended run (no elicitor that takes a choice) whose prompt says
     "don't stop" must not pass the limit: nobody is there to agree to the
     spend."""
-    for elicitor in (None, _PathOnlyElicitor(KEEP_GOING)):
+    for elicitor in (None, _PathOnlyElicitor(KEEP_GOING), _ApprovalsOnlyElicitor(KEEP_GOING)):
         session = _session(workspace, responses=[_tool_call(i) for i in range(1, 14)] + [_text("all done")])
         session.elicitor = elicitor
         calls = _structured_calls(session, authorized=True)
-        _, kwargs = await _run(session, "Keep going, don't stop until you are finished")
+        events, kwargs = await _run(session, "Keep going, don't stop until you are finished")
         assert kwargs["ended_by"] == "spend_ceiling", elicitor
         assert kwargs["limit_message_continues"] == "0"
+        assert kwargs["limit_continues"] == "0"
         assert _authorization_checks(calls) == 0, "no check is spent on a grant that can't happen"
+        assert not any(isinstance(ev, StreamAskUser) for ev in events), "no question is published"
+        assert elicitor is None or not elicitor.requests, elicitor
 
 
 async def test_turn_without_an_emitter_ignores_the_message_too(workspace):

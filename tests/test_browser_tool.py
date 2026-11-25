@@ -24,9 +24,9 @@ from anton.core.browser.page import (
     signature,
 )
 from anton.core.browser.policy import parse_step, signed_in_request, step_request, target_request
-from anton.core.interaction.elicit import AskAnswer
+from anton.core.interaction.elicit import APPROVAL_KIND, AskAnswer
 from anton.core.llm import jev
-from anton.core.llm.provider import StreamAskUserAnswered, StreamBrowserSession
+from anton.core.llm.provider import StreamAskUser, StreamAskUserAnswered, StreamBrowserSession
 
 BASE = "https://app.example.test/browser"
 SID = "t-1"
@@ -2653,3 +2653,68 @@ async def test_no_tidy_up_for_a_turn_that_never_opened_the_browser_or_on_the_des
     desktop._browser_state.opened = True
     await browser_tool.tidy_after_turn(desktop)
     assert fake_jev.calls == []
+
+
+# ── an elicitor that takes approval cards only ─────────────────────────────
+
+
+class _Answers:
+    """Takes `kinds` and answers every card at once with `value`, recording
+    each question id. These tests ask through the real `elicit()`, so the
+    kinds it takes decide which cards reach it."""
+
+    answer_hint = ""
+    timeout_s = None
+
+    def __init__(self, *kinds: str, value: str) -> None:
+        self.supported_kinds = kinds
+        self.value = value
+        self.question_ids: list[str] = []
+
+    async def begin(self, question_id, request):
+        pass
+
+    async def ask(self, question_id, request):
+        self.question_ids.append(question_id)
+        return AskAnswer(status="answered", values=(self.value,))
+
+    async def end(self, question_id):
+        pass
+
+
+def asking_session(host: FakeHost, elicitor) -> SimpleNamespace:
+    """`make_session` with the stream and question budget `elicit()` reads."""
+    session = make_session(host, elicitor=elicitor)
+    session.emitter = object()
+    session.question_count = 0
+    session.answer_wait_s = 0.0
+    return session
+
+
+def _cards(session) -> list[str]:
+    return [event.id for event in session.events if isinstance(event, StreamAskUser)]
+
+
+async def test_an_approvals_only_elicitor_gets_the_browser_step_card_and_approve_takes_the_step():
+    host = FakeHost(pages=[CHECKOUT])
+    elicitor = _Answers(APPROVAL_KIND, value="approve")
+    session = asking_session(host, elicitor)
+    result = await browser_tool.handle_browser(session, {"action": "act", "step": {"action": "click", "element": 7}})
+    assert result.ok is True and result.content.startswith("Done: click [7].")
+    assert elicitor.question_ids == _cards(session) == ["browser:approve:t-1:pa-1"]
+    assert host.posted("/action")[-1] == {"action": "click", "element": 7, "include_page": True, "pending_id": "pa-1"}
+
+
+async def test_an_approvals_only_elicitor_gets_no_browser_question():
+    session = asking_session(FakeHost(), _Answers(APPROVAL_KIND, value="a"))
+    assert await browser_tool._ask(session, "Which one?", [("a", "A"), ("b", "B")]) is None
+    assert session.elicitor.question_ids == [] and _cards(session) == []
+
+
+async def test_an_approvals_only_elicitor_gets_no_hand_over_card():
+    host = FakeHost()
+    elicitor = _Answers(APPROVAL_KIND, value="later")
+    session = asking_session(host, elicitor)
+    result = await browser_tool.handle_browser(session, {"action": "hand_to_user", "reason": "Sign in"})
+    assert result.content.startswith("No one can answer in this conversation right now.")
+    assert elicitor.question_ids == [] and _cards(session) == []

@@ -31,7 +31,7 @@ from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.backends.remote import RemoteScratchpadRuntime
 from anton.core.backends.sandbox import CellSandbox
 from anton.core.backends.wire import NOTHING_KEPT
-from anton.core.interaction.elicit import AskAnswer, AskRequest
+from anton.core.interaction.elicit import APPROVAL_KIND, AskAnswer, AskRequest
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.llm.provider import (
     LLMResponse,
@@ -363,6 +363,18 @@ async def test_an_update_without_approve_never_runs(project, answer):
     history = _history_text(harness.session)
     assert "The user didn't approve this change, so it must not be made another way" in history
     assert "try one or two more genuine workarounds" not in history
+
+
+@pytest.mark.parametrize("answer, runs", [(APPROVE, True), (CANCEL, False)], ids=["approve", "cancel"])
+async def test_an_approvals_only_elicitor_gets_the_card_and_its_answer_decides(project, answer, runs):
+    """A host lists only APPROVAL_KIND for a turn nobody is known to be
+    watching. The cell's card still reaches it, and its answer decides."""
+    harness = _session(project, UPDATE_CELL)
+    harness.elicitor.supported_kinds = (APPROVAL_KIND,)
+    seen = await _run(harness=harness, answers=[answer])
+    assert len(seen.cards) == 1 and seen.cards[0].id.startswith("write:")
+    assert seen.ran_before == [0], "nothing ran before the user answered"
+    assert harness.pad.ran == ([UPDATE_CELL] if runs else [])
 
 
 @pytest.mark.parametrize("answer", [APPROVE, CANCEL, SKIP, TIMEOUT], ids=["approve", "cancel", "skip", "timeout"])
