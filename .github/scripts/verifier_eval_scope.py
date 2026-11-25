@@ -38,6 +38,8 @@ SPAN_MARKERS: dict[str, tuple[str, ...]] = {
         "_VERIFIER_JUDGMENT_RUBRIC",
         "_build_verify_request",
         "_render_verify_transcript",
+        "_render_verify_tool_call",
+        "_VERIFY_TOOL_TARGET_KEYS",
         "_render_tool_result_content",
         "_clip_keep_cause",
         # Inlined into the transcript the verifier judges (review of #486).

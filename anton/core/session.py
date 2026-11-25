@@ -1562,6 +1562,29 @@ def _stub_largest_results(*, messages: list[dict], model: str) -> list[dict]:
 # real reply.
 _IMAGE_PLACEHOLDER = "[image]"
 
+# Input fields that name what a built-in tool acted on. Never code or file bodies.
+_VERIFY_TOOL_TARGET_KEYS = (
+    "action", "name", "one_line_description", "path", "file_path", "slug", "filename",
+)
+
+
+def _render_verify_tool_call(block: dict) -> str:
+    """One line naming the tool and what it acted on, so the verifier can tell
+    which file was written or checked, not only that some tool ran."""
+    line = f"ASSISTANT called tool: {block.get('name')}"
+    tool_input = block.get("input")
+    if not isinstance(tool_input, dict):
+        return line
+    parts = []
+    for key in _VERIFY_TOOL_TARGET_KEYS:
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            # Scrubbed whole before clipping, so no cut can leave part of a secret.
+            # Both ends kept: a path's file name is at its end.
+            text = _clip_keep_cause(" ".join(scrub_output(value).split()), 120)
+            parts.append(f"{key}={' '.join(text.split())}")
+    return f"{line} ({', '.join(parts)})" if parts else line
+
 
 def _render_verify_transcript(
     history: list[dict],
@@ -1653,7 +1676,7 @@ def _render_verify_transcript(
                 elif btype in ("image", "image_url"):
                     convo.append((i, speaker, _IMAGE_PLACEHOLDER))
                 elif btype == "tool_use":
-                    tools.append((i, f"ASSISTANT called tool: {block.get('name')}"))
+                    tools.append((i, _render_verify_tool_call(block)))
                 elif btype == "tool_result":
                     rendered = _render_tool_result_content(block.get("content"), tool_cap)
                     tools.append((i, f"TOOL RESULT: {rendered}"))
@@ -1683,7 +1706,14 @@ def _render_verify_transcript(
             f"{_clip_keep_cause(text, final_cap if n == judged else text_cap)}",
         )
         for n, (i, speaker, text) in enumerate(kept_convo)
-    ] + tools[-max_tool:]
+    ]
+    kept_tools = tools[-max_tool:]
+    if len(tools) > len(kept_tools):
+        # Otherwise the verifier reads a missing earlier step as one never taken.
+        kept.append(
+            (kept_tools[0][0] - 0.5, f"[... {len(tools) - len(kept_tools)} earlier tool events omitted ...]")
+        )
+    kept += kept_tools
     kept.sort(key=lambda entry: entry[0])
     return "\n".join(line for _, line in kept) or "(no conversation)"
 
