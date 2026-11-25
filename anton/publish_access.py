@@ -25,6 +25,20 @@ _EMAIL_SPLIT_RE = re.compile(r"[\s,;]+")
 WEBSITE_MODE = "website"
 
 
+def website_access(access: dict | None, *, with_confirmation: bool) -> dict:
+    """Build a website access block: ``{"mode": "website"}``.
+
+    ``confirmed_by_owner`` is added only when ``with_confirmation`` is set and
+    the caller's ``access`` carries exactly ``True``; it is never taken from a
+    stored entry. The upload service creates a website only with this flag
+    and keeps an existing one without it.
+    """
+    block: dict = {"mode": WEBSITE_MODE}
+    if with_confirmation and (access or {}).get("confirmed_by_owner") is True:
+        block["confirmed_by_owner"] = True
+    return block
+
+
 def normalize_emails(values) -> list[str]:
     """Strip + lowercase + de-dupe, preserving first-seen order."""
     seen: set[str] = set()
@@ -68,12 +82,7 @@ def resolve_access(
     access_version = prev_access_version or 1
 
     if mode == WEBSITE_MODE:
-        effective: dict = {"mode": WEBSITE_MODE}
-        # Sent once, never stored: a republish rebuilt from the entry must not
-        # be able to create a website (the upload service keeps an existing
-        # site without it).
-        if (access or {}).get("confirmed_by_owner") is True:
-            effective["confirmed_by_owner"] = True
+        effective = website_access(access, with_confirmation=True)
         return effective, pwd_version, access_version, {"mode": WEBSITE_MODE, "requires_password": False}
 
     if mode == "password":
@@ -179,8 +188,7 @@ def access_from_owner_side(entry: Any) -> dict:
             "owner_only": bool(entry.get("owner_only")),
         }
     if mode == WEBSITE_MODE:
-        # Never rebuilds confirmed_by_owner, even when the entry carries one.
-        return {"mode": WEBSITE_MODE}
+        return website_access(None, with_confirmation=False)
     return {"mode": "public"}
 
 

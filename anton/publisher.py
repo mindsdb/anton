@@ -30,7 +30,7 @@ from anton.core.artifacts.internal_files import (
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault, withheld_fields
 from anton.minds_client import minds_request, minds_request_with_status
-from anton.publish_access import WEBSITE_MODE, access_from_owner_side
+from anton.publish_access import WEBSITE_MODE, access_from_owner_side, website_access
 from anton.utils.datasources import scrub_credentials
 
 # LLM API key env vars whose values must be stripped from published files.
@@ -298,10 +298,11 @@ def _wait_for_publish_job(
                 return job.get("result") or {}
             if state == "failed":
                 err = job.get("error") or {}
+                err_code = err.get("code")
                 raise PublishJobFailed(
                     int(err.get("status_code") or 500), str(err.get("message") or "unknown error"),
                     job_id=job_id, report_id=job.get("report_id") or report_id,
-                    code=err.get("code") if isinstance(err.get("code"), str) else None,
+                    code=err_code if isinstance(err_code, str) else None,
                 )
             poll = _poll_interval(job.get("poll_after_s"), poll)
 
@@ -426,12 +427,7 @@ def build_access_payload(
             "access_version": access_version,
         }
     if mode == WEBSITE_MODE:
-        payload = {"mode": WEBSITE_MODE}
-        # The upload service creates a website only with this flag; it keeps
-        # an existing one without it.
-        if access.get("confirmed_by_owner") is True:
-            payload["confirmed_by_owner"] = True
-        return payload
+        return website_access(access, with_confirmation=True)
     return {"mode": "public"}
 
 # Patterns that capture relative paths from HTML attributes and CSS url()
