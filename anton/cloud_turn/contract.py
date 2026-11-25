@@ -1031,6 +1031,8 @@ class TurnRequestV1:
     #: block. Only a turn whose stdin is open offers them, one proxy tool each.
     #: Empty means none.
     host_tools: tuple[HostToolSpecV1, ...] = ()
+    #: Engine and display name pairs excluded from this scheduled run.
+    scheduled_excluded_connectors: tuple[tuple[str, str], ...] = ()
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -1080,4 +1082,17 @@ class TurnRequestV1:
             browser=BrowserConfig.from_dict(d.get("browser")),
             limits=_parse_limits(d.get("limits"), str(d["conversation_id"])),
             host_tools=parse_host_tools(d.get("host_tools"), str(d["conversation_id"])),
+            scheduled_excluded_connectors=_parse_scheduled_exclusions(d.get("scheduled_excluded_connectors")),
         )
+
+
+def _parse_scheduled_exclusions(value: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(dict.fromkeys(
+        (entry["engine"], entry["name"])
+        for entry in value
+        if isinstance(entry, dict)
+        and isinstance(entry.get("engine"), str) and entry["engine"]
+        and isinstance(entry.get("name"), str) and entry["name"]
+    ))
