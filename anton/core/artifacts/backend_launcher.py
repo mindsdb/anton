@@ -33,7 +33,7 @@ from typing import Any, Protocol
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
 from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, cell_sandbox_of
 from anton.utils.datasources import scrub_output
-from anton.utils.private_dir import PRIVATE_DIR_MODE, make_private_dir
+from anton.utils.private_dir import PRIVATE_DIR_MODE, require_private_dir
 
 
 _log = logging.getLogger(__name__)
@@ -161,14 +161,17 @@ def _anton_state_pythonpath_root() -> Path:
     mkdtemp instead. Neither folder is ever removed, because backends started
     from it keep importing from it after this call returns.
 
-    On Windows the temp folder sits in the user's profile, which other
-    standard accounts can't open, so the fixed name stays.
+    Windows uses the OS-provided profile, independently of temporary directory
+    overrides. POSIX verifies that every ancestor of the temporary directory
+    protects its entries, including the sticky bit on a shared system tmp.
     """
-    temp = Path(tempfile.gettempdir())
     if sys.platform == "win32":
-        root = temp / "anton_state_pp"
-        root.mkdir(parents=True, exist_ok=True)
+        parent = _windows_profile() / ".anton"
+        require_private_dir(path=parent)
+        root = parent / "anton_state_pp"
+        require_private_dir(path=root, windows_acl=True)
         return root
+    temp = _trusted_temp_parent()
     root = temp / f"anton_state_pp-{os.getuid()}"
     try:
         os.mkdir(root, PRIVATE_DIR_MODE)
@@ -178,22 +181,57 @@ def _anton_state_pythonpath_root() -> Path:
     if refusal is None:
         # A umask can leave a new folder narrower than 0700, and an older
         # folder of this user's can be wider.
-        make_private_dir(path=root)
+        require_private_dir(path=root)
         return root
-    return _own_pythonpath_root(refusal=refusal)
+    return _own_pythonpath_root(parent=temp, refusal=refusal)
 
 
-def _own_pythonpath_root(*, refusal: str) -> Path:
+def _windows_profile() -> Path:
+    """Get the current user's profile from Windows, outside configurable TEMP paths."""
+    import ctypes
+    from ctypes import wintypes
+
+    buffer = ctypes.create_unicode_buffer(260)
+    # CSIDL_PROFILE; SHGetFolderPathW takes the current user's token by default.
+    get_path = ctypes.WinDLL("shell32").SHGetFolderPathW
+    get_path.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR]
+    get_path.restype = ctypes.c_long
+    result = get_path(None, 0x28, None, 0, buffer)
+    if result or not buffer.value:
+        raise OSError(f"Could not locate the Windows user profile (HRESULT {result:#x})")
+    return Path(buffer.value)
+
+
+def _trusted_temp_parent() -> Path:
+    """Choose a canonical parent where another user cannot rename our import directory."""
+    for candidate in (Path(tempfile.gettempdir()), Path("/tmp"), Path.home()):
+        try:
+            directory = candidate.resolve(strict=True)
+            for ancestor in (*reversed(directory.parents), directory):
+                st = ancestor.lstat()
+                if not stat.S_ISDIR(st.st_mode) or st.st_uid not in (0, os.getuid()):
+                    break
+                if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
+                    break
+            else:
+                if os.access(directory, os.W_OK | os.X_OK):
+                    return directory
+        except (OSError, RuntimeError):
+            continue
+    raise PermissionError("Could not find a trusted parent for the backend import directory")
+
+
+def _own_pythonpath_root(*, parent: Path, refusal: str) -> Path:
     """This process's mkdtemp folder for `anton_state`, made on first use."""
     global _fallback_pythonpath_root
     cached = _fallback_pythonpath_root
-    if cached is not None and _unsafe_folder_reason(path=cached) is None:
+    if cached is not None and cached.parent == parent and _unsafe_folder_reason(path=cached) is None:
         return cached
     _log.warning(
         "Refused the shared anton_state import folder; using a fresh one",
         extra={"event": "anton_state_folder_refused", "reason": refusal},
     )
-    cached = Path(tempfile.mkdtemp(prefix=f"anton_state_pp-{os.getuid()}-"))
+    cached = Path(tempfile.mkdtemp(dir=parent, prefix=f"anton_state_pp-{os.getuid()}-"))
     _fallback_pythonpath_root = cached
     return cached
 

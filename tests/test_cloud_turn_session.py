@@ -40,6 +40,7 @@ from anton.cloud_turn.session import (
     resolve_trusted_workspace_path,
 )
 from anton.core.backends.local import local_scratchpad_runtime_factory
+from anton.core.interaction.elicit import APPROVAL_KIND
 
 
 class _FakeSession:
@@ -73,13 +74,30 @@ def test_no_elicitor_means_no_ask_user(tmp_path, monkeypatch):
     assert "ask_user" not in cfg.tool_allowlist
 
 
+class _Kinds:
+    """An elicitor stand-in: the allowlist reads only `supported_kinds`."""
+
+    def __init__(self, *kinds: str) -> None:
+        self.supported_kinds = kinds
+
+
 def test_an_elicitor_enables_ask_user(tmp_path, monkeypatch):
-    elicitor = object()
+    elicitor = _Kinds("choice")
     _, cfg = _build(tmp_path, monkeypatch, elicitor=elicitor)
     assert cfg.elicitor is elicitor
     assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {"ask_user"}
     # A console would let anton fall back to its terminal elicitor.
     assert cfg.console is None
+
+
+def test_an_approvals_only_elicitor_leaves_ask_user_off_the_allowlist(tmp_path, monkeypatch):
+    """Core registers `ask_user` only for an elicitor that lists "choice",
+    and an allowlist name that matches no registered tool is fatal."""
+    elicitor = _Kinds(APPROVAL_KIND)
+    _, cfg = _build(tmp_path, monkeypatch, elicitor=elicitor)
+    assert cfg.elicitor is elicitor
+    assert "ask_user" not in cfg.tool_allowlist
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST
 
 
 # ── config-level safety ──────────────────────────────────────────────────────
@@ -604,6 +622,11 @@ _DAY_ONE = _stdlib_datetime(2030, 1, 1, 23, 55)
 _DAY_TWO = _stdlib_datetime(2030, 1, 2, 0, 5)
 
 
+# Withheld by a pod turn that reports no surface: `generate_image` with no images
+# API (ENG-4024), `inspect_artifact` outside a Cowork surface (ENG-4684).
+_WITHHELD_WITHOUT_SURFACE = {"generate_image", "inspect_artifact"}
+
+
 def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
     """A REAL ChatSession off the cloud builder, not a captured config.
 
@@ -758,7 +781,7 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
     names = {t.name for t in session.tool_registry.get_tool_defs()}
     # `generate_image` is withheld where no images API serves it, as with
     # this mock client (ENG-4024); every other allowlisted tool is built.
-    assert names == set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}, (
+    assert names == set(CLOUD_TOOL_ALLOWLIST) - _WITHHELD_WITHOUT_SURFACE, (
         f"cloud tool set drifted from the allowlist: {sorted(names)}"
     )
 
@@ -772,7 +795,7 @@ def test_the_tool_list_without_extra_tools_has_one_order_and_the_same_bytes_each
 
     assert first == second
     assert [tool["name"] for tool in json.loads(first)] == [
-        "scratchpad", "read_text_file", "memorize", "recall_skill", "create_skill_draft",
+        "scratchpad", "read_image", "read_text_file", "memorize", "recall_skill", "create_skill_draft",
         "create_artifact", "list_artifacts", "update_artifact",
     ]
 
@@ -795,7 +818,7 @@ def test_a_real_turn_with_connector_drafts_registers_and_drains_the_tool(tmp_pat
     session._build_tools()
     names = {t.name for t in session.tool_registry.get_tool_defs()}
     # `generate_image` is withheld with no images API (ENG-4024).
-    assert names == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}) | {"create_connector_draft"}
+    assert names == (set(CLOUD_TOOL_ALLOWLIST) - _WITHHELD_WITHOUT_SURFACE) | {"create_connector_draft"}
 
     draft = {
         "connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}],
@@ -857,7 +880,7 @@ def test_a_cloud_session_with_a_router_block_registers_exactly_the_browser_too(t
     session._build_tools()
     names = {t.name for t in session.tool_registry.get_tool_defs()}
     # `generate_image` is withheld with no images API (ENG-4024).
-    assert names == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}) | {"browser"}
+    assert names == (set(CLOUD_TOOL_ALLOWLIST) - _WITHHELD_WITHOUT_SURFACE) | {"browser"}
 
 
 def test_the_environment_never_gives_a_browser(tmp_path, monkeypatch):
@@ -1020,7 +1043,7 @@ def test_memorize_is_offered_with_or_without_existing_memory(tmp_path, monkeypat
         session._build_tools()
         names = {t.name for t in session.tool_registry.get_tool_defs()}
         # `generate_image` is withheld with no images API (ENG-4024).
-        assert names == set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}
+        assert names == set(CLOUD_TOOL_ALLOWLIST) - _WITHHELD_WITHOUT_SURFACE
         assert "memorize" in names
 
 
@@ -1779,11 +1802,15 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
         "list_artifacts",
         "update_artifact",
         "read_text_file",
+        # Takes only a path and returns the picture.
+        "read_image",
         "memorize",
         "recall_skill",
         "create_skill_draft",
         # Takes a prompt and image paths: nothing a credential could ride in.
         "generate_image",
+        # Takes an artifact slug and reads two page files: no credential field.
+        "inspect_artifact",
     }
 
 
@@ -1903,3 +1930,12 @@ def test_a_minds_cloud_turn_does_not_import_the_anthropic_sdk(tmp_path):
         capture_output=True, text=True, env=env, cwd=str(_REPO_ROOT),
     )
     assert result.returncode == 0, result.stderr
+
+
+# ── ENG-4684: inspect_artifact only on a Cowork surface ──────────────────────
+
+def test_a_web_turn_registers_inspect_artifact(tmp_path, monkeypatch):
+    session = _real_cloud_session(tmp_path, monkeypatch, trace={"surface": "web"})
+    session._build_tools()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert names == set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}

@@ -14,9 +14,8 @@ such as ``~/.anton``, is only created. A repository outside the profile, such as
 ``C:\\src\\app``, lets every local account read it, so for a folder that can
 sit anywhere, such as a project's ``.anton``, `make_private_dir` can give the
 folder an access list that names only SYSTEM, Administrators and the folder's
-owner, with inheritance removed. That runs once per folder: a marker file inside
-records which folder got the list, so a copy or a clone that carries the marker
-gets the list again.
+owner, with inherited access removed. Project callers reapply the list before
+writing so a copied or restored directory cannot retain broad inherited access.
 """
 
 from __future__ import annotations
@@ -28,9 +27,9 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-from anton.utils.gitignore import ensure_gitignored
 from anton.utils.nofollow import opened_dir_nofollow
 
 _log = logging.getLogger(__name__)
@@ -43,12 +42,6 @@ _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
-
-#: Written inside a folder once its owner-only access list is in place, so
-#: the list is applied once per folder rather than at every call. It holds the
-#: folder's volume serial number and file index, and the folder's .gitignore
-#: lists it, so it is never committed.
-WINDOWS_ACL_MARKER = ".owner-only-acl"
 
 #: SYSTEM, Administrators and OWNER RIGHTS, each with full control that every
 #: file and folder below inherits. CPython's os.mkdir(mode=0o700) applies the
@@ -70,70 +63,60 @@ def anton_home() -> Path:
     profile.
     """
     home = Path.home() / ".anton"
-    make_private_dir(path=home)
+    require_private_dir(path=home)
     return home
 
 
-def make_private_dir(*, path: Path, windows_acl: bool = False) -> None:
-    """Create ``path`` so that only the current user can open it, or make an existing folder so.
+def require_private_dir(*, path: Path, windows_acl: bool = False) -> None:
+    """Refuse private persistence when the folder cannot be protected."""
+    if not make_private_dir(path=path, windows_acl=windows_acl):
+        raise PermissionError(errno.EACCES, "Could not establish a private directory", str(path))
 
-    Missing parents are created with the default mode, because they belong to
-    the user's home or project, not to anton. On macOS and Linux the folder
-    ends 0700. A symbolic link at the name and a folder another account owns
-    are left as they are. So is a folder whose mode can't change, such as one
-    on a read-only mount or a FAT drive: that logs a warning and returns,
-    because the folder still works. Raises FileExistsError when something
-    other than a folder holds the name, as ``Path.mkdir(exist_ok=True)`` does.
 
-    On Windows the folder is only created, with its parent's access list,
-    unless ``windows_acl`` is set. With it, the folder gets the owner-only
-    access list once, and a link or junction at the name is left as it is.
-    Set it for a folder that can sit outside the user's profile.
+def make_private_dir(*, path: Path, windows_acl: bool = False) -> bool:
+    """Create or tighten a directory and report whether it is private.
+
+    An existing link or foreign-owned directory is never changed. Missing
+    ancestors belong to the project and retain their normal creation modes.
+    Windows profile directories keep their profile ACL. Elsewhere pass
+    windows_acl=True to remove inherited grants before writing.
     """
     if _IS_WINDOWS and not windows_acl:
         path.mkdir(parents=True, exist_ok=True)
-        return
-    try:
-        _mkdir_unless_taken(path=path)
-    except FileNotFoundError:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _mkdir_unless_taken(path=path)
+    else:
+        try:
+            _mkdir_unless_taken(path=path)
+        except FileNotFoundError:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _mkdir_unless_taken(path=path)
 
     st = os.lstat(path)
-    if stat.S_ISLNK(st.st_mode) or _is_junction(path=path):
-        _log.info(
-            "Left a folder's permissions as they are",
-            extra={"event": "private_folder_left", "reason": "symlink"},
-        )
-        return
+    # Before Python 3.12 os.path.isjunction is absent, and lstat represents
+    # a directory junction as a directory with a mount-point reparse tag.
+    if stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0):
+        return False
     if not stat.S_ISDIR(st.st_mode):
         raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(path))
     if _IS_WINDOWS:
-        _apply_owner_only_acl(path=path, st=st)
-        return
+        if windows_acl:
+            _apply_owner_only_acl(path=path)
+        return True
     if st.st_uid != os.getuid():
-        _log.info(
-            "Left a folder's permissions as they are",
-            extra={"event": "private_folder_left", "reason": "other_owner"},
-        )
-        return
+        return False
     if stat.S_IMODE(st.st_mode) == PRIVATE_DIR_MODE:
-        return
+        return True
     try:
-        # Opened without following a link, so a link swapped in after the
-        # lstat raises instead of passing the chmod to its target.
         with opened_dir_nofollow(path.parent, (path.name,)) as fd:
-            if os.fstat(fd).st_uid == os.getuid():
-                os.fchmod(fd, PRIVATE_DIR_MODE)
+            if not os.path.samestat(os.fstat(fd), st):
+                return False
+            os.fchmod(fd, PRIVATE_DIR_MODE)
+            return stat.S_IMODE(os.fstat(fd).st_mode) == PRIVATE_DIR_MODE
     except OSError as exc:
         _log.warning(
             "Could not make a folder private",
-            extra={
-                "event": "private_folder_chmod_failed",
-                "reason": errno.errorcode.get(exc.errno, "unknown"),
-                "error_type": type(exc).__name__,
-            },
+            extra={"event": "private_folder_chmod_failed", "reason": errno.errorcode.get(exc.errno, "unknown")},
         )
+        return False
 
 
 def _mkdir_unless_taken(*, path: Path) -> None:
@@ -148,6 +131,17 @@ def _mkdir_unless_taken(*, path: Path) -> None:
     except OSError:
         if not os.path.lexists(path):
             raise
+
+
+def write_private_text(path: Path, text: str) -> None:
+    """Publish a private UTF-8 file, preserving the target of any previous link."""
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def tighten_private_file(*, path: Path) -> None:
@@ -181,7 +175,7 @@ def tighten_private_file(*, path: Path) -> None:
     fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC)
     try:
         # The same file the lstat saw, not one swapped in after it.
-        if os.fstat(fd).st_ino == st.st_ino:
+        if os.path.samestat(os.fstat(fd), st):
             os.fchmod(fd, PRIVATE_FILE_MODE)
     finally:
         os.close(fd)
@@ -196,26 +190,11 @@ def icacls_command(*, path: Path) -> list[str]:
     """
     system_root = os.environ.get("SystemRoot") or r"C:\Windows"
     icacls = ntpath.join(system_root, "System32", "icacls.exe")
-    return [icacls, str(path), "/inheritance:r", "/grant:r", *OWNER_ONLY_GRANTS]
+    return [icacls, str(path), "/L", "/inheritance:r", "/grant:r", *OWNER_ONLY_GRANTS]
 
 
-def _apply_owner_only_acl(*, path: Path, st: os.stat_result) -> None:
-    """Give ``path`` the owner-only access list, unless its marker says this folder has it.
-
-    ``st`` is the folder's own lstat. The marker names the folder by its volume
-    serial number and file index, which a copy or a clone does not share, so a
-    marker that came along with the folder's contents gets the list applied
-    again. A marker that can't be read counts as missing, because applying the
-    list again is safe. A failure logs a warning and leaves the marker as it
-    was, so the next call tries again.
-    """
-    marker = path / WINDOWS_ACL_MARKER
-    identity = f"{st.st_dev}:{st.st_ino}"
-    try:
-        if marker.read_text(encoding="utf-8").strip() == identity:
-            return
-    except (OSError, UnicodeDecodeError):
-        pass
+def _apply_owner_only_acl(*, path: Path) -> None:
+    """Remove inherited access on each use, preserving explicit administrator grants."""
     try:
         result = subprocess.run(
             icacls_command(path=path),
@@ -227,29 +206,6 @@ def _apply_owner_only_acl(*, path: Path, st: os.stat_result) -> None:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        _log.warning(
-            "Could not make a folder's access list owner-only",
-            extra={"event": "private_folder_acl_failed", "reason": "icacls_not_run", "error_type": type(exc).__name__},
-        )
-        return
-    if result.returncode != 0:
-        _log.warning(
-            "Could not make a folder's access list owner-only",
-            extra={"event": "private_folder_acl_failed", "reason": "icacls_refused"},
-        )
-        return
-    try:
-        # Listed first, so the marker never shows up as a file to commit.
-        ensure_gitignored(folder=path, pattern=WINDOWS_ACL_MARKER)
-        marker.write_text(identity + "\n", encoding="utf-8")
-    except OSError as exc:
-        _log.warning(
-            "Could not record a folder's owner-only access list",
-            extra={"event": "private_folder_acl_failed", "reason": "marker_not_written", "error_type": type(exc).__name__},
-        )
-
-
-def _is_junction(*, path: Path) -> bool:
-    """Whether ``path`` is a Windows junction; always False elsewhere and before Python 3.12."""
-    isjunction = getattr(os.path, "isjunction", None)
-    return bool(isjunction and isjunction(path))
+        raise PermissionError(errno.EACCES, "Could not run icacls", str(path)) from exc
+    if result.returncode:
+        raise PermissionError(errno.EACCES, f"icacls exited with status {result.returncode}", str(path))

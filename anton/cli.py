@@ -463,7 +463,8 @@ def _reconcile_publish_identity(settings) -> bool:
     # Reuse the vault's own atomic 0600 writer rather than re-implementing it:
     # the archive holds the same secret as the file it came from, and a plain
     # write_text would leave it at umask mode until a chmod landed.
-    from anton.workspace import Workspace, _write_private, vault_key
+    from anton.utils.private_dir import write_private_text
+    from anton.workspace import Workspace, vault_key
 
     project_path = Path(settings.workspace_path)
     # resolve() both sides: `workspace_path` is already canonical (Path.cwd() /
@@ -484,6 +485,7 @@ def _reconcile_publish_identity(settings) -> bool:
     if not project_key:
         return False
 
+    project_ws.make_anton_dir_private()
     global_ws = Workspace(Path.home(), settings=settings)
     global_key = vault_key(global_ws.env_path)
 
@@ -571,7 +573,7 @@ def _reconcile_publish_identity(settings) -> bool:
 
             archive = project_ws.env_path.with_name(".env.superseded")
             previous = archive.read_text(encoding="utf-8") if archive.is_file() else ""
-            _write_private(
+            write_private_text(
                 archive,
                 f"{previous}# superseded {datetime.now():%Y-%m-%d %H:%M}, was in .anton/.env\n"
                 f"ANTON_MINDS_API_KEY={project_key}\n",
@@ -621,7 +623,7 @@ def _secure_anton_home() -> None:
     Nothing is created here: each step that writes into ~/.anton creates it
     0700. This step leaves a symbolic link at ~/.anton as it is, and the .env
     behind it too; a later step that writes that .env still makes it 0600
-    through `anton.workspace._open_private`. Never fatal, for the reason given
+    when it publishes the managed file. Never fatal, for the reason given
     at its call site: an OSError here would stop every `anton` command on a
     container with no writable home.
     """
@@ -631,7 +633,8 @@ def _secure_anton_home() -> None:
     try:
         if home.is_symlink() or not home.is_dir():
             return
-        make_private_dir(path=home)
+        if not make_private_dir(path=home):
+            return
         tighten_private_file(path=home / ".env")
     except OSError as exc:
         console.print(f"[anton.muted]  Could not make ~/.anton private: {escape(str(exc))}[/]")
@@ -655,7 +658,7 @@ def _ensure_workspace(settings) -> None:
 
     # Always ensure local .anton exists so project memory has a home
     if not local_ws.is_initialized():
-        local_ws.initialize()
+        local_ws.initialize(private=True)
         console.print(f"[anton.muted]  workspace is {local_path}/.anton[/]")
     else:
         # An earlier version left an existing .anton at the umask's mode.
@@ -686,10 +689,9 @@ def main(
     configure_logging()
     from anton.config.settings import AntonSettings
 
+    _secure_anton_home()
     settings = AntonSettings()
     settings.resolve_workspace(folder)
-
-    _secure_anton_home()
 
     # Must run before anything reads a key off `settings`, and before
     # `_ensure_workspace` promotes the project vault into os.environ.
@@ -1813,13 +1815,23 @@ def dashboard() -> None:
     render_dashboard(console)
 
 
+def _history_directory(settings) -> Path:
+    """Secure the project's default history root before a store can create it."""
+    from anton.workspace import Workspace
+
+    directory = Path(settings.memory_dir)
+    if Path(os.path.abspath(directory)).is_relative_to(settings.workspace_path / ".anton"):
+        Workspace(settings.workspace_path, settings=settings).make_anton_dir_private()
+    return directory
+
+
 @app.command("sessions")
 def list_sessions(ctx: typer.Context) -> None:
     """List recent sessions."""
     from anton.memory.store import SessionStore
 
     settings = _get_settings(ctx)
-    memory_dir = Path(settings.memory_dir)
+    memory_dir = _history_directory(settings)
     store = SessionStore(memory_dir)
 
     sessions = store.list_sessions()
@@ -1851,7 +1863,7 @@ def show_session(
     from anton.memory.store import SessionStore
 
     settings = _get_settings(ctx)
-    memory_dir = Path(settings.memory_dir)
+    memory_dir = _history_directory(settings)
     store = SessionStore(memory_dir)
 
     session = store.get_session(session_id)
@@ -1874,7 +1886,7 @@ def list_learnings(ctx: typer.Context) -> None:
     from anton.memory.learnings import LearningStore
 
     settings = _get_settings(ctx)
-    memory_dir = Path(settings.memory_dir)
+    memory_dir = _history_directory(settings)
     store = LearningStore(memory_dir)
 
     items = store.list_all()

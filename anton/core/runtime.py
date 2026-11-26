@@ -59,6 +59,7 @@ async def build_chat_session(
     *,
     session_id: str,
     workspace_path: Optional[str] = None,
+    private_workspace: bool = False,
     model: Optional[str] = None,
     extra_tools: Optional[Sequence[Any]] = None,
     system_prompt_suffix: Optional[str] = None,
@@ -77,6 +78,8 @@ async def build_chat_session(
         Stable id used for episodic-memory resume + history-store load.
     workspace_path
         Project workspace root. None → current working directory.
+    private_workspace
+        Desktop hosts can opt in to user-only project permissions. Managed mounts retain their modes by default.
     model
         Override planning model on the resolved settings.
     extra_tools
@@ -123,7 +126,7 @@ async def build_chat_session(
         settings.planning_model = model
 
     workspace = Workspace(base)
-    workspace.initialize()
+    workspace.initialize(private=private_workspace)
     workspace.apply_env_to_process()
 
     anton_dir = base / ".anton"

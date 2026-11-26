@@ -281,3 +281,55 @@ def test_the_cli_start_pins_an_existing_project_anton_folder(home, tmp_path):
     run_chat.assert_called_once()
     assert _mode(anton_dir) == 0o700
     assert (anton_dir / "anton.md").read_text() == "# mine\n"
+
+
+@pytest.mark.parametrize(("command", "expected"), [(["sessions"], 0), (["session", "missing"], 1), (["learnings"], 0)])
+@pytest.mark.parametrize("existing", [False, True])
+def test_cli_history_secures_project_before_opening_store(home, tmp_path, command, expected, existing):
+    project = tmp_path / "project"
+    project.mkdir()
+    folder = project / ".anton"
+    if existing:
+        folder.mkdir(mode=0o755)
+
+    result = _boot_cli(["--no-update", "--folder", str(project), *command])
+
+    assert result.exit_code == expected, result.output
+    assert _mode(folder) == 0o700
+
+
+def test_first_run_detaches_linked_dotenv_without_changing_personal_dotfiles(home, tmp_path):
+    from anton.chat import _persist_first_run_done
+
+    folder = home / ".anton"
+    folder.mkdir(mode=0o700)
+    personal = tmp_path / "personal.env"
+    personal.write_text("SETTING=value\n")
+    personal.chmod(0o644)
+    managed = folder / ".env"
+    managed.symlink_to(personal)
+
+    _persist_first_run_done(SimpleNamespace(first_run_done=False))
+
+    assert personal.read_text() == "SETTING=value\n"
+    assert _mode(personal) == 0o644
+    assert not managed.is_symlink()
+    assert _mode(managed) == 0o600
+    assert managed.read_text() == "SETTING=value\nANTON_FIRST_RUN_DONE=true\n"
+
+
+@pytest.mark.parametrize(("options", "mode"), [({}, 0o770), ({"private_workspace": True}, 0o700)])
+async def test_shared_runtime_builder_uses_host_workspace_policy(home, tmp_path, monkeypatch, options, mode):
+    from anton.core.runtime import build_chat_session
+
+    monkeypatch.setenv("ANTON_ANTHROPIC_API_KEY", "test-local-session")
+    project = tmp_path / "project"
+    directory = project / ".anton"
+    directory.mkdir(parents=True)
+    directory.chmod(0o770)
+
+    session = await build_chat_session(session_id="local-check", workspace_path=str(project), **options)
+    try:
+        assert _mode(directory) == mode
+    finally:
+        await session.close()

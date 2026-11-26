@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from anton.core import session as session_mod
 from anton.core.session import (
     ChatSession,
@@ -60,6 +62,85 @@ class TestLastCompaction:
         assert session.history[0]["content"] == compaction["summary"]
         # The last 4 (uncompacted) turns survive verbatim, in order.
         assert session.history[-4:] == original[6:]
+
+    async def test_a_reply_that_is_not_a_record_keeps_history(self):
+        original = _alternating_history(10, "x" * 50)
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response(
+            "I have most of the picture. Let me re-read the files in smaller chunks."
+        ))
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=original))
+
+        assert await session._summarize_history() is False
+
+        assert session.history == original
+        assert session.last_compaction is None
+
+    @pytest.mark.parametrize("record", [
+        "### Goal\nship it", "**Goal**\nship it", "## 1. Goal\nship it", "Here is the record.\n## Remaining\n- x",
+        "Goal: ship it\nRemaining: test it",
+    ])
+    async def test_a_record_with_other_heading_styles_is_kept(self, record):
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response(record))
+        session = ChatSession(ChatSessionConfig(
+            llm_client=mock_llm, initial_history=_alternating_history(10, "x" * 50),
+        ))
+
+        assert await session._summarize_history() is True
+
+    @pytest.mark.parametrize("pairs", range(3, 12))
+    async def test_a_tool_loop_compacts_at_every_length_without_splitting_a_pair(self, pairs):
+        history = [_msg("user", "do the task")]
+        for i in range(pairs):
+            history.append({"role": "assistant", "content": [
+                {"type": "tool_use", "id": f"t{i}", "name": "scratchpad", "input": {"code": "x" * 50}},
+            ]})
+            history.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": f"t{i}", "content": "y" * 50},
+            ]})
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\ndo the task"))
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+
+        assert await session._summarize_history() is True
+
+        recent = history[session.last_compaction["covered_through"]:]
+        assert recent[0]["role"] == "assistant"
+        assert session.history[1:] == recent
+
+    async def test_large_recent_messages_are_folded_down_to_the_recent_budget(self):
+        """12 small messages then 8 large ones: a cut by message count folds too little to act."""
+        small = _alternating_history(12, "s" * 2_000)
+        large = [_msg("user" if i % 2 == 0 else "assistant", f"{i}" + "L" * 20_000) for i in range(8)]
+        history = small + large
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nship it"))
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+
+        assert await session._summarize_history() is True
+
+        kept = history[session.last_compaction["covered_through"]:]
+        assert len(kept) >= 4
+        assert sum(len(m["content"]) for m in kept) <= session_mod._COMPACTION_RECENT_TOKENS * 4
+
+    @pytest.mark.parametrize("prior", [None, f"{_COMPACTED_MARKER}\n## Goal\nolder record"])
+    async def test_the_turns_are_framed_as_a_record_with_the_instruction_last(self, prior):
+        """A transcript ending in the agent's own words, with the instruction only
+        in the system prompt, gets continued by some models instead of summarized."""
+        history = _alternating_history(10, "x" * 50)
+        if prior:
+            history[0] = _msg("user", prior)
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nship it"))
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+
+        assert await session._summarize_history() is True
+
+        sent = mock_llm.summarize.call_args.kwargs["messages"][0]["content"]
+        start, end = sent.index("<conversation>"), sent.rindex("</conversation>")
+        assert start < sent.index("x" * 50) < end
+        assert sent[end + len("</conversation>"):].strip()
 
     async def test_budget_ignores_the_larger_stream_budget(self):
         """Compaction is a non-streamed call: it stays under the client's own
@@ -325,7 +406,7 @@ class TestSecondCompactionInOneTurn:
 
         assert session.history == original
         assert session.last_compaction is None
-        assert "empty record" in caplog.text
+        assert "no state record" in caplog.text
 
     async def test_budget_never_exceeds_the_client_ceiling(self):
         """A host configuring a smaller `max_tokens` would otherwise get a 400 on
@@ -382,7 +463,7 @@ class TestSkipWhenLittleNewMaterial:
         recent_turns = _alternating_history(4, "y" * 100)
         history = [prior_summary, *new_old_turns, *recent_turns]
         mock_llm = make_mock_llm()
-        mock_llm.summarize = AsyncMock(return_value=_summarize_response("updated summary"))
+        mock_llm.summarize = AsyncMock(return_value=_summarize_response("## Goal\nupdated summary"))
 
         session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
         await session._summarize_history()

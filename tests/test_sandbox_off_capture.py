@@ -233,7 +233,16 @@ class _VerifierPool:
         return self._python
 
 
-async def test_the_verifier_checks_are_unchanged(tmp_path, monkeypatch, parent_env):
+@pytest.fixture
+def backend_import_path(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        monkeypatch.setattr(backend_launcher, "_windows_profile", lambda: tmp_path)
+        return str(tmp_path / ".anton" / "anton_state_pp")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    return str(tmp_path.resolve() / f"anton_state_pp-{os.getuid()}")
+
+
+async def test_the_verifier_checks_are_unchanged(tmp_path, monkeypatch, parent_env, backend_import_path):
     artifact = tmp_path / "artifact"
     artifact.mkdir()
     (artifact / "backend.py").write_text("app = None\n", encoding="utf-8")
@@ -249,7 +258,6 @@ async def test_the_verifier_checks_are_unchanged(tmp_path, monkeypatch, parent_e
         scratchpad_pool=_VerifierPool("/venv/bin/python"), slug="x", artifact_path=artifact
     )
 
-    pythonpath = str(Path(tempfile.gettempdir()) / f"anton_state_pp-{os.getuid()}")
     assert calls == [
         (
             ("/venv/bin/python", "-I", "-B", "-X", "utf8", "-c", verifiers._SYNTAX_CHECK_SCRIPT),
@@ -265,13 +273,13 @@ async def test_the_verifier_checks_are_unchanged(tmp_path, monkeypatch, parent_e
                 "cwd": str(artifact),
                 "stdout": asyncio.subprocess.PIPE,
                 "stderr": asyncio.subprocess.PIPE,
-                "env": {**_environ(), "PYTHONPATH": pythonpath, "PYTHONDONTWRITEBYTECODE": "1"},
+                "env": {**_environ(), "PYTHONPATH": backend_import_path, "PYTHONDONTWRITEBYTECODE": "1"},
             },
         ),
     ]
 
 
-async def test_the_backend_launch_is_unchanged(tmp_path, monkeypatch, parent_env):
+async def test_the_backend_launch_is_unchanged(tmp_path, monkeypatch, parent_env, backend_import_path):
     folder = tmp_path / "artifacts" / "app"
     folder.mkdir(parents=True)
     (folder / "backend.py").write_text("print('hi')\n", encoding="utf-8")
@@ -301,7 +309,7 @@ async def test_the_backend_launch_is_unchanged(tmp_path, monkeypatch, parent_env
     env.update(
         FROM_DOTENV="1",
         DS_PG_MAIN__PASSWORD="artifact-ds",
-        PYTHONPATH=str(Path(tempfile.gettempdir()) / f"anton_state_pp-{os.getuid()}"),
+        PYTHONPATH=backend_import_path,
         PYTHONDONTWRITEBYTECODE="1",
     )
     assert set(kwargs) == {"cwd", "stdout", "stderr", "stdin", "preexec_fn", "env"}

@@ -156,6 +156,11 @@ class CoreSettings(BaseSettings):
     # refused before any request is sent.
     max_images_per_turn: int = 8
     context_pressure_threshold: float = 0.7
+    # Prompt size (ANTON_CONTEXT_COMPACTION_MAX_TOKENS) at which history is
+    # compacted whatever the window. On a 1M window 0.7 is 700k tokens, so a
+    # long turn re-sent its whole history every call and never compacted.
+    # Off (0) until measured on Cowork; the benchmark adapter sets it.
+    context_compaction_max_tokens: int = 0
     max_consecutive_errors: int = 5
     resilience_nudge_at: int = 2
     token_status_cache_ttl: float = 60.0

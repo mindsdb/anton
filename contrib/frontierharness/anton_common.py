@@ -13,6 +13,8 @@ from pathlib import Path
 DEFAULT_MODEL = "kimi-k3"
 # FrontierHarness v1.1 caps every harness's replies at 131,072 tokens.
 DEFAULT_MAX_TOKENS = "131072"
+# The v1.1 model proxy runs every harness at max reasoning effort.
+DEFAULT_REASONING_EFFORT = "max"
 
 EVENTS_FILE = "anton-events.jsonl"
 STDERR_FILE = "anton-stderr.log"
@@ -69,6 +71,7 @@ def anton_env(get_env: Callable[[str], str | None], model_name: str | None) -> d
     if not api_key:
         raise RuntimeError("set ANTON_FH_API_KEY or OPENAI_API_KEY")
     model = model_id(get_env, model_name)
+    effort = _first(get_env, "ANTON_FH_REASONING_EFFORT") or DEFAULT_REASONING_EFFORT
     return {
         "ANTON_PLANNING_PROVIDER": "openai-compatible",
         "ANTON_CODING_PROVIDER": "openai-compatible",
@@ -77,6 +80,10 @@ def anton_env(get_env: Callable[[str], str | None], model_name: str | None) -> d
         "ANTON_OPENAI_BASE_URL": base_url(get_env),
         "ANTON_OPENAI_API_KEY": api_key,
         "ANTON_MAX_TOKENS": _first(get_env, "ANTON_FH_MAX_TOKENS") or DEFAULT_MAX_TOKENS,
+        "ANTON_PLANNING_REASONING_EFFORT": effort,
+        "ANTON_CODING_REASONING_EFFORT": effort,
+        # Kimi K3's 1M window would otherwise let a long task resend 700k tokens a call.
+        "ANTON_CONTEXT_COMPACTION_MAX_TOKENS": "80000",
         "ANTON_USAGE_LOG": "1",
         # Artifacts would otherwise land under the workspace and in the graded diff.
         "ANTON_CLOUD_ARTIFACTS_ROOT": "/tmp/anton-artifacts",

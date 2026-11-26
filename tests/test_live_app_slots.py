@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import itertools
 import json
 import logging
 import os
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -620,6 +622,20 @@ def test_an_api_url_keeps_its_user_info_through_the_relay():
     # The slot refuses any other `DS_*` name, and with it the whole launch.
     (DatasourceRef(engine="rest", name="httpbin"),
      {("rest", "httpbin"): {"BASE_URL": "https://httpbin.org/", "api-key": _PG_PASSWORD}}, "field_names"),
+    # The slot also refuses a value exec can't carry.
+    (DatasourceRef(engine="postgres", name="demo"),
+     {("postgres", "demo"): {"HOST": "samples.mindsdb.com", "PASSWORD": _PG_PASSWORD + "\0"}}, "field_values"),
+    (DatasourceRef(engine="postgres", name="demo"),
+     {("postgres", "demo"): {"HOST": "samples.mindsdb.com", "PASSWORD": _PG_PASSWORD + "\ud800"}}, "field_values"),
+    (DatasourceRef(engine="postgres", name="demo"),
+     {("postgres", "demo"): {"HOST": "samples.mindsdb.com", "PASSWORD": "x" * (las.MAX_ENV_VALUE_CHARS + 1)}},
+     "field_values"),
+    (DatasourceRef(engine="rest", name="httpbin"),
+     {("rest", "httpbin"): {"BASE_URL": "https://httpbin.org/", "API_KEY": _PG_PASSWORD + "\udfff"}},
+     "field_values"),
+    (DatasourceRef(engine="postgres", name="demo"),
+     {("postgres", "demo"): {"HOST": "samples.mindsdb.com", "PASSWORD": _PG_PASSWORD,
+                             "K" * las.MAX_ENV_STRING_BYTES: "v"}}, "too_large"),
 ])
 def test_a_connection_left_out_is_named_without_a_value(ref, saved, reason):
     resolved = las.resolve_connections(FakeVault(saved), [ref], _approved_set(), slug="a")
@@ -630,6 +646,197 @@ def test_a_connection_left_out_is_named_without_a_value(ref, saved, reason):
                                      missing=tuple(resolved.missing))
     assert f"`{ref.engine}/{ref.name}` ({las.MISSING_REASON_TEXT[reason]})" in result.message()
     assert _PG_PASSWORD not in result.message()
+
+
+# The pattern the slot and anton used before: right, but quadratic on a long
+# name with many "__".
+_BACKTRACKING_ENV_NAME = re.compile(r"^DS_[A-Z0-9_]+__[A-Z0-9][A-Z0-9_]*$")
+
+
+def _strings(alphabet: str, longest: int):
+    yield ""
+    for length in range(1, longest + 1):
+        for chars in itertools.product(alphabet, repeat=length):
+            yield "".join(chars)
+
+
+@pytest.mark.parametrize("prefix, alphabet, longest", [
+    ("DS_", "_A0a", 7),
+    # Letters outside A to Z, a newline the old `$` stood before, and the prefix itself.
+    ("DS_", "_A0éÉ\n", 5),
+    ("", "DS_A0a", 6),
+])
+def test_the_env_name_check_takes_exactly_the_names_the_old_pattern_took(prefix, alphabet, longest):
+    for rest in _strings(alphabet, longest):
+        name = prefix + rest
+        assert las.env_name_is_valid(name) == (_BACKTRACKING_ENV_NAME.fullmatch(name) is not None), repr(name)
+
+
+def test_a_long_field_name_of_many_underscores_is_refused_at_once():
+    # upper() makes the key's last letter `É`, which no field name takes, and
+    # the old pattern then tried every "__" split: 3.6 s at 32,013 characters.
+    key = ("0__0" * 25_000 + "é").upper()
+    vault = FakeVault({("postgres", "demo"): {"HOST": "samples.mindsdb.com", key: "v"}})
+    started = time.monotonic()
+    resolved = las.resolve_connections(vault, _DECLARED[:1], _approved_set(), slug="a")
+    assert time.monotonic() - started < 1.0
+    assert [m.reason for m in resolved.missing] == ["field_names"]
+
+
+def _db_fields(**fields: str) -> dict[str, str]:
+    return {"HOST": "samples.mindsdb.com", **fields}
+
+
+def _env_bytes(env: dict[str, str]) -> int:
+    return sum(len(name) + 1 + len(value.encode()) for name, value in env.items())
+
+
+@pytest.mark.parametrize("value, sent", [
+    ("x" * las.MAX_ENV_VALUE_CHARS, True),
+    ("x" * (las.MAX_ENV_VALUE_CHARS + 1), False),
+    # A value's limit counts characters: four bytes each here, and still taken.
+    ("\U0001F600" * las.MAX_ENV_VALUE_CHARS, True),
+], ids=["16-kib", "over-16-kib", "16-kib-of-4-byte-characters"])
+def test_a_value_is_taken_up_to_16_kib(value, sent):
+    vault = FakeVault({("postgres", "demo"): _db_fields(PASSWORD=value)})
+    resolved = las.resolve_connections(vault, _DECLARED[:1], _approved_set(), slug="a")
+    assert ("DS_POSTGRES_DEMO__PASSWORD" in resolved.env) is sent
+
+
+@pytest.mark.parametrize("extra, sent", [(0, True), (1, False)])
+def test_a_name_and_value_are_taken_below_128_kib(extra, sent):
+    # A 64 KiB value of four-byte characters, and a name that brings the
+    # name=value and its NUL to the limit, then one byte past it.
+    value = "\U0001F600" * las.MAX_ENV_VALUE_CHARS
+    prefix = "DS_POSTGRES_DEMO__"
+    field = "K" * (las.MAX_ENV_STRING_BYTES - 1 - len(value.encode()) - 1 - len(prefix) + extra)
+    vault = FakeVault({("postgres", "demo"): _db_fields(**{field: value})})
+    resolved = las.resolve_connections(vault, _DECLARED[:1], _approved_set(), slug="a")
+    assert len((prefix + field).encode()) + 1 + len(value.encode()) + 1 == las.MAX_ENV_STRING_BYTES + extra
+    assert bool(resolved.granted) is sent
+    assert [m.reason for m in resolved.missing] == ([] if sent else ["too_large"])
+
+
+@pytest.mark.parametrize("extra, sent", [(0, True), (1, False)])
+def test_a_connection_that_takes_the_env_past_1_mib_is_left_out(extra, sent):
+    # The database's fields fill the env to just under 1 MiB, and the API's
+    # last field brings it to the limit, then one byte past it.
+    filler = "x" * las.MAX_ENV_VALUE_CHARS
+    db = _db_fields(**{f"F{n:02}": filler for n in range(63)})
+    db_env = FakeVault({("postgres", "demo"): db}).env_for("postgres", "demo")
+    api = {"BASE_URL": "https://httpbin.org/"}
+    api_env = {"DS_REST_HTTPBIN__BASE_URL": "http://live-apps-relay:10001/", "DS_REST_HTTPBIN__LAST": ""}
+    left = las.MAX_ENV_TOTAL_BYTES - _env_bytes(db_env) - _env_bytes(api_env) + extra
+    assert 0 < left <= las.MAX_ENV_VALUE_CHARS
+    api["LAST"] = "y" * left
+    vault = FakeVault({("postgres", "demo"): db, ("rest", "httpbin"): api})
+    resolved = las.resolve_connections(vault, _DECLARED, _approved_set(), slug="a")
+    assert [g.slot.engine for g in resolved.granted] == (["postgres", "rest"] if sent else ["postgres"])
+    assert [m.model_dump() for m in resolved.missing] == (
+        [] if sent else [{"engine": "rest", "name": "httpbin", "reason": "too_large"}])
+    assert _env_bytes(resolved.env) == (las.MAX_ENV_TOTAL_BYTES if sent else _env_bytes(db_env))
+
+
+@pytest.mark.parametrize("extra, sent", [(0, True), (1, False)])
+def test_a_connection_that_takes_the_env_past_128_names_is_left_out(extra, sent):
+    db = _db_fields(**{f"F{n:03}": "v" for n in range(99)})
+    api = {"BASE_URL": "https://httpbin.org/", **{f"F{n:02}": "v" for n in range(27 + extra)}}
+    vault = FakeVault({("postgres", "demo"): db, ("rest", "httpbin"): api})
+    resolved = las.resolve_connections(vault, _DECLARED, _approved_set(), slug="a")
+    assert len(resolved.env) == (las.MAX_ENV_NAMES if sent else 100)
+    assert [m.reason for m in resolved.missing] == ([] if sent else ["too_large"])
+
+
+def test_a_connection_after_one_left_out_for_size_is_still_sent():
+    # The first connection alone is too large; the second still fits.
+    too_many = _db_fields(**{f"F{n:03}": "v" for n in range(las.MAX_ENV_NAMES)})
+    vault = FakeVault({("postgres", "demo"): too_many, ("rest", "httpbin"): {"BASE_URL": "https://httpbin.org/"}})
+    resolved = las.resolve_connections(vault, _DECLARED, _approved_set(), slug="a")
+    assert [m.reason for m in resolved.missing] == ["too_large"]
+    assert resolved.env == {"DS_REST_HTTPBIN__BASE_URL": "http://live-apps-relay:10001/"}
+
+
+def test_a_connection_past_the_slots_32_is_left_out():
+    names = [f"db{n:02}" for n in range(las.MAX_LAUNCH_CONNECTIONS + 1)]
+    approved = ApprovedConnections(version=1, connections=tuple(
+        ApprovedConnection(engine="postgres", name=name, kind="db", host="samples.mindsdb.com", port=5432)
+        for name in names))
+    vault = FakeVault({("postgres", name): {"HOST": "samples.mindsdb.com"} for name in names})
+    refs = [DatasourceRef(engine="postgres", name=name) for name in names]
+    resolved = las.resolve_connections(vault, refs, approved, slug="a")
+    assert [g.slot.name for g in resolved.granted] == names[:-1]
+    assert [m.model_dump() for m in resolved.missing] == [{"engine": "postgres", "name": "db32", "reason": "too_many"}]
+    assert "DS_POSTGRES_DB32__HOST" not in resolved.env
+
+
+@pytest.mark.parametrize("second, saved", [
+    # One prefix and a field both have: the later HOST would replace the earlier one.
+    (ApprovedConnection(engine="postgres", name="prod_db", kind="db", host="db.example.com", port=5432),
+     {"HOST": "db.example.com", "TOKEN": "tok"}),
+    # One prefix and no field in common: the later field would sit beside the earlier ones.
+    (ApprovedConnection(engine="postgres", name="prod_db", kind="http-read", host="api.example.com", port=443,
+                        relay_port=10002),
+     {"BASE_URL": "https://api.example.com/"}),
+    # Two prefixes and one name: the earlier X__HOST field and the later connection's HOST.
+    (ApprovedConnection(engine="postgres", name="prod-db__x", kind="db", host="db.example.com", port=5432),
+     {"HOST": "db.example.com"}),
+], ids=["shared-field", "same-prefix", "same-name"])
+def test_a_connection_that_builds_an_earlier_ones_names_is_left_out(second, saved):
+    first = ApprovedConnection(engine="postgres", name="prod-db", kind="db", host="samples.mindsdb.com", port=5432)
+    first_fields = {"HOST": "samples.mindsdb.com", "PASSWORD": _PG_PASSWORD, "X__HOST": "x"}
+    vault = FakeVault({("postgres", "prod-db"): first_fields, ("postgres", second.name): saved})
+    refs = [DatasourceRef(engine="postgres", name="prod-db"), DatasourceRef(engine="postgres", name=second.name)]
+    approved = ApprovedConnections(version=1, connections=(first, second))
+    resolved = las.resolve_connections(vault, refs, approved, slug="a")
+    assert resolved.env == {f"DS_POSTGRES_PROD_DB__{key}": value for key, value in first_fields.items()}
+    assert [g.slot.name for g in resolved.granted] == ["prod-db"]
+    assert [m.model_dump() for m in resolved.missing] == [
+        {"engine": "postgres", "name": second.name, "reason": "name_clash"}]
+
+
+@pytest.mark.parametrize("order", [("prod", "prod--db"), ("prod--db", "prod")], ids=["prod-first", "prod--db-first"])
+@pytest.mark.parametrize("prod_fields", [
+    # prod's DB__USER builds DS_POSTGRES_PROD__DB__USER, the name prod--db's USER would have.
+    {"HOST": "samples.mindsdb.com", "DB__USER": "prod-user"},
+    # No field nests, but every prod--db name still sits in prod's DS_POSTGRES_PROD__ namespace.
+    {"HOST": "samples.mindsdb.com"},
+], ids=["nested-field", "nested-prefix"])
+def test_a_connection_whose_names_sit_in_an_earlier_ones_namespace_is_left_out(order, prod_fields):
+    approved = ApprovedConnections(version=1, connections=(
+        ApprovedConnection(engine="postgres", name="prod", kind="db", host="samples.mindsdb.com", port=5432),
+        ApprovedConnection(engine="postgres", name="prod--db", kind="db", host="db.example.com", port=5432),
+    ))
+    vault = FakeVault({
+        ("postgres", "prod"): prod_fields,
+        ("postgres", "prod--db"): {"HOST": "db.example.com", "PASSWORD": _PG_PASSWORD},
+    })
+    refs = [DatasourceRef(engine="postgres", name=name) for name in order]
+    resolved = las.resolve_connections(vault, refs, approved, slug="a")
+    first, second = order
+    assert [g.slot.name for g in resolved.granted] == [first]
+    assert [m.model_dump() for m in resolved.missing] == [{"engine": "postgres", "name": second, "reason": "name_clash"}]
+    assert resolved.env == vault.env_for("postgres", first)
+
+
+def test_a_connection_declared_twice_is_sent_once():
+    vault = FakeVault({("postgres", "demo"): {"HOST": "samples.mindsdb.com", "PASSWORD": _PG_PASSWORD}})
+    refs = [_DECLARED[0], DatasourceRef(engine="Postgres", name="Demo")]
+    resolved = las.resolve_connections(vault, refs, _approved_set(), slug="a")
+    assert [g.slot.name for g in resolved.granted] == ["demo"]
+    assert resolved.missing == []
+    assert resolved.env == {"DS_POSTGRES_DEMO__HOST": "samples.mindsdb.com", "DS_POSTGRES_DEMO__PASSWORD": _PG_PASSWORD}
+
+
+@pytest.mark.parametrize("approved, reason", [
+    (_approved_set(), "not_saved"),
+    (ApprovedConnections(version=1), "not_approved"),
+], ids=["not-saved", "not-approved"])
+def test_a_connection_declared_twice_and_left_out_is_named_once(approved, reason):
+    refs = [_DECLARED[0], DatasourceRef(engine="Postgres", name="Demo")]
+    resolved = las.resolve_connections(FakeVault({}), refs, approved, slug="a")
+    assert [m.model_dump() for m in resolved.missing] == [{"engine": "postgres", "name": "demo", "reason": reason}]
+    assert resolved.granted == []
+    assert resolved.env == {}
 
 
 def test_an_api_approved_for_writes_points_at_its_relay_and_carries_its_override():
@@ -858,6 +1065,41 @@ async def test_a_first_launch_asks_the_card_then_sends_only_approved_values(tmp_
     assert event[0] == "launched"
     assert event[1].model_dump() == {"slot": 1, "slug": "sales-demo", "artifact_dir": str(folder),
                                      "address": "http://app1.view.localhost:8080/", "boot_id": "boot-1-1"}
+
+
+@pytest.mark.parametrize("password, reason", [
+    ("pw\0", "field_values"),
+    ("pw\ud800", "field_values"),
+    ("x" * (las.MAX_ENV_VALUE_CHARS + 1), "field_values"),
+], ids=["nul", "lone-surrogate", "over-16-kib"])
+async def test_a_value_the_slot_would_refuse_never_reaches_it(tmp_path, slots, approved, cards, password, reason):
+    folder = _artifact(tmp_path)
+    session = _session(saved={
+        ("postgres", "demo"): {"HOST": "samples.mindsdb.com", "PORT": "5432", "PASSWORD": password},
+        ("rest", "httpbin"): {"BASE_URL": "https://httpbin.org/anything?x=1", "API_KEY": _API_KEY},
+    })
+    result = await las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=_DECLARED)
+
+    (request,) = slots[0].requests
+    assert not any(name.startswith("DS_POSTGRES") for name in request.env)
+    assert request.env["DS_REST_HTTPBIN__API_KEY"] == _API_KEY
+    assert [(c.engine, c.kind) for c in request.connections] == [("rest", "http-read")]
+    assert [m.model_dump() for m in result.missing] == [{"engine": "postgres", "name": "demo", "reason": reason}]
+    message = result.message()
+    assert f"`postgres/demo` ({las.MISSING_REASON_TEXT[reason]})" in message
+    assert password not in message
+
+
+async def test_a_long_field_name_never_reaches_the_slot(tmp_path, slots, approved, cards):
+    folder = _artifact(tmp_path)
+    key = ("0__0" * 25_000 + "é").upper()
+    session = _session(saved={("postgres", "demo"): {"HOST": "samples.mindsdb.com", key: "v"}})
+    started = time.monotonic()
+    result = await las.launch_live_app(session, slug="sales-demo", folder=folder, datasources=_DECLARED[:1])
+    assert time.monotonic() - started < 1.0
+    (request,) = slots[0].requests
+    assert request.env == {}
+    assert [m.reason for m in result.missing] == ["field_names"]
 
 
 async def test_the_launch_writes_the_scrubbed_log_tail_and_no_port(tmp_path, slots, approved, cards):

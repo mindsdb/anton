@@ -110,6 +110,9 @@ def test_a_folder_another_account_owns_is_not_used(temp_dir, monkeypatch):
     """Simulated with a stubbed uid: the folders below are this test's, so to
     that uid they belong to someone else."""
     other_uid = os.getuid() + 1
+    # Only the candidate ownership is simulated. Keep this fixture's real
+    # temporary parent pinned while the effective uid is mocked.
+    monkeypatch.setattr(backend_launcher, "_trusted_temp_parent", lambda: temp_dir)
     monkeypatch.setattr(os, "getuid", lambda: other_uid)
     planted = []
     for name in _names_another_account_could_take():
@@ -137,6 +140,36 @@ def test_a_refused_name_gives_one_folder_for_the_life_of_the_process(temp_dir):
     assert first == second
     assert os.listdir(first) == ["anton_state"]
     assert stat.S_IMODE(os.lstat(first).st_mode) == 0o700
+
+
+@_posix_only
+def test_configured_temp_with_writable_ancestor_uses_trusted_parent(temp_dir, monkeypatch):
+    shared = temp_dir.parent / "shared"
+    child = shared / "subdirectory"
+    child.mkdir(parents=True)
+    shared.chmod(0o777)
+    try:
+        monkeypatch.setattr(tempfile, "tempdir", str(child))
+        parent = backend_launcher._trusted_temp_parent()
+        assert shared not in (parent, *parent.parents)
+        assert parent != child
+    finally:
+        shared.chmod(0o700)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows profile lookup and ACLs")
+def test_windows_imports_use_the_profile_despite_configured_temp(tmp_path, monkeypatch):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    unrelated = tmp_path / "configured-temp"
+    unrelated.mkdir()
+    monkeypatch.setattr(backend_launcher, "_windows_profile", lambda: profile)
+    monkeypatch.setattr(tempfile, "tempdir", str(unrelated))
+
+    directory = Path(_anton_state_pythonpath_dir())
+
+    assert directory == profile / ".anton" / "anton_state_pp"
+    assert list(unrelated.iterdir()) == []
 
 
 def test_build_env_prepends_isolated_dir_to_pythonpath():

@@ -2,19 +2,32 @@
 
 from __future__ import annotations
 
+import errno
+import os
+import stat
 from pathlib import Path
 
 
 def ensure_gitignored(*, folder: Path, pattern: str) -> None:
-    """List ``pattern`` in ``folder/.gitignore``, adding the file when it is missing.
-
-    Appends when a ``.gitignore`` already exists rather than replacing it, so
-    the lines a project keeps there survive. Raises OSError when the file
-    can't be read or written.
-    """
-    gitignore = folder / ".gitignore"
-    existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
-    if pattern in existing.split():
-        return
-    prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
-    gitignore.write_text(f"{prefix}{pattern}\n", encoding="utf-8")
+    """Append a literal pattern to a regular, single-link .gitignore without recoding it."""
+    path = folder / ".gitignore"
+    encoded = pattern.encode("utf-8")
+    flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags | getattr(os, "O_BINARY", 0), 0o666)
+    with os.fdopen(fd, "r+b") as handle:
+        opened = os.fstat(fd)
+        entry = path.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or getattr(entry, "st_reparse_tag", 0)
+            or not os.path.samestat(opened, entry)
+        ):
+            raise OSError(errno.EINVAL, "Cannot update a linked or non-regular .gitignore", str(path))
+        existing = handle.read()
+        if b"\x00" in existing:
+            raise OSError(errno.EINVAL, "Cannot append a Git pattern to a binary .gitignore", str(path))
+        if encoded in existing.splitlines():
+            return
+        prefix = b"\n" if existing and not existing.endswith(b"\n") else b""
+        handle.write(prefix + encoded + b"\n")

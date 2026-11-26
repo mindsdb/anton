@@ -50,6 +50,7 @@ from anton.cloud_turn.session import (
     drain_pending_skills,
     remove_staged_skills,
 )
+from anton.cloud_turn.host_tools import CloudHostTools
 from anton.cloud_turn.preview_check import CloudPreviewChecks
 from anton.cloud_turn.stdin import start_answer_reader
 from anton.core.browser.tool import tidy_after_turn
@@ -246,6 +247,12 @@ def _accepts(builder, name: str) -> bool:
     return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
+def _run_all(callbacks: list[Callable[[], None]]) -> None:
+    """Run each callback in order (stdin EOF closes every bridge that waits on it)."""
+    for callback in callbacks:
+        callback()
+
+
 async def stream_turn(
     raw_line: str, emit, session_builder=None, stdin: BinaryIO | None = None
 ) -> None:
@@ -319,6 +326,7 @@ async def _stream_turn(
     terminal_emitted = False
     elicitor = None
     preview_checks = None
+    host_tools = None
     addons = CloudAddons(wire)
     try:
         req = TurnRequestV1.from_json(raw_line)
@@ -334,14 +342,29 @@ async def _stream_turn(
             # answers on stdin (cloud_turn/preview_check.py).
             preview_checks = CloudPreviewChecks(wire)
             build = functools.partial(build, preview_checker=preview_checks)
+        if req.host_tools and stdin is not None and _accepts(builder, "host_tools"):
+            # Tools the host runs; their progress and results come back on
+            # stdin (cloud_turn/host_tools.py), so there are none without it.
+            host_tools = CloudHostTools(wire)
+            build = functools.partial(build, host_tools=host_tools)
         if stdin is not None:
             # For every turn, not only interactive ones: a message the user
             # adds mid-task (ENG-4194) arrives here too. Lines that land before
             # `addons.attach` below are refused (see cloud_turn/addons.py).
-            checks = ({"deliver_check": preview_checks.deliver, "on_close": preview_checks.close}
-                      if preview_checks is not None else {})
+            # Only the hooks this turn has go in as keywords, so a turn
+            # without them calls the reader exactly as before.
+            hooks: dict = {}
+            closers: list[Callable[[], None]] = []
+            if preview_checks is not None:
+                hooks["deliver_check"] = preview_checks.deliver
+                closers.append(preview_checks.close)
+            if host_tools is not None:
+                hooks["deliver_host_tool"] = host_tools.deliver
+                closers.append(host_tools.close)
+            if closers:
+                hooks["on_close"] = functools.partial(_run_all, closers)
             start_answer_reader(stdin, asyncio.get_running_loop(),
-                                elicitor.deliver if elicitor else None, addons.deliver, **checks)
+                                elicitor.deliver if elicitor else None, addons.deliver, **hooks)
         # build_cloud_chat_session() can block synchronously for several
         # seconds (a turn-key OAuth token fetch per connector) — run it off
         # the event loop thread so the heartbeat ticker above keeps firing
@@ -564,6 +587,8 @@ async def _stream_turn(
     finally:
         if preview_checks is not None:
             preview_checks.close()  # a check still waiting reads as unanswered
+        if host_tools is not None:
+            host_tools.close()  # a call still waiting reads as unanswered
         # No terminal yet = BaseException/teardown path; emit one (guarded — a
         # broken pipe here must not mask the original error).
         if not terminal_emitted:

@@ -77,7 +77,7 @@ jobs:
       - name: Run tests that need the sandbox packages
         env:
           ANTON_REQUIRE_SANDBOX_PACKAGES: "1"
-        run: uv run --locked --group dev --group scratchpad pytest tests/test_reading_files_skill.py tests/test_image_smoke.py -v -rs
+        run: uv run --locked --group dev --group scratchpad pytest tests/test_reading_files_skill.py tests/test_image_smoke.py tests/test_artifact_editor_ooxml.py -v -rs
       - name: Run the backend verifier tests, which need fastapi and mangum
         env:
           ANTON_REQUIRE_SANDBOX_PACKAGES: "1"
@@ -98,8 +98,11 @@ jobs:
       - name: Check a cell's environment on Windows
         run: uv run --locked --group dev pytest tests/test_agent_env.py tests/test_cell_env.py -v -rs
 
-      - name: Check a project's .anton folder is owner-only
-        run: uv run --locked --group dev pytest tests/test_workspace_private.py -v -rs
+      - name: Check project folder permissions on Windows
+        run: |
+          uv run --locked --python 3.11 --group dev pytest tests/test_workspace_private.py -v -rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --locked --python 3.12 --group dev pytest -v -rs tests/test_workspace_private.py tests/test_backend_launcher_env.py::test_windows_imports_use_the_profile_despite_configured_temp tests/test_sandbox_off_capture.py::test_the_verifier_checks_are_unchanged tests/test_sandbox_off_capture.py::test_the_backend_launch_is_unchanged
 
   # Preserve the required check name, and fail even if a dependency was skipped.
   run-tests:

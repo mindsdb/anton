@@ -160,7 +160,7 @@ When you run `anton` in a directory:
 - `.anton/memory/lessons.md` — factual knowledge: things I've learned (stock API quirks, dashboard patterns, data fetching notes).
 - `.anton/memory/topics/*` — topic-specific lessons: deeper notes organized by subject (dashboard-visualization, stock-data-api, etc.).
 
-Only your account can open `.anton/` and the global `~/.anton/`. On macOS and Linux anton creates each folder at `0700`, and it tightens an older one to `0700` when it starts in that project. It keeps `~/.anton/.env` at `0600`. On Windows a project's `.anton/` gets an access list that names only SYSTEM, Administrators and the folder's owner, so a project outside your profile, such as `C:\src\app`, doesn't share its `.anton/` with other local accounts. `~/.anton/` sits in your profile, whose access list already keeps other standard accounts out, so anton leaves that list as it is.
+The CLI creates the project’s `.anton/` and global `~/.anton/` with mode `0700` on macOS and Linux, and tightens an older project directory before it writes history or starts a chat. It keeps `~/.anton/.env` at `0600`. On Windows, the CLI removes inherited access from the project directory before writing there, grants access to SYSTEM, Administrators and the owner, and preserves explicit grants from administrators. The global directory uses its Windows profile’s permissions. If the project directory cannot be protected, the CLI stops the affected operation. Cloud turns retain the permissions set on their mounted workspace.
 
 Override the working folder:
 ```bash
@@ -261,6 +261,8 @@ A decision model picks the browser's steps: Jev on the session's MindsHub connec
 ## Shared live-app slots
 
 Hosts that enable live apps can set `ANTON_LIVE_APPS_PER_PERSON` from zero through their configured slot count. Empty uses the slot count; zero refuses launches and leaves running apps alone. At the cap, or when every slot is full, the person chooses one of their own apps to replace. Cancel, Skip and unanswered cards leave the apps running.
+
+A launch sends a connection's `DS_*` values only when the slot would take them, and names every connection it leaves out, with the reason and never a value. A slot refuses the whole launch for a name that isn't `DS_<ENGINE>_<NAME>__<FIELD>` in A-Z, 0-9 and `_`, a value over 16 KiB or holding a NUL or a lone surrogate, a `name=value` of 128 KiB or more, an env over 128 names or 1 MiB, or more than 32 connections. anton checks each connection against those limits in declared order, in time linear in the names' length, so a connection that would break one is left out and the others still go. It also leaves out a connection whose `DS_*` names share a namespace with an earlier one's, so two connections' values never mix. That covers one prefix, such as `postgres/prod_db` after `postgres/prod-db`, and one prefix inside another's namespace, such as `postgres/prod--db` (`DS_POSTGRES_PROD__DB`) after `postgres/prod`. A connection declared twice is sent or named once.
 
 `LiveAppHost` must implement a deployment-wide `launch_lock`, plus `slots_full` and `slots_available` hooks for durable notices. The lock must coordinate every server worker. Approval cards wait outside it; final ownership checks, slot changes and launch recording happen inside it. A notice invites refused people to try again and reserves no capacity.
 

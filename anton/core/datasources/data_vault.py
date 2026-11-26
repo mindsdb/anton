@@ -4,12 +4,13 @@ import json
 import logging
 import os
 import re
+import stat
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from anton.utils.private_dir import anton_home, make_private_dir
+from anton.utils.private_dir import anton_home, require_private_dir, write_private_text
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,13 @@ class LocalDataVault:
     def _ensure_dir(self) -> None:
         if self._in_anton_home:
             anton_home()
-        make_private_dir(path=self._dir)
+        if self._dir.is_symlink() and os.name != "nt":
+            # A user-selected vault link keeps its target's mode. Each record
+            # is private from creation, even when the target allows listing.
+            target = self._dir.stat()
+            if stat.S_ISDIR(target.st_mode) and target.st_uid == os.getuid() and not target.st_mode & 0o022:
+                return
+        require_private_dir(path=self._dir)
 
     def save(
         self,
@@ -275,10 +282,7 @@ class LocalDataVault:
             # Stable order so the on-disk JSON diffs cleanly across
             # updates that don't change the secret-set membership.
             data["secure_keys"] = sorted(set(secure_keys))
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.chmod(0o600)
-        tmp.replace(path)
+        write_private_text(path, json.dumps(data, indent=2))
         return path
 
     def load(self, engine: str, name: str) -> dict[str, str] | None:
