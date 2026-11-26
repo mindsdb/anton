@@ -85,6 +85,33 @@ def test_a_render_that_treats_the_selection_as_a_string_is_sent_back_for_repair(
         assert component_page.existing_program(component_page.document(program)) == program
 
 
+def test_unsupported_cowork_section_types_are_rejected_without_lexer_false_positives():
+    # Rejects direct unsupported types across sections:[...], sections=[...], and sections.push(...)
+    for bad in (
+        "const src = 'https://example.com'; await CoworkPage({title:'T', sections:[{type:'html', title:'X'}]});",
+        "const sections = [{type:'card', title:'KPI'}]; await CoworkPage({title:'T', sections});",
+        "const sections = []; sections.push({type:'text', title:'A'}, {type:'kpi', title:'B'}); await CoworkPage({title:'T', sections});",
+    ):
+        with pytest.raises(ValueError, match="Unsupported CoworkPage section type"):
+            component_page.document(bad)
+
+    # Accepts valid sections, helper calls with {type:'bar'} inside sections:[...], RegExp literals
+    # containing quotes / escaped slashes / `/*`, and nested template literals with `}` and backticks.
+    good = """
+    const clean = s => s.replace(/['"]/g, '').replace(/https?:\\/\\//g, '').replace(/\\/*/g, '');
+    const nested = `${rows.map(r => `a}`).join(',')}${s.replace("`", "'")}`;
+    // comment mentioning sections:[{type:'html'}]
+    await CoworkPage({title:'T', sections:[
+      buildChart(data, {type:'bar'}),
+      ...items.map(x => mkView(x, {type:'line'})),
+      {type:'table', title:'Assets', columns:[{key:'type', label:'Type'}], rows:[{type:'HTML'}, {type:'SVG'}]},
+      {type:'chart', title:'C', option:{toolbox:{feature:{saveAsImage:{type:'svg'}}}, series:[{type:'bar', data:[1]}]}},
+      {type:'text', title:'Note', text: clean(nested) + " type: 'html'"}
+    ]});
+    """
+    assert component_page.existing_program(component_page.document(good)) == good.strip()
+
+
 async def test_the_component_writer_is_told_how_render_receives_controls(tmp_path, monkeypatch):
     (tmp_path / "observed-data.json").write_text(json.dumps({"revenue": 42}))
     systems = []

@@ -72,6 +72,9 @@ def test_a_row_of_zeros_across_period_columns_is_flagged():
       rows:[{store:'North',days:3,w1:4,w2:1,w3:5},{store:'South',days:2,w1:SOUTH,w2:0,w3:0}]}]});"""
     errors, _ = render(program.replace("SOUTH", "0"))
     assert len(errors) == 1 and 'shows 0 in all 3 "units" columns for row "South"' in errors[0]
+    errors, text = render(program.replace("{store:'South',days:2,w1:SOUTH,w2:0,w3:0}",
+                                          "{store:'South',days:2,w1:0,w2:0,w3:0,zeroReason:'South store closed'}"))
+    assert errors == [] and "South store closed" in text
     errors, _ = render(program.replace("SOUTH", "6"))
     assert errors == []
 

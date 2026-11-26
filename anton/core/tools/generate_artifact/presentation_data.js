@@ -1,14 +1,14 @@
 /* Readable details of the actual ECharts series, including transformed and filtered data. */
 (() => {
   const translations = {
-    en: ['Data', 'Series', 'Item', 'Value', 'Source', 'Target', 'Previous', 'Next'],
-    es: ['Datos', 'Serie', 'Elemento', 'Valor', 'Origen', 'Destino', 'Anterior', 'Siguiente'],
-    fr: ['Données', 'Série', 'Élément', 'Valeur', 'Source', 'Cible', 'Précédent', 'Suivant'],
-    de: ['Daten', 'Reihe', 'Eintrag', 'Wert', 'Quelle', 'Ziel', 'Zurück', 'Weiter'],
-    pt: ['Dados', 'Série', 'Item', 'Valor', 'Origem', 'Destino', 'Anterior', 'Próximo'],
-    it: ['Dati', 'Serie', 'Elemento', 'Valore', 'Origine', 'Destinazione', 'Precedente', 'Successivo'],
+    en: ['Data', 'Series', 'Item', 'Value', 'Source', 'Target', 'Previous', 'Next', 'Date'],
+    es: ['Datos', 'Serie', 'Elemento', 'Valor', 'Origen', 'Destino', 'Anterior', 'Siguiente', 'Fecha'],
+    fr: ['Données', 'Série', 'Élément', 'Valeur', 'Source', 'Cible', 'Précédent', 'Suivant', 'Date'],
+    de: ['Daten', 'Reihe', 'Eintrag', 'Wert', 'Quelle', 'Ziel', 'Zurück', 'Weiter', 'Datum'],
+    pt: ['Dados', 'Série', 'Item', 'Valor', 'Origem', 'Destino', 'Anterior', 'Próximo', 'Data'],
+    it: ['Dati', 'Serie', 'Elemento', 'Valore', 'Origine', 'Destinazione', 'Precedente', 'Successivo', 'Data'],
   };
-  const names = ['data', 'series', 'item', 'value', 'source', 'target', 'previous', 'next'];
+  const names = ['data', 'series', 'item', 'value', 'source', 'target', 'previous', 'next', 'date'];
   function node(tag, text, className) {
     const element = document.createElement(tag);
     if (text != null) element.textContent = String(text);
@@ -19,8 +19,9 @@
     const groups = [];
     chart.getModel().eachSeries(series => {
       const data = series.getData();
-      const label = series.name && !series.name.startsWith('series\u0000')
-        ? series.name : labels.series + ' ' + (series.seriesIndex + 1);
+      const namedSeries = series.name && !series.name.startsWith('series\u0000') ? series.name : '';
+      const label = namedSeries || labels.series + ' ' + (series.seriesIndex + 1);
+      const defaultLabel = !namedSeries;
       if (['sankey', 'graph'].includes(series.subType)) {
         const edges = series.getEdgeData?.();
         if (!edges || !edges.count()) return;
@@ -30,22 +31,42 @@
           const raw = edges.getRawDataItem(i);
           rows.push([endpoint(raw.source), endpoint(raw.target), edges.get('value', i)]);
         }
-        groups.push({label, columns: [labels.source, labels.target, labels.value], rows});
+        groups.push({label, defaultLabel, columns: [labels.source, labels.target, labels.value], rows});
         return;
       }
       const dimensions = data.dimensions.map(name => data.getDimensionInfo(name))
         .filter(info => info && !info.isExtraCoord && !info.isCalculationCoord);
       if (!dimensions.length || !data.count()) return;
+      const unnamedNumeric = dimensions.filter(info => {
+        const axis = series.coordinateSystem?.getAxis?.(info.coordDim);
+        const axisName = axis?.model?.get('name');
+        return !axisName && !info.displayName && !info.ordinalMeta && info.type !== 'time' && axis?.type !== 'category';
+      });
       const columns = dimensions.map(info => {
-        const axisName = series.coordinateSystem?.getAxis?.(info.coordDim)?.model?.get('name');
-        return axisName || info.displayName || (info.name === 'value' ? labels.value : info.name);
+        const axis = series.coordinateSystem?.getAxis?.(info.coordDim);
+        const axisName = axis?.model?.get('name');
+        if (axisName) return axisName;
+        if (info.displayName) return info.displayName;
+        if (info.ordinalMeta || axis?.type === 'category') return labels.item;
+        if (info.type === 'time') return labels.date;
+        if (info.name === 'value') return namedSeries || labels.value;
+        if ((info.name === 'x' || info.name === 'y') && unnamedNumeric.length === 1) {
+          return namedSeries || labels.value;
+        }
+        return info.name === 'x' || info.name === 'y' ? info.name.toUpperCase() : info.name;
       });
       const rows = [];
       for (let i = 0; i < data.count(); i++) {
         rows.push(dimensions.map(info => {
           const value = data.get(info.name, i);
           if (info.ordinalMeta) return info.ordinalMeta.categories[value] ?? value;
-          if (info.type === 'time' && Number.isFinite(value)) return new Date(value).toISOString();
+          if (info.type === 'time' && Number.isFinite(value)) {
+            const iso = new Date(value).toISOString();
+            if (iso.endsWith('T00:00:00.000Z')) return iso.slice(0, 10);
+            if (iso.endsWith(':00.000Z')) return iso.slice(0, 16).replace('T', ' ') + ' UTC';
+            if (iso.endsWith('.000Z')) return iso.slice(0, 19).replace('T', ' ') + ' UTC';
+            return iso.slice(0, -1).replace('T', ' ') + ' UTC';
+          }
           return value;
         }));
       }
@@ -54,7 +75,7 @@
         columns.unshift(labels.item);
         rows.forEach((row, i) => row.unshift(data.getName(i)));
       }
-      groups.push({label, columns, rows});
+      groups.push({label, defaultLabel, columns, rows});
     });
     return groups;
   }
@@ -72,7 +93,8 @@
     function render(groups) {
       panel.replaceChildren();
       for (const group of groups) {
-        const wrap = node('div', null, 'data-group'); wrap.append(node('h3', group.label));
+        const wrap = node('div', null, 'data-group');
+        if (!(groups.length === 1 && group.defaultLabel)) wrap.append(node('h3', group.label));
         const table = node('table'), head = node('thead'), tr = node('tr'), body = node('tbody');
         group.columns.forEach(label => {const th = node('th', label); th.scope = 'col'; tr.append(th);});
         head.append(tr); table.append(head, body); wrap.append(table);

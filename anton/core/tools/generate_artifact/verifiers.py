@@ -186,6 +186,32 @@ _UNIVERSAL_IMPORTANT = re.compile(r"\*\s*\{[^}]*!important")
 _EXEMPT_MEDIA_HEADER = re.compile(
     r"@media[^{]*(?:prefers-reduced-motion|\bprint\b)[^{]*\{", re.I
 )
+# Since Tailwind v4, `cdn.jsdelivr.net/npm/tailwindcss` has no browser bundle
+# (returns non-JS / ORB-blocked); the browser build is `@tailwindcss/browser`.
+_TAILWIND_V4_CDN = re.compile(
+    r"^(?:https?:)?//cdn\.jsdelivr\.net/npm/tailwindcss(?:@(?:latest|[\^~]?4(?:[.-][^/?#]*)?))?(?:/[^?#]*)?(?:[?#].*)?$",
+    re.I,
+)
+
+
+def _strip_html_comments_linear(html: str) -> str:
+    """Linear-time HTML comment removal (avoids O(N^2) backtracking on unclosed `<!--`)."""
+    if "<!--" not in html:
+        return html
+    out: list[str] = []
+    pos = 0
+    n = len(html)
+    while pos < n:
+        start = html.find("<!--", pos)
+        if start < 0:
+            out.append(html[pos:])
+            break
+        out.append(html[pos:start])
+        end = html.find("-->", start + 4)
+        if end < 0:
+            break
+        pos = end + 3
+    return "".join(out)
 
 
 def _exempt_media_spans(html: str) -> list[tuple[int, int]]:
@@ -500,6 +526,19 @@ def verify_frontend(
             f"The page shows HTML tags as text, so that markup does not render or run: {shown}. "
             "Escape only text values, never the page's own markup."
         )
+
+    # 5d. Tailwind v4 browserless CDN script: `cdn.jsdelivr.net/npm/tailwindcss@4...`
+    #     (or bare/latest) serves no browser build and fails with ORB/404 in previews.
+    if "tailwindcss" in low:
+        html_no_comments = _strip_html_comments_linear(html)
+        for tag in _SCRIPT_TAG.finditer(html_no_comments):
+            src = _attr_value(_SRC_ATTR, tag.group())
+            if src and _TAILWIND_V4_CDN.match(src.strip()):
+                errors.append(
+                    f"Tailwind v4 script {_shown_value(src)} has no browser build; "
+                    "load https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4 instead (or use inline CSS)."
+                )
+                break
 
     # 6. Forbidden globals / CSS.
     if "__antonCommentsLayer" in html:

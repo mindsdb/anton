@@ -131,10 +131,24 @@
           if (block.length < 3) continue;
           const empty = rows.filter(row => block.every(column => amount(row?.[column.key]) === 0));
           if (!empty.length || empty.length === rows.length) continue;
-          const names = empty.map(row => quote(Object.values(row).find(value => typeof value === 'string' && amount(value) === undefined) ?? '?'));
-          hasReason(section.zeroReason) ? reasons.push(section.zeroReason.trim())
-            : zero(name + ' shows 0 in all ' + block.length + (unit ? ' ' + quote(unit) : '') + ' columns for row'
-              + (names.length > 1 ? 's ' : ' ') + list(names), 'section');
+          const colReasons = block.every(column => hasReason(column?.zeroReason))
+            ? block.map(column => column.zeroReason.trim()) : null;
+          if (hasReason(section.zeroReason)) {
+            reasons.push(section.zeroReason.trim());
+          } else if (colReasons) {
+            reasons.push(...colReasons);
+          } else {
+            const explained = empty.filter(row => hasReason(row?.zeroReason));
+            const unexplained = empty.filter(row => !hasReason(row?.zeroReason));
+            for (const row of explained) reasons.push(row.zeroReason.trim());
+            if (unexplained.length) {
+              const names = unexplained.map(row => quote(
+                Object.entries(row).find(([k, v]) => k !== 'zeroReason' && typeof v === 'string' && amount(v) === undefined)?.[1] ?? '?'
+              ));
+              zero(name + ' shows 0 in all ' + block.length + (unit ? ' ' + quote(unit) : '') + ' columns for row'
+                + (names.length > 1 ? 's ' : ' ') + list(names), 'section');
+            }
+          }
         }
       } else if (section.type === 'chart' && !section.option?.dataset) {
         const {items, values} = chartValues(section.option);
