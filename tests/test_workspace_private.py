@@ -12,6 +12,7 @@ import errno
 import json
 import logging
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -211,6 +212,9 @@ def icacls_calls(monkeypatch):
     acl_subprocess = SimpleNamespace(**vars(subprocess))
     acl_subprocess.run = fake_run
     monkeypatch.setattr(f"{_HELPER}.subprocess", acl_subprocess)
+    # Only the apply is recorded: the user's SID and the current list are read elsewhere.
+    monkeypatch.setattr(f"{_HELPER}._current_user_sid", lambda: None)
+    monkeypatch.setattr(f"{_HELPER}._acl_is_owner_only", lambda *, path, user_sid: False)
     return calls, result
 
 
@@ -270,6 +274,69 @@ def test_windows_leaves_the_home_anton_folder_to_the_profiles_list(tmp_path, mon
     assert calls == []
     assert (home / ".anton" / "anton.md").is_file()
     assert not (home / ".anton" / _MARKER).exists()
+
+
+def test_windows_names_the_user_beside_owner_rights(tmp_path, icacls_calls, monkeypatch):
+    """A folder made from an elevated terminal is owned by Administrators; the user keeps access."""
+    calls, _ = icacls_calls
+    monkeypatch.setattr(f"{_HELPER}._current_user_sid", lambda: "S-1-5-21-1-2-3-1001")
+
+    Workspace(tmp_path).make_anton_dir_private()
+
+    argv, _ = calls[-1]
+    assert argv[1:] == [str(tmp_path / ".anton"), *_GRANTS, "*S-1-5-21-1-2-3-1001:(OI)(CI)F"]
+
+
+def test_windows_leaves_an_owner_only_list_alone(tmp_path, icacls_calls, monkeypatch):
+    """Applying the list again rewrites every entry below, scratchpad venvs included."""
+    calls, _ = icacls_calls
+    monkeypatch.setattr(f"{_HELPER}._acl_is_owner_only", lambda *, path, user_sid: True)
+    workspace = Workspace(tmp_path)
+
+    workspace.initialize(private=True)
+    workspace.set_secret("TEST_KEY", "value")
+
+    assert calls == []
+    assert (tmp_path / ".anton" / ".env").is_file()
+
+
+_USER = "S-1-5-21-1-2-3-1001"
+_OWNER_ONLY = f"D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)(A;OICI;FA;;;{_USER})"
+
+
+@pytest.mark.parametrize(("sddl", "expected"), [
+    (_OWNER_ONLY, True),
+    (f".anton\r\n{_OWNER_ONLY}\r\n", True),
+    (_OWNER_ONLY + "(A;;0x1200a9;;;LS)", True),
+    (_OWNER_ONLY.replace("D:PAI", "D:AI"), False),
+    (_OWNER_ONLY + "(A;OICIID;0x1200a9;;;BU)", False),
+    (_OWNER_ONLY.replace("(A;OICI;FA;;;OW)", ""), False),
+    (_OWNER_ONLY.replace(_USER, "S-1-5-21-9-9-9-1002"), False),
+    ("not an access list", False),
+])
+def test_an_owner_only_list_is_read_from_its_sddl(sddl, expected):
+    from anton.utils.private_dir import _sddl_is_owner_only
+
+    assert _sddl_is_owner_only(sddl=sddl, user_sid=_USER) is expected
+
+
+@_posix_only
+@pytest.mark.parametrize("outside", [True, False])
+def test_windows_lists_a_linked_home_only_outside_the_profile(tmp_path, icacls_calls, monkeypatch, outside):
+    """A home linked to another disk lands where the profile's list doesn't reach."""
+    from anton.utils.private_dir import make_private_dir
+
+    calls, _ = icacls_calls
+    profile = tmp_path / "profile"
+    target = (tmp_path / "other-disk" if outside else profile / "dotfiles") / "anton"
+    target.mkdir(parents=True)
+    profile.mkdir(exist_ok=True)
+    monkeypatch.setattr(Path, "home", lambda: profile)
+    (profile / ".anton").symlink_to(target, target_is_directory=True)
+
+    assert make_private_dir(path=profile / ".anton", follow_link=True)
+
+    assert [argv[1] for argv, _ in calls] == ([os.path.realpath(target)] if outside else [])
 
 
 def test_windows_uses_a_volume_without_access_lists_as_it_is(tmp_path, icacls_calls, monkeypatch):
@@ -430,6 +497,31 @@ def test_windows_revisiting_project_repairs_reenabled_inheritance(users_readable
     assert protected
     assert service_sid in sids
     assert not sids & _BROAD_SIDS
+
+
+@_windows_only
+def test_windows_second_visit_reads_the_list_and_applies_nothing(users_readable_project, monkeypatch):
+    from anton.utils import private_dir
+
+    workspace = Workspace(users_readable_project)
+    workspace.initialize(private=True)
+    seen: list[list[str]] = []
+    real = private_dir._run_system_tool
+    monkeypatch.setattr(private_dir, "_run_system_tool", lambda argv: seen.append(argv) or real(argv))
+
+    workspace.make_anton_dir_private()
+
+    assert seen
+    assert not any("/inheritance:r" in argv for argv in seen)
+
+
+@_windows_only
+def test_windows_owner_only_list_names_the_user(users_readable_project):
+    Workspace(users_readable_project).initialize(private=True)
+    whoami = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True, check=True)
+    sid = re.search(r'"(S-1-[0-9-]+)"', whoami.stdout).group(1)
+
+    assert sid in _acl(users_readable_project / ".anton")[1]
 
 
 @_windows_only

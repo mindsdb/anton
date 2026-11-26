@@ -21,9 +21,11 @@ writing so a copied or restored directory cannot retain broad inherited access.
 from __future__ import annotations
 
 import errno
+import functools
 import logging
 import ntpath
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -47,7 +49,8 @@ PRIVATE_FILE_MODE = 0o600
 #: file and folder below inherits. CPython's os.mkdir(mode=0o700) applies the
 #: same list on Windows since 3.12.4; icacls also covers older Pythons and
 #: folders that already exist. cowork gives ``<repo>/.claude-mindshub`` the
-#: same list, and tests/test_workspace_private.py pins it.
+#: same list, and tests/test_workspace_private.py pins it. The current user's
+#: SID is added beside these when Windows names it (`icacls_command`).
 OWNER_ONLY_GRANTS = (
     "*S-1-5-18:(OI)(CI)F",
     "*S-1-5-32-544:(OI)(CI)F",
@@ -93,7 +96,11 @@ def make_private_dir(*, path: Path, windows_acl: bool = False, follow_link: bool
         target = Path(os.path.realpath(path))
         if not target.is_dir():
             return False
-        return make_private_dir(path=target, windows_acl=windows_acl)
+        # The profile's list protects a home inside the profile. A link to
+        # another disk lands where that list doesn't reach, so the folder
+        # there gets the owner-only list, as POSIX tightens it to 0700.
+        outside_profile = _IS_WINDOWS and not _is_within(path=target, root=Path.home())
+        return make_private_dir(path=target, windows_acl=windows_acl or outside_profile)
     if _IS_WINDOWS and not windows_acl:
         path.mkdir(parents=True, exist_ok=True)
     else:
@@ -237,16 +244,104 @@ def tighten_private_file(*, path: Path) -> None:
         os.close(fd)
 
 
-def icacls_command(*, path: Path) -> list[str]:
-    """The icacls call that gives ``path`` the owner-only access list.
+def _is_within(*, path: Path, root: Path) -> bool:
+    """Whether ``path`` sits in ``root`` once both are resolved, ignoring case on Windows."""
+    resolved = os.path.normcase(os.path.realpath(path))
+    base = os.path.normcase(os.path.realpath(root))
+    try:
+        return os.path.commonpath([resolved, base]) == base
+    except ValueError:
+        # Different drives.
+        return False
 
-    Named by its full path in System32: a bare ``icacls`` would let Windows
-    search the current folder first, which can be a repository someone else
-    filled.
-    """
+
+def _system_tool(name: str) -> str:
+    """A System32 tool by its full path: a bare name would let Windows search
+    the current folder first, which can be a repository someone else filled."""
     system_root = os.environ.get("SystemRoot") or r"C:\Windows"
-    icacls = ntpath.join(system_root, "System32", "icacls.exe")
-    return [icacls, str(path), "/L", "/inheritance:r", "/grant:r", *OWNER_ONLY_GRANTS]
+    return ntpath.join(system_root, "System32", name)
+
+
+def _run_system_tool(argv: list[str]) -> subprocess.CompletedProcess:
+    """Run a System32 tool with no window and no shell, capturing its output."""
+    return subprocess.run(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=60,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _current_user_sid() -> str | None:
+    """The SID of the account this process runs as, or None when Windows can't say.
+
+    The owner-only list names it beside OWNER RIGHTS. A folder made from an
+    elevated terminal is owned by Administrators, so OWNER RIGHTS alone would
+    shut the same user out of it from a normal terminal.
+    """
+    try:
+        result = _run_system_tool([_system_tool("whoami.exe"), "/user", "/fo", "csv", "/nh"])
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r'"(S-1-[0-9-]+)"', result.stdout.decode("utf-8", "replace")) if result.returncode == 0 else None
+    return match.group(1) if match else None
+
+
+def icacls_command(*, path: Path, user_sid: str | None = None) -> list[str]:
+    """The icacls call that gives ``path`` the owner-only access list, naming
+    ``user_sid`` too when it is known."""
+    grants = [*OWNER_ONLY_GRANTS, *([f"*{user_sid}:(OI)(CI)F"] if user_sid else [])]
+    return [_system_tool("icacls.exe"), str(path), "/L", "/inheritance:r", "/grant:r", *grants]
+
+
+#: One ACE in SDDL: type, flags, rights, object, inherited object, SID.
+_SDDL_ACE = re.compile(r"\(([A-Z]+);([A-Z]*);([A-Za-z0-9]+);[^;)]*;[^;)]*;([A-Za-z0-9-]+)\)")
+
+
+def _sddl_is_owner_only(*, sddl: str, user_sid: str | None) -> bool:
+    """Whether a folder's DACL, as SDDL, already is the owner-only list.
+
+    That is: inheritance is off (``D:P``), no entry is inherited (``ID``), and
+    SYSTEM, Administrators, OWNER RIGHTS and the user each have full control
+    that every entry below inherits. An administrator's other explicit grant
+    may stay, as icacls keeps it too.
+    """
+    match = re.search(r"D:([A-Z]*)((?:\([^)]*\))*)", sddl)
+    if not match or "P" not in match.group(1):
+        return False
+    granted = set()
+    for ace in re.findall(r"\([^)]*\)", match.group(2)):
+        parts = _SDDL_ACE.fullmatch(ace)
+        if not parts:
+            return False
+        kind, flags, rights, sid = parts.groups()
+        if "ID" in flags:
+            return False
+        if kind == "A" and rights == "FA" and "OI" in flags and "CI" in flags and "IO" not in flags:
+            granted.add(sid)
+    return {"SY", "BA", "OW", *([user_sid] if user_sid else [])} <= granted
+
+
+def _acl_is_owner_only(*, path: Path, user_sid: str | None) -> bool:
+    """Read the folder's own list with ``icacls /save``, which walks nothing.
+
+    False whenever the list can't be read or parsed, so the caller applies it.
+    """
+    saved = Path(tempfile.mkdtemp(prefix="anton-acl-")) / "acl"
+    try:
+        result = _run_system_tool([_system_tool("icacls.exe"), str(path), "/save", str(saved), "/L", "/Q"])
+        if result.returncode != 0 or not saved.is_file():
+            return False
+        return _sddl_is_owner_only(sddl=saved.read_bytes().decode("utf-16", "replace"), user_sid=user_sid)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        saved.unlink(missing_ok=True)
+        saved.parent.rmdir()
 
 
 #: GetVolumeInformationW's flag for a volume that stores access lists. NTFS
@@ -279,22 +374,20 @@ def _volume_keeps_acls(*, path: Path) -> bool:
 def _apply_owner_only_acl(*, path: Path) -> None:
     """Remove inherited access on each use, preserving explicit administrator grants.
 
-    A volume with no access lists, such as a FAT or exFAT drive, is used as
-    it is, with a warning, for the reason `make_private_dir` gives for modes.
+    A folder whose list already is owner-only is left alone: applying it again
+    makes Windows rewrite every entry below, scratchpad venvs included, at each
+    command start. A restored inheritance shows in the list and gets the full
+    apply. A volume with no access lists, such as a FAT or exFAT drive, is used
+    as it is, with a warning, for the reason `make_private_dir` gives for modes.
     """
     if not _volume_keeps_acls(path=path):
         _warn_modes_not_kept(path=path, cause="volume_keeps_no_acls")
         return
+    user_sid = _current_user_sid()
+    if _acl_is_owner_only(path=path, user_sid=user_sid):
+        return
     try:
-        result = subprocess.run(
-            icacls_command(path=path),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=60,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        result = _run_system_tool(icacls_command(path=path, user_sid=user_sid))
     except (OSError, subprocess.SubprocessError) as exc:
         raise PermissionError(errno.EACCES, "Could not run icacls", str(path)) from exc
     if result.returncode:
