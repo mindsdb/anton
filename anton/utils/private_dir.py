@@ -125,10 +125,10 @@ def make_private_dir(*, path: Path, windows_acl: bool = False, follow_link: bool
             try:
                 os.fchmod(fd, PRIVATE_DIR_MODE)
             except OSError as exc:
-                _warn_modes_not_kept(path=path, reason=errno.errorcode.get(exc.errno, "unknown"))
+                _warn_modes_not_kept(path=path, cause=errno.errorcode.get(exc.errno, "unknown"))
                 return True
             if stat.S_IMODE(os.fstat(fd).st_mode) != PRIVATE_DIR_MODE:
-                _warn_modes_not_kept(path=path, reason="mode_not_kept")
+                _warn_modes_not_kept(path=path, cause="mode_not_kept")
             return True
     except OSError as exc:
         _log.warning(
@@ -155,7 +155,7 @@ def _mkdir_unless_taken(*, path: Path) -> None:
 _WARNED_MODES_NOT_KEPT: set[str] = set()
 
 
-def _warn_modes_not_kept(*, path: Path, reason: str) -> None:
+def _warn_modes_not_kept(*, path: Path, cause: str) -> None:
     """Warn once per folder that its filesystem keeps no private modes."""
     key = os.path.normcase(os.path.abspath(path))
     if key in _WARNED_MODES_NOT_KEPT:
@@ -163,7 +163,7 @@ def _warn_modes_not_kept(*, path: Path, reason: str) -> None:
     _WARNED_MODES_NOT_KEPT.add(key)
     _log.warning(
         "The filesystem keeps no private permissions for a folder; using it as it is",
-        extra={"event": "private_folder_modes_not_kept", "reason": reason},
+        extra={"event": "private_folder_modes_not_kept", "reason": cause},
     )
 
 
@@ -261,7 +261,7 @@ def _apply_owner_only_acl(*, path: Path) -> None:
     it is, with a warning, for the reason `make_private_dir` gives for modes.
     """
     if not _volume_keeps_acls(path=path):
-        _warn_modes_not_kept(path=path, reason="volume_keeps_no_acls")
+        _warn_modes_not_kept(path=path, cause="volume_keeps_no_acls")
         return
     try:
         result = subprocess.run(
