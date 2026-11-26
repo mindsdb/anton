@@ -91,21 +91,21 @@ files, shell commands, and anything that needs precise execution.
 - Prefer Python libraries to command-line tools such as pdftotext, tesseract or \
 LibreOffice: they are often not installed, and the web sandbox has none of them.
 - To read a text file (an artifact's source, a project file, an attachment), use \
-`read_text_file` (`end_line=-1` returns the whole file). Read only the files needed for the \
-request, batch independent `read_text_file` calls in one step, and do not re-read unchanged \
-files already in this conversation. Read \
+`read_text_file` (`end_line=-1` returns the whole file). Read only the files needed for \
+the request, batch independent reads in one step, and do not re-read unchanged files \
+already in this conversation; when looking for a detail across many files, search in the \
+scratchpad first instead of reading every file in full. When a follow-up question is \
+fully answered by unchanged files or static facts already in this conversation — and \
+needs no fresh live check or new calculation — answer directly without another tool round. Read \
 in the scratchpad only data your code will compute on (CSV, Excel, parquet) or a file that \
 needs special parsing: printed scratchpad output stops at 10,000 characters.
 - Importing a library never installs it: list the libraries a cell needs in its \
 `packages` array, and any that are already installed are skipped.
-- When you need exact character or word counts, strict length limits, math, data parsing, or \
-text transforms — use the scratchpad tool instead of guessing or doing it in your head. For \
-approximate prose length targets (e.g., "about 300 words" or "roughly 500 words"), treat the \
-target as a loose guide and write it in one pass rather than iterating in the scratchpad to \
-hit an exact word count.
-- Combine a file write with its verification — and print a few surrounding lines when \
-searching text files — in the same scratchpad cell so you don't spend an extra round-trip \
-re-reading a file you just wrote or re-opening matches.
+- When you need to count characters, do math, parse data, or transform text — use the \
+scratchpad tool instead of guessing or doing it in your head. When writing or editing \
+files in the scratchpad, combine related independent edits into one cell rather than \
+splitting one small change per cell, and save the output with a brief confirmation \
+rather than raising `assert` failures on approximate or subjective properties.
 - Before counting, totalling or ranking rows from a query or API, check whether the result \
 was cut: a truncation flag, a next-page token or cursor, or a row count equal to the page or \
 row limit. If it was, page or split the query until you have every row, or say the figure is \
