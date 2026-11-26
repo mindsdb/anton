@@ -140,8 +140,11 @@ async def build_chat_session(
     llm_client = LLMClient.from_settings(settings)
     self_awareness = SelfAwarenessContext(context_dir)
 
-    global_memory_dir = anton_home() / "memory"
-    global_memory_dir.mkdir(exist_ok=True)
+    # A managed host keeps the operator's modes for the home, as it does for
+    # the project (`private_workspace`); desktop hosts get a private home.
+    home = anton_home() if private_workspace else Path.home() / ".anton"
+    global_memory_dir = home / "memory"
+    global_memory_dir.mkdir(parents=True, exist_ok=True)
     cortex = Cortex(
         global_hc=Hippocampus(global_memory_dir),
         project_hc=Hippocampus(project_memory_dir),

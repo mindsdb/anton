@@ -406,9 +406,15 @@ async def test_shared_runtime_builder_uses_host_workspace_policy(home, tmp_path,
     directory = project / ".anton"
     directory.mkdir(parents=True)
     directory.chmod(0o770)
+    # The home follows the same policy: a managed host keeps the operator's mode.
+    global_home = home / ".anton"
+    global_home.mkdir()
+    global_home.chmod(0o770)
 
     session = await build_chat_session(session_id="local-check", workspace_path=str(project), **options)
     try:
         assert _mode(directory) == mode
+        assert _mode(global_home) == mode
+        assert (global_home / "memory").is_dir()
     finally:
         await session.close()
