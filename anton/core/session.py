@@ -2851,6 +2851,8 @@ class ChatSession:
             nudge = self._select_resilience_nudge(tool_name, result_text)
             if not getattr(self, "_internet_research_enabled", True):
                 nudge = _NO_INTERNET_NUDGES.get(nudge, nudge)
+            elif nudge == SCRATCHPAD_INSTALL_NUDGE and not getattr(self, "_scratchpad_web_search_enabled", True):
+                nudge = NO_INTERNET_SCRATCHPAD_INSTALL_NUDGE  # Same text minus web_search().
             if nudge:
                 result_text += nudge
                 resilience_nudged.add(tool_name)

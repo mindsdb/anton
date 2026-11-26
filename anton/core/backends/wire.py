@@ -28,8 +28,9 @@ INTERNET_RESEARCH_ENV = "ANTON_SCRATCHPAD_INTERNET_RESEARCH"
 # and classify_yes_no() then raise instead of calling it.
 CLASSIFY_ENV = "ANTON_SCRATCHPAD_CLASSIFY"
 # "off" when the organization has zero data retention: the pad's web_search()
-# then raises. Other internet access from the pad stays allowed.
-WEB_SEARCH_ENV = "ANTON_SCRATCHPAD_WEB_SEARCH"
+# then raises. Other internet access from the pad stays allowed. Named apart from
+# the `scratchpad_web_search` setting's env, which a nested Anton would inherit.
+WEB_SEARCH_ENV = "ANTON_SCRATCHPAD_WEB_SEARCH_HELPER"
 # The image model the pad's generate_image() asks for (ENG-4024). Unset: the
 # pad resolves it itself, from ANTON_IMAGE_MODEL or the MindsHub catalogue.
 IMAGE_MODEL_ENV = "ANTON_SCRATCHPAD_IMAGE_MODEL"
