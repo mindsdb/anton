@@ -415,7 +415,7 @@ def get_installation_id() -> str:
                 from anton.utils.private_dir import require_private_dir
 
                 _cached_aid = uuid.uuid4().hex[:16]
-                require_private_dir(path=path.parent)
+                require_private_dir(path=path.parent, follow_link=True)
                 path.write_text(_cached_aid + "\n", encoding="utf-8")
         else:
             _cached_aid = hashlib.sha256(str(node).encode()).hexdigest()[:16]

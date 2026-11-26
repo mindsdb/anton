@@ -180,7 +180,9 @@ class Workspace:
         """
         base = os.path.normcase(os.path.abspath(self._base))
         home = os.path.normcase(os.path.abspath(Path.home()))
-        require_private_dir(path=self._anton_dir, windows_acl=base != home)
+        # A workspace at the home folder is ~/.anton itself, which the user
+        # may link elsewhere; a project's .anton link stays refused.
+        require_private_dir(path=self._anton_dir, windows_acl=base != home, follow_link=base == home)
 
     def initialize(self, *, create_anton_md: bool = True, refuse_links: bool = False, private: bool = False) -> list[str]:
         """Create the workspace structure. Returns list of actions taken.

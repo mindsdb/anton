@@ -63,24 +63,37 @@ def anton_home() -> Path:
     profile.
     """
     home = Path.home() / ".anton"
-    require_private_dir(path=home)
+    require_private_dir(path=home, follow_link=True)
     return home
 
 
-def require_private_dir(*, path: Path, windows_acl: bool = False) -> None:
+def require_private_dir(*, path: Path, windows_acl: bool = False, follow_link: bool = False) -> None:
     """Refuse private persistence when the folder cannot be protected."""
-    if not make_private_dir(path=path, windows_acl=windows_acl):
+    if not make_private_dir(path=path, windows_acl=windows_acl, follow_link=follow_link):
         raise PermissionError(errno.EACCES, "Could not establish a private directory", str(path))
 
 
-def make_private_dir(*, path: Path, windows_acl: bool = False) -> bool:
+def make_private_dir(*, path: Path, windows_acl: bool = False, follow_link: bool = False) -> bool:
     """Create or tighten a directory and report whether it is private.
 
-    An existing link or foreign-owned directory is never changed. Missing
-    ancestors belong to the project and retain their normal creation modes.
-    Windows profile directories keep their profile ACL. Elsewhere pass
-    windows_acl=True to remove inherited grants before writing.
+    A foreign-owned directory is never changed, and neither is a link unless
+    ``follow_link`` is set. The user's own ``~/.anton`` sets it, since a
+    dotfiles setup or a move to another disk links it; the folder the link
+    resolves to is then tightened when this user owns it. A project's
+    ``.anton`` never sets it: a repository can commit a link that points
+    outside itself. Missing ancestors belong to the project and retain their
+    normal creation modes. Windows profile directories keep their profile ACL.
+    Elsewhere pass windows_acl=True to remove inherited grants before writing.
+
+    A filesystem that keeps no modes, such as WSL's ``/mnt/c``, exFAT or an
+    SMB share, leaves the folder as it is, with a warning: no mode can protect
+    it, and refusing would stop the user without stopping any reader.
     """
+    if follow_link and os.path.islink(path):
+        target = Path(os.path.realpath(path))
+        if not target.is_dir():
+            return False
+        return make_private_dir(path=target, windows_acl=windows_acl)
     if _IS_WINDOWS and not windows_acl:
         path.mkdir(parents=True, exist_ok=True)
     else:
@@ -109,8 +122,14 @@ def make_private_dir(*, path: Path, windows_acl: bool = False) -> bool:
         with opened_dir_nofollow(path.parent, (path.name,)) as fd:
             if not os.path.samestat(os.fstat(fd), st):
                 return False
-            os.fchmod(fd, PRIVATE_DIR_MODE)
-            return stat.S_IMODE(os.fstat(fd).st_mode) == PRIVATE_DIR_MODE
+            try:
+                os.fchmod(fd, PRIVATE_DIR_MODE)
+            except OSError as exc:
+                _warn_modes_not_kept(path=path, reason=errno.errorcode.get(exc.errno, "unknown"))
+                return True
+            if stat.S_IMODE(os.fstat(fd).st_mode) != PRIVATE_DIR_MODE:
+                _warn_modes_not_kept(path=path, reason="mode_not_kept")
+            return True
     except OSError as exc:
         _log.warning(
             "Could not make a folder private",
@@ -131,6 +150,21 @@ def _mkdir_unless_taken(*, path: Path) -> None:
     except OSError:
         if not os.path.lexists(path):
             raise
+
+
+_WARNED_MODES_NOT_KEPT: set[str] = set()
+
+
+def _warn_modes_not_kept(*, path: Path, reason: str) -> None:
+    """Warn once per folder that its filesystem keeps no private modes."""
+    key = os.path.normcase(os.path.abspath(path))
+    if key in _WARNED_MODES_NOT_KEPT:
+        return
+    _WARNED_MODES_NOT_KEPT.add(key)
+    _log.warning(
+        "The filesystem keeps no private permissions for a folder; using it as it is",
+        extra={"event": "private_folder_modes_not_kept", "reason": reason},
+    )
 
 
 def write_private_text(path: Path, text: str) -> None:
@@ -193,8 +227,42 @@ def icacls_command(*, path: Path) -> list[str]:
     return [icacls, str(path), "/L", "/inheritance:r", "/grant:r", *OWNER_ONLY_GRANTS]
 
 
+#: GetVolumeInformationW's flag for a volume that stores access lists. NTFS
+#: and ReFS set it; FAT, FAT32 and exFAT don't.
+_FILE_PERSISTENT_ACLS = 0x00000008
+
+
+def _volume_keeps_acls(*, path: Path) -> bool:
+    """Whether the volume holding ``path`` stores access lists.
+
+    True when Windows can't say, so an unknown volume still gets the list and
+    still refuses when icacls fails.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        root = ctypes.create_unicode_buffer(32768)
+        if not kernel32.GetVolumePathNameW(str(path), root, len(root)):
+            return True
+        flags = wintypes.DWORD()
+        if not kernel32.GetVolumeInformationW(root, None, 0, None, None, ctypes.byref(flags), None, 0):
+            return True
+    except (AttributeError, OSError):
+        return True
+    return bool(flags.value & _FILE_PERSISTENT_ACLS)
+
+
 def _apply_owner_only_acl(*, path: Path) -> None:
-    """Remove inherited access on each use, preserving explicit administrator grants."""
+    """Remove inherited access on each use, preserving explicit administrator grants.
+
+    A volume with no access lists, such as a FAT or exFAT drive, is used as
+    it is, with a warning, for the reason `make_private_dir` gives for modes.
+    """
+    if not _volume_keeps_acls(path=path):
+        _warn_modes_not_kept(path=path, reason="volume_keeps_no_acls")
+        return
     try:
         result = subprocess.run(
             icacls_command(path=path),

@@ -136,7 +136,7 @@ def _check_and_update(result: dict, settings) -> None:
             # The marker holds only a public release tag, so a folder that
             # cannot be made private (a link, another owner) must not stop it.
             try:
-                require_private_dir(path=_SKIP_MARKER.parent)
+                require_private_dir(path=_SKIP_MARKER.parent, follow_link=True)
             except OSError:
                 _SKIP_MARKER.parent.mkdir(parents=True, exist_ok=True)
             _SKIP_MARKER.write_text(latest_tag)

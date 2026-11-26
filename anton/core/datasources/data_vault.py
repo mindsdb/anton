@@ -245,7 +245,7 @@ class LocalDataVault:
             target = self._dir.stat()
             if stat.S_ISDIR(target.st_mode) and target.st_uid == os.getuid() and not target.st_mode & 0o022:
                 return
-        require_private_dir(path=self._dir)
+        require_private_dir(path=self._dir, follow_link=self._in_anton_home)
 
     def save(
         self,

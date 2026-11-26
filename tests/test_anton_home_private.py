@@ -112,6 +112,22 @@ def test_the_default_data_vault_creates_a_private_home(home):
     assert _mode(home / ".anton" / "data_vault") == 0o700
 
 
+def test_a_linked_data_vault_with_a_group_writable_target_is_tightened(home, tmp_path):
+    """Ubuntu's umask 0002 leaves a new folder 0775; the user's own target is tightened, not refused."""
+    from anton.core.datasources.data_vault import LocalDataVault
+
+    target = tmp_path / "vault-target"
+    target.mkdir()
+    os.chmod(target, 0o775)
+    (home / ".anton").mkdir(mode=0o700)
+    (home / ".anton" / "data_vault").symlink_to(target, target_is_directory=True)
+
+    record = LocalDataVault().save("postgres", "private", {"host": "db.internal"})
+
+    assert _mode(target) == 0o700
+    assert _mode(record) == 0o600
+
+
 def test_a_symlinked_data_vault_keeps_its_targets_mode(home, tmp_path):
     """The link's target belongs to whoever made the link; each record is still 0600."""
     from anton.core.datasources.data_vault import LocalDataVault
@@ -222,7 +238,8 @@ def test_the_cli_start_tightens_an_existing_home_and_env(home):
     assert env.read_text() == "ANTON_ANTHROPIC_API_KEY=secret\n"
 
 
-def test_the_cli_start_leaves_a_symlinked_home_and_its_env_alone(home, tmp_path):
+def test_the_cli_start_tightens_a_linked_home_and_its_env(home, tmp_path):
+    """A dotfiles setup links ~/.anton; the folder it resolves to is the user's own."""
     target = tmp_path / "dotfiles-anton"
     target.mkdir()
     os.chmod(target, 0o755)
@@ -234,8 +251,36 @@ def test_the_cli_start_leaves_a_symlinked_home_and_its_env_alone(home, tmp_path)
     result = _boot_cli(["--no-update", "version"])
 
     assert result.exit_code == 0, result.output
+    assert (home / ".anton").is_symlink()
+    assert _mode(target) == 0o700
+    assert _mode(env) == 0o600
+
+
+def test_a_linked_home_serves_the_chat_paths(home, tmp_path):
+    from anton.utils.private_dir import anton_home
+
+    target = tmp_path / "moved-anton"
+    target.mkdir()
+    os.chmod(target, 0o755)
+    (home / ".anton").symlink_to(target, target_is_directory=True)
+
+    assert anton_home() == home / ".anton"
+    assert _mode(target) == 0o700
+
+
+def test_a_linked_home_another_account_owns_is_refused(home, tmp_path, monkeypatch):
+    from anton.utils.private_dir import anton_home
+
+    target = tmp_path / "their-anton"
+    target.mkdir()
+    os.chmod(target, 0o755)
+    (home / ".anton").symlink_to(target, target_is_directory=True)
+    other_uid = os.getuid() + 1
+    monkeypatch.setattr(os, "getuid", lambda: other_uid)
+
+    with pytest.raises(PermissionError):
+        anton_home()
     assert _mode(target) == 0o755
-    assert _mode(env) == 0o644
 
 
 def test_the_cli_start_carries_on_when_the_home_cannot_be_made_private(home, monkeypatch):

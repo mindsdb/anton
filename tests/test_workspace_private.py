@@ -126,28 +126,34 @@ def test_an_anton_folder_another_account_owns_keeps_its_mode(tmp_path, monkeypat
     assert _mode(anton_dir) == 0o755
 
 
+def _refuse_chmod(fd, mode):
+    raise PermissionError(errno.EPERM, "Operation not permitted")
+
+
+def _ignore_chmod(fd, mode):
+    """WSL's /mnt/c, exFAT and SMB report success and keep the old mode."""
+
+
 @_posix_only
-def test_initialize_refuses_private_writes_when_the_folder_mode_cannot_change(tmp_path, monkeypatch, caplog, umask_022):
-    """A FAT drive or a read-only mount refuses the chmod, so secrets must not be written there."""
+@pytest.mark.parametrize(("fchmod", "reason"), [(_refuse_chmod, "EPERM"), (_ignore_chmod, "mode_not_kept")])
+def test_initialize_carries_on_where_the_filesystem_keeps_no_modes(tmp_path, monkeypatch, caplog, umask_022, fchmod, reason):
+    """No mode protects a folder there, so refusing would stop the user and no reader."""
     anton_dir = tmp_path / ".anton"
     anton_dir.mkdir()
     os.chmod(anton_dir, 0o755)
-
-    def refuse(fd, mode):
-        raise PermissionError(errno.EPERM, "Operation not permitted")
-
-    monkeypatch.setattr(os, "fchmod", refuse)
+    monkeypatch.setattr(os, "fchmod", fchmod)
 
     with caplog.at_level(logging.WARNING, logger=_HELPER):
-        with pytest.raises(PermissionError):
-            Workspace(tmp_path).initialize(private=True)
+        workspace = Workspace(tmp_path)
+        workspace.initialize(private=True)
+        workspace.set_secret("TEST_KEY", "value")
 
-    assert not (anton_dir / ".env").exists()
+    assert (anton_dir / ".env").is_file()
     assert _mode(anton_dir) == 0o755
     assert [
         (r.levelno, getattr(r, "event", None), getattr(r, "reason", None))
         for r in caplog.records if r.name == _HELPER
-    ] == [(logging.WARNING, "private_folder_chmod_failed", "EPERM")]
+    ] == [(logging.WARNING, "private_folder_modes_not_kept", reason)]
 
 
 @_posix_only
@@ -264,6 +270,20 @@ def test_windows_leaves_the_home_anton_folder_to_the_profiles_list(tmp_path, mon
     assert calls == []
     assert (home / ".anton" / "anton.md").is_file()
     assert not (home / ".anton" / _MARKER).exists()
+
+
+def test_windows_uses_a_volume_without_access_lists_as_it_is(tmp_path, icacls_calls, monkeypatch):
+    """A FAT or exFAT drive keeps no access list, so icacls is skipped rather than refused."""
+    calls, result = icacls_calls
+    result["returncode"] = 5
+    monkeypatch.setattr(f"{_HELPER}._volume_keeps_acls", lambda *, path: False)
+    workspace = Workspace(tmp_path)
+
+    workspace.initialize(private=True)
+    workspace.set_secret("TEST_KEY", "value")
+
+    assert calls == []
+    assert (tmp_path / ".anton" / ".env").is_file()
 
 
 @pytest.mark.parametrize("outcome", [5, FileNotFoundError(2, "icacls not found")])

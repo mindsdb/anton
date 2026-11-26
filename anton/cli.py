@@ -621,9 +621,8 @@ def _secure_anton_home() -> None:
 
     An earlier version left both at the umask's modes, such as 0755 and 0644.
     Nothing is created here: each step that writes into ~/.anton creates it
-    0700. This step leaves a symbolic link at ~/.anton as it is, and the .env
-    behind it too; a later step that writes that .env still makes it 0600
-    when it publishes the managed file. Never fatal, for the reason given
+    0700. A symbolic link at ~/.anton is followed to a folder this user owns,
+    which is tightened with the .env inside it. Never fatal, for the reason given
     at its call site: an OSError here would stop every `anton` command on a
     container with no writable home.
     """
@@ -631,9 +630,9 @@ def _secure_anton_home() -> None:
 
     home = Path.home() / ".anton"
     try:
-        if home.is_symlink() or not home.is_dir():
+        if not home.is_dir():
             return
-        if not make_private_dir(path=home):
+        if not make_private_dir(path=home, follow_link=True):
             return
         tighten_private_file(path=home / ".env")
     except OSError as exc:

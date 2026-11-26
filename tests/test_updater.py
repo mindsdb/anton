@@ -91,7 +91,7 @@ def test_skip_marker_written_even_when_its_folder_cannot_be_made_private(monkeyp
     _stub_env(monkeypatch, tmp_path, latest_tag="v9.9.9.9.9", local_version="2.0.0", proc=_OkProc())
     monkeypatch.setattr(updater, "_read_installed_anton_version", lambda: Version("2.0.0"))
 
-    def _refuse(*, path, windows_acl=False):
+    def _refuse(*, path, **_options):
         raise PermissionError("not private")
 
     monkeypatch.setattr(updater, "require_private_dir", _refuse)
