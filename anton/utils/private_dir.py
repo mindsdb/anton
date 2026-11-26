@@ -323,7 +323,17 @@ def _sddl_is_owner_only(*, sddl: str, user_sid: str | None) -> bool:
             return False
         if kind == "A" and rights == "FA" and "OI" in flags and "CI" in flags and "IO" not in flags:
             granted.add(sid)
-    return {"SY", "BA", "OW", *([user_sid] if user_sid else [])} <= granted
+    if not {"SY", "BA", "OW"} <= granted:
+        return False
+    return user_sid is None or bool(_sddl_forms(user_sid) & granted)
+
+
+def _sddl_forms(sid: str) -> set[str]:
+    """The ways SDDL can write ``sid``: the account with RID 500 is ``LA`` and
+    the one with RID 501 ``LG``, as a CI runner's built-in Administrator shows."""
+    aliases = {"500": "LA", "501": "LG"}
+    rid = sid.rsplit("-", 1)[-1]
+    return {sid, aliases[rid]} if sid.startswith("S-1-5-21-") and rid in aliases else {sid}
 
 
 def _acl_is_owner_only(*, path: Path, user_sid: str | None) -> bool:

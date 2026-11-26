@@ -320,6 +320,19 @@ def test_an_owner_only_list_is_read_from_its_sddl(sddl, expected):
     assert _sddl_is_owner_only(sddl=sddl, user_sid=_USER) is expected
 
 
+@pytest.mark.parametrize(("sid", "alias", "expected"), [
+    ("S-1-5-21-1-2-3-500", "LA", True),
+    ("S-1-5-21-1-2-3-501", "LG", True),
+    ("S-1-5-21-1-2-3-1001", "LA", False),
+])
+def test_an_owner_only_list_reads_the_users_sddl_alias(sid, alias, expected):
+    """SDDL writes the built-in Administrator, as a CI runner runs, as LA."""
+    from anton.utils.private_dir import _sddl_is_owner_only
+
+    sddl = f"D:PAI(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{alias})"
+    assert _sddl_is_owner_only(sddl=sddl, user_sid=sid) is expected
+
+
 @_posix_only
 @pytest.mark.parametrize("outside", [True, False])
 def test_windows_lists_a_linked_home_only_outside_the_profile(tmp_path, icacls_calls, monkeypatch, outside):
