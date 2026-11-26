@@ -36,6 +36,13 @@ from anton.core.idle_scratchpad import (
     round_is_idle,
     without_scratchpad,
 )
+from anton.core.repeated_calls import (
+    REPEATS_BEFORE_NOTICE,
+    REPEATS_BEFORE_WITHHOLD,
+    RepeatedCalls,
+    repeat_notice,
+    without_tools,
+)
 from anton.core.llm import jev as _jev
 from anton.core.llm.effort import (
     TRUNCATION_RETRY_NOTE,
@@ -2125,6 +2132,7 @@ class ChatSession:
         # count spans verifier continuations and provider-error retries alike.
         # Reset per turn in turn_stream.
         self._turn_tool_rounds = 0
+        self._repeated_calls = RepeatedCalls()
         # Verifier-forced continuations this turn has run, against
         # `max_continuations`. Per turn for the same reason: a retry must
         # not hand out a fresh set. Reset per turn in turn_stream.
@@ -6545,6 +6553,7 @@ class ChatSession:
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
         self._turn_tool_rounds = 0
+        self._repeated_calls = RepeatedCalls()
         self._compacted_this_turn = False
         self._compaction_failures_this_turn = 0
         self._last_compaction_round = None
@@ -7721,6 +7730,7 @@ class ChatSession:
                 import time as _time
 
                 tool_results: list[dict] = []
+                repeated_tools: set[str] = set()
                 for tc in llm_response.tool_calls:
                     # Nothing runs after a question nobody answered, whatever the
                     # model sent with it. Refuse before inspecting its arguments.
@@ -8263,10 +8273,24 @@ class ChatSession:
                             tool=tc.name,
                         )
                     self._record_root_cause(tool_ok, tool_reason, result_text)
+                    # A cell the user declined never ran, so asking again is not a loop.
+                    repeats = (
+                        0 if tool_reason in CELL_NOT_RUN_REASONS
+                        else self._repeated_calls.record(tc.name, tc.input, result_text)
+                    )
                     result_text = self._apply_error_tracking(
                         result_text, tc.name, error_streak, resilience_nudged,
                         ok=tool_ok,
                     )
+                    if repeats >= REPEATS_BEFORE_NOTICE:
+                        withhold = repeats >= REPEATS_BEFORE_WITHHOLD
+                        result_text += repeat_notice(tc.name, repeats, withhold)
+                        if withhold:
+                            repeated_tools.add(tc.name)
+                            logger.info(
+                                "identical-call loop: '%s' %d times, withholding it for the next round",
+                                tc.name, repeats,
+                            )
                     # ACC: tool_result emit. Prefer the handler's own verdict
                     # (ENG-1276); heuristic text-detection only for handlers
                     # that haven't declared one — the conventional
@@ -8350,6 +8374,8 @@ class ChatSession:
                 tools = self._build_tools()
                 if withhold_scratchpad:
                     tools = without_scratchpad(tools)
+                if repeated_tools:
+                    tools = without_tools(tools, repeated_tools)
 
                 # Signal that tools are done and LLM is now reasoning
                 _reasoning_t0 = _time.monotonic()
