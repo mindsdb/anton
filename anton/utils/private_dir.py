@@ -89,7 +89,7 @@ def make_private_dir(*, path: Path, windows_acl: bool = False, follow_link: bool
     SMB share, leaves the folder as it is, with a warning: no mode can protect
     it, and refusing would stop the user without stopping any reader.
     """
-    if follow_link and os.path.islink(path):
+    if follow_link and _is_link_or_junction(path=path):
         target = Path(os.path.realpath(path))
         if not target.is_dir():
             return False
@@ -135,6 +135,28 @@ def make_private_dir(*, path: Path, windows_acl: bool = False, follow_link: bool
             "Could not make a folder private",
             extra={"event": "private_folder_chmod_failed", "reason": errno.errorcode.get(exc.errno, "unknown")},
         )
+        return False
+
+
+#: The reparse tag of a Windows directory junction, as `mklink /J` makes.
+_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+
+
+def _is_link_or_junction(*, path: Path) -> bool:
+    """Whether ``path`` is a symbolic link or, on Windows, a directory junction.
+
+    A folder moved to another disk is usually linked back with a junction, and
+    os.path.islink is False for one. Before Python 3.12 os.path.isjunction is
+    absent, so the mount-point reparse tag from lstat stands in for it.
+    """
+    if os.path.islink(path):
+        return True
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction is not None:
+        return bool(isjunction(path))
+    try:
+        return getattr(os.lstat(path), "st_reparse_tag", 0) == _IO_REPARSE_TAG_MOUNT_POINT
+    except OSError:
         return False
 
 

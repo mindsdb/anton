@@ -268,6 +268,40 @@ def test_a_linked_home_serves_the_chat_paths(home, tmp_path):
     assert _mode(target) == 0o700
 
 
+def test_a_junctioned_home_is_followed_like_a_symlinked_one(home, tmp_path, monkeypatch):
+    """On Windows os.path.islink is False for the junction `mklink /J` makes."""
+    from anton.utils import private_dir
+
+    target = tmp_path / "moved-anton"
+    target.mkdir()
+    os.chmod(target, 0o755)
+    junction = home / ".anton"
+    junction.mkdir()
+    real_realpath = os.path.realpath
+    monkeypatch.setattr(os.path, "isjunction", lambda p: str(p) == str(junction), raising=False)
+    monkeypatch.setattr(
+        os.path, "realpath", lambda p, *a, **k: str(target) if str(p) == str(junction) else real_realpath(p, *a, **k)
+    )
+
+    assert private_dir._is_link_or_junction(path=junction)
+    assert private_dir.make_private_dir(path=junction, follow_link=True)
+    assert _mode(target) == 0o700
+
+
+def test_a_junction_is_found_by_its_reparse_tag_before_python_3_12(tmp_path, monkeypatch):
+    from anton.utils import private_dir
+
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    monkeypatch.delattr(os.path, "isjunction", raising=False)
+    assert not private_dir._is_link_or_junction(path=folder)
+
+    real_lstat = os.lstat
+    tagged = SimpleNamespace(st_mode=stat.S_IFDIR, st_reparse_tag=private_dir._IO_REPARSE_TAG_MOUNT_POINT)
+    monkeypatch.setattr(os, "lstat", lambda p, *a, **k: tagged if str(p) == str(folder) else real_lstat(p, *a, **k))
+    assert private_dir._is_link_or_junction(path=folder)
+
+
 def test_a_linked_home_another_account_owns_is_refused(home, tmp_path, monkeypatch):
     from anton.utils.private_dir import anton_home
 
