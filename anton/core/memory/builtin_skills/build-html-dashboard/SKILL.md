@@ -7,8 +7,9 @@ description: 'ONLY for writing dashboard or chart HTML BY HAND. NOT needed on th
   before rewriting the code of a generated dashboard, or when generate_artifact failed and
   the user asked you to continue manually: it is the output contract — self-contained file
   rules, Apache ECharts setup, dark theme, layout/design standards, large-dataset handling.
-  Also recall it to write an inline chart (create_artifact with display="inline"): its
-  Inline section says how that page differs.
+  Also recall it to write an inline chart or an inline page the user reviews and confirms
+  (create_artifact with display="inline"): its Inline section says how that page differs
+  and documents the window.anton state and submit API.
   Not needed to repair a page generate_artifact returned as browser_check_failed: that
   result''s instruction says how.'
 metadata:
@@ -156,4 +157,39 @@ Register it with `create_artifact(type="html-app", primary="index.html", display
 - THEME: the host sets `data-theme="light"` or `"dark"` and `color-scheme` on `<html>`, and changes them live when the app's theme changes. Style from CSS custom properties, not the fixed #0d1117 theme: light tokens on `:root`, dark ones on `:root[data-theme="dark"]`, and the same dark tokens under `@media (prefers-color-scheme: dark) { :root:not([data-theme]) { ... } }` for the moment before the host sets it. Keep the page background transparent so it sits in the reply. Start ECharts with `echarts.init(el, dark ? 'dark' : null)` and `backgroundColor: 'transparent'`, reading colours from the tokens (`getComputedStyle(document.documentElement).getPropertyValue('--fg')`). Watch the attribute with `new MutationObserver(redraw).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })`, where `redraw` disposes the chart and starts it again in the new theme with the current range and toggles.
 - NO NETWORK: the frame makes no requests, so all data is inline as `const D = ...;` and nothing calls `fetch`, `XMLHttpRequest`, `d3.json` or `EventSource`. No web fonts, external images, map atlases or tiles, and no Tailwind: style with a `<style>` block. The one external resource is the pinned ECharts script `https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js`, the same `<script src>` every html-app preview loads; no other library.
 - SMALL DATA: aggregate in the scratchpad to what the chart shows, a few hundred points per view at most, with every range a tab offers computed ahead, and keep the file under 200 KB. Larger data, or a page the user will keep and reopen, is a full artifact without `display`.
-- No `localStorage` state to keep: the chart starts in its default view every time.
+- No `localStorage`. A chart starts in its default view every time; a page the user works in keeps its state through `window.anton` (below).
+- COLLABORATION PAGES (review, pick, edit or confirm several items: people to contact, rows to approve, a plan to reorder): same rules, with checkboxes, fields or drag handles instead of a chart, and no ECharts unless it also shows a chart. The host injects a small page API:
+  - `anton.setState(obj)`: saves the page state (JSON, at most 32 KB) as `state.json` in the artifact folder. Call it on every edit; keep ids and choices in it, not the whole data set.
+  - `anton.getState()` returns the saved state or `null`; `anton.onState(cb)` calls `cb(state)` when the saved state arrives or changes. Render from the data in the page first, then apply the state; ignore keys that no longer match the data (a newer revision may have changed the items).
+  - `anton.submit(obj, message)`: sends the user's confirmation to the chat as a new user turn tagged with this artifact; both arguments are optional (`obj` defaults to the current state). Give the page one clear confirm button that calls it.
+  - Guard every call with `if (window.anton)`: the full preview and the browser check have no API, and the page must still render there.
+  - When the conversation keeps working on the same list, rewrite this page under the same slug (a new revision) instead of creating another artifact; the chat shows only the newest copy.
+  Example checklist (the view helper from item 10 is left out for brevity; a real page still starts its view through it):
+  ```html
+  <ul id="list"></ul><button id="ok">Confirm</button>
+  <script>
+  const D = [{id: "ana", label: "Ana Ruiz, Acme"}, {id: "li", label: "Li Wei, Globex"}];
+  let state = {picked: D.map(d => d.id)};
+  const api = window.anton;
+  function render() {  // DOM nodes and textContent: item labels are data, never HTML
+    document.getElementById("list").replaceChildren(...D.map(d => {
+      const li = document.createElement("li"), label = document.createElement("label"), box = document.createElement("input");
+      box.type = "checkbox"; box.dataset.id = d.id; box.checked = state.picked.includes(d.id);
+      label.append(box, " " + d.label); li.append(label); return li;
+    }));
+  }
+  function apply(s) {
+    if (s && Array.isArray(s.picked)) { state = {picked: s.picked.filter(id => D.some(d => d.id === id))}; render(); }
+  }
+  document.getElementById("list").addEventListener("change", e => {
+    const id = e.target.dataset.id;
+    state.picked = e.target.checked ? [...state.picked, id] : state.picked.filter(x => x !== id);
+    if (api) api.setState(state);
+  });
+  document.getElementById("ok").addEventListener("click", () => {
+    if (api) api.submit(state, `Contact these ${state.picked.length} people`);
+  });
+  render();
+  if (api) { apply(api.getState()); api.onState(apply); }
+  </script>
+  ```

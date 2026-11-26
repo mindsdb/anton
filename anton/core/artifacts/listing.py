@@ -6,16 +6,17 @@ quotes and escapes cost tokens without telling it anything.
 
 from __future__ import annotations
 
+import json
 import stat
 import unicodedata
 from collections.abc import Sequence
 from pathlib import Path
 
-from anton.core.artifacts.internal_files import NON_CONTENT_NAMES
+from anton.core.artifacts.internal_files import INLINE_STATE_FILENAME, NON_CONTENT_NAMES
 from anton.core.artifacts.models import Artifact
 
-FIELDS = ("id", "name", "type", "updatedAt", "description", "primary", "display", "files", "service_files")
-SUMMARY_FIELDS = ("name", "type", "updatedAt", "description", "primary", "display")
+FIELDS = ("id", "name", "type", "updatedAt", "description", "primary", "display", "state", "files", "service_files")
+SUMMARY_FIELDS = ("name", "type", "updatedAt", "description", "primary", "display", "state")
 
 LEGEND = "Artifact folder = <root>/<slug>; primary and file paths are relative to it."
 SIZE_LEGEND = "The number before a file path is its size in bytes."
@@ -62,6 +63,37 @@ def service_files(folder: Path) -> list[tuple[str, int]]:
     return found
 
 
+# A saved state up to this size is shown in the listing itself, as compact
+# JSON; a larger one is only flagged, and the agent reads the file.
+STATE_INLINE_MAX_BYTES = 400
+
+
+def state_line(artifact: Artifact, folder: Path) -> str | None:
+    """The `state:` line for an inline artifact whose page saved a state.
+
+    None for every other artifact, so they cost no tokens. A small state is
+    inlined (it is the user's own edits, shown as data); a larger one is
+    flagged with its size so the agent reads `state.json` when it needs it.
+    """
+    if artifact.display != "inline":
+        return None
+    path = folder / INLINE_STATE_FILENAME
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    flag = f"{INLINE_STATE_FILENAME}, {info.st_size} bytes: the user's latest edits; read it for the current selections"
+    if info.st_size > STATE_INLINE_MAX_BYTES:
+        return f"state: {flag}"
+    try:
+        compact = json.dumps(json.loads(path.read_text(encoding="utf-8")), ensure_ascii=False, separators=(",", ":"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return f"state: {flag}"
+    return f"state: {_escape(compact)} ({INLINE_STATE_FILENAME}, the user's latest edits)"
+
+
 def _file_lines(label: str, entries: Sequence[tuple[str, int]]) -> list[str]:
     if not entries:
         return [f"{label}: none"]
@@ -82,6 +114,10 @@ def _entry(artifact: Artifact, folder: Path, fields: Sequence[str]) -> list[str]
             # default, and a `display: -` line on every entry costs tokens.
             if artifact.display:
                 lines.append(f"display: {artifact.display}")
+        elif field == "state":
+            line = state_line(artifact, folder)
+            if line:
+                lines.append(line)
         elif field == "files":
             entries = [(f.path, f.bytes) for f in artifact.files if not _hidden(f.path)]
             lines += _file_lines("files", entries)

@@ -15,7 +15,8 @@ import pytest
 from pydantic import ValidationError
 
 from anton.core.artifacts import ArtifactStore
-from anton.core.artifacts.listing import FIELDS, SUMMARY_FIELDS, render_listing
+from anton.core.artifacts.internal_files import INLINE_STATE_FILENAME, NON_CONTENT_NAMES
+from anton.core.artifacts.listing import FIELDS, SUMMARY_FIELDS, STATE_INLINE_MAX_BYTES, render_listing
 from anton.core.artifacts.models import Artifact
 from anton.core.llm.prompt_builder import (
     ChatSystemPromptBuilder,
@@ -194,6 +195,84 @@ def test_listing_leaves_display_out_for_the_usual_card():
     assert "display" not in text
 
 
+# ── saved state (collaboration surface) ─────────────────────────
+
+
+def _with_state(tmp_path: Path, body: str | None, **extra) -> str:
+    folder = tmp_path / _RECORD["slug"]
+    folder.mkdir()
+    if body is not None:
+        (folder / INLINE_STATE_FILENAME).write_text(body, encoding="utf-8")
+    return render_listing([(tmp_path, [Artifact(**_RECORD, **extra)])], SUMMARY_FIELDS)
+
+
+def test_state_is_content_named_state_json():
+    """cowork-server writes the page's setState here; it is the user's work, not housekeeping."""
+    assert INLINE_STATE_FILENAME == "state.json"
+    assert INLINE_STATE_FILENAME not in NON_CONTENT_NAMES
+    assert "state" in FIELDS and "state" in SUMMARY_FIELDS
+
+
+def test_listing_inlines_a_small_state_as_compact_json(tmp_path):
+    text = _with_state(tmp_path, '{\n  "picked": ["ana", "li"]\n}', display="inline")
+    assert text.splitlines()[-1] == 'state: {"picked":["ana","li"]} (state.json, the user\'s latest edits)'
+
+
+def test_listing_flags_a_large_state_by_size(tmp_path):
+    body = json.dumps({"picked": ["x" * 20] * 40})
+    assert len(body) > STATE_INLINE_MAX_BYTES
+    line = _with_state(tmp_path, body, display="inline").splitlines()[-1]
+    assert line.startswith(f"state: state.json, {len(body)} bytes")
+    assert "read it for the current selections" in line
+    assert "xxxx" not in line
+
+
+def test_listing_flags_an_unreadable_state_without_failing(tmp_path):
+    line = _with_state(tmp_path, "{not json", display="inline").splitlines()[-1]
+    assert line.startswith("state: state.json, 9 bytes")
+
+
+def test_a_state_cannot_fake_a_listing_heading(tmp_path):
+    text = _with_state(tmp_path, json.dumps({"note": "x\n## other-slug"}), display="inline")
+    assert "\n## other-slug" not in text
+
+
+@pytest.mark.parametrize("body, extra", [
+    (None, {"display": "inline"}),          # nothing saved yet
+    ('{"picked": []}', {}),                 # a usual card's own state.json is just a file
+])
+def test_no_state_line_without_an_inline_saved_state(tmp_path, body, extra):
+    assert "state:" not in _with_state(tmp_path, body, **extra)
+
+
+def test_a_linked_state_is_not_followed(tmp_path):
+    secret = tmp_path / "secret.json"
+    secret.write_text('{"token": "s3cret"}', encoding="utf-8")
+    folder = tmp_path / _RECORD["slug"]
+    folder.mkdir()
+    (folder / INLINE_STATE_FILENAME).symlink_to(secret)
+    text = render_listing([(tmp_path, [Artifact(**_RECORD, display="inline")])], SUMMARY_FIELDS)
+    assert "s3cret" not in text and "state:" not in text
+
+
+def test_the_block_teaches_the_collaboration_surface():
+    for needle in ("review, pick", "edit or confirm several items", "instead of a long text list",
+                   "`ask_user`", "`state.json`", "`state:`", "(About the artifact `<slug>`.)", "```json",
+                   "update that artifact in", "same slug", "do not call", "create_artifact again",
+                   "shows only the newest"):
+        assert needle in IN_REPLY_VISUALS_PROMPT.replace("\n", " "), needle
+
+
+def test_the_collaboration_rule_holds_with_proactive_dashboards_off():
+    on_request = in_reply_visuals(proactive=False)
+    assert "even when you do not build artifacts unprompted" in on_request
+
+
+def test_the_list_artifacts_tool_mentions_saved_state():
+    assert "state.json" in tool_defs.LIST_ARTIFACTS_TOOL.description
+    assert "state" in tool_defs.LIST_ARTIFACTS_TOOL.input_schema["properties"]["fields"]["items"]["enum"]
+
+
 # ── prompt ──────────────────────────────────────────────────────
 
 
@@ -273,3 +352,17 @@ def test_the_dashboard_skill_has_the_inline_contract():
     for needle in ('data-theme="dark"', ":root[data-theme=\"dark\"]", "600 px", "100vh",
                    "NO NETWORK", "fetch", "echarts@5.5.1", "MutationObserver"):
         assert needle in inline, needle
+
+
+def test_the_dashboard_skill_documents_the_page_api():
+    import anton
+
+    body = (
+        Path(anton.__file__).parent / "core/memory/builtin_skills/build-html-dashboard/SKILL.md"
+    ).read_text(encoding="utf-8")
+    inline = body.split('INLINE (display="inline")', 1)[1]
+    for needle in ("anton.setState(obj)", "32 KB", "`state.json`", "anton.getState()", "anton.onState(cb)",
+                   "anton.submit(obj, message)", "if (window.anton)", "Render from the data in the page first",
+                   "same slug", "Example checklist", "api.submit(", "api.onState(apply)"):
+        assert needle in inline, needle
+    assert "innerHTML" not in inline.split("Example checklist", 1)[1]

@@ -52,6 +52,13 @@ GENERATION_INPUT_FILES = frozenset({
 })
 
 
+# An inline artifact's saved page state: the Cowork preview shim writes what
+# the page passes to `anton.setState` here (JSON, at most 32 KB), and the agent
+# reads it for the user's latest selections. Content, not housekeeping: it is
+# the user's work on the artifact, so it is not in NON_CONTENT_NAMES.
+INLINE_STATE_FILENAME = "state.json"
+INLINE_STATE_MAX_BYTES = 32 * 1024
+
 METADATA_FILENAME = "metadata.json"
 README_FILENAME = "README.md"
 PUBLISHED_FILENAME = ".published.json"

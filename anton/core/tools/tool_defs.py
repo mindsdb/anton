@@ -404,7 +404,8 @@ LIST_ARTIFACTS_TOOL = ToolDef(
         "List the artifacts in this workspace, newest first. An artifact's folder "
         "is `<root>/<slug>`, and paths in the result are relative to it. Without "
         "`match` you get a summary (name, type, updatedAt, description, primary, "
-        "and display when the artifact is shown inline); "
+        "and, for an artifact shown inline, display and its saved state: the "
+        "user's latest edits in the page, from `state.json` in its folder); "
         "with `match` the full record, including id, files and service_files "
         "(housekeeping and generation files, not what was built)."
     ),

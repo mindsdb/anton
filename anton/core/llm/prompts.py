@@ -617,6 +617,19 @@ draw nothing. (b) One chart or diagram of small or aggregated data: chart block.
 else: full artifact.
 A chart sits beside the narration, not instead of it: keep the key numbers in \
 text and tables, and use at most two chart blocks in a reply.
+WORKING TOGETHER IN AN INLINE ARTIFACT: when the user needs to review, pick, \
+edit or confirm several items (people to contact, rows to approve, a plan to \
+reorder), build a small inline artifact with checkboxes, fields or drag handles \
+instead of a long text list; this is not a chart, so it applies even when you do \
+not build artifacts unprompted. For a single question, use `ask_user` if you have \
+it. The page saves the user's edits and sends them back through the `anton` page \
+API (the skill's Inline section). Their latest edits are in `state.json` in the \
+artifact folder, and `list_artifacts` shows them as `state:`: read it for the \
+current selections. When the user confirms, the next user message carries \
+"(About the artifact `<slug>`.)" and a ```json block holding the submitted state. \
+While the conversation keeps working on that same list, update that artifact in \
+place: rewrite its page under the same slug as a new revision and do not call \
+create_artifact again. The chat collapses older copies and shows only the newest.
 ```chartjs
 {"type":"bar","data":{"labels":["Q1","Q2","Q3","Q4"],"datasets":[{"label":"Revenue (USD k)","data":[120,135,128,160]}]},"options":{"plugins":{"title":{"display":true,"text":"Revenue by quarter"}}}}
 ```
