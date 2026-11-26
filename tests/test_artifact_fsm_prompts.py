@@ -1040,6 +1040,8 @@ def test_html_prompt_carries_no_leftovers_from_other_builders():
     assert "/tmp/artifact-prompt-probe" not in s
     assert "fullstack" not in s.lower()
     assert "main agent" not in s
+    assert "api()" not in s
+    assert "backend" not in s.lower()
     # The old DATA INTO FILES block told the model to append the data as its
     # own part — contradicting the whole-file-in-one-body default.
     assert "DATA INTO FILES" not in s

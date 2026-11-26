@@ -719,7 +719,20 @@ def test_any_other_absolute_fetch_is_still_an_error(call):
     html = GOOD.replace("fetch(api('/api/items'))", call)
     [err] = _absolute_fetch_errors(html)
     assert "https://cdn.jsdelivr.net/npm/" in err
+    assert "api()" not in err
+
+
+def test_fullstack_absolute_fetch_error_points_at_api():
+    html = GOOD.replace("fetch(api('/api/items'))", "fetch('https://example.com/data.json')")
+    [err] = _absolute_fetch_errors(html, is_fullstack=True)
+    assert "https://cdn.jsdelivr.net/npm/" in err
     assert "api()" in err
+
+
+def test_an_allowed_fetch_does_not_hide_a_disallowed_one():
+    html = _page(f"fetch('{_JSDELIVR_FILE}');\nfetch('https://example.com/data.json');")
+    [err] = _absolute_fetch_errors(html)
+    assert "example.com" in err
 
 
 def test_a_jsdelivr_fetch_is_not_compared_with_the_api_contract():

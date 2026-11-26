@@ -469,10 +469,19 @@ def verify_frontend(
     for m in _ABSOLUTE_FETCH.finditer(html):
         if _fetch_allowed_absolute(bool(m.group(1)), m.group(2)):
             continue
+        if is_fullstack:
+            hint = (
+                f"Call the backend through api(); a data file may come only from "
+                f"{_JSDELIVR_DATA_HOST}{_JSDELIVR_DATA_PATH}."
+            )
+        else:
+            hint = (
+                f"A data file may come only from "
+                f"{_JSDELIVR_DATA_HOST}{_JSDELIVR_DATA_PATH}; embed other data in the page."
+            )
         errors.append(
             f"Absolute URL is not allowed in fetch(): ...{html[m.start():m.start()+60]!r}. "
-            f"Call the backend through api(); a data file may come only from "
-            f"{_JSDELIVR_DATA_HOST}{_JSDELIVR_DATA_PATH}."
+            f"{hint}"
         )
         break
 

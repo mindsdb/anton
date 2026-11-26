@@ -174,8 +174,7 @@ VISUAL DESIGN (for every HTML file you produce):
   to that policy so the page renders on every deployment: no external
   stylesheet or web font, no external image or map tile (embed an image as a
   `data:` URI), no `eval` or `new Function`, and no web workers.
-- NETWORK: the page makes requests only to its own address (the app's own
-  backend, through `api()`) and to
+- NETWORK: the page makes requests only to its own address and to
   `https://cdn.jsdelivr.net/npm/<package>@<exact version>/...`. Load a data
   file from there with `d3.json(...)` or `fetch(...)`. Requests to any other
   host fail once the page is published, and in some previews, so the data
@@ -241,7 +240,7 @@ step and costs a regeneration, unless the item says it is only a warning:
 - A complete HTML document with an explicit `<body>`...`</body>`.
 - `<meta name="viewport" content="width=device-width, initial-scale=1.0">`.
 - No absolute URL in any `fetch()` call except a data file from
-  `https://cdn.jsdelivr.net/npm/`; call the backend through `api()`.
+  `https://cdn.jsdelivr.net/npm/`.
 - No root-relative path in `src`, `href`, `fetch()` or `new EventSource()`
   (a value that starts with a single `/`, `/api/...` included): the page is
   served under a path prefix, in the app preview and once published, and
