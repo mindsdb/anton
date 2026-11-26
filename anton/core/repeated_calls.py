@@ -18,8 +18,9 @@ from anton.core.llm.prompts import ANTON_NOTE
 REPEATS_BEFORE_NOTICE = 3
 REPEATS_BEFORE_WITHHOLD = 5
 
-# An object's repr carries its memory address, which differs on every run of the same cell.
-_ADDRESS = re.compile(r"0x[0-9a-fA-F]+")
+# An object's repr carries its memory address ("at 0x7f..."), which differs on every run of the
+# same cell. Other hex values (hashes, ids) are real changes and stay as they are.
+_ADDRESS = re.compile(r"(?<=\bat )0x[0-9a-fA-F]+")
 
 
 class RepeatedCalls:

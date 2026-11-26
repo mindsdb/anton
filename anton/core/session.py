@@ -8481,6 +8481,8 @@ class ChatSession:
                     message="Continuing past the time limit...",
                 )
                 response = None
+                # Rebuilt so a tool withheld for the last round is back.
+                tools = self._build_tools()
                 async for event in self.plan_stream_with_recovery(
                     system=system, tools=tools
                 ):
@@ -8532,6 +8534,8 @@ class ChatSession:
                         message="Taking your added message into account...",
                     )
                     response = None
+                    # Rebuilt so a tool withheld for the last round is back.
+                    tools = self._build_tools()
                     async for event in self.plan_stream_with_recovery(
                         system=system, tools=tools
                     ):

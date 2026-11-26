@@ -35,6 +35,14 @@ def test_a_different_call_or_result_is_a_new_count(other):
     assert calls.record(*other) == 1
 
 
+def test_a_result_that_differs_only_in_a_hex_value_is_a_new_count():
+    calls = RepeatedCalls()
+    calls.record("scratchpad", {"code": WORK}, "block 0x12a4f3")
+    assert calls.record("scratchpad", {"code": WORK}, "block 0x12a4f4") == 1
+    calls.record("scratchpad", {"code": WORK}, "1920x1080")
+    assert calls.record("scratchpad", {"code": WORK}, "1920x1081") == 1
+
+
 def test_a_changing_memory_address_is_still_the_same_result():
     calls = RepeatedCalls()
     calls.record("scratchpad", {"code": WORK}, "<Env object at 0x7f3a2b10>")
