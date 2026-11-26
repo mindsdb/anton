@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import importlib
-import ipaddress
 import logging
 import os
 import shutil
@@ -11,7 +10,6 @@ import subprocess
 import sys
 import webbrowser
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import typer
 from rich.console import Console
@@ -28,6 +26,7 @@ from anton.core.llm.provider import close_live_providers, install_asyncgen_noise
 
 from anton.utils.prompt import prompt_or_cancel
 from anton.core.llm.openai import build_chat_completion_kwargs, _is_azure_endpoint
+from anton.core.llm.endpoints import ENDPOINT_LOCAL, classify_base_url
 
 from anton.chat import ChatSession
 from anton.chat_session import get_runtime_factory
@@ -1177,12 +1176,12 @@ def _setup_other_provider(settings, ws) -> None:
 def _validate_with_spinner(console, label: str, fn) -> None:
     """Run a validation function with a spinner, print result."""
     with Live(
-        Spinner("dots", text=f"  Validating {label}...", style="anton.cyan"),
+        Spinner("dots", text=f"  Validating {escape(label)}...", style="anton.cyan"),
         console=console,
         transient=True,
     ):
         fn()
-    console.print(f"  [anton.success]Validated[/] [anton.muted]{label}[/]")
+    console.print(f"  [anton.success]Validated[/] [anton.muted]{escape(label)}[/]")
 
 
 def _normalize_probe_text(text: str | None) -> str:
@@ -1409,37 +1408,22 @@ def _strip_to_azure_endpoint(raw_url: str) -> str:
     return f"{scheme}://{host}"
 
 
-def _is_local_endpoint_host(*, host: str) -> bool:
-    """Return True for a host on this machine or the local network.
-
-    That is ``localhost``, a ``*.localhost`` or ``*.local`` name, or an IP
-    address that is loopback, private (RFC 1918, IPv6 ULA) or link-local.
-    """
-    if host == "localhost" or host.endswith((".localhost", ".local")):
-        return True
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return address.is_loopback or address.is_private or address.is_link_local
-
-
 def _endpoint_url_with_scheme(*, typed: str) -> str:
     """Return the endpoint URL the user typed, with a scheme added when it has none.
 
     A typed ``http://`` or ``https://`` (any case) is kept as typed. Without
-    one, a local host gets ``http://``, since local servers such as Ollama
-    and LM Studio usually serve plain HTTP. Every other host gets
-    ``https://``, so the API key does not cross the internet in clear text.
-    A string whose host cannot be parsed also gets ``https://``.
+    one, a host that ``classify_base_url`` calls local gets ``http://``,
+    since local servers such as Ollama and LM Studio usually serve plain
+    HTTP. Every other host gets ``https://``, so the API key does not cross
+    the internet in clear text. A string whose host cannot be parsed also
+    gets ``https://``.
     """
     if typed.lower().startswith(("http://", "https://")):
         return typed
-    try:
-        host = urlsplit(f"//{typed}").hostname or ""
-    except ValueError:
-        host = ""
-    scheme = "http" if _is_local_endpoint_host(host=host) else "https"
+    # The "//" marks where the host starts. Without it, ``classify_base_url``
+    # reads a typed URL that holds "//" (``localhost:11434//v1``) as it
+    # stands and finds no host.
+    scheme = "http" if classify_base_url(f"//{typed}") == ENDPOINT_LOCAL else "https"
     return f"{scheme}://{typed}"
 
 
@@ -1452,11 +1436,15 @@ def _setup_custom_openai(settings, ws) -> None:
     console.print()
 
     while True:
-        base_url = _setup_prompt("Base URL (e.g. http://localhost:11434/v1)").strip()
-        if base_url:
+        typed_url = _setup_prompt("Base URL (e.g. http://localhost:11434/v1)").strip()
+        if typed_url:
             break
         console.print("  [anton.warning]Base URL is required.[/]")
-    base_url = _endpoint_url_with_scheme(typed=base_url)
+    base_url = _endpoint_url_with_scheme(typed=typed_url)
+    if base_url == f"https://{typed_url}":
+        console.print(
+            f"  [anton.muted]Using {escape(base_url)}. Type http:// or https:// to choose the scheme.[/]"
+        )
 
     api_key = _setup_prompt(
         "API key (Enter to skip if not needed)", is_password=True

@@ -114,19 +114,27 @@ def _host_of(base_url: str) -> str:
 
 
 def _is_local_host(host: str) -> bool:
-    """True for loopback, private, link-local, or a local-only name suffix."""
+    """True for ``localhost``, a local-only name suffix, or an IP address that is not globally reachable.
+
+    ``not is_global`` covers loopback, private, link-local and unspecified
+    addresses, and shared address space (100.64.0.0/10, which Tailscale
+    uses). An IPv4-mapped (``::ffff:a.b.c.d``) or 6to4 (``2002::/16``) IPv6
+    address is judged by the IPv4 address it carries, which is where its
+    packets go; Python calls every 6to4 address non-global from 3.11.10 and
+    3.12.4 on. A Teredo (``2001::/32``) address is never local, because a
+    relay on the internet carries its packets.
+    """
     if host == "localhost" or host.endswith(_LOCAL_SUFFIXES):
         return True
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return bool(
-        addr.is_loopback
-        or addr.is_private
-        or addr.is_link_local
-        or addr.is_unspecified
-    )
+    if addr.version == 6:
+        if addr.teredo:
+            return False
+        addr = addr.ipv4_mapped or addr.sixtofour or addr
+    return not addr.is_global
 
 
 def _is_mindshub_host(host: str) -> bool:

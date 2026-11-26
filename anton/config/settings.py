@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pydantic import PrivateAttr, ValidationInfo, field_validator, model_validator
 
+from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url
 from anton.core.settings import CoreSettings
 
 
@@ -36,6 +37,19 @@ def _build_env_files() -> list[str]:
     if cowork_env.is_file():
         files.append(str(cowork_env))
     return files
+
+
+def _mindshub_url_over_https(*, url: str) -> str:
+    """Return ``url`` with ``https://`` in place of ``http://`` when its host is MindsHub's.
+
+    MindsHub hosts answer plain HTTP only with a redirect to https, so the
+    rewrite loses nothing, and the key stops crossing the internet in clear
+    text on every request. Any other URL, a local or third-party ``http://``
+    one included, comes back unchanged.
+    """
+    if url.lower().startswith("http://") and classify_base_url(url) == ENDPOINT_MINDSHUB:
+        return "https://" + url[len("http://"):]
+    return url
 
 
 _ENV_FILES = _build_env_files()
@@ -231,8 +245,15 @@ class AntonSettings(CoreSettings):
         return v
 
     def model_post_init(self, __context) -> None:
-        """Derive openai vars from minds credentials when appropriate, then the decisions model."""
+        """Derive openai vars from minds credentials when appropriate, move MindsHub URLs to https, then the decisions model."""
         self._derive_openai_from_minds()
+        # Both URLs move together, because _resolve_openai_compatible_flavor
+        # (anton/core/llm/client.py) compares openai_base_url with minds_url,
+        # scheme included.
+        if self.minds_url:
+            self.minds_url = _mindshub_url_over_https(url=self.minds_url)
+        if self.openai_base_url:
+            self.openai_base_url = _mindshub_url_over_https(url=self.openai_base_url)
         if self.decisions_model is None:
             from anton.core.llm.jev import default_decisions_model
 

@@ -52,6 +52,10 @@ def _settings(provider: str, base_url: str = "") -> SimpleNamespace:
         ("http://172.16.5.5:8000/v1", ENDPOINT_LOCAL),
         ("http://169.254.10.1:8000/v1", ENDPOINT_LOCAL),
         ("http://mac-studio.local:11434/v1", ENDPOINT_LOCAL),
+        # Shared address space (100.64.0.0/10): a Tailscale peer. Python calls
+        # it neither private nor global.
+        ("http://100.101.102.103:11434/v1", ENDPOINT_LOCAL),
+        ("http://[::ffff:100.101.102.103]:11434/v1", ENDPOINT_LOCAL),
         # Our gateway, in all three shapes `model_post_init` can build.
         ("https://api.mindshub.ai/v1", ENDPOINT_MINDSHUB),
         ("https://mdb.ai/api/v1", ENDPOINT_MINDSHUB),
@@ -62,6 +66,13 @@ def _settings(provider: str, base_url: str = "") -> SimpleNamespace:
         ("https://openrouter.ai/api/v1", ENDPOINT_THIRD_PARTY),
         ("https://api.openai.com/v1", ENDPOINT_THIRD_PARTY),
         ("https://acme-corp.databricks.com/serving-endpoints", ENDPOINT_THIRD_PARTY),
+        # IPv6 forms that reach a public IPv4 host: IPv4-mapped, 6to4 (which
+        # Python calls non-global from 3.11.10 and 3.12.4 on) and Teredo,
+        # which travels through a relay on the internet.
+        ("http://[::ffff:8.8.8.8]:8000/v1", ENDPOINT_THIRD_PARTY),
+        ("http://[::ffff:34.120.10.20]:8000/v1", ENDPOINT_THIRD_PARTY),
+        ("http://[2002:2278:a14::1]:8000/v1", ENDPOINT_THIRD_PARTY),
+        ("http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]:8000/v1", ENDPOINT_THIRD_PARTY),
         # Nothing configured still reaches a third party: the OpenAI SDK
         # defaults to api.openai.com, so `third-party` is the true answer
         # here rather than a fallback.
