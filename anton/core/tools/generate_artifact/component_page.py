@@ -60,7 +60,9 @@ script tags, fetch, storage, backend, eval, new Function or extra library setup.
 
 The page must answer the user's actual question. Quantify all requested measures at their
 requested scope and show exact values in labels, a table or details as well as tooltips.
-Keep visible text in the user's language. Do not invent currency or translate source identifiers.
+Keep all visible text — including displayed status labels and short annotations when source
+values are in another language — in the user's language. Do not invent currency or translate
+source identifiers.
 """
 
 _COWORK_SECTION_TYPES = frozenset({"chart", "table", "map", "globe", "timeline", "text"})

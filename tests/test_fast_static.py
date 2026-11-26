@@ -302,18 +302,27 @@ def test_a_runtime_page_is_sized_by_its_program(tmp_path):
 
 
 async def test_discovery_gets_the_general_analysis_rules(tmp_path, monkeypatch):
+    from anton.core.tools.generate_artifact import component_page
     from anton.core.tools.generate_artifact.discovery import engine
     state = GenState(session=SimpleNamespace(history=[]), artifact_type="html-app", artifact_path=tmp_path,
                      slug="r", act_first=True)
 
     async def gather(received):
-        assert "check which values in the data belong to it" in received.pipeline_system
-        assert "compared against" in received.pipeline_system
+        sys_prompt = received.pipeline_system
+        assert "check which values in the data belong to it" in sys_prompt
+        assert "compared against" in sys_prompt
+        assert "filter `col < '2026-11-02'`" in sys_prompt
+        assert "day before that next period's start" in sys_prompt
+        assert "retrieve every page of paginated endpoints" in sys_prompt
+        assert "unrequested date cut" in sys_prompt
+        assert "last week-start + 6 days" not in sys_prompt
         received.gathering_complete = True
         received.final_artifact_type = "html-app"
 
     monkeypatch.setattr(engine, "run_gathering_loop", gather)
     assert await fast_static.prepare(state)
+    assert "displayed status labels and short annotations" in component_page.SYSTEM
+    assert "Do not invent currency or translate\nsource identifiers" in component_page.SYSTEM
 
 
 @pytest.mark.parametrize("known_data, prepared", [
