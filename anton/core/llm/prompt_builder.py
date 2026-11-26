@@ -290,7 +290,7 @@ class ChatSystemPromptBuilder:
 
         tool_prompts = self._build_tool_prompts_section(tool_defs)
         if tool_prompts:
-            prompt += tool_prompts
+            prompt += "\n\n" + tool_prompts
 
         # Static note (cache-stable): the current time is no longer in the
         # system prompt — each message carries its send time as a bracketed

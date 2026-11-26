@@ -209,7 +209,9 @@ def _secret_of(length: int) -> str:
     (33, "'x' * 9967 + ' ' + secret"),
     (101, "(' ' + secret + chr(10)) * 130 + 'x' * 655 + ' ' + secret + 'y' * 100"),
     (6000, "'x' * 9095 + ' ' + secret + 'y' * 100"),
-], ids=["at-the-output-limit", "at-the-worker-cut-after-text-the-scrub-shrinks", "longer-than-the-margin"])
+    (6000, "'x' * 20000 + ' ' + secret + chr(10) + ('y' + chr(10)) * 1547"),
+], ids=["at-the-output-limit", "at-the-worker-cut-after-text-the-scrub-shrinks", "longer-than-the-margin",
+        "at-the-start-of-the-kept-end"])
 async def test_a_saved_secret_cut_by_the_output_limit_is_still_redacted(tmp_path, length, printed):
     """Long output is cut to its limit; a saved secret across a cut must not
     lose its tail and with it the exact match that redacts it."""
@@ -219,6 +221,18 @@ async def test_a_saved_secret_cut_by_the_output_limit_is_still_redacted(tmp_path
     assert "chars total)" in cell.stdout
     # The cut output plus the truncation note, which points at read_text_file.
     assert len(cell.stdout) < 10_300
+    for start in range(len(secret) - 7):
+        assert secret[start : start + 8] not in cell.stdout
+
+
+async def test_the_kept_end_shows_its_safe_text_but_not_a_secret_at_its_edge(tmp_path):
+    secret = _secret_of(6000)
+    cell = await _print_saved_secret(
+        tmp_path, secret, "'x' * 20000 + ' ' + secret + chr(10) + ('y' + chr(10)) * 1547",
+    )
+
+    tail = cell.stdout.split("characters of the output follow.")[1]
+    assert "y\n" * 1500 in tail
     for start in range(len(secret) - 7):
         assert secret[start : start + 8] not in cell.stdout
 
@@ -253,19 +267,23 @@ async def test_a_long_saved_value_that_is_not_secret_does_not_withhold_output(tm
 
 
 async def test_short_and_cut_output_both_read_as_printed():
-    """Output under the limit comes back as printed; output over it is cut
-    with a note giving the full length."""
+    """Output under the limit comes back as printed; output over it keeps its
+    start and its end, with a note giving the full length."""
     pad = LocalScratchpadRuntime(name="uncut-field-cell", **_DEFAULTS)
     await pad.start()
     try:
         short = await pad.execute("print('short')\n")
         long = await pad.execute("print('x' * 12000)\n")
+        longer = await pad.execute("print('start\\n' + 'x\\n' * 30000 + 'FAILED test_end')\n")
     finally:
         await pad.close()
 
     assert short.stdout == "short\n"
-    assert long.stdout.startswith("x" * 10_000)
+    assert long.stdout.startswith("x" * 6_000)
     assert "(truncated, 12001 chars total)" in long.stdout
+    assert long.stdout.endswith("\n" + "x" * 3_999 + "\n")
+    assert longer.stdout.startswith("start\n")
+    assert longer.stdout.rstrip().endswith("FAILED test_end")
 
 
 def test_cells_replayed_from_stored_history_are_scrubbed():

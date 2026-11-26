@@ -1219,3 +1219,65 @@ async def test_cli_closed_choice_can_still_be_cancelled(cli_elicitor, monkeypatc
     prompt = AsyncMock(side_effect=["nope", ""])
     monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", prompt)
     assert (await cli_elicitor.ask("q1", _choice(allow_custom=False))).status == "cancelled"
+
+
+# ─── act first: whether to ask, and the default ───────────────────────────
+
+
+def _ask_user_def(session):
+    return next(t for t in session.tool_registry.dump() if t["name"] == "ask_user")
+
+
+def test_act_first_tells_the_card_that_whether_to_ask_is_not_its_call(make_session):
+    from anton.core.tools.tool_defs import ASK_USER_ACT_FIRST_DESCRIPTION
+
+    session = make_session(elicitor=_RecordingElicitor(), act_first=True)
+    session._build_tools()
+    description = _ask_user_def(session)["description"]
+    assert ASK_USER_ACT_FIRST_DESCRIPTION in description
+    assert description.endswith("hint")  # the host's answer hint still comes last
+
+
+def test_ask_first_keeps_the_card_exactly_as_it_was(make_session):
+    session = make_session(elicitor=_RecordingElicitor(), act_first=False)
+    session._build_tools()
+    assert _ask_user_def(session)["description"] == ASK_USER_TOOL.description + "\n\nhint"
+
+
+async def test_act_first_puts_the_whether_rule_and_the_default_in_the_prompt(make_session):
+    from anton.core.tools.tool_defs import ASK_USER_ACT_FIRST_PROMPT
+
+    on = make_session(elicitor=_RecordingElicitor(), act_first=True)
+    on._build_tools()
+    prompt = await on._build_system_prompt("my laptop is slow, fix it")
+    assert ASK_USER_ACT_FIRST_PROMPT in prompt
+    assert ASK_USER_TOOL.prompt in prompt  # how to ask is unchanged
+    assert prompt.index(ASK_USER_ACT_FIRST_PROMPT) < prompt.index(ASK_USER_TOOL.prompt)
+
+    off = make_session(elicitor=_RecordingElicitor(), act_first=False)
+    off._build_tools()
+    off_prompt = await off._build_system_prompt("my laptop is slow, fix it")
+    assert ASK_USER_ACT_FIRST_PROMPT not in off_prompt
+    assert ASK_USER_TOOL.prompt in off_prompt
+
+
+def test_ask_user_tool_never_mutates_the_singleton():
+    from anton.core.tools.tool_defs import ask_user_tool
+
+    pristine = (ASK_USER_TOOL.description, ASK_USER_TOOL.prompt)
+    ask_user_tool(True)
+    assert (ASK_USER_TOOL.description, ASK_USER_TOOL.prompt) == pristine
+    assert ask_user_tool(False) is ASK_USER_TOOL
+
+
+def test_act_first_discipline_covers_a_missing_detail_and_the_default():
+    from anton.core.llm.prompts import (
+        CONVERSATION_DISCIPLINE_ACT_FIRST,
+        CONVERSATION_DISCIPLINE_ASK_FIRST,
+    )
+
+    assert "A MISSING DETAIL IS NOT A REASON TO ASK FIRST" in CONVERSATION_DISCIPLINE_ACT_FIRST
+    assert "as text or shown as" in CONVERSATION_DISCIPLINE_ACT_FIRST.replace("whether written ", "")
+    assert "what you would do by default" in CONVERSATION_DISCIPLINE_ACT_FIRST
+    for rule in ("MISSING DETAIL", "by default"):
+        assert rule not in CONVERSATION_DISCIPLINE_ASK_FIRST

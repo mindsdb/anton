@@ -6,6 +6,10 @@
 whether the artifact still works. `router` and `quick` are the artifact
 viewer's quick-edit bar (ENG-4227): route a message, then edit directly;
 `reply` answers small talk and questions about the artifact in the bar (ENG-4455).
+
+Word, Excel and PowerPoint documents are edited by the same loop, through
+their XML parts (ENG-4687); `OOXML_EDITS` says so to a host that checks for
+it without calling anything.
 """
 
 from anton.core.artifact_editor.checkers import CheckResult, Checker, Finding, select_checker
@@ -27,7 +31,13 @@ from anton.core.artifact_editor.workspace import (
     WorkspaceError,
 )
 
+# This anton's quick editor can edit .docx, .xlsx and .pptx artifacts (their
+# XML parts, repacked on save). A host such as cowork-server reads the flag to
+# decide whether to offer quick edits on a document; PDFs are never edited.
+OOXML_EDITS = True
+
 __all__ = [
+    "OOXML_EDITS",
     "ArtifactEditor",
     "ArtifactWorkspace",
     "CheckResult",

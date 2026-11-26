@@ -53,10 +53,8 @@ def _provider(
     client_class = getattr(sdk, client_name)
 
     def client(**kwargs: object):
-        return client_class(
-            **kwargs, max_retries=0,
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-        )
+        kwargs["http_client"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return client_class(**kwargs, max_retries=0)
 
     monkeypatch.setattr(sdk, client_name, client)
     if lane == "anthropic":
