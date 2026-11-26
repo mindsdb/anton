@@ -1286,12 +1286,6 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env.pop(CLASSIFY_ENV, None)
         else:
             env[CLASSIFY_ENV] = "off"
-        # A saved http:// MindsHub URL reaches the pad over https, as
-        # AntonSettings loads it. Code in the pad reads these names as they
-        # stand, so without this it would send the key in clear.
-        for name in ("ANTON_MINDS_URL", "ANTON_OPENAI_BASE_URL", "OPENAI_BASE_URL"):
-            if env.get(name):
-                env[name] = mindshub_url_over_https(url=env[name])
         # Propagate provider credentials from the ANTON_* names into the SDK
         # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
@@ -1351,6 +1345,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             if base_url:
                 env["OPENAI_BASE_URL"] = base_url
                 env["ANTON_OPENAI_BASE_URL"] = base_url
+        # An http:// MindsHub URL reaches the pad over https, as AntonSettings
+        # loads it, whether it came from the environment or the runtime's own
+        # coding_base_url. Code in the pad reads these names as they stand, so
+        # this runs after their last write.
+        for name in ("ANTON_MINDS_URL", "ANTON_OPENAI_BASE_URL", "OPENAI_BASE_URL"):
+            if env.get(name):
+                env[name] = mindshub_url_over_https(url=env[name])
         uv = self._uv()
         if uv:
             env["ANTON_UV_PATH"] = uv
