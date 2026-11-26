@@ -540,7 +540,7 @@ class GenState:
 
             self._pipeline_tools = pipeline_tool_schemas(
                 self.buildable_types, internet_research=self.internet_research,
-                classify=self.classify,
+                classify=self.classify, web_search=self.web_search,
             )
         return self._pipeline_tools
 
@@ -556,6 +556,11 @@ class GenState:
     def classify(self) -> bool:
         """False when the session's scratchpad has no classify() to offer."""
         return getattr(self.session, "_classify_enabled", True) is not False
+
+    @property
+    def web_search(self) -> bool:
+        """False when the session's scratchpad has no web_search() to offer."""
+        return getattr(self.session, "_scratchpad_web_search_enabled", True) is not False
 
     @property
     def buildable_types(self) -> tuple[str, ...]:

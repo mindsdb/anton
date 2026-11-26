@@ -27,6 +27,9 @@ INTERNET_RESEARCH_ENV = "ANTON_SCRATCHPAD_INTERNET_RESEARCH"
 # "off" when the session does not label texts with Jev: the pad's classify()
 # and classify_yes_no() then raise instead of calling it.
 CLASSIFY_ENV = "ANTON_SCRATCHPAD_CLASSIFY"
+# "off" when the organization has zero data retention: the pad's web_search()
+# then raises. Other internet access from the pad stays allowed.
+WEB_SEARCH_ENV = "ANTON_SCRATCHPAD_WEB_SEARCH"
 # The image model the pad's generate_image() asks for (ENG-4024). Unset: the
 # pad resolves it itself, from ANTON_IMAGE_MODEL or the MindsHub catalogue.
 IMAGE_MODEL_ENV = "ANTON_SCRATCHPAD_IMAGE_MODEL"

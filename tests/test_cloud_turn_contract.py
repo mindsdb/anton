@@ -327,6 +327,23 @@ def test_jev_classify_turns_off_on_anything_else(value):
     assert _classify_request(value).jev_classify is False
 
 
+def _web_search_request(value):
+    body = {"protocol_version": 1, "conversation_id": "c", "input": "hi"}
+    if value is not ...:
+        body["web_search"] = value
+    return TurnRequestV1.from_json(json.dumps(body))
+
+
+@pytest.mark.parametrize("value", [..., True])
+def test_web_search_stays_on_when_missing_or_true(value):
+    assert _web_search_request(value).web_search is True
+
+
+@pytest.mark.parametrize("value", [False, None, 0, "true", {"on": True}])
+def test_web_search_turns_off_on_anything_else(value):
+    assert _web_search_request(value).web_search is False
+
+
 def _limits_request(value):
     body = {"protocol_version": 1, "conversation_id": "conv-7", "input": "q"}
     if value is not ...:

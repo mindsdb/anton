@@ -173,9 +173,12 @@ NO_CLASSIFY_SCRATCHPAD_TOOL = _without_classify(SCRATCHPAD_TOOL)
 NO_INTERNET_NO_CLASSIFY_SCRATCHPAD_TOOL = _without_classify(NO_INTERNET_SCRATCHPAD_TOOL)
 
 
-def scratchpad_tool(*, internet_research: bool = True, classify: bool = True) -> ToolDef:
-    """The scratchpad tool for a session with or without internet research and classify()."""
-    if internet_research:
+def scratchpad_tool(
+    *, internet_research: bool = True, classify: bool = True, web_search: bool = True
+) -> ToolDef:
+    """The scratchpad tool for a session with or without internet research, classify() and web_search()."""
+    # The no-internet description differs only in leaving out web_search().
+    if internet_research and web_search:
         return SCRATCHPAD_TOOL if classify else NO_CLASSIFY_SCRATCHPAD_TOOL
     return NO_INTERNET_SCRATCHPAD_TOOL if classify else NO_INTERNET_NO_CLASSIFY_SCRATCHPAD_TOOL
 

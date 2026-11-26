@@ -2359,6 +2359,7 @@ class ChatSession:
             getattr(s, "classify_jev", "on") == "on"
             and classify_base_url(coding_conn.base_url or "") == ENDPOINT_MINDSHUB
         )
+        self._scratchpad_web_search_enabled = getattr(s, "scratchpad_web_search", "on") == "on"
         self._scratchpads = ScratchpadManager(
             runtime_factory=config.runtime_factory,
             coding_provider=coding_conn.provider,
@@ -2375,6 +2376,7 @@ class ChatSession:
             cell_sandbox=config.cell_sandbox,
             internet_research_enabled=config.internet_research_enabled,
             classify_enabled=self._classify_enabled,
+            scratchpad_web_search_enabled=self._scratchpad_web_search_enabled,
             image_model=_named_model(getattr(self._llm, "image_model", None)),
         )
         # Sandboxed without live apps, nothing starts an app backend, so the
@@ -3354,6 +3356,7 @@ class ChatSession:
             fullstack_offered=getattr(self, "_fullstack_offered", True),
             internet_research=getattr(self, "_internet_research_enabled", True),
             classify=getattr(self, "_classify_enabled", True),
+            web_search=getattr(self, "_scratchpad_web_search_enabled", True),
             reading_files_offered=self._reading_files_offered(),
             direct_reports=self._direct_reports_enabled(),
             proactive_dashboards=self._proactive_dashboards,
@@ -3528,6 +3531,7 @@ class ChatSession:
         scratchpad_tool = replace(_scratchpad_tool_def(
             internet_research=getattr(self, "_internet_research_enabled", True),
             classify=getattr(self, "_classify_enabled", True),
+            web_search=getattr(self, "_scratchpad_web_search_enabled", True),
         ))
         pkg_list = self._scratchpads.available_packages
         if pkg_list:

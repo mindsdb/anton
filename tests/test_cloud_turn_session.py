@@ -362,6 +362,15 @@ def test_jev_classify_sets_the_scratchpad_classify(tmp_path, monkeypatch, jev_cl
     assert cfg.settings.classify_jev == classify_jev
 
 
+@pytest.mark.parametrize(("web_search", "scratchpad_web_search"), [(False, "off"), (True, "on")])
+def test_web_search_sets_the_scratchpad_web_search(tmp_path, monkeypatch, web_search, scratchpad_web_search):
+    monkeypatch.delenv("ANTON_SCRATCHPAD_WEB_SEARCH", raising=False)
+    _, cfg = _build(tmp_path, monkeypatch, web_search=web_search)
+    assert cfg.settings.scratchpad_web_search == scratchpad_web_search
+    # The pod's native web tools stay as they were; only the scratchpad helper follows the flag.
+    assert cfg.web_search_enabled is False
+
+
 @pytest.mark.parametrize("ui_locale", ["es", None])
 def test_ui_locale_reaches_the_session(tmp_path, monkeypatch, ui_locale):
     """ENG-4149: the request's UI language is the session's."""

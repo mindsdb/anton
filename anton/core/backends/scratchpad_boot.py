@@ -24,6 +24,7 @@ from anton.core.backends.wire import (
     RESULT_END,
     USAGE_MARKER,
     USAGE_MARKER_ENV,
+    WEB_SEARCH_ENV,
     cell_stopped_at,
     heal_surrogate_source,
 )
@@ -922,6 +923,13 @@ if _scratchpad_model:
                 "unavailable. Answer from the connected data sources and the user's files."
             )
 
+        def _web_search_zdr_off(query, *, max_tokens=4096):
+            """Raise: zero data retention drops the model's native web search."""
+            raise RuntimeError(
+                "Web search is off because your organization has zero data retention, "
+                "so web_search() is unavailable."
+            )
+
         def _send_image_event(record):
             with _wire_lock:
                 _real_stdout.write(IMAGE_MARKER + " " + json.dumps(record) + "\n")
@@ -1081,10 +1089,13 @@ if _scratchpad_model:
         _inject_helper("agentic_loop", agentic_loop)
         _inject_helper("generate_image", generate_image)
         # A stub rather than no name: a NameError would read as a missing package.
-        _inject_helper(
-            "web_search",
-            _web_search_off if os.environ.get(INTERNET_RESEARCH_ENV) == "off" else web_search,
-        )
+        if os.environ.get(INTERNET_RESEARCH_ENV) == "off":
+            _web_search_helper = _web_search_off
+        elif os.environ.get(WEB_SEARCH_ENV) == "off":
+            _web_search_helper = _web_search_zdr_off
+        else:
+            _web_search_helper = web_search
+        _inject_helper("web_search", _web_search_helper)
 
         from anton.core.llm import jev as _jev
         from anton.core.llm.endpoints import ENDPOINT_MINDSHUB, classify_base_url

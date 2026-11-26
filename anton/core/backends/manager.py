@@ -85,6 +85,7 @@ class ScratchpadManager:
         coding_flavor: str | None = None,
         internet_research_enabled: bool = True,
         classify_enabled: bool = True,
+        scratchpad_web_search_enabled: bool = True,
         image_model: str | None = None,
     ) -> None:
         self._pads: dict[str, ScratchpadRuntime] = {}
@@ -142,6 +143,10 @@ class ScratchpadManager:
             )
         self._classify_enabled = classify_enabled
         self._factory_takes_classify = self._probe_factory_kwarg(runtime_factory, "classify_enabled")
+        self._scratchpad_web_search_enabled = scratchpad_web_search_enabled
+        self._factory_takes_web_search = self._probe_factory_kwarg(
+            runtime_factory, "scratchpad_web_search_enabled"
+        )
         # Unlike the kwargs above, a policy is never dropped: a factory that
         # cannot take it would run agent code unlocked. It must name the
         # parameter, since a bare **kwargs can swallow it, and get_or_create
@@ -393,6 +398,11 @@ class ScratchpadManager:
                 **(
                     {"classify_enabled": False}
                     if not self._classify_enabled and self._factory_takes_classify
+                    else {}
+                ),
+                **(
+                    {"scratchpad_web_search_enabled": False}
+                    if not self._scratchpad_web_search_enabled and self._factory_takes_web_search
                     else {}
                 ),
                 **(

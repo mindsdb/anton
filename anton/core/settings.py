@@ -66,6 +66,9 @@ class CoreSettings(BaseSettings):
     # "off": the scratchpad's classify() and classify_yes_no() are not offered,
     # and the prompt leaves them out. They also need the coding model on MindsHub.
     classify_jev: Literal["on", "off"] = "on"
+    # "off": the scratchpad's web_search() is not offered (zero data retention drops
+    # native web search), and the prompt leaves it out.
+    scratchpad_web_search: Literal["on", "off"] = "on"
     verifier_jev_timeout_s: float = 2.0
     # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
     verifier_jev_min_p: float = 0.8

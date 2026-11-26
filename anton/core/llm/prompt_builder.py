@@ -21,6 +21,8 @@ from .prompts import (
     NO_CLASSIFY_CHAT_SYSTEM_PROMPT,
     NO_INTERNET_CHAT_SYSTEM_PROMPT,
     NO_INTERNET_NO_CLASSIFY_CHAT_SYSTEM_PROMPT,
+    NO_WEB_SEARCH_CHAT_SYSTEM_PROMPT,
+    NO_WEB_SEARCH_NO_CLASSIFY_CHAT_SYSTEM_PROMPT,
     STATIC_ARTIFACTS_PROMPT,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
@@ -199,6 +201,7 @@ class ChatSystemPromptBuilder:
         direct_reports: bool = True,
         internet_research: bool = True,
         classify: bool = True,
+        web_search: bool = True,
         reading_files_offered: bool = True,
         ui_locale_context: str = "",
     ) -> str:
@@ -209,7 +212,8 @@ class ChatSystemPromptBuilder:
         (`ChatSessionConfig.internet_research_enabled`) swaps the internet
         guidance for "use the connected data only" and leaves out the
         public-data-sources skill's line. ``classify`` False leaves out the
-        scratchpad's classify() and classify_yes_no(). ``ui_locale_context`` is
+        scratchpad's classify() and classify_yes_no(). ``web_search`` False
+        (zero data retention) leaves out the scratchpad's web_search(). ``ui_locale_context`` is
         the language line (`anton.core.llm.ui_locale.ui_locale_line`); empty
         adds nothing."""
         direct_generation = any(getattr(tool, "name", "") == "generate_artifact"
@@ -257,8 +261,11 @@ class ChatSystemPromptBuilder:
             configured_block=system_prompt_context.runtime_context,
             product_block=list(product_lines) if product_lines else None,
         )
-        if internet_research:
+        if internet_research and web_search:
             chat_prompt = CHAT_SYSTEM_PROMPT if classify else NO_CLASSIFY_CHAT_SYSTEM_PROMPT
+        elif internet_research:
+            chat_prompt = (NO_WEB_SEARCH_CHAT_SYSTEM_PROMPT if classify
+                           else NO_WEB_SEARCH_NO_CLASSIFY_CHAT_SYSTEM_PROMPT)
         else:
             chat_prompt = (NO_INTERNET_CHAT_SYSTEM_PROMPT if classify
                            else NO_INTERNET_NO_CLASSIFY_CHAT_SYSTEM_PROMPT)

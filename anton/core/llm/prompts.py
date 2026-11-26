@@ -776,7 +776,14 @@ def without_classify(prompt: str) -> str:
     return cut_spans(prompt, ("  - classify(texts, categories", "- All .anton/.env", ""))
 
 
+def without_web_search(prompt: str) -> str:
+    """``prompt`` without the scratchpad's web_search(), for zero data retention."""
+    return cut_spans(prompt, ("- web_search(query) answers", "- classify(texts, categories", ""))
+
+
 NO_CLASSIFY_CHAT_SYSTEM_PROMPT = without_classify(CHAT_SYSTEM_PROMPT)
+NO_WEB_SEARCH_CHAT_SYSTEM_PROMPT = without_web_search(CHAT_SYSTEM_PROMPT)
+NO_WEB_SEARCH_NO_CLASSIFY_CHAT_SYSTEM_PROMPT = without_classify(NO_WEB_SEARCH_CHAT_SYSTEM_PROMPT)
 NO_INTERNET_NO_CLASSIFY_CHAT_SYSTEM_PROMPT = without_classify(NO_INTERNET_CHAT_SYSTEM_PROMPT)
 
 NO_INTERNET_RESILIENCE_NUDGE = cut_spans(

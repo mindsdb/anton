@@ -34,7 +34,9 @@ from pydantic import BaseModel, TypeAdapter
 
 from anton.core.backends.local import LocalScratchpadRuntime, local_scratchpad_runtime_factory
 from anton.core.backends.manager import ScratchpadManager
-from anton.core.backends.wire import CELL_DELIM, CLASSIFY_ENV, INTERNET_RESEARCH_ENV, RESULT_START
+from anton.core.backends.wire import (
+    CELL_DELIM, CLASSIFY_ENV, INTERNET_RESEARCH_ENV, RESULT_START, WEB_SEARCH_ENV,
+)
 from anton.core.llm.openai import OpenAIProvider
 from anton.core.llm.tracing import TraceContext, reset_trace_context, set_trace_context
 
@@ -775,6 +777,20 @@ def test_web_search_raises_without_a_model_call_when_internet_research_is_off(tm
     assert len(server.seen) == 1
 
 
+def test_web_search_raises_without_a_model_call_under_zero_data_retention(tmp_path):
+    with _serving() as server:
+        web, ask = _run_cells(
+            [_WEB_SEARCH_CELL, _ASK_CELL],
+            tmp_path,
+            base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            extra_env={WEB_SEARCH_ENV: "off"},
+        )
+
+    assert web.error is not None and "zero data retention" in web.error
+    assert ask.error is None, ask.error
+    assert len(server.seen) == 1
+
+
 
 # Jev lives on the MindsHub gateway only. Elsewhere classify() raises with the
 # fallback in its message, and sends nothing.
@@ -848,3 +864,27 @@ async def test_the_session_flag_decides_web_search_whatever_the_pad_inherits(tmp
     else:
         assert cell.error is not None and "Internet research is turned off" in cell.error
         assert server.seen == []
+
+
+@pytest.mark.slow
+async def test_the_session_flag_turns_off_web_search_under_zero_data_retention(tmp_path, monkeypatch):
+    """Through the manager and the real local runtime; an inherited value doesn't turn it back on."""
+    monkeypatch.setenv(WEB_SEARCH_ENV, "on")
+    with _serving() as server:
+        manager = ScratchpadManager(
+            runtime_factory=local_scratchpad_runtime_factory,
+            coding_provider="openai",
+            coding_model="stub-model",
+            coding_api_key="test-key",
+            coding_base_url=f"http://127.0.0.1:{server.server_port}/v1",
+            workspace_path=tmp_path,
+            scratchpad_web_search_enabled=False,
+        )
+        try:
+            pad = await manager.get_or_create("research")
+            cell = await pad.execute(_WEB_SEARCH_CELL)
+        finally:
+            await manager.close_all()
+
+    assert cell.error is not None and "zero data retention" in cell.error
+    assert server.seen == []
