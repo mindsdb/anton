@@ -338,6 +338,9 @@ def test_single_valued_cases_still_demand_that_exact_verdict():
         # And the shadow-replay finding: a failed attempt followed by asking
         # the user is WAITING. INCOMPLETE here IS ENG-716's incident.
         "asks_user_after_one_failed_attempt": "WAITING",
+        # STUCK here IS the incident: a correct "not recorded" answer handed back.
+        "searched_several_sources_value_not_recorded": "COMPLETE",
+        "searched_several_sources_then_asks_for_one": "WAITING",
     }
     assert set(single) | {"implied_success_data_never_arrived", "disclaimered_fabrication"} == set(by_name), (
         "a new case was added without deciding here whether it is single-valued"

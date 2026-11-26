@@ -1117,27 +1117,34 @@ _VERIFIER_NO_PREAMBLE = (
 # into a redundant continuation that re-streamed the whole answer (ENG-1134).
 # The hallucinated-success safeguard is preserved: implying success while the
 # data the answer relies on errored/came back empty is still INCOMPLETE.
+# "Failed" is defined before the STUCK sentence: read after it, correct "not in
+# the data" answers matched STUCK by their number of searches.
 _VERIFIER_JUDGMENT_RUBRIC = (
     "Which status applies? Judge the FINAL outcome, not every intermediate step. "
+    "First decide which attempts FAILED. An attempt failed only when its source "
+    "refused, errored, timed out, or denied access, or the tool it needed is "
+    "absent. A source that answered (document text, rows, a list of tables or "
+    "fields) but does not hold the value has not failed, and neither has a "
+    "guessed table, field, or endpoint name rejected as unknown or not found "
+    "(including a 400 or 404 saying it does not exist): that is a search that "
+    "found nothing, however many places were searched. A reply that says the "
+    "value is not recorded, without substituting a related figure, is COMPLETE, "
+    "or WAITING if it asks the user for a source that might hold it. "
     "An errored or empty tool result only makes the task INCOMPLETE or STUCK when "
     "the assistant's final answer depends on data that never arrived and was not "
     "recovered another way. A tool that failed but the assistant worked around — "
     "getting what it needed elsewhere, or the failed step being inessential — and "
     "then answered from is COMPLETE. An assistant whose two or more distinct "
-    "approaches all failed, or that found the needed tool absent, and said plainly "
-    "what it could not obtain — leaving those values marked unavailable rather "
-    "than guessing — is STUCK, not INCOMPLETE, even if the rest was delivered and "
-    "whatever it says it will try next; one failed attempt with an obvious "
-    "alternative untried is INCOMPLETE — unless the assistant asked the user for "
-    "the file, link, access, or decision it needs, which is WAITING even after one "
-    "attempt. Conversely, an assistant that implied success "
+    "attempts all failed in the sense above, or that found the needed tool absent, "
+    "and said plainly what it could not obtain — leaving those values marked "
+    "unavailable rather than guessing — is STUCK, not INCOMPLETE, even if the rest "
+    "was delivered and whatever it says it will try next; one failed attempt with "
+    "an obvious alternative untried is INCOMPLETE — unless the assistant asked the "
+    "user for the file, link, access, or decision it needs, which is WAITING even "
+    "after one attempt. Conversely, an assistant that implied success "
     "while the data its answer relies on errored or came back empty is INCOMPLETE, "
     "not COMPLETE — and supplying such values with a disclaimer that they are "
-    "indicative or unverified is still implying success, not honesty. A source "
-    "that returned its contents but does not record what was asked has not "
-    "failed, and neither has a guessed table or field name rejected as unknown: "
-    "a reply that says the value is not recorded, without substituting a "
-    "related figure, is COMPLETE, not STUCK."
+    "indicative or unverified is still implying success, not honesty."
 )
 
 # Opens the block that shows the model text the user added mid-turn (ENG-4194).
