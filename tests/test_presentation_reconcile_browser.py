@@ -57,6 +57,11 @@ def test_a_table_column_of_zeros_is_flagged_but_a_single_zero_cell_is_not():
       columns:[{key:'store',label:'Store'},{key:'refund',label:'Refunds',zeroReason:'No refunds were issued'}],
       rows:[{store:'North',refund:0},{store:'South',refund:0}]}]});""")
     assert errors == [] and "No refunds were issued" in text
+    errors, text = render("""await CoworkPage({title:'Sales',sections:[{type:'table',title:'By store',
+      zeroReason:'Baseline plan has no refunds or penalties',
+      columns:[{key:'store',label:'Store'},{key:'refund',label:'Refunds'},{key:'penalty',label:'Penalties'}],
+      rows:[{store:'North',refund:0,penalty:0},{store:'South',refund:0,penalty:0}]}]});""")
+    assert errors == [] and "Baseline plan has no refunds or penalties" in text
 
 
 def test_a_row_of_zeros_across_period_columns_is_flagged():
@@ -104,3 +109,33 @@ def test_a_figure_that_counts_total_rows_twice_is_flagged_with_the_correct_value
     assert 'including elements where category = "Total"' in errors[0] and "Counted once it is 705" in errors[0]
     errors, _ = render(program.replace("KEEP", "r=>r.category!=='Total'"), {"sales": rows})
     assert errors == []
+
+
+def test_double_count_check_does_not_false_positive_on_unrelated_measure_value():
+    # A separate record array holds a legitimate count (234) that numerically matches
+    # the double-counted sum of a different subtotaled measure (2 * 117 = 234).
+    data = {
+        "activity": [
+            {"week": "w1", "dept": "A", "cancellations": 70},
+            {"week": "w1", "dept": "B", "cancellations": 47},
+            {"week": "w1", "dept": "All", "cancellations": 117},
+            {"week": "w2", "dept": "A", "cancellations": 30},
+            {"week": "w2", "dept": "B", "cancellations": 20},
+            {"week": "w2", "dept": "All", "cancellations": 50},
+            {"week": "w3", "dept": "A", "cancellations": 15},
+            {"week": "w3", "dept": "B", "cancellations": 10},
+            {"week": "w3", "dept": "All", "cancellations": 25},
+        ],
+        "sites": [{"site": "Main", "beds": 234}],
+    }
+    program = """await CoworkPage({title:'Capacity',sections:[{type:'table',title:'Sites',
+      columns:[{key:'site',label:'Site'},{key:'beds',label:'Staffed beds'}],
+      rows:window.ARTIFACT_DATA.key.sites}]});"""
+    errors, _ = render(program, data)
+    assert errors == []
+    # Unrelated double-counted values (e.g. w1+w2+w3 total = 384) remain caught.
+    bad_program = """const rows=window.ARTIFACT_DATA.key.activity;
+    await CoworkPage({title:'Capacity',metrics:[{label:'Total cancellations',
+      value:rows.reduce((s,r)=>s+r.cancellations,0)}]});"""
+    errors, _ = render(bad_program, data)
+    assert len(errors) == 1 and "384" in errors[0] and "counts rows twice" in errors[0]

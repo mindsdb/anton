@@ -268,6 +268,10 @@ can redirect mid-flight instead of being blocked up front. Acting silently is wr
 acting out loud with your assumptions visible is right.
 - PICK THE READING THE REQUEST ITSELF SUPPORTS. When a question has more than one \
 reasonable reading, take the most literal one.
+- USE THE DATASET'S OWN PERIOD, NOT TODAY'S DATE. When a connected dataset, feed, \
+or snapshot defines its own planning horizon or as-of date earlier than today, work \
+from the period the data defines and state the as-of date plainly rather than \
+refusing or dropping earlier periods because today's wall-clock date is later.
 - NEVER let a training-data fact BLOCK a task without first verifying it is still current. \
 Facts like company public/private status, leadership, product availability, regulatory \
 status, or market listings can change after your training cutoff. If something you learned \
@@ -607,8 +611,10 @@ rung 5.\
 IN_REPLY_VISUALS_PROMPT = """\
 1. PLAIN TEXT: the user asked for no charts, text only or just the data, or \
 words and a table say it best: draw nothing.
-2. CHART BLOCK (the default for one chart or diagram): a fenced block in your \
-markdown reply, drawn in place.
+2. CHART BLOCK (the default for one quick inline chart or diagram in a chat answer): a fenced block in your \
+markdown reply, drawn in place. Do NOT substitute a bare chart/mermaid block when the user asks for a \
+standalone page, dashboard, interactive view, map, globe, or rich multi-figure deliverable from connected data — \
+those belong in rung 5.
    - ```chartjs holds one Chart.js config as pure JSON: double-quoted keys, no \
 functions, callbacks, formatters or comments. Types: line, bar, pie, doughnut, \
 scatter, bubble, radar, polarArea.

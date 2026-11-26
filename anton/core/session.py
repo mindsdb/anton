@@ -6558,11 +6558,16 @@ class ChatSession:
         # ENG-673: a mid-stream provider failure that had NO prior retry (an
         # overload smuggled into an HTTP-200 stream) gets budget-bounded
         # backoff-and-retry — separate from the instant, count-bounded recovery
-        # used for genuine errors. The clock starts on the first such error and
-        # is measured across the turn. Request-time transients (real 5xx/429,
-        # connection errors) carry session_backoff=False and skip this path.
-        _transient_deadline: float | None = None
+        # used for genuine errors. Accounted as TIME SLEPT (mirroring
+        # `_rate_limit_slept`) rather than a wall-clock deadline so long tool
+        # rounds or slow reasoning streams do not eat the retry budget, and
+        # reset on forward progress (`StreamComplete`) under a turn-wide cap.
+        # Request-time transients (real 5xx/429, connection errors) carry
+        # session_backoff=False and skip this path.
+        _transient_slept = 0.0
+        _transient_total_slept = 0.0
         _transient_attempt = 0
+        _max_turn_transient_slept = 180.0
         # ENG-1537: velocity rate-limits are budgeted separately from incidents
         # (see _rate_limit_budget_s) so neither starves the other in one turn.
         # Accounted as TIME SLEPT, not a wall-clock deadline: the cohort this
@@ -6641,6 +6646,8 @@ class ChatSession:
                     async for event in self._stream_and_handle_tools(user_msg_str):
                         if isinstance(event, StreamComplete):
                             _drop_retries = 0
+                            _transient_slept = 0.0
+                            _transient_attempt = 0
                         # The first model call after the drop sends the
                         # history without the dropped images; its completion
                         # shows they caused the refusal. Before the generator
@@ -6727,18 +6734,20 @@ class ChatSession:
                     # already retried them, so they fall through to the fast
                     # count-based path below with their honest typed message.
                     if isinstance(_agent_exc, TransientProviderError) and _agent_exc.session_backoff:
-                        now = asyncio.get_running_loop().time()
                         # ENG-1537: a velocity rate-limit runs on its own budget
-                        # and its own longer Retry-After cap. Everything else
-                        # keeps the ENG-673 incident budget unchanged.
+                        # and its own longer Retry-After cap. Incident retries
+                        # keep the 30s per-incident budget and 30s clamp, but
+                        # account time slept (like rate-limits) under a 180s
+                        # turn-wide cap so healthy tool rounds do not burn it.
                         _rate_limited = _agent_exc.code == "rate_limited"
                         if _rate_limited:
                             remaining_budget = self._rate_limit_budget_s - _rate_limit_slept
                             max_delay = self._rate_limit_max_delay_s
                         else:
-                            if _transient_deadline is None:
-                                _transient_deadline = now + self._transient_budget_s
-                            remaining_budget = _transient_deadline - now
+                            remaining_budget = min(
+                                self._transient_budget_s - _transient_slept,
+                                _max_turn_transient_slept - _transient_total_slept,
+                            )
                             max_delay = 30.0
                         self._seal_dangling_tool_uses("interrupted by a transient provider error")
                         # A hint longer than we are willing to sleep: card NOW
@@ -6773,10 +6782,11 @@ class ChatSession:
                             )
                             if _rate_limited:
                                 _rate_limit_attempt += 1
+                                _rate_limit_slept += delay
                             else:
                                 _transient_attempt += 1
-                            if _rate_limited:
-                                _rate_limit_slept += delay
+                                _transient_slept += delay
+                                _transient_total_slept += delay
                             # Tell the user WHY the turn is quiet. A silent
                             # 90s pause is indistinguishable from a hang, and
                             # that is how a correct wait gets reported as a

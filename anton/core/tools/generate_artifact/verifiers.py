@@ -568,6 +568,96 @@ def verify_frontend(
     return VerifyResult(errors=errors, warnings=warnings)
 
 
+_INLINE_SCRIPT_BLOCK = re.compile(
+    r"<script\b(?P<attrs>[^>]*)>(?P<body>.*?)</script\b[^>]*>", re.I | re.S
+)
+_SCRIPT_TYPE_ATTR = re.compile(
+    r"""(?<![\w-])type\s*=\s*(?:['"](?P<quoted>[^'"]*)['"]|(?P<bare>[^\s'"<>]+))""", re.I
+)
+_NON_JS_SCRIPT_TYPES = frozenset({
+    "application/json",
+    "application/ld+json",
+    "importmap",
+    "speculationrules",
+    "text/template",
+    "text/x-template",
+    "text/html",
+})
+
+
+def check_inline_js_syntax(html: str, *, timeout_s: float = 3.0) -> list[str]:
+    """Syntax-check executable inline ``<script>`` blocks using ``node --check``.
+
+    Returns a list of concise syntax error messages (empty when all inline JS
+    parses cleanly, or when ``node`` is not installed on PATH). Runs outside
+    ``verify_frontend`` so ``verify_frontend`` remains pure and I/O-free.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if not node or "<script" not in html.lower():
+        return []
+    errors: list[str] = []
+    for idx, match in enumerate(_INLINE_SCRIPT_BLOCK.finditer(html)):
+        attrs = match.group("attrs") or ""
+        if _SRC_ATTR.search(attrs):
+            continue
+        type_match = _SCRIPT_TYPE_ATTR.search(attrs)
+        script_type = (
+            (type_match["quoted"] if type_match["quoted"] is not None else type_match["bare"])
+            .strip()
+            .lower()
+            if type_match
+            else ""
+        )
+        if script_type in _NON_JS_SCRIPT_TYPES:
+            continue
+        if script_type and script_type not in (
+            "text/javascript",
+            "application/javascript",
+            "module",
+        ):
+            continue
+        body = match.group("body") or ""
+        if not body.strip():
+            continue
+        suffix = ".mjs" if script_type == "module" else ".js"
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=suffix, encoding="utf-8", delete=False
+            ) as tf:
+                tf.write(body)
+                tmp_path = tf.name
+            proc = subprocess.run(
+                [node, "--check", tmp_path],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                check=False,
+            )
+            if proc.returncode != 0:
+                lines = [
+                    line.strip()
+                    for line in (proc.stderr or proc.stdout or "").splitlines()
+                    if line.strip() and not line.strip().startswith("Node.js ")
+                ]
+                detail = " | ".join(lines[-3:])[:260] if lines else "JavaScript syntax error"
+                errors.append(f"Inline <script> #{idx + 1} has a JavaScript syntax error: {detail}")
+                break
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+    return errors
+
+
 def verify_frontend_live(
     entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True, previous_html: str | None = None
 ) -> BrowserCheck:

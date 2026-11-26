@@ -45,8 +45,10 @@ sections are any of:
 
 The host reconciles shown figures with the data: a metric, lead value, table column, chart, map or
 timeline that shows only 0 or nothing is returned for repair, and so is a sum that counts a source's
-TOTAL ROWS beside their parts. When zero or empty is the true answer, give that metric, lead, table
-column or section zeroReason: a short reason in the user's language, shown only when it applies.
+TOTAL ROWS beside their parts. When zero or empty is the true answer — including a table column or
+baseline row that is legitimately all 0 in one control state (such as zero delays, cancellations,
+overtime or extra spend) — give that metric, lead, table column or table section zeroReason: a short
+reason in the user's language, shown only when it applies.
 
 Use normal JavaScript to select, join, group, sort and transform the complete bound data into
 these views. A filter's render callback must update the requested views consistently. For edits,

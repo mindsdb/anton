@@ -190,22 +190,36 @@ def _record_arrays(value, path, depth=0):
 def double_counts(data):
     """Sums that include total rows beside their parts, for the page to reject when shown."""
     found, legitimate = {}, set()
-    for key, value in data.items():
-        for path, rows in _record_arrays(value, "window.ARTIFACT_DATA[" + json.dumps(key) + "]"):
-            for marker in total_rows(rows):
-                scopes = [("", rows)] + [(f'{label} = {json.dumps(v, ensure_ascii=False)}', [r for r in rows if r.get(label) == v])
-                                         for label in marker["by"] for v in dict.fromkeys(r.get(label) for r in rows)]
-                for measure in marker["measures"]:
-                    legitimate.update(round(r[measure], 2) for r in rows if _number(r.get(measure)))
-                    for scope, subset in scopes:
-                        every = sum(r.get(measure) or 0 for r in subset)
-                        parts = sum(r.get(measure) or 0 for r in subset if r.get(marker["field"]) != marker["value"])
-                        legitimate.add(round(parts, 2))
-                        # Small sums match unrelated counts too often to reject.
-                        if abs(every) >= 10 and not _same(every, parts, len(subset)):
-                            found.setdefault(round(every, 2), {
-                                "value": every, "parts": parts, "measure": measure, "path": path, "scope": scope,
-                                "field": marker["field"], "marker": marker["value"]})
+    arrays = [
+        (path, rows)
+        for key, value in data.items()
+        for path, rows in _record_arrays(value, "window.ARTIFACT_DATA[" + json.dumps(key) + "]")
+    ]
+    markers_by_path = [(path, rows, total_rows(rows)) for path, rows in arrays]
+    total_measures = {m for _, _, markers in markers_by_path for mk in markers for m in mk["measures"]}
+    # Raw numeric values from non-subtotaled columns (e.g., staffed beds in a site
+    # summary) are legitimate figures that must not be misflagged if they happen to
+    # numerically match a double-counted sum of an unrelated measure.
+    for _, rows, _ in markers_by_path:
+        for r in rows:
+            for k, v in r.items():
+                if k not in total_measures and _number(v):
+                    legitimate.add(round(v, 2))
+    for path, rows, markers in markers_by_path:
+        for marker in markers:
+            scopes = [("", rows)] + [(f'{label} = {json.dumps(v, ensure_ascii=False)}', [r for r in rows if r.get(label) == v])
+                                     for label in marker["by"] for v in dict.fromkeys(r.get(label) for r in rows)]
+            for measure in marker["measures"]:
+                legitimate.update(round(r[measure], 2) for r in rows if _number(r.get(measure)))
+                for scope, subset in scopes:
+                    every = sum(r.get(measure) or 0 for r in subset)
+                    parts = sum(r.get(measure) or 0 for r in subset if r.get(marker["field"]) != marker["value"])
+                    legitimate.add(round(parts, 2))
+                    # Small sums match unrelated counts too often to reject.
+                    if abs(every) >= 10 and not _same(every, parts, len(subset)):
+                        found.setdefault(round(every, 2), {
+                            "value": every, "parts": parts, "measure": measure, "path": path, "scope": scope,
+                            "field": marker["field"], "marker": marker["value"]})
     return [item for value, item in found.items() if value not in legitimate][:MAX_DOUBLE_COUNTS]
 
 

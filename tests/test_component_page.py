@@ -156,3 +156,114 @@ async def test_component_pages_carry_the_figure_checks_and_html_pages_do_not(tmp
     assert ('id="cowork-figure-checks"' in page) is checked
     assert ("Figure check: " in page) is checked
     assert "zeroReason" in component_page.SYSTEM
+
+
+async def test_fast_static_catches_inline_js_syntax_error_and_repairs(tmp_path, monkeypatch):
+    import shutil
+
+    if not shutil.which("node"):
+        pytest.skip("node not available")
+    broken = (
+        '<!doctype html><html><head><meta name="viewport" content="width=device-width"></head>'
+        '<body><div id="app">ok</div><script>function broken(a, b { return a + b; }</script></body></html>'
+    )
+    fixed = (
+        '<!doctype html><html><head><meta name="viewport" content="width=device-width"></head>'
+        '<body><div id="app">ok</div><script>function fixed(a, b) { return a + b; }</script></body></html>'
+    )
+    replies = iter([broken, fixed])
+    seen = []
+
+    async def stream(**kwargs):
+        seen.append(kwargs["messages"])
+        yield StreamComplete(LLMResponse(content=next(replies)))
+
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(history=[], _llm=SimpleNamespace(code_stream=stream)),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
+    result = await fast_static.run(state)
+    assert result["status"] == "generated"
+    assert len(seen) == 2
+    assert "JavaScript syntax error" in seen[1][-1]["content"]
+
+
+def test_double_counts_excludes_raw_values_from_unrelated_columns():
+    from anton.core.tools.generate_artifact import observed_data
+
+    data = {
+        "key": {
+            "activity": [
+                {"week": "w1", "dept": "A", "cancellations": 70},
+                {"week": "w1", "dept": "B", "cancellations": 47},
+                {"week": "w1", "dept": "All", "cancellations": 117},
+                {"week": "w2", "dept": "A", "cancellations": 30},
+                {"week": "w2", "dept": "B", "cancellations": 20},
+                {"week": "w2", "dept": "All", "cancellations": 50},
+                {"week": "w3", "dept": "A", "cancellations": 15},
+                {"week": "w3", "dept": "B", "cancellations": 10},
+                {"week": "w3", "dept": "All", "cancellations": 25},
+            ],
+            "sites": [{"site": "Main", "beds": 234}],
+        }
+    }
+    doubled = observed_data.double_counts(data)
+    values = {round(item["value"]) for item in doubled}
+    # 234 matches a legitimate raw column value in `sites.beds` -> excluded
+    assert 234 not in values
+    # 384 (2 * (117+50+25)) is a genuine double-counted sum not present in other raw columns -> kept
+    assert 384 in values
+
+
+def test_presentation_reconcile_js_honors_section_zero_reason_on_columns():
+    import shutil
+    import subprocess
+
+    if not shutil.which("node"):
+        pytest.skip("node not available")
+    reconcile_js = (
+        component_page.HERE / "presentation_reconcile.js"
+    ).read_text(encoding="utf-8")
+    harness = r"""
+const errors = [];
+const origErr = console.error;
+console.error = (...args) => errors.push(args.join(' '));
+let drawn;
+global.window = {
+  ARTIFACT_DATA: { k: { rows: [{ a: 1 }] } },
+  CoworkNumber: v => String(v),
+  CoworkSelection: s => s,
+  CoworkPage: async cfg => { drawn = cfg; },
+};
+global.document = { getElementById: () => null };
+""" + reconcile_js + r"""
+(async () => {
+  await window.CoworkPage({
+    title: 'T',
+    sections: [{
+      type: 'table', title: 'S', zeroReason: 'Baseline has zero delays',
+      columns: [{ key: 'n', label: 'Name' }, { key: 'd', label: 'Delay' }],
+      rows: [{ n: 'A', d: 0 }, { n: 'B', d: 0 }],
+    }],
+  });
+  if (errors.length !== 0) { console.log('UNEXPECTED_ERRORS:' + JSON.stringify(errors)); process.exit(1); }
+  if (!String(drawn.sections[0].caption || '').includes('Baseline has zero delays')) {
+    console.log('MISSING_CAPTION:' + JSON.stringify(drawn.sections[0])); process.exit(2);
+  }
+  // Without any zeroReason, the all-zero column MUST still be flagged.
+  await window.CoworkPage({
+    title: 'T',
+    sections: [{
+      type: 'table', title: 'S',
+      columns: [{ key: 'n', label: 'Name' }, { key: 'd', label: 'Delay' }],
+      rows: [{ n: 'A', d: 0 }, { n: 'B', d: 0 }],
+    }],
+  });
+  if (errors.length !== 1 || !errors[0].includes('shows 0 in every row of column "Delay"')) {
+    console.log('EXPECTED_FLAG:' + JSON.stringify(errors)); process.exit(3);
+  }
+  console.log('OK');
+})();
+"""
+    proc = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=5)
+    assert proc.returncode == 0, f"stdout={proc.stdout} stderr={proc.stderr}"
+    assert "OK" in proc.stdout

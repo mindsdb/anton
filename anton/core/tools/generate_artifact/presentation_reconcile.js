@@ -77,7 +77,8 @@
           if (!values.length) continue;
           blocks.set(column.unit ?? '', [...blocks.get(column.unit ?? '') || [], column]);
           if (values.every(value => value === 0 || !Number.isFinite(value))) {
-            column.zeroReason ? reasons.push(column.zeroReason) : zeros.push(quote(column.label));
+            const colReason = column.zeroReason || section.zeroReason;
+            colReason ? reasons.push(colReason) : zeros.push(quote(column.label));
           }
         }
         if (zeros.length) zero(name + ' shows 0 in every row of column' + (zeros.length > 1 ? 's ' : ' ') + list(zeros), 'column');

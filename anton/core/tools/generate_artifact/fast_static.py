@@ -313,7 +313,8 @@ async def run(state):
         "id:'scope', read selection.scope or destructure render:({scope})=>({...}). Never "
         "compare the whole selection object to a string or use it as a source dictionary key. "
         "Unknown control keys and printing objects trigger a precise repair error."
-        "\nMap and globe sections also take legend:[{label,color}] for a visible color key; "
+        "\nMap and globe sections also take legend:[{label,color}] for a visible color key "
+        "(every legend entry must include both a string label and a valid CSS color matching its mark); "
         "point labels are placed so they don't overlap. Only when the user asks for motion: "
         "D3 maps take routeMotion:true and globes take autoRotate:true with an optional "
         "rotationSpeed between -4 and 4. Motion respects the reader's reduced-motion setting."
@@ -359,6 +360,10 @@ async def run(state):
             verifiers.verify_frontend, html, is_fullstack=False,
             geography=generated_requirement(state, state.artifact_path / primary),
         )
+        if verdict.ok:
+            js_errors = await asyncio.to_thread(verifiers.check_inline_js_syntax, html)
+            if js_errors:
+                verdict.errors.extend(js_errors)
         if not verdict.ok:
             state.record("fast_static_check", "failed", "; ".join(verdict.errors))
             messages += [{"role": "assistant", "content": response.content},
