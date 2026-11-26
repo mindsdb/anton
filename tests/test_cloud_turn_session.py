@@ -604,6 +604,11 @@ _DAY_ONE = _stdlib_datetime(2030, 1, 1, 23, 55)
 _DAY_TWO = _stdlib_datetime(2030, 1, 2, 0, 5)
 
 
+# Withheld by a pod turn that reports no surface: `generate_image` with no images
+# API (ENG-4024), `inspect_artifact` outside a Cowork surface (ENG-4684).
+_WITHHELD_WITHOUT_SURFACE = {"generate_image", "inspect_artifact"}
+
+
 def _real_cloud_session(tmp_path, monkeypatch, **req_overrides):
     """A REAL ChatSession off the cloud builder, not a captured config.
 
@@ -758,7 +763,7 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
     names = {t.name for t in session.tool_registry.get_tool_defs()}
     # `generate_image` is withheld where no images API serves it, as with
     # this mock client (ENG-4024); every other allowlisted tool is built.
-    assert names == set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}, (
+    assert names == set(CLOUD_TOOL_ALLOWLIST) - _WITHHELD_WITHOUT_SURFACE, (
         f"cloud tool set drifted from the allowlist: {sorted(names)}"
     )
 
@@ -781,7 +786,7 @@ def test_a_real_turn_with_connector_drafts_registers_and_drains_the_tool(tmp_pat
     session._build_tools()
     names = {t.name for t in session.tool_registry.get_tool_defs()}
     # `generate_image` is withheld with no images API (ENG-4024).
-    assert names == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}) | {"create_connector_draft"}
+    assert names == (set(CLOUD_TOOL_ALLOWLIST) - _WITHHELD_WITHOUT_SURFACE) | {"create_connector_draft"}
 
     draft = {
         "connector_id": "acme", "label": "Acme", "fields": [{"name": "api_key", "label": "Key"}],
@@ -843,7 +848,7 @@ def test_a_cloud_session_with_a_router_block_registers_exactly_the_browser_too(t
     session._build_tools()
     names = {t.name for t in session.tool_registry.get_tool_defs()}
     # `generate_image` is withheld with no images API (ENG-4024).
-    assert names == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}) | {"browser"}
+    assert names == (set(CLOUD_TOOL_ALLOWLIST) - _WITHHELD_WITHOUT_SURFACE) | {"browser"}
 
 
 def test_the_environment_never_gives_a_browser(tmp_path, monkeypatch):
@@ -1005,7 +1010,7 @@ def test_memorize_is_offered_with_or_without_existing_memory(tmp_path, monkeypat
         session._build_tools()
         names = {t.name for t in session.tool_registry.get_tool_defs()}
         # `generate_image` is withheld with no images API (ENG-4024).
-        assert names == set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}
+        assert names == set(CLOUD_TOOL_ALLOWLIST) - _WITHHELD_WITHOUT_SURFACE
         assert "memorize" in names
 
 
@@ -1769,6 +1774,8 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
         "create_skill_draft",
         # Takes a prompt and image paths: nothing a credential could ride in.
         "generate_image",
+        # Takes an artifact slug and reads two page files: no credential field.
+        "inspect_artifact",
     }
 
 
@@ -1888,3 +1895,12 @@ def test_a_minds_cloud_turn_does_not_import_the_anthropic_sdk(tmp_path):
         capture_output=True, text=True, env=env, cwd=str(_REPO_ROOT),
     )
     assert result.returncode == 0, result.stderr
+
+
+# ── ENG-4684: inspect_artifact only on a Cowork surface ──────────────────────
+
+def test_a_web_turn_registers_inspect_artifact(tmp_path, monkeypatch):
+    session = _real_cloud_session(tmp_path, monkeypatch, trace={"surface": "web"})
+    session._build_tools()
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert names == set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}

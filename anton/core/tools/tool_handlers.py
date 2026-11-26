@@ -2656,6 +2656,40 @@ async def handle_list_artifacts(
     return ToolOutcome(content=render_listing([(root, artifacts)], fields, unmatched), ok=True)
 
 
+async def handle_inspect_artifact(
+    session: "ChatSession", tc_input: dict
+) -> "str | ToolOutcome":
+    """What an inline html-app page reported: its saved state, form controls and visible text."""
+    from anton.core.artifacts.page_state import render_inspection
+
+    store = resolve_artifact_store(session)
+    if store is None:
+        return ToolOutcome(
+            content="Artifact store unavailable (no workspace bound to this session).",
+            ok=False, reason="store_unavailable",
+        )
+    slug = str(tc_input.get("slug") or "").strip()
+    if not slug:
+        return ToolOutcome(content="Error: `slug` is required.", ok=False, reason="missing_slug")
+    artifact = store.read_metadata(slug)
+    if artifact is None:
+        return ToolOutcome(
+            content=f"Error: no artifact found for slug `{slug}`.", ok=False, reason="artifact_not_found"
+        )
+    if artifact.type != "html-app":
+        return ToolOutcome(
+            content=(
+                f"Error: `{slug}` is a {artifact.type} artifact; inspect_artifact reads only "
+                "html-app pages. Read its files instead."
+            ),
+            ok=False, reason="invalid_type",
+        )
+    # Tier 1: the page files were read. "Nothing reported yet" is a correct
+    # answer, not a failure; the refusals above are tier 2 (a retry cannot help).
+    root = Path(store.root).absolute()
+    return ToolOutcome(content=render_inspection(artifact, root / artifact.slug), ok=True)
+
+
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
     """Process a recall tool call — search episodic memory."""
     if session._episodic is None or not session._episodic.enabled:

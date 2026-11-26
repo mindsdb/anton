@@ -266,7 +266,7 @@ def test_a_linked_state_is_not_followed(tmp_path):
 
 def test_the_block_teaches_the_collaboration_surface():
     for needle in ("review, pick", "edit or confirm several items", "instead of a long text list",
-                   "`ask_user`", "`state.json`", "`state:`", "(About the artifact `<slug>`.)", "```json",
+                   "`ask_user`", "`inspect_artifact`", "(About the artifact `<slug>`.)", "```json",
                    "update that artifact in", "same slug", "do not call", "create_artifact again",
                    "shows only the newest"):
         assert needle in IN_REPLY_VISUALS_PROMPT.replace("\n", " "), needle

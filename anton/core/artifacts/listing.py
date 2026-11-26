@@ -12,11 +12,15 @@ import unicodedata
 from collections.abc import Sequence
 from pathlib import Path
 
-from anton.core.artifacts.internal_files import INLINE_STATE_FILENAME, NON_CONTENT_NAMES
+from anton.core.artifacts.internal_files import (
+    INLINE_SNAPSHOT_FILENAME,
+    INLINE_STATE_FILENAME,
+    NON_CONTENT_NAMES,
+)
 from anton.core.artifacts.models import Artifact
 
-FIELDS = ("id", "name", "type", "updatedAt", "description", "primary", "display", "state", "files", "service_files")
-SUMMARY_FIELDS = ("name", "type", "updatedAt", "description", "primary", "display", "state")
+FIELDS = ("id", "name", "type", "updatedAt", "description", "primary", "display", "state", "controls", "files", "service_files")
+SUMMARY_FIELDS = ("name", "type", "updatedAt", "description", "primary", "display", "state", "controls")
 
 LEGEND = "Artifact folder = <root>/<slug>; primary and file paths are relative to it."
 SIZE_LEGEND = "The number before a file path is its size in bytes."
@@ -94,6 +98,24 @@ def state_line(artifact: Artifact, folder: Path) -> str | None:
     return f"state: {_escape(compact)} ({INLINE_STATE_FILENAME}, the user's latest edits)"
 
 
+def controls_line(artifact: Artifact, folder: Path) -> str | None:
+    """`controls: N` when the shim captured an inline page's form controls.
+
+    Only a count: the values are what `inspect_artifact` is for.
+    """
+    if not artifact.display:
+        return None
+    from anton.core.artifacts.page_state import read_page_file, snapshot_controls
+
+    snapshot = read_page_file(folder, INLINE_SNAPSHOT_FILENAME)
+    if snapshot is None:
+        return None
+    if snapshot.problem:
+        return f"controls: {INLINE_SNAPSHOT_FILENAME} {snapshot.problem}"
+    count = len(snapshot_controls(snapshot))
+    return f"controls: {count} ({INLINE_SNAPSHOT_FILENAME}; inspect_artifact shows their values)"
+
+
 def _file_lines(label: str, entries: Sequence[tuple[str, int]]) -> list[str]:
     if not entries:
         return [f"{label}: none"]
@@ -116,6 +138,10 @@ def _entry(artifact: Artifact, folder: Path, fields: Sequence[str]) -> list[str]
                 lines.append(f"display: {artifact.display}")
         elif field == "state":
             line = state_line(artifact, folder)
+            if line:
+                lines.append(line)
+        elif field == "controls":
+            line = controls_line(artifact, folder)
             if line:
                 lines.append(line)
         elif field == "files":

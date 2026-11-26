@@ -4,6 +4,7 @@ from anton.core.tools.tool_handlers import (
     handle_create_artifact,
     handle_generate_artifact,
     handle_generate_image,
+    handle_inspect_artifact,
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
@@ -439,6 +440,30 @@ LIST_ARTIFACTS_TOOL = ToolDef(
         },
     },
     handler=handle_list_artifacts,
+)
+
+
+# Cowork only (ENG-4684): the pages it reads exist only where the chat shows
+# inline artifacts, so the session registers it with `renders_chart_blocks`.
+INSPECT_ARTIFACT_TOOL = ToolDef(
+    name="inspect_artifact",
+    description=(
+        "See what the user did in an html-app page shown in the chat (an inline "
+        "artifact or widget): its saved page state (`state.json`, from "
+        "anton.setState), its form controls with their current values and its "
+        "visible text (`snapshot.json`, captured by the app), and when they were "
+        "last saved. Call it before answering when the user refers to something "
+        "they did or picked in the page (\"what did I pick\", \"use these "
+        "settings\")."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "slug": {"type": "string", "description": "The html-app artifact's slug."},
+        },
+        "required": ["slug"],
+    },
+    handler=handle_inspect_artifact,
 )
 
 

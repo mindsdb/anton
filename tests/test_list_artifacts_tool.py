@@ -85,7 +85,7 @@ async def test_invalid_fields(session, fields, needle):
     out = await handle_list_artifacts(session, {"fields": fields})
     assert (out.ok, out.reason) == (False, "invalid_fields")
     assert needle in out.content
-    assert "Valid fields: id, name, type, updatedAt, description, primary, display, state, files, service_files." in out.content
+    assert "Valid fields: id, name, type, updatedAt, description, primary, display, state, controls, files, service_files." in out.content
 
 
 async def test_no_artifacts_yet(session):

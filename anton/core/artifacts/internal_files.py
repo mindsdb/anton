@@ -58,6 +58,12 @@ GENERATION_INPUT_FILES = frozenset({
 # the user's work on the artifact, so it is not in NON_CONTENT_NAMES.
 INLINE_STATE_FILENAME = "state.json"
 INLINE_STATE_MAX_BYTES = 32 * 1024
+# What the Cowork preview shim captures from an inline page on its own, even
+# when the page never calls `anton.setState`: its form controls and visible
+# text, as {"controls": [{"label", "name", "type", "value"}], "text": "..."}.
+# Content like state.json, so not in NON_CONTENT_NAMES. `inspect_artifact`
+# reads both files.
+INLINE_SNAPSHOT_FILENAME = "snapshot.json"
 
 METADATA_FILENAME = "metadata.json"
 README_FILENAME = "README.md"

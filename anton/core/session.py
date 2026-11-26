@@ -132,6 +132,7 @@ from anton.core.tools.tool_defs import (
     GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     GENERATE_IMAGE_TOOL,
     GENERATE_IMAGE_TOOL_NO_PAD_HELPER,
+    INSPECT_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
@@ -3473,6 +3474,8 @@ class ChatSession:
             # `generate_image` is offered only where an images API serves it
             # (`_settle_image_offer`), so a host may allow it unconditionally.
             withheld = set() if getattr(self, "_image_offer", None) else {GENERATE_IMAGE_TOOL.name}
+            # `inspect_artifact` is offered only where the chat shows inline pages.
+            withheld.add(INSPECT_ARTIFACT_TOOL.name)
             unknown = set(self._tool_allowlist) - built - deferred - withheld
             if unknown:
                 raise ValueError(
@@ -3667,6 +3670,9 @@ class ChatSession:
                             else STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS)
             self.tool_registry.register_tool(create)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
+            # Inline pages exist only where the chat renders them (Cowork).
+            if renders_chart_blocks(getattr(self, "_surface", None)):
+                self.tool_registry.register_tool(INSPECT_ARTIFACT_TOOL)
             self.tool_registry.register_tool(
                 UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
             )
