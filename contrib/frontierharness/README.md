@@ -40,6 +40,7 @@ are not set, so anton runs there as an agent entry with `"import_path":
 | `ANTON_FH_API_KEY` | `OPENAI_API_KEY` | Key for that endpoint |
 | `ANTON_FH_MODEL` | from `-m` | Model id, if it differs from `-m` |
 | `ANTON_FH_MAX_TOKENS` | `131072` | Longest reply, the cap v1.1 sets for every harness |
+| `ANTON_FH_REASONING_EFFORT` | `max` | Reasoning effort, the level v1.1 sets for every harness |
 
 ## Run it on v1.0
 
@@ -57,6 +58,8 @@ v1.0 (30 tasks, Kimi K3) lives at eval commit `e837a70bd6beb4e72eeeda62dd06e3bd3
   Python 3.12.
 - Sends the task instruction as one non-interactive turn of `python -m anton.cloud_turn`, so
   anton never waits for a user.
+- Compacts history once a prompt reaches 80,000 tokens
+  (`ANTON_CONTEXT_COMPACTION_MAX_TOKENS`), which is off by default in anton.
 - Turns off Jev (MindsHub's decision model, used for completion checks and the scratchpad's
   `classify()`), analytics and auto-updates, so every model call goes to the benchmark's model.
 - Keeps anton's `.anton/` folder out of git while the agent works and deletes it after, so it

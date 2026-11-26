@@ -888,3 +888,37 @@ class TestChatCompletionsReasoningContent:
         from anton.core.llm.provider import StreamReasoningDelta, StreamTextDelta
         assert [e for e in yielded if isinstance(e, StreamReasoningDelta)] == []
         assert [e for e in yielded if isinstance(e, StreamTextDelta)] == [StreamTextDelta(text="hi")]
+
+
+class TestKeepalive:
+    @pytest.mark.parametrize("ssl_verify", [True, False])
+    def test_connections_use_tcp_keepalive(self, ssl_verify):
+        """A silent multi-minute wait for the first byte must not let a NAT drop the socket."""
+        import socket
+
+        with patch.dict("os.environ", clear=True):
+            provider = OpenAIProvider(
+                api_key="sk-test", base_url="http://localhost:11434/v1", ssl_verify=ssl_verify
+            )
+        pool = provider._client._client._transport._pool
+        assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in pool._socket_options
+        assert pool._max_connections == 1000
+
+    def test_an_environment_proxy_is_still_used(self):
+        import httpx2
+
+        with patch.dict("os.environ", {"HTTPS_PROXY": "http://proxy.example:3128"}, clear=True):
+            provider = OpenAIProvider(api_key="sk-test", base_url="https://api.example/v1")
+        transport = provider._client._client._transport_for_url(
+            httpx2.URL("https://api.example/v1/chat/completions")
+        )
+        assert type(transport._pool).__name__ == "AsyncHTTPProxy"
+
+    @pytest.mark.parametrize("env", [{"NO_PROXY": "localhost"}, {"FTP_PROXY": "http://proxy.example:3128"}])
+    def test_a_variable_httpx_does_not_proxy_keeps_keepalive(self, env):
+        import socket
+
+        with patch.dict("os.environ", env, clear=True):
+            provider = OpenAIProvider(api_key="sk-test", base_url="https://api.example/v1")
+        pool = provider._client._client._transport._pool
+        assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in pool._socket_options

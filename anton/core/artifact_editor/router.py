@@ -21,6 +21,10 @@ MindsHub, none elsewhere) the bar must not edit directly: hosts check
 :func:`route_request` answers ``agent`` / ``no_decisions_model`` without a
 call. The agent's ``edit_artifact`` does not depend on any of this.
 
+A PDF cannot be edited by the editor (a Word, Excel or PowerPoint document
+can, through its XML parts), so an artifact whose content is only PDFs goes
+to the agent / ``pdf_only`` without a call.
+
 With ``allow_reply`` (ENG-4455) the question gets a third choice, ``reply``:
 a greeting, thanks or a question the artifact context already answers ("what
 does this chart show?"). The host answers it in the bar with
@@ -76,13 +80,18 @@ OUTLINE_SUFFIXES = (".html", ".htm", ".js", ".mjs", ".jsx", ".ts", ".tsx", ".css
 OUTLINE_FILE_BYTES = 400_000
 OUTLINE_FILES = 8
 PRESENTATION_PROGRAM = "presentation-program.js"
+# Word, Excel and PowerPoint packages, outlined from the text in their content parts.
+DOCUMENT_SUFFIXES = (".docx", ".xlsx", ".pptx")
+DOCUMENT_FILES = 3
+DOCUMENT_FILE_BYTES = 25 * 1024 * 1024
+DOCUMENT_PART_BYTES = 2 * 1024 * 1024
 # Never what the user means by "the artifact": housekeeping and generation inputs.
 _HOUSEKEEPING = {"metadata.json", "README.md", "prd.md", "spec.md", "openapi.json", "discovery.json",
                  "observed-data.json", "backend.log", "requirements.txt"}
 
 INSTRUCTIONS = (
-    "A user is looking at an artifact Anton already built (a dashboard, report, calculator, game, animation or "
-    "small web app) and typed the request in state.request into a quick-edit bar under it. Decide whether an "
+    "A user is looking at an artifact Anton already built (a dashboard, report, calculator, game, animation, "
+    "small web app, or a Word, Excel or PowerPoint document) and typed the request in state.request into a quick-edit bar under it. Decide whether an "
     "editor that can only change this artifact's own files, using only the data already inside them, can fully "
     "do it, or whether it must go to the analyst agent, which can query datasources, fetch new data and answer "
     "questions. state.artifact describes the artifact: state.artifact.outline and state.artifact.recent_changes "
@@ -145,7 +154,7 @@ class RouteDecision:
     route: Route
     confidence: float  # probability of the chosen route, 0..1 (0 when nothing answered)
     # "jev" | "uncertain" | "router_error" | "router_timeout" | "router_disabled" | "no_decisions_model"
-    # | "empty_artifact" | "empty_message" | "message_too_long"
+    # | "empty_artifact" | "empty_message" | "message_too_long" | "pdf_only"
     reason: str
     ms: int
 
@@ -233,6 +242,55 @@ def _code_files(folder: Path) -> list[Path]:
     return found[:OUTLINE_FILES]
 
 
+_DOCUMENT_TEXT_PARTS = re.compile(
+    r"word/document\.xml|xl/sharedStrings\.xml|xl/workbook\.xml|ppt/slides/slide\d+\.xml")
+_RUN_TEXT = re.compile(r"<(?:[\w-]+:)?t(?:\s[^<>]*)?>([^<]*)</(?:[\w-]+:)?t>")
+_SHEET_NAME = re.compile(r"<(?:[\w-]+:)?sheet\b[^>]*\bname=\"([^\"]+)\"")
+_PARAGRAPH_END = re.compile(r"</(?:w|a):p>|</si>")
+
+
+def _document_outline(folder: Path) -> tuple[list[str], list[str]]:
+    """(document file names, lines of their text) for the Word, Excel and PowerPoint files in FOLDER.
+
+    The text is what a reader sees: paragraph text, sheet names and shared
+    strings, slide text, in part order. Read with plain zip reads, bounded.
+    """
+    import zipfile
+    from html import unescape
+
+    names: list[str] = []
+    lines: list[str] = []
+    try:
+        found = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in DOCUMENT_SUFFIXES)
+    except OSError:
+        return [], []
+    for path in found[:DOCUMENT_FILES]:
+        try:
+            if path.stat().st_size > DOCUMENT_FILE_BYTES:
+                continue
+            with zipfile.ZipFile(path) as zf:
+                parts = sorted((i for i in zf.infolist() if _DOCUMENT_TEXT_PARTS.fullmatch(i.filename)
+                                and i.file_size <= DOCUMENT_PART_BYTES),
+                               key=lambda i: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", i.filename)])
+                names.append(path.name)
+                for info in parts:
+                    xml = zf.read(info).decode("utf-8", "replace")
+                    if info.filename == "xl/workbook.xml":
+                        sheets = _SHEET_NAME.findall(xml)
+                        if sheets:
+                            lines.append("sheets " + ", ".join(unescape(s) for s in sheets[:12]))
+                        continue
+                    for paragraph in _PARAGRAPH_END.split(xml):
+                        text = " ".join("".join(unescape(t) for t in _RUN_TEXT.findall(paragraph)).split())
+                        if text:
+                            lines.append(_clip(text, 80))
+                        if len(lines) >= 40:
+                            break
+        except (OSError, zipfile.BadZipFile, RuntimeError, ValueError, EOFError):
+            continue
+    return names, lines
+
+
 def artifact_outline(folder: str | Path, *, limit: int = MAX_OUTLINE_CHARS) -> str:
     """A compact picture of what an artifact's page contains, for the router (about LIMIT characters).
 
@@ -240,10 +298,16 @@ def artifact_outline(folder: str | Path, *, limit: int = MAX_OUTLINE_CHARS) -> s
     headings, visible text of buttons, labels and links, element ids and
     class names, keyframe and function names, and notable features (canvas,
     WebGL / three.js, charts, forms, animations, tabs...). Embedded data is
-    left out (``data`` carries its shape). Never raises; "" when nothing reads.
+    left out (``data`` carries its shape). A Word, Excel or PowerPoint
+    artifact is outlined from its documents' text instead. Never raises; ""
+    when nothing reads.
     """
     folder = Path(folder)
     try:
+        documents, document_text = _document_outline(folder)
+        if documents:
+            parts = [("documents", documents), ("text", _uniq(document_text, 40))]
+            return _clip("; ".join(f"{key}: {' | '.join(values)}" for key, values in parts if values), limit)
         files = _code_files(folder)
         texts: list[tuple[str, str]] = []
         for path in files:
@@ -354,6 +418,12 @@ def _questions(allow_reply: bool = False) -> dict:
     return {"route": {"type": "choice", "instructions": INSTRUCTIONS, "criteria": dict(CRITERIA)}}
 
 
+def _only_pdfs(files: list[str]) -> bool:
+    """Whether the artifact's content is PDFs alone: nothing the editor can change."""
+    content = [str(f) for f in files if str(f).rsplit("/", 1)[-1] not in _HOUSEKEEPING]
+    return bool(content) and all(f.lower().endswith(".pdf") for f in content)
+
+
 def _decisions_base(base_url: str) -> str:
     """``https://host/v1`` from a MindsHub base given with or without ``/v1``."""
     base = base_url.strip().rstrip("/")
@@ -413,6 +483,8 @@ async def route_request(
             return done("agent", 0.0, "message_too_long")
         if not files:
             return done("agent", 0.0, "empty_artifact")
+        if _only_pdfs(files):
+            return done("agent", 0.0, "pdf_only")
         if not base_url or not api_key:
             return done("agent", 0.0, "router_disabled")
 

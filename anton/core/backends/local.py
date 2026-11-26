@@ -41,7 +41,9 @@ from anton.core.backends.wire import (
     CLASSIFY_ENV,
     INTERNET_RESEARCH_ENV,
     WEB_SEARCH_ENV,
+    HEAD_OUTPUT,
     MAX_OUTPUT,
+    TAIL_OUTPUT,
     truncation_note,
     NOTHING_KEPT,
     PROGRESS_MARKER,
@@ -316,23 +318,35 @@ def _replace_ds_env(env: dict[str, str], *, ds_env: dict[str, str]) -> None:
     env.update(ds_env)
 
 
-def _clip_stdout(raw: str, total: int, cwd_note: str) -> str:
+def _clip_stdout(raw: str, total: int, cwd_note: str, raw_tail: str | None = None) -> str:
     """Scrub a cell's stdout, cut it to `MAX_OUTPUT`, then append the cwd note.
 
     When `total` is longer, the worker cut `raw` at `MAX_OUTPUT +
     STDOUT_SCRUB_MARGIN`, which can split a secret the scrub then cannot match.
     That piece is in the last margin, or the longest exact-match secret if
     longer, of the scrubbed text; measured from the end because the scrub
-    changes lengths, so it goes.
+    changes lengths, so it goes. `raw_tail`, the output's end, gets the same
+    care at its cut start as `_salvage_tail`, and fills the last `TAIL_OUTPUT`.
     """
     text = scrub_output(raw)
     if total > MAX_OUTPUT:
-        keep = MAX_OUTPUT
-        if total > len(raw):
+        whole = total <= len(raw)
+        tail = ""
+        if raw_tail is not None:
+            if whole:
+                tail = text[HEAD_OUTPUT:][-TAIL_OUTPUT:]
+            else:
+                tail = scrub_output(raw_tail)
+                tail = tail[exact_secret_suffix_at_start(tail) :]
+                tail = _without_orphan_region(tail)[-TAIL_OUTPUT:]
+        keep = HEAD_OUTPUT if tail else MAX_OUTPUT
+        if not whole:
             unsafe_tail = max(STDOUT_SCRUB_MARGIN, longest_exact_secret())
             keep = min(keep, max(len(text) - unsafe_tail, 0))
         if keep:
             text = text[:keep] + truncation_note(total)
+            if tail:
+                text += f"\nThe last {len(tail):,} characters of the output follow.\n{tail}"
         else:
             text = f"... (output withheld: it could not be scrubbed safely, {total} chars total)"
     if cwd_note:
@@ -1881,6 +1895,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                 result_data["stdout_head"],
                 result_data["stdout_total"],
                 result_data.get("cwd_note", ""),
+                result_data.get("stdout_tail"),
             )
         cell = Cell(
             code=code,

@@ -268,7 +268,8 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "rendering/launch.\n\n"
         "Pick `type` from the closed enum:\n"
         "- html-app: a single self-contained HTML page (charts, dashboards, demos)\n"
-        "- document: a doc, report, or markdown file the user reads\n"
+        "- document: a report you write for the user to read. A file the user names or asks "
+        "you to save in the project is not an artifact: write it into the project folder\n"
         "- dataset: data files (CSV, JSON, parquet) the user downloads or feeds elsewhere\n"
         "- image: a generated image (PNG, SVG, etc.)\n"
         "- mixed: multi-modal output that doesn't fit the above\n"
@@ -1249,6 +1250,36 @@ ASK_USER_TOOL = ToolDef(
     },
     handler=handle_ask_user,
 )
+
+
+# Under act_first, "use this whenever the answers form a short closed set" reads as
+# a licence to ask, so the card defers WHETHER to ask to the conversation discipline
+# and carries the agent's default. Ask-first sessions keep the card as it was.
+ASK_USER_ACT_FIRST_DESCRIPTION = (
+    "Whether to ask at all is decided by the conversation discipline, not by this "
+    "tool: a short list of possible answers is not by itself a reason to ask."
+)
+ASK_USER_ACT_FIRST_PROMPT = (
+    "WHETHER to ask comes before HOW. A choice card is still a question that stops the "
+    "work until the user answers, and a new user who sees only a question usually "
+    "leaves. When the task can start on a stated assumption (which operating system, "
+    "which brand, what budget), do the work now and offer the other options after it; "
+    "do not show a card for that. When asking first is warranted (deleting, spending, "
+    "sending, acting on the user's accounts), put the option you would choose first, "
+    "say in its label that it is your default, and say in the question what you would "
+    "do with it, so one click is enough to go ahead."
+)
+
+
+def ask_user_tool(act_first: bool) -> ToolDef:
+    """`ASK_USER_TOOL` as a session with this "Act first, ask later" setting gets it."""
+    if not act_first:
+        return ASK_USER_TOOL
+    return replace(
+        ASK_USER_TOOL,
+        description=ASK_USER_TOOL.description + "\n\n" + ASK_USER_ACT_FIRST_DESCRIPTION,
+        prompt=ASK_USER_ACT_FIRST_PROMPT + "\n\n" + ASK_USER_TOOL.prompt,
+    )
 
 
 APPROVE_HELD_WRITE_TOOL = ToolDef(

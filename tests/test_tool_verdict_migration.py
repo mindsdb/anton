@@ -343,6 +343,64 @@ def test_read_image_success_is_the_same_content_blocks_plus_a_verdict(tmp_path):
     assert outcome.content[1]["text"].startswith("Loaded shot.png (")
 
 
+def test_read_image_refuses_a_file_over_its_read_limit(tmp_path, monkeypatch):
+    from anton.core.tools import tool_handlers
+
+    monkeypatch.setattr(tool_handlers, "_READ_IMAGE_MAX_FILE_BYTES", 64)
+    (tmp_path / "big.png").write_bytes(_PNG_1X1 + b"\0" * 64)
+    outcome = _read_image(tmp_path, file_path="big.png")
+
+    assert outcome.ok is False
+    assert outcome.reason == "image_too_large"
+
+
+def _cloud_read_image(workspace, **args):
+    import asyncio
+
+    from anton.core.tools.tool_handlers import handle_read_image
+
+    session = SimpleNamespace(
+        _workspace=SimpleNamespace(base=workspace), _tool_allowlist=frozenset({"read_image"}),
+    )
+    return asyncio.run(handle_read_image(session, args))
+
+
+def test_a_restricted_host_refuses_an_image_outside_the_workspace(tmp_path):
+    workspace, elsewhere = tmp_path / "ws", tmp_path / "elsewhere"
+    workspace.mkdir()
+    elsewhere.mkdir()
+    (elsewhere / "x.png").write_bytes(_PNG_1X1)
+    (workspace / "link.png").symlink_to(elsewhere / "x.png")
+
+    for path in (str(elsewhere / "x.png"), "../elsewhere/x.png", "link.png"):
+        outcome = _cloud_read_image(workspace, file_path=path)
+        assert (outcome.ok, outcome.reason) == (False, "access_denied"), path
+
+
+def test_a_restricted_host_reports_a_symlink_loop_as_a_bad_path(tmp_path):
+    (tmp_path / "a.png").symlink_to(tmp_path / "b.png")
+    (tmp_path / "b.png").symlink_to(tmp_path / "a.png")
+
+    outcome = _cloud_read_image(tmp_path, file_path="a.png")
+
+    assert (outcome.ok, outcome.reason) == (False, "invalid_type")
+
+
+def test_a_restricted_host_reads_an_image_in_the_workspace(tmp_path):
+    (tmp_path / "shot.png").write_bytes(_PNG_1X1)
+
+    assert _cloud_read_image(tmp_path, file_path="shot.png").ok is True
+
+
+def test_the_desktop_still_reads_an_image_outside_the_workspace(tmp_path):
+    workspace, elsewhere = tmp_path / "ws", tmp_path / "elsewhere"
+    workspace.mkdir()
+    elsewhere.mkdir()
+    (elsewhere / "x.png").write_bytes(_PNG_1X1)
+
+    assert _read_image(workspace, file_path=str(elsewhere / "x.png")).ok is True
+
+
 def test_read_image_never_pairs_a_list_with_a_failure_verdict():
     """The seam that keeps two documented gaps unreachable.
 

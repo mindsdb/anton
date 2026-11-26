@@ -25,6 +25,15 @@ folder, and every rule about what the model may see or touch lives here:
   nor rewritten by an edit. A page compiled from a presentation program
   (`component_page.document`) is shown as its program alone, between the two
   markers the generator itself reads it back from; see `_component_bounds`.
+* **Documents are packages of parts.** A Word, Excel or PowerPoint file
+  (`.docx`, `.xlsx`, `.pptx`) is a zip of XML parts, and a change to one is a
+  change to a part. Each package's content parts are listed as files of their
+  own, addressed `<package path>/<part path>` (`report.docx/word/document.xml`),
+  and read, searched and patched like any text file. A read unpacks the part;
+  a write repacks the whole package and lands it like any other file, so the
+  all-or-nothing and no-symlink rules below cover it, and a snapshot of a part
+  is a snapshot of its package's bytes. A PDF is not a package of text and is
+  never edited here.
 * **How writes land.** All paths are checked before anything is written, then
   every file is staged next to its target and renamed into place; a failure
   part way puts back the files already replaced. Every path below the folder
@@ -41,12 +50,14 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import io
 import os
 import re
 import stat
 import sys
 import time
 import uuid
+import zipfile
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -170,6 +181,49 @@ HTML_SUFFIXES = frozenset({".html", ".htm"})
 FULLSTACK_KINDS = frozenset({"fullstack-stateless-app", "fullstack-stateful-app"})
 FULLSTACK_ROOT_FILES = ("backend.py", "requirements.txt")
 STATE_MANIFEST = "state_manifest.json"
+
+# Word, Excel and PowerPoint packages: zips of XML parts (ECMA-376, Open
+# Packaging Conventions). A PDF is a binary page description, not one of them.
+OOXML_SUFFIXES = frozenset({".docx", ".xlsx", ".pptx"})
+PDF_SUFFIX = ".pdf"
+# The largest package read: the same bound cowork-server keeps for a document
+# (`publish.PUBLISH_FILE_MAX_BYTES`), above MAX_RAW_BYTES for text.
+MAX_PACKAGE_BYTES = 25 * 1024 * 1024
+# A repack rewrites every member, so the members and what they unpack to are
+# bounded too: a small zip can claim to hold gigabytes.
+MAX_PACKAGE_MEMBERS = 4000
+MAX_PACKAGE_UNPACKED_BYTES = 256 * 1024 * 1024
+# Parts that can be read and patched: XML and relationship parts. Media,
+# embedded objects and printer settings are binary and stay as they are.
+PART_SUFFIXES = (".xml", ".rels")
+
+_DOCX_TEXT = r"word/(?:document|footnotes|endnotes|comments)\.xml|word/(?:header|footer)\d*\.xml"
+_XLSX_TEXT = r"xl/workbook\.xml|xl/sharedStrings\.xml|xl/worksheets/sheet\d+\.xml"
+_PPTX_TEXT = r"ppt/slides/slide\d+\.xml"
+# The parts listed for each kind of package: the ones that carry its content
+# and its formatting. Relationships, `[Content_Types].xml` and document
+# properties are left off the list (a change rarely needs them) but can still
+# be read and patched by path when one does, such as adding a slide.
+_LISTED_PARTS = {
+    ".docx": re.compile(rf"(?:{_DOCX_TEXT}|word/(?:styles|numbering|settings)\.xml|word/theme/theme\d*\.xml)"),
+    ".xlsx": re.compile(rf"(?:{_XLSX_TEXT}|xl/styles\.xml|xl/theme/theme\d*\.xml|xl/charts/chart\d+\.xml)"),
+    ".pptx": re.compile(
+        rf"(?:{_PPTX_TEXT}|ppt/presentation\.xml|ppt/slideLayouts/slideLayout\d+\.xml"
+        r"|ppt/slideMasters/slideMaster\d+\.xml|ppt/theme/theme\d+\.xml|ppt/notesSlides/notesSlide\d+\.xml"
+        r"|ppt/charts/chart\d+\.xml)"
+    ),
+}
+# The parts preloaded with a small artifact: where the words and numbers are.
+# Styles, themes, masters and layouts are mostly boilerplate, often larger than
+# the content itself, and read on demand.
+_PRELOAD_PARTS = {
+    ".docx": re.compile(_DOCX_TEXT),
+    ".xlsx": re.compile(_XLSX_TEXT),
+    ".pptx": re.compile(_PPTX_TEXT),
+}
+# The part a request is most likely about, read first when nothing is preloaded.
+_MAIN_PARTS = {".docx": "word/document.xml", ".xlsx": "xl/worksheets/sheet1.xml", ".pptx": "ppt/slides/slide1.xml"}
+_PACKAGE_NAMES = {".docx": "Word document", ".xlsx": "Excel workbook", ".pptx": "PowerPoint presentation"}
 
 _IS_WINDOWS = sys.platform == "win32"
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -330,6 +384,62 @@ def _restore_masks(path: str, masked: str, original: str, masks: list[_Mask]) ->
             right = right[len(mask.post):]
         masked = left + original[mask.start:mask.end] + right
     return masked
+
+
+# ── document parts ────────────────────────────────────────────────────
+
+# A part is usually written as one line: the whole body of a document after
+# its XML declaration. A patch places lines, so the view adds a line break
+# after every tag that is followed by another tag (directly, or after line
+# breaks of its own), and the write takes exactly that one break out again.
+# Adding one and removing one is exact both ways, so a part that comes back
+# unchanged is byte-identical. A text element (`<w:t>`, `<a:t>`, `<t>`, ...)
+# is never broken, so no text a reader of the document sees changes.
+_TAG_BEFORE_TAG = re.compile(r"(<[^<>]*>)(\n*)(?=<)")
+_TAG_BREAK_TAG = re.compile(r"(<[^<>]*>)\n(\n*)(?=<)")
+_TEXT_ELEMENT_OPEN = re.compile(r"<(?:[\w.-]+:)?(?:t|delText|instrText)(?:\s[^<>]*)?(?<!/)>")
+
+
+def _part_view(xml: str) -> str:
+    """The part with a line break added after every tag that a tag follows."""
+    return _TAG_BEFORE_TAG.sub(
+        lambda m: m.group(0) if _TEXT_ELEMENT_OPEN.fullmatch(m.group(1)) else m.group(0) + "\n", xml
+    )
+
+
+def _part_unview(view: str) -> str:
+    """`_part_view` undone: the one added line break after each such tag taken out again."""
+    return _TAG_BREAK_TAG.sub(
+        lambda m: m.group(0) if _TEXT_ELEMENT_OPEN.fullmatch(m.group(1)) else m.group(1) + m.group(2), view
+    )
+
+
+def _natural(name: str) -> list:
+    """Sort key putting slide2.xml before slide10.xml."""
+    return [int(piece) if piece.isdigit() else piece for piece in re.split(r"(\d+)", name)]
+
+
+def _zip_member(zf: zipfile.ZipFile, part: str) -> zipfile.ZipInfo | None:
+    """The member for `part`. Part names compare case-insensitively (OPC)."""
+    try:
+        return zf.getinfo(part)
+    except KeyError:
+        pass
+    lower = part.lower()
+    for info in zf.infolist():
+        if info.filename.lower() == lower:
+            return info
+    return None
+
+
+def _copy_info(info: zipfile.ZipInfo) -> zipfile.ZipInfo:
+    """A fresh header for `info`'s member: same name, date, method and attributes."""
+    copy = zipfile.ZipInfo(info.filename, info.date_time)
+    copy.compress_type = info.compress_type
+    copy.external_attr = info.external_attr
+    copy.create_system = info.create_system
+    copy.comment = info.comment
+    return copy
 
 
 # ── search safety ─────────────────────────────────────────────────────
@@ -560,6 +670,24 @@ class ArtifactWorkspace:
 
     def _hidden_reason(self, rel: str) -> str | None:
         """Why `rel` is not artifact content, or None. Mirrors `map()`."""
+        reason = self._non_content_reason(rel)
+        if reason:
+            return reason
+        suffix = os.path.splitext(rel)[1].lower()
+        if suffix in OOXML_SUFFIXES:
+            main = _MAIN_PARTS[suffix]
+            return (
+                f"{rel}: a {_PACKAGE_NAMES[suffix]}, a package of XML parts. Read and edit its parts by path "
+                f"instead, such as {rel}/{main}."
+            )
+        if suffix == PDF_SUFFIX:
+            return f"{rel}: a PDF, which cannot be edited here; only text files and Word, Excel and PowerPoint parts can"
+        if suffix in BINARY_SUFFIXES:
+            return f"{rel}: a binary file; only text files can be read or edited"
+        return None
+
+    def _non_content_reason(self, rel: str) -> str | None:
+        """Why `rel` is housekeeping, an input, bytecode or a dependency, or None."""
         parts = rel.split("/")
         top = parts[0]
         if top == PRESENTATION_PROGRAM_FILENAME and len(parts) == 1:
@@ -578,8 +706,6 @@ class ArtifactWorkspace:
         for part in parts[:-1]:
             if part in SKIP_DIRS:
                 return f"{rel}: inside {part}/, which holds dependencies, build output or history, not the artifact"
-        if os.path.splitext(parts[-1])[1].lower() in BINARY_SUFFIXES:
-            return f"{rel}: a binary file; only text files can be read or edited"
         return None
 
     def _kind_reason(self, rel: str, *, create: bool) -> str | None:
@@ -632,12 +758,222 @@ class ArtifactWorkspace:
             rel = _clean(path)
         except WorkspaceError as exc:
             return str(exc)
+        split = self._package_split(rel)
+        if split is not None:
+            return self._part_reason(rel, *split, create=create)
         reason = self._hidden_reason(rel) or self._link_reason(rel)
         if reason:
             return reason
         if not create and self._is_binary_file(rel):
             return f"{rel}: a binary file; only text files can be read or edited"
         return self._kind_reason(rel, create=create)
+
+    # ── document packages ────────────────────────────────────────────
+
+    def _package_split(self, rel: str) -> tuple[str, str] | None:
+        """(package path, part path) when `rel` names a part inside a document package.
+
+        The first path component with a package suffix that is not a folder on
+        disk is the package; everything after it is the part.
+        """
+        parts = rel.split("/")
+        for i, name in enumerate(parts[:-1]):
+            if os.path.splitext(name)[1].lower() not in OOXML_SUFFIXES:
+                continue
+            package = "/".join(parts[: i + 1])
+            try:
+                if stat.S_ISDIR(os.lstat(self._target(package)).st_mode):
+                    continue
+            except OSError:
+                pass
+            return package, "/".join(parts[i + 1:])
+        return None
+
+    def package_of(self, path: str) -> str | None:
+        """The document package `path` addresses a part of, or None for a plain file."""
+        try:
+            split = self._package_split(_clean(path))
+        except WorkspaceError:
+            return None
+        return split[0] if split is not None else None
+
+    def _part_reason(self, rel: str, package: str, part: str, *, create: bool) -> str | None:
+        reason = self._non_content_reason(package) or self._link_reason(package)
+        if reason:
+            return reason
+        if not self._exists(package):
+            return f"{rel}: there is no document {package} in this artifact"
+        if not part.lower().endswith(PART_SUFFIXES):
+            return f"{rel}: a binary part (media or an embedded object); only the XML parts of {package} can be edited"
+        try:
+            with self._package(package) as (zf, _data):
+                info = _zip_member(zf, part)
+        except WorkspaceError as exc:
+            return str(exc)
+        if info is None and not create:
+            return f"{rel}: {package} has no part {part}"
+        if info is not None and info.is_dir():
+            return f"{rel}: a folder inside {package}, not a part"
+        return None
+
+    @contextmanager
+    def _package(self, package: str) -> Iterator[tuple[zipfile.ZipFile, bytes]]:
+        """The package's zip, opened from bytes read no-follow, and those bytes."""
+        self._check_read()
+        raw = self._read_raw(package)
+        if raw is None:
+            raise WorkspaceError(f"{package}: no such document")
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(raw[0]))
+        except (zipfile.BadZipFile, OSError, ValueError, EOFError) as exc:
+            raise WorkspaceError(f"{package}: not a readable document package ({exc})") from exc
+        with zf:
+            members = zf.infolist()
+            if len(members) > MAX_PACKAGE_MEMBERS:
+                raise WorkspaceError(f"{package}: holds {len(members)} parts, more than this editor opens")
+            if sum(info.file_size for info in members) > MAX_PACKAGE_UNPACKED_BYTES:
+                raise WorkspaceError(f"{package}: unpacks to more than {_size(MAX_PACKAGE_UNPACKED_BYTES)}")
+            yield zf, raw[0]
+
+    @staticmethod
+    def _member_bytes(zf: zipfile.ZipFile, info: zipfile.ZipInfo, rel: str) -> bytes:
+        if info.file_size > MAX_RAW_BYTES:
+            raise WorkspaceError(f"{rel}: too large ({_size(info.file_size)})")
+        try:
+            with zf.open(info) as handle:
+                data = handle.read(MAX_RAW_BYTES + 1)
+        except (zipfile.BadZipFile, RuntimeError, NotImplementedError, OSError, EOFError, ValueError) as exc:
+            raise WorkspaceError(f"{rel}: cannot be unpacked ({exc})") from exc
+        if len(data) > MAX_RAW_BYTES:
+            raise WorkspaceError(f"{rel}: too large")
+        return data
+
+    def _part_text(self, zf: zipfile.ZipFile, info: zipfile.ZipInfo, rel: str) -> str:
+        return self._decode(rel, self._member_bytes(zf, info, rel))
+
+    def _listed_parts(self, package: str, zf: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
+        """The package's content and formatting parts, in reading order."""
+        pattern = _LISTED_PARTS[os.path.splitext(package)[1].lower()]
+        found = [info for info in zf.infolist() if not info.is_dir() and pattern.fullmatch(info.filename)]
+        return sorted(found, key=lambda info: _natural(info.filename))
+
+    def _package_entries(self, package: str) -> list[MapEntry]:
+        """One MapEntry per listed part of `package`, sized as `read()` shows it."""
+        out: list[MapEntry] = []
+        try:
+            with self._package(package) as (zf, _data):
+                for info in self._listed_parts(package, zf):
+                    rel = f"{package}/{info.filename}"
+                    try:
+                        view = _part_view(self._part_text(zf, info, rel))
+                    except WorkspaceError:
+                        continue
+                    out.append(MapEntry(rel, len(view.encode("utf-8"))))
+        except WorkspaceError:
+            return []
+        return out
+
+    def _part_masked(self, rel: str, package: str, part: str) -> str | None:
+        reason = self._non_content_reason(package)
+        if reason:
+            raise WorkspaceError(reason)
+        if not part.lower().endswith(PART_SUFFIXES):
+            raise WorkspaceError(f"{rel}: a binary part (media or an embedded object); only XML parts can be read")
+        if not self._exists(package):
+            return None
+        with self._package(package) as (zf, _data):
+            info = _zip_member(zf, part)
+            if info is None or info.is_dir():
+                return None
+            return _part_view(self._part_text(zf, info, rel))
+
+    def _repack(self, package: str, edits: dict[str, str]) -> tuple[bytes, int] | None:
+        """The package's new bytes with each part in `edits` replaced (views unviewed), or None when unchanged.
+
+        Every other member is carried over unchanged, in its order and with its
+        compression, so `[Content_Types].xml` stays first as Office expects. A
+        part that does not exist yet is added at the end.
+        """
+        current = self._read_raw(package)
+        if current is None:
+            raise WorkspaceError(f"{package}: no such document")
+        with self._package(package) as (zf, _data):
+            replaced: dict[str, bytes] = {}
+            added: dict[str, bytes] = {}
+            for part, view in edits.items():
+                rel = f"{package}/{part}"
+                info = _zip_member(zf, part)
+                text = _part_unview(view)
+                try:
+                    data = text.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise WorkspaceError(f"{rel}: the text cannot be saved as UTF-8 ({exc.reason})") from exc
+                if info is None:
+                    if _PLACEHOLDER_RE.search(text):
+                        raise WorkspaceError(
+                            f"{rel}: contains an `anton:keep` placeholder that does not belong to this file. "
+                            "Remove it; placeholders only stand for content in the file they were read from."
+                        )
+                    added[part] = data
+                elif data != self._member_bytes(zf, info, rel):
+                    replaced[info.filename] = data
+            if not replaced and not added:
+                return None
+            out = io.BytesIO()
+            try:
+                with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+                    for info in zf.infolist():
+                        body = replaced.get(info.filename)
+                        if body is None:
+                            body = self._member_bytes(zf, info, f"{package}/{info.filename}")
+                        dst.writestr(_copy_info(info), body)
+                    stamp = time.localtime()[:6]
+                    for part, body in added.items():
+                        info = zipfile.ZipInfo(part, stamp)
+                        info.compress_type = zipfile.ZIP_DEFLATED
+                        dst.writestr(info, body)
+            except (zipfile.BadZipFile, RuntimeError, NotImplementedError, ValueError) as exc:
+                raise WorkspaceError(f"{package}: could not be repacked ({exc})") from exc
+        return out.getvalue(), current[1]
+
+    def read_package(self, path: str) -> bytes | None:
+        """The bytes of the document package `path` is (or names a part of), read no-follow."""
+        rel = _clean(path)
+        split = self._package_split(rel)
+        package = split[0] if split is not None else rel
+        if os.path.splitext(package)[1].lower() not in OOXML_SUFFIXES:
+            raise WorkspaceError(f"{rel}: not a Word, Excel or PowerPoint document")
+        reason = self._non_content_reason(package)
+        if reason:
+            raise WorkspaceError(reason)
+        self._check_read()
+        raw = self._read_raw(package)
+        return raw[0] if raw is not None else None
+
+    def pdf_files(self) -> list[str]:
+        """The artifact's PDFs: content, but never edited here."""
+        try:
+            self._check_read()
+        except WorkspaceError:
+            return []
+        return sorted(rel for rel, _st in self._walk() if rel.lower().endswith(PDF_SUFFIX))
+
+    def entry_file(self) -> str | None:
+        """The file an edit most likely starts in: the entry page, or the primary document's main part."""
+        primary = self.primary
+        if primary and os.path.splitext(primary)[1].lower() not in OOXML_SUFFIXES:
+            return primary
+        entries = [entry.path for entry in self.map()]
+        packages = [primary] if primary else list(dict.fromkeys(p for p in map(self.package_of, entries) if p))
+        if len(packages) != 1:
+            return None
+        package = packages[0]
+        main = f"{package}/{_MAIN_PARTS[os.path.splitext(package)[1].lower()]}"
+        if main in entries:
+            return main
+        listed = [p for p in entries if p.startswith(package + "/")
+                  and _PRELOAD_PARTS[os.path.splitext(package)[1].lower()].fullmatch(p[len(package) + 1:])]
+        return listed[0] if listed else None
 
     # ── raw I/O ──────────────────────────────────────────────────────
 
@@ -649,7 +985,8 @@ class ArtifactWorkspace:
 
         Opened like `nofollow.read_bytes_nofollow`: one component at a time
         with O_NOFOLLOW, then required to be a regular file with no other
-        hard link, and read no further than MAX_RAW_BYTES.
+        hard link, and read no further than MAX_RAW_BYTES (MAX_PACKAGE_BYTES
+        for a document package).
         """
         try:
             fd = open_nofollow(self.folder, self._target(rel), os.O_RDONLY | _O_NONBLOCK)
@@ -665,10 +1002,11 @@ class ArtifactWorkspace:
                 raise WorkspaceError(f"{rel}: not a regular file")
             if not _IS_WINDOWS and st.st_nlink != 1:
                 raise WorkspaceError(f"{rel}: has another hard link, so it is never read or written")
-            if st.st_size > MAX_RAW_BYTES:
+            limit = MAX_PACKAGE_BYTES if os.path.splitext(rel)[1].lower() in OOXML_SUFFIXES else MAX_RAW_BYTES
+            if st.st_size > limit:
                 raise WorkspaceError(f"{rel}: too large ({_size(st.st_size)})")
-            data = handle.read(MAX_RAW_BYTES + 1)
-        if len(data) > MAX_RAW_BYTES:
+            data = handle.read(limit + 1)
+        if len(data) > limit:
             raise WorkspaceError(f"{rel}: too large")
         return data, stat.S_IMODE(st.st_mode)
 
@@ -698,7 +1036,8 @@ class ArtifactWorkspace:
 
         Pruned like `store.iter_content_files` (top-level NON_CONTENT_NAMES,
         bytecode at any depth, symlinks never followed), and additionally
-        SKIP_DIRS at any depth and known binary suffixes.
+        SKIP_DIRS at any depth and known binary suffixes, except document
+        packages and PDFs, which `map()` and `pdf_files()` sort out.
         """
         stack: list[tuple[str, str]] = [(os.fspath(self.folder), "")]
         while stack:
@@ -722,7 +1061,8 @@ class ArtifactWorkspace:
                         continue
                     if not entry.is_file(follow_symlinks=False):
                         continue
-                    if os.path.splitext(name)[1].lower() in BINARY_SUFFIXES:
+                    suffix = os.path.splitext(name)[1].lower()
+                    if suffix in BINARY_SUFFIXES and suffix not in OOXML_SUFFIXES and suffix != PDF_SUFFIX:
                         continue
                     yield rel, entry.stat(follow_symlinks=False)
                 except OSError:
@@ -732,7 +1072,9 @@ class ArtifactWorkspace:
         """The artifact's text content files, sorted by path.
 
         HTML pages are sized as the model will read them (masked), every other
-        file by its size on disk.
+        file by its size on disk. A document package is listed as its content
+        and formatting parts (`report.docx/word/document.xml`), each sized as
+        `read()` shows it; a PDF is not listed.
         """
         try:
             self._check_read()
@@ -742,6 +1084,12 @@ class ArtifactWorkspace:
         for rel, st in sorted(self._walk()):
             if len(found) >= MAX_MAP_FILES:
                 break
+            suffix = os.path.splitext(rel)[1].lower()
+            if suffix == PDF_SUFFIX:
+                continue
+            if suffix in OOXML_SUFFIXES:
+                found += self._package_entries(rel)[: MAX_MAP_FILES - len(found)]
+                continue
             if self._is_binary_file(rel):
                 continue
             size = st.st_size
@@ -759,6 +1107,9 @@ class ArtifactWorkspace:
 
     def _masked(self, rel: str) -> str | None:
         """The masked view of `rel`, with no size cap; None when absent."""
+        split = self._package_split(rel)
+        if split is not None:
+            return self._part_masked(rel, *split)
         reason = self._hidden_reason(rel)
         if reason:
             raise WorkspaceError(reason)
@@ -789,8 +1140,11 @@ class ArtifactWorkspace:
 
     # ── preload ──────────────────────────────────────────────────────
 
-    @staticmethod
-    def _preloadable(path: str) -> bool:
+    def _preloadable(self, path: str) -> bool:
+        split = self._package_split(path)
+        if split is not None:
+            package, part = split
+            return bool(_PRELOAD_PARTS[os.path.splitext(package)[1].lower()].fullmatch(part))
         name = path.rsplit("/", 1)[-1].lower()
         if name.endswith(".lock") or "-lock." in name or name == "lock.json" or ".min." in name:
             return False
@@ -802,8 +1156,10 @@ class ArtifactWorkspace:
 
         All or nothing: a set the model sees only part of reads as the whole
         project, which is worse than seeing a map and choosing. Eligible: text
-        files by suffix, no lockfiles or minified bundles. Code files come
-        before content files, then by path.
+        files by suffix, no lockfiles or minified bundles, and a document's
+        content parts (its body, sheets and shared strings, or slides), not
+        its styles, themes, masters or layouts, which are read when needed.
+        Code files come before content files, then by path.
         """
         entries = [entry for entry in self.map() if self._preloadable(entry.path)]
         if not entries or len(entries) > PRELOAD_MAX_FILES:
@@ -898,6 +1254,14 @@ class ArtifactWorkspace:
     # ── write ────────────────────────────────────────────────────────
 
     def _exists(self, rel: str) -> bool:
+        split = self._package_split(rel)
+        if split is not None:
+            package, part = split
+            try:
+                with self._package(package) as (zf, _data):
+                    return _zip_member(zf, part) is not None
+            except WorkspaceError:
+                return False
         try:
             os.lstat(self._target(rel))
         except OSError:
@@ -911,7 +1275,9 @@ class ArtifactWorkspace:
         unmasked against the file as it is on disk now; then every file is
         written by staging it next to its target and renaming it into place,
         keeping an existing file's permission bits. If any rename fails the
-        files already replaced are put back and created ones removed.
+        files already replaced are put back and created ones removed. Parts of
+        a document package are gathered per package, and the repacked package
+        is one of the files written, in the same transaction.
         """
         self._check_write()
         cleaned: dict[str, str] = {}
@@ -933,7 +1299,12 @@ class ArtifactWorkspace:
             raise WorkspaceError("\n".join(problems))
 
         changes: dict[str, tuple[bytes, int] | None] = {}
+        package_edits: dict[str, dict[str, str]] = {}
         for rel, text in cleaned.items():
+            split = self._package_split(rel)
+            if split is not None:
+                package_edits.setdefault(split[0], {})[split[1]] = text
+                continue
             current = self._read_raw(rel)
             if current is None:
                 if _PLACEHOLDER_RE.search(text):
@@ -953,6 +1324,10 @@ class ArtifactWorkspace:
             if current is not None and data == current[0]:
                 continue
             changes[rel] = (data, current[1] if current is not None else -1)
+        for package, edits in package_edits.items():
+            repacked = self._repack(package, edits)
+            if repacked is not None:
+                changes[package] = repacked
         if changes:
             self._commit(changes)
 
@@ -1007,11 +1382,19 @@ class ArtifactWorkspace:
     # ── snapshot ─────────────────────────────────────────────────────
 
     def snapshot(self, paths: Iterable[str]) -> Snapshot:
-        """Capture each path's bytes and mode, or its absence."""
+        """Capture each path's bytes and mode, or its absence.
+
+        A part is captured as its whole package, so `restore()` puts the
+        package back byte for byte, whatever was repacked into it since.
+        """
         saved: dict[str, tuple[bytes, int] | None] = {}
         for path in paths:
             rel = _clean(path)
-            saved[rel] = self._read_raw(rel)
+            split = self._package_split(rel)
+            if split is not None:
+                rel = split[0]
+            if rel not in saved:
+                saved[rel] = self._read_raw(rel)
         return Snapshot(self, saved)
 
     # ── the transaction ──────────────────────────────────────────────

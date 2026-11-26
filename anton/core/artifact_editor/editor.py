@@ -31,6 +31,9 @@ One tool-using conversation per edit:
    ``hand_to_agent``: a request that needs data or analysis these files do not
    have is handed back (status ``escalated``) and every file is restored.
    ``max_fix_rounds`` then bounds how many failed checks go back for repair.
+9. A Word, Excel or PowerPoint document is edited through its XML parts, by
+   the same loop (see ``workspace``). A PDF cannot be edited: an artifact that
+   is only PDFs is handed back (or answered) before any model call.
 
 Every rejected patch is written to the editor's JSONL record (``records``).
 """
@@ -386,6 +389,16 @@ class ArtifactEditor:
         self._stage("reading")
         self.progress.status("Looking over the artifact...")
         entries = self.ws.map()
+        if not entries:
+            pdfs = await asyncio.to_thread(self.ws.pdf_files)
+            if pdfs:
+                # Nothing a patch can change, so no model call is spent finding that out.
+                reason = (f"{', '.join(pdfs[:3])} {'is a PDF' if len(pdfs) == 1 else 'are PDFs'}, which can't be "
+                          "edited in place; the agent can rebuild it with the change.")
+                self.progress.log("only PDFs here: " + ", ".join(pdfs[:3]))
+                if self.escalation:
+                    raise _Escalate(reason)
+                return Outcome("answered", reply=reason)
         file_list = "\n".join(f"{e.path} ({e.bytes} bytes)" for e in entries) or "(no files)"
         intro = prompts.intro(kind=self.ws.kind, slug=self.slug, name=self.name, primary=self.ws.primary,
                               file_list=file_list)
@@ -409,11 +422,11 @@ class ArtifactEditor:
             self.progress.log(f"read the whole artifact up front: {len(preload)} files")
             self._say(prompts.request(task, preloaded=True))
         else:
-            primary = self.ws.primary
+            lead = self.ws.entry_file()
             self.messages.append({"role": "user", "content": intro})
-            # The entry page first: nearly every edit is to it.
-            if primary and any(e.path == primary for e in entries):
-                self._preload([primary])
+            # The entry page (a document's main part) first: nearly every edit is to it.
+            if lead and any(e.path == lead for e in entries):
+                self._preload([lead])
             self._say(prompts.request(task, preloaded=False))
 
         self._stage("writing")
@@ -842,12 +855,12 @@ class ArtifactEditor:
                 lines[index] = "@" + line[2:].strip()
         patch = "\n".join(lines)
         try:
-            return parse_patch(patch)
+            return parse_patch(patch, known)
         except PatchParseError as exc:
             headerless = not any(line.startswith("@") and not line.startswith("@@") for line in lines)
             if (self.ws.kind == "html-app" and self.ws.primary and headerless
                     and ("before any file header" in str(exc) or "no file headers" in str(exc))):
-                return parse_patch(f"@{self.ws.primary}\n{patch}")
+                return parse_patch(f"@{self.ws.primary}\n{patch}", known)
             raise
 
     def _apply_diff(self, args: dict) -> _ToolResult:

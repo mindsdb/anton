@@ -76,7 +76,7 @@ jobs:
       - name: Run tests that need the sandbox packages
         env:
           ANTON_REQUIRE_SANDBOX_PACKAGES: "1"
-        run: uv run --locked --group dev --group scratchpad pytest tests/test_reading_files_skill.py tests/test_image_smoke.py -v -rs
+        run: uv run --locked --group dev --group scratchpad pytest tests/test_reading_files_skill.py tests/test_image_smoke.py tests/test_artifact_editor_ooxml.py -v -rs
 
   windows-installer:
     runs-on: windows-latest
