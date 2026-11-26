@@ -1435,8 +1435,9 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
             f"Created artifact `{artifact.slug}` ({artifact.type}). "
             f"Write output files under: {folder}"
             + (f" (primary: {artifact.primary})" if artifact.primary else "")
-            + (" Shown inline in the chat reply: follow the Inline section of "
-               "`recall_skill(\"build-html-dashboard\")`." if artifact.display == "inline" else "")
+            + (f" Shown in the chat reply as {'a widget' if artifact.display == 'widget' else 'inline'}: "
+               "follow the Inline section of `recall_skill(\"build-html-dashboard\")`."
+               if artifact.display else "")
         ),
         resource_id=artifact.slug,
         idempotency_key=artifact.slug,
@@ -1455,8 +1456,9 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
 def _artifact_display(tc_input: dict, artifact_type: str) -> tuple[str | None, str | None]:
     """`display` from a create/update call as (value, error).
 
-    Absent, None or "" is the usual card (None). "inline" is the one other
-    value, and only an html-app can be shown live inside the chat reply.
+    Absent, None or "" is the usual card (None). "inline" and "widget" are
+    the other values, and only an html-app can be shown live inside the chat
+    reply.
     """
     from anton.core.artifacts.models import ARTIFACT_DISPLAYS
 
@@ -1471,7 +1473,7 @@ def _artifact_display(tc_input: dict, artifact_type: str) -> tuple[str | None, s
         )
     if artifact_type != "html-app":
         return None, (
-            f"Error: only an html-app can be shown inline; this artifact is a {artifact_type}. "
+            f"Error: only an html-app can be shown inline or as a widget; this artifact is a {artifact_type}. "
             "Omit `display`."
         )
     return value, None
@@ -1485,8 +1487,8 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     - `port`: backend port number (fullstack apps only)
     - `datasources`: list of vault-connection slugs the backend reads from.
       `engine`, `name`, and `env_prefix` are derived from the vault.
-    - `display`: "inline" to show an html-app live in the chat reply, empty
-      string to go back to the usual card.
+    - `display`: "inline" or "widget" to show an html-app live in the chat
+      reply, empty string to go back to the usual card.
     """
     store = resolve_artifact_store(session)
     if store is None:

@@ -1,7 +1,8 @@
 """ENG-4684: charts inside the chat reply.
 
-Two halves: the metadata field `display: "inline"` that marks an html-app the
-Cowork chat shows live in the reply, and the IN-REPLY VISUALS prompt block that
+Two halves: the metadata field `display` ("inline" for an interactive view
+worth keeping, "widget" for a page that collects the user's input) that marks
+an html-app the Cowork chat shows live in the reply, and the IN-REPLY VISUALS prompt block that
 teaches ```chartjs / ```mermaid fences and inline artifacts, only on surfaces
 whose chat draws them.
 """
@@ -60,7 +61,13 @@ def test_display_inline_round_trips_through_json():
     assert loaded.display == "inline"
 
 
-@pytest.mark.parametrize("bad", ["card", "INLINE", "", 1])
+@pytest.mark.parametrize("display", ["inline", "widget"])
+def test_every_display_round_trips_through_json(display):
+    artifact = Artifact(**_RECORD, display=display)
+    assert Artifact.model_validate(json.loads(artifact.model_dump_json())).display == display
+
+
+@pytest.mark.parametrize("bad", ["card", "INLINE", "Widget", "", 1])
 def test_display_rejects_other_values(bad):
     with pytest.raises(ValidationError):
         Artifact(**_RECORD, display=bad)
@@ -169,7 +176,8 @@ async def test_update_artifact_refuses_inline_for_a_document(tmp_path):
     tool_defs.STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
 ])
 def test_every_create_artifact_variant_offers_display(tool):
-    assert tool.input_schema["properties"]["display"]["enum"] == ["inline"]
+    assert tool.input_schema["properties"]["display"]["enum"] == ["inline", "widget"]
+    assert "widget" in tool.description and "Share" in tool.description
     assert "display" not in tool.input_schema["required"]
 
 
@@ -178,7 +186,8 @@ def test_every_create_artifact_variant_offers_display(tool):
     tool_defs.STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
 ])
 def test_every_update_artifact_variant_can_set_and_clear_display(tool):
-    assert tool.input_schema["properties"]["display"]["enum"] == ["inline", ""]
+    assert tool.input_schema["properties"]["display"]["enum"] == ["inline", "widget", ""]
+    assert "keep or share a widget" in tool.description
 
 
 # ── listing ─────────────────────────────────────────────────────
@@ -348,7 +357,7 @@ def test_the_dashboard_skill_has_the_inline_contract():
     body = (
         Path(anton.__file__).parent / "core/memory/builtin_skills/build-html-dashboard/SKILL.md"
     ).read_text(encoding="utf-8")
-    inline = body.split('INLINE (display="inline")', 1)[1]
+    inline = body.split('INLINE AND WIDGET (display="inline" or "widget")', 1)[1]
     for needle in ('data-theme="dark"', ":root[data-theme=\"dark\"]", "600 px", "100vh",
                    "NO NETWORK", "fetch", "echarts@5.5.1", "MutationObserver"):
         assert needle in inline, needle
@@ -360,9 +369,112 @@ def test_the_dashboard_skill_documents_the_page_api():
     body = (
         Path(anton.__file__).parent / "core/memory/builtin_skills/build-html-dashboard/SKILL.md"
     ).read_text(encoding="utf-8")
-    inline = body.split('INLINE (display="inline")', 1)[1]
+    inline = body.split('INLINE AND WIDGET (display="inline" or "widget")', 1)[1]
     for needle in ("anton.setState(obj)", "32 KB", "`state.json`", "anton.getState()", "anton.onState(cb)",
                    "anton.submit(obj, message)", "if (window.anton)", "Render from the data in the page first",
-                   "same slug", "Example checklist", "api.submit(", "api.onState(apply)"):
+                   "same slug", "a checklist in that state shape", "api.submit(", "api.onState(apply)"):
         assert needle in inline, needle
-    assert "innerHTML" not in inline.split("Example checklist", 1)[1]
+    assert "innerHTML" not in inline.split("a checklist in that state shape", 1)[1]
+
+
+# ── widget (ENG-4684) ───────────────────────────────────────────
+
+
+def _skill_inline_section() -> str:
+    import anton
+
+    body = (
+        Path(anton.__file__).parent / "core/memory/builtin_skills/build-html-dashboard/SKILL.md"
+    ).read_text(encoding="utf-8")
+    return body.split('INLINE AND WIDGET (display="inline" or "widget")', 1)[1]
+
+
+def test_store_writes_widget_and_turns_it_inline_in_place(tmp_path: Path):
+    store = ArtifactStore(tmp_path)
+    artifact = store.create(name="Pick people", description="d", type="html-app", display="widget")
+    assert json.loads(store.metadata_path(artifact.slug).read_text(encoding="utf-8"))["display"] == "widget"
+    kept = store.update(artifact.slug, display="inline")
+    assert (kept.slug, kept.id, kept.display) == (artifact.slug, artifact.id, "inline")
+
+
+async def test_create_artifact_persists_a_widget(tmp_path):
+    outcome = await handle_create_artifact(_session(tmp_path), {
+        "name": "Pick people", "description": "d", "type": "html-app",
+        "primary": "index.html", "display": " Widget ",
+    })
+    assert outcome.ok is True
+    assert "as a widget" in outcome.content and "Inline section" in outcome.content
+    assert _metadata(tmp_path)["display"] == "widget"
+
+
+async def test_create_artifact_refuses_a_widget_for_a_document(tmp_path):
+    outcome = await handle_create_artifact(_session(tmp_path), {
+        "name": "Notes", "description": "d", "type": "document", "display": "widget",
+    })
+    assert outcome.ok is False and "only an html-app" in outcome.content
+    assert not any(tmp_path.iterdir())
+
+
+async def test_keeping_a_widget_is_a_metadata_change_on_the_same_slug(tmp_path):
+    session = _session(tmp_path)
+    await handle_create_artifact(session, {"name": "Pick", "description": "d", "type": "html-app", "display": "widget"})
+    slug = next(tmp_path.iterdir()).name
+    outcome = await handle_update_artifact_metadata(session, {"slug": slug, "display": "inline"})
+    assert outcome.ok is True and "display=inline" in outcome.content
+    assert [p.name for p in tmp_path.iterdir()] == [slug]
+    assert _metadata(tmp_path)["display"] == "inline"
+    outcome = await handle_update_artifact_metadata(session, {"slug": slug, "display": "widget"})
+    assert outcome.ok is True and _metadata(tmp_path)["display"] == "widget"
+
+
+def test_listing_shows_a_widget_and_its_state(tmp_path):
+    text = _with_state(tmp_path, '{"people": [{"name": "Ana Li", "picked": true}]}', display="widget")
+    lines = text.splitlines()
+    assert "display: widget" in lines
+    assert lines[-1] == 'state: {"people":[{"name":"Ana Li","picked":true}]} (state.json, the user\'s latest edits)'
+
+
+def test_the_ladder_runs_text_chart_widget_inline_full():
+    prompt = IN_REPLY_VISUALS_PROMPT
+    rungs = ["1. PLAIN TEXT", "2. CHART BLOCK", "3. WIDGET", "4. INLINE ARTIFACT", "5. FULL ARTIFACT"]
+    positions = [prompt.index(r) for r in rungs]
+    assert positions == sorted(positions)
+    widget = prompt[positions[2]:positions[3]]
+    assert 'display="widget"' in widget
+    assert "`ask_user`" in widget
+    assert "no Share" in widget and "Artifacts list" in widget
+    assert 'display="inline")`' in widget and "same slug" in widget.replace("\n", " ")
+    assert 'display="inline"' in prompt[positions[3]:positions[4]]
+    assert "WORKING TOGETHER IN AN INLINE ARTIFACT" not in prompt  # folded into the widget rung
+
+
+def test_both_heads_point_at_rung_five():
+    for proactive in (True, False):
+        head = in_reply_visuals(proactive=proactive).split("\n1. PLAIN TEXT", 1)[0]
+        assert "rung 5" in head and "option 3" not in head
+    assert "a widget (rung 3) is not a chart and needs no request" in in_reply_visuals(proactive=False).replace("\n", " ")
+
+
+def test_the_widget_rung_is_voice_friendly():
+    flat = IN_REPLY_VISUALS_PROMPT.replace("\n", " ")
+    for needle in ("voice call", "title, visible text and current state", "set the state or submit",
+                   "self-describing JSON", '{"people":[{"name":"Ana Li","picked":true}]}', "not opaque ids",
+                   "render the page fully from any state", "short and human"):
+        assert needle in flat, needle
+
+
+def test_the_skill_teaches_widgets_and_voice():
+    inline = _skill_inline_section()
+    for needle in ('display="widget"', "not a deliverable", "no Share", "Artifacts list",
+                   'update_artifact(slug=..., display="inline")', "VOICE", "voice call",
+                   '{"people":[{"name":"Ana Li","picked":true}]}', "Render fully from `onState`",
+                   "pushed from outside at any time", "short and human"):
+        assert needle in inline, needle
+
+
+def test_the_skill_example_uses_the_readable_state_shape():
+    example = _skill_inline_section().split("```html", 1)[1].split("```", 1)[0]
+    assert "people:" in example and "name:" in example and "picked:" in example
+    assert "api.onState(apply)" in example and "api.submit(" in example
+    assert "Contact " in example  # a short, human submit message
+    assert "innerHTML" not in example

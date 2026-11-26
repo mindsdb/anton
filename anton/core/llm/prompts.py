@@ -577,23 +577,26 @@ Fallback only if `create_artifact` is unavailable: save to `{output_dir}` \
 # from the session's surface): in a terminal a ```chartjs fence is raw JSON.
 # Kept out of the `.format` templates above because the examples hold braces.
 IN_REPLY_VISUALS_PROACTIVE_HEAD = """\
-IN-REPLY VISUALS: this chat draws charts inside your reply. When a visual makes \
-the answer clearer, show one, and pick the lightest option that works. For a \
-single chart or diagram this comes before the artifact routing above, which is \
-option 3.\
+IN-REPLY VISUALS: this chat draws charts and small pages inside your reply. When \
+a visual makes the answer clearer, show one, and take the first rung below that \
+fits. For a single chart, diagram or input page this comes before the artifact \
+routing above, which is rung 5.\
 """
 
 IN_REPLY_VISUALS_ON_REQUEST_HEAD = """\
-IN-REPLY VISUALS: this chat draws charts inside your reply. You do not build \
-artifacts unprompted here, so: add a chart block when a trend, comparison, distribution or flow is \
-the point of the answer, and build an inline or full artifact only when the user \
-asks for an interactive chart, a dashboard or a file. When the user asks for a \
-chart, pick the lightest option that works; this comes before the artifact \
-routing above, which is option 3.\
+IN-REPLY VISUALS: this chat draws charts and small pages inside your reply. You \
+do not build artifacts unprompted here, so: add a chart block when a trend, \
+comparison, distribution or flow is the point of the answer, and build an inline \
+or full artifact only when the user asks for an interactive chart, a dashboard \
+or a file; a widget (rung 3) is not a chart and needs no request. Take the first \
+rung below that fits; this comes before the artifact routing above, which is \
+rung 5.\
 """
 
 IN_REPLY_VISUALS_PROMPT = """\
-1. CHART BLOCK (the default for one chart or diagram): a fenced block in your \
+1. PLAIN TEXT: the user asked for no charts, text only or just the data, or \
+words and a table say it best: draw nothing.
+2. CHART BLOCK (the default for one chart or diagram): a fenced block in your \
 markdown reply, drawn in place.
    - ```chartjs holds one Chart.js config as pure JSON: double-quoted keys, no \
 functions, callbacks, formatters or comments. Types: line, bar, pie, doughnut, \
@@ -603,33 +606,46 @@ scatter, bubble, radar, polarArea.
 Mermaid at most ~100 nodes. Aggregate or sample in the scratchpad first, to \
 about 100 points (weekly buckets, top 10 plus "Other"), never thousands of raw \
 rows. Title the chart and put units in the axis or dataset labels.
-2. INLINE ARTIFACT: the chart needs interaction a chart block cannot give \
-(range tabs like 1D/5D/1M, toggles, linked views) and still fits in a message. \
-`create_artifact(type="html-app", primary="index.html", display="inline", ...)`, \
-then `recall_skill("build-html-dashboard")` and write the page yourself by its \
-Inline section, not with generate_artifact. It renders live inside your reply, \
-sandboxed and with no network, so every byte of data is in the page.
-3. FULL ARTIFACT: large data, multi-chart dashboards, reports, anything the \
-user will reopen or share: the usual html-app artifact flow, unchanged.
-Decide in order: (a) the user asked for no charts, text only or just the data: \
-draw nothing. (b) One chart or diagram of small or aggregated data: chart block. \
-(c) Needs interaction but fits in a message: inline artifact. (d) Anything \
-else: full artifact.
-A chart sits beside the narration, not instead of it: keep the key numbers in \
-text and tables, and use at most two chart blocks in a reply.
-WORKING TOGETHER IN AN INLINE ARTIFACT: when the user needs to review, pick, \
-edit or confirm several items (people to contact, rows to approve, a plan to \
-reorder), build a small inline artifact with checkboxes, fields or drag handles \
-instead of a long text list; this is not a chart, so it applies even when you do \
-not build artifacts unprompted. For a single question, use `ask_user` if you have \
-it. The page saves the user's edits and sends them back through the `anton` page \
-API (the skill's Inline section). Their latest edits are in `state.json` in the \
-artifact folder, and `list_artifacts` shows them as `state:`: read it for the \
-current selections. When the user confirms, the next user message carries \
-"(About the artifact `<slug>`.)" and a ```json block holding the submitted state. \
-While the conversation keeps working on that same list, update that artifact in \
-place: rewrite its page under the same slug as a new revision and do not call \
-create_artifact again. The chat collapses older copies and shows only the newest.
+   A chart sits beside the narration, not instead of it: keep the key numbers \
+in text and tables, and use at most two chart blocks in a reply.
+3. WIDGET: the point is the user's input in this conversation: review, pick, \
+edit or confirm several items, approve, rank, fill in, or choose between \
+options (people to contact, rows to approve, a plan to reorder). Build a small \
+page with checkboxes, fields, buttons or drag handles instead of a long text \
+list: `create_artifact(type="html-app", primary="index.html", display="widget", ...)`. \
+It is not a chart, so this applies even when you do not build artifacts \
+unprompted. For a single question, use `ask_user` if you have it. A widget is \
+not a deliverable: the app offers no Share or publishing for it and keeps it out \
+of the Artifacts list.
+   - The page saves the user's edits and sends them back through the `anton` \
+page API (the skill's Inline section). Their latest edits are in `state.json` \
+in the artifact folder, and `list_artifacts` shows them as `state:`: read it \
+for the current selections. When the user confirms, the next user message \
+carries "(About the artifact `<slug>`.)" and a ```json block holding the \
+submitted state.
+   - The user may be on a voice call: a voice assistant reads the widget's \
+title, visible text and current state, and can set the state or submit for \
+them. So keep the state a small, self-describing JSON with readable keys and \
+labels ({"people":[{"name":"Ana Li","picked":true}]}, not opaque ids), render \
+the page fully from any state pushed to it, and make the submit message short \
+and human.
+   - While the conversation keeps working on that same list, update that \
+artifact in place: rewrite its page under the same slug as a new revision and \
+do not call create_artifact again. The chat collapses older copies and shows \
+only the newest.
+   - If the user asks to keep or share a widget, call \
+`update_artifact(slug=..., display="inline")`: a metadata change on the same \
+slug, nothing rebuilt.
+4. INLINE ARTIFACT: an interactive view worth keeping or sharing that a chart \
+block cannot give (range tabs like 1D/5D/1M, toggles, linked views, a small \
+dashboard) and that still fits in a message: the same call with \
+display="inline". Its page state works as in rung 3.
+   For rungs 3 and 4, call `recall_skill("build-html-dashboard")` and write \
+the page yourself by its Inline section, not with generate_artifact. It renders \
+live inside your reply, sandboxed and with no network, so every byte of data is \
+in the page.
+5. FULL ARTIFACT: large data, multi-chart dashboards, reports, anything the \
+user will open as its own page: the usual html-app artifact flow, unchanged.
 ```chartjs
 {"type":"bar","data":{"labels":["Q1","Q2","Q3","Q4"],"datasets":[{"label":"Revenue (USD k)","data":[120,135,128,160]}]},"options":{"plugins":{"title":{"display":true,"text":"Revenue by quarter"}}}}
 ```

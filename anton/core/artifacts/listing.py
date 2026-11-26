@@ -69,13 +69,13 @@ STATE_INLINE_MAX_BYTES = 400
 
 
 def state_line(artifact: Artifact, folder: Path) -> str | None:
-    """The `state:` line for an inline artifact whose page saved a state.
+    """The `state:` line for an inline artifact or widget whose page saved a state.
 
     None for every other artifact, so they cost no tokens. A small state is
     inlined (it is the user's own edits, shown as data); a larger one is
     flagged with its size so the agent reads `state.json` when it needs it.
     """
-    if artifact.display != "inline":
+    if not artifact.display:  # every display is shown in the reply with a page state
         return None
     path = folder / INLINE_STATE_FILENAME
     try:
@@ -110,7 +110,7 @@ def _entry(artifact: Artifact, folder: Path, fields: Sequence[str]) -> list[str]
         elif field == "primary":
             lines.append(f"primary: {_escape(artifact.primary) if artifact.primary else '-'}")
         elif field == "display":
-            # Only an artifact shown inline says so: the usual card is the
+            # Only an artifact shown inline or as a widget says so: the usual card is the
             # default, and a `display: -` line on every entry costs tokens.
             if artifact.display:
                 lines.append(f"display: {artifact.display}")

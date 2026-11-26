@@ -7,9 +7,9 @@ description: 'ONLY for writing dashboard or chart HTML BY HAND. NOT needed on th
   before rewriting the code of a generated dashboard, or when generate_artifact failed and
   the user asked you to continue manually: it is the output contract — self-contained file
   rules, Apache ECharts setup, dark theme, layout/design standards, large-dataset handling.
-  Also recall it to write an inline chart or an inline page the user reviews and confirms
-  (create_artifact with display="inline"): its Inline section says how that page differs
-  and documents the window.anton state and submit API.
+  Also recall it to write an inline chart (create_artifact with display="inline") or a
+  widget the user picks, confirms or fills in (display="widget"): its Inline section says
+  how that page differs and documents the window.anton state and submit API.
   Not needed to repair a page generate_artifact returned as browser_check_failed: that
   result''s instruction says how.'
 metadata:
@@ -25,7 +25,7 @@ For an Earth map or globe, follow the always-available MAPS AND GLOBES guidance:
 
 BUILD THE DASHBOARD — use multiple scratchpad cells, but produce ONE single self-contained HTML file:
 
-Before the first write, call `create_artifact(type="html-app", name=..., description=..., primary="index.html")` (with `display="inline"` for a chart shown inside the chat reply: see INLINE at the end) and use the returned `<artifact_path>` for every file you write. All paths below referring to "the output directory" mean `<artifact_path>`. The final dashboard MUST be a single .html file with all data, CSS, JS and images inlined, with no exception: the web app preview shows only the page itself, so a separate file next to it (`dashboard_data.js`, `logo.png`) does not load there, whatever its size. Build every page this way so it renders on every deployment. Keep the whole page under 8 MB; a larger page cannot be checked in a browser.
+Before the first write, call `create_artifact(type="html-app", name=..., description=..., primary="index.html")` (with `display="inline"` for a chart shown inside the chat reply, or `display="widget"` for a page that collects the user's input there: see INLINE AND WIDGET at the end) and use the returned `<artifact_path>` for every file you write. All paths below referring to "the output directory" mean `<artifact_path>`. The final dashboard MUST be a single .html file with all data, CSS, JS and images inlined, with no exception: the web app preview shows only the page itself, so a separate file next to it (`dashboard_data.js`, `logo.png`) does not load there, whatever its size. Build every page this way so it renders on every deployment. Keep the whole page under 8 MB; a larger page cannot be checked in a browser.
 
   REROUND DISCIPLINE (critical — most "round-cap exhaustion" failures we've seen on real dashboards come from drifting off one or more of these):
   1. ONE scratchpad, ONE name. Pick a name on the first cell (e.g. `dash`) and reuse it for the entire build. Switching names (`build_pres` → `write_html` → `pres1` …) creates *separate isolated environments* — variables in one don't exist in another — and burns rounds on recovery.
@@ -150,44 +150,54 @@ Responsive layout (critical — dashboards must work on phones too):
 - A map fits its projection to the plotted points (with a margin), not the whole world, when they sit in one region. At phone width its labels and legend stay inside the view and no smaller than 11 px: shorten or drop labels that would overlap.
 - Default to one column on narrow viewports unless the user explicitly asks for a fixed multi-column layout (e.g. for a printable PDF).
 
-INLINE (display="inline") — a small interactive chart shown live inside the chat reply:
-Register it with `create_artifact(type="html-app", primary="index.html", display="inline", ...)` and write it yourself; generate_artifact builds full pages. Everything above still holds (one self-contained file, the HOST CONTRACT with its view helper, SECURITY, chart rules) except where these rules differ:
+INLINE AND WIDGET (display="inline" or "widget") — a small page shown live inside the chat reply:
+Two kinds, one set of rules. `display="inline"` is an interactive view worth keeping or sharing: a chart with range tabs or toggles, a small dashboard. `display="widget"` is a page whose point is the user's input in this conversation: pick, confirm, approve, rank, fill in, choose between options. A widget is not a deliverable: the app offers no Share or publishing for it and keeps it out of the Artifacts list. If the user later wants to keep or share a widget, `update_artifact(slug=..., display="inline")`: same slug, nothing rebuilt.
+Register it with `create_artifact(type="html-app", primary="index.html", display="inline" or "widget", ...)` and write it yourself; generate_artifact builds full pages. Everything above still holds (one self-contained file, the HOST CONTRACT with its view helper, SECURITY, chart rules) except where these rules differ:
 - FITS IN A MESSAGE: one chart and its controls (range tabs such as 1D/5D/1M, a series toggle, a select), or two small linked views. No page header, KPI rows, multi-section layout, tabbed pages or long tables. The insight list is one line. Build it in one or two cells; REROUND DISCIPLINE is for full dashboards.
 - HEIGHT: the host measures the page and sizes the frame to it, so the page sizes to its content: aim for 600 px tall or less. No `100vh`, `height: 100%` on `html`/`body`, `position: fixed`, or a wrapper with its own scrolling (`overflow: auto`/`scroll`). `body { margin: 0; }`, chart container `width: 100%; height: 320px` (420 px at most), and the resize hook from Responsive layout.
 - THEME: the host sets `data-theme="light"` or `"dark"` and `color-scheme` on `<html>`, and changes them live when the app's theme changes. Style from CSS custom properties, not the fixed #0d1117 theme: light tokens on `:root`, dark ones on `:root[data-theme="dark"]`, and the same dark tokens under `@media (prefers-color-scheme: dark) { :root:not([data-theme]) { ... } }` for the moment before the host sets it. Keep the page background transparent so it sits in the reply. Start ECharts with `echarts.init(el, dark ? 'dark' : null)` and `backgroundColor: 'transparent'`, reading colours from the tokens (`getComputedStyle(document.documentElement).getPropertyValue('--fg')`). Watch the attribute with `new MutationObserver(redraw).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })`, where `redraw` disposes the chart and starts it again in the new theme with the current range and toggles.
 - NO NETWORK: the frame makes no requests, so all data is inline as `const D = ...;` and nothing calls `fetch`, `XMLHttpRequest`, `d3.json` or `EventSource`. No web fonts, external images, map atlases or tiles, and no Tailwind: style with a `<style>` block. The one external resource is the pinned ECharts script `https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js`, the same `<script src>` every html-app preview loads; no other library.
-- SMALL DATA: aggregate in the scratchpad to what the chart shows, a few hundred points per view at most, with every range a tab offers computed ahead, and keep the file under 200 KB. Larger data, or a page the user will keep and reopen, is a full artifact without `display`.
+- SMALL DATA: aggregate in the scratchpad to what the chart shows, a few hundred points per view at most, with every range a tab offers computed ahead, and keep the file under 200 KB. Larger data, or a page the user will open on its own, is a full artifact without `display`.
 - No `localStorage`. A chart starts in its default view every time; a page the user works in keeps its state through `window.anton` (below).
-- COLLABORATION PAGES (review, pick, edit or confirm several items: people to contact, rows to approve, a plan to reorder): same rules, with checkboxes, fields or drag handles instead of a chart, and no ECharts unless it also shows a chart. The host injects a small page API:
-  - `anton.setState(obj)`: saves the page state (JSON, at most 32 KB) as `state.json` in the artifact folder. Call it on every edit; keep ids and choices in it, not the whole data set.
+- WIDGETS (review, pick, edit or confirm several items: people to contact, rows to approve, a plan to reorder): same rules, with checkboxes, fields, buttons or drag handles instead of a chart, and no ECharts unless it also shows a chart. Give it a visible title that says what the user is deciding. The host injects a small page API (an inline chart may use it too):
+  - `anton.setState(obj)`: saves the page state (JSON, at most 32 KB) as `state.json` in the artifact folder. Call it on every edit.
   - `anton.getState()` returns the saved state or `null`; `anton.onState(cb)` calls `cb(state)` when the saved state arrives or changes. Render from the data in the page first, then apply the state; ignore keys that no longer match the data (a newer revision may have changed the items).
   - `anton.submit(obj, message)`: sends the user's confirmation to the chat as a new user turn tagged with this artifact; both arguments are optional (`obj` defaults to the current state). Give the page one clear confirm button that calls it.
   - Guard every call with `if (window.anton)`: the full preview and the browser check have no API, and the page must still render there.
   - When the conversation keeps working on the same list, rewrite this page under the same slug (a new revision) instead of creating another artifact; the chat shows only the newest copy.
-  Example checklist (the view helper from item 10 is left out for brevity; a real page still starts its view through it):
+- VOICE: the user may be on a voice call. A voice assistant reads the page's title, visible text and current state, and can set the state or submit for the user. So:
+  - Keep the state a small, self-describing JSON with readable keys and labels: `{"people":[{"name":"Ana Li","picked":true}]}`, not `{"p":["u_83f2"]}`. Someone reading only the state knows what the user chose.
+  - Render fully from `onState`: any valid state can be pushed from outside at any time, so every visible control follows the state it is given, not only the user's clicks.
+  - Make the `submit` message short and human: "Contact Ana Li and Li Wei", not a dump of the state.
+- Example widget, a checklist in that state shape (the view helper from item 10 is left out for brevity; a real page still starts its view through it):
   ```html
+  <h3>Who should we contact?</h3>
   <ul id="list"></ul><button id="ok">Confirm</button>
   <script>
-  const D = [{id: "ana", label: "Ana Ruiz, Acme"}, {id: "li", label: "Li Wei, Globex"}];
-  let state = {picked: D.map(d => d.id)};
+  const D = [{name: "Ana Li", company: "Acme"}, {name: "Li Wei", company: "Globex"}];
+  let state = {people: D.map(d => ({name: d.name, picked: true}))};
   const api = window.anton;
-  function render() {  // DOM nodes and textContent: item labels are data, never HTML
-    document.getElementById("list").replaceChildren(...D.map(d => {
-      const li = document.createElement("li"), label = document.createElement("label"), box = document.createElement("input");
-      box.type = "checkbox"; box.dataset.id = d.id; box.checked = state.picked.includes(d.id);
-      label.append(box, " " + d.label); li.append(label); return li;
+  function render() {  // DOM nodes and textContent: names are data, never HTML
+    document.getElementById("list").replaceChildren(...state.people.map((p, i) => {
+      const d = D.find(x => x.name === p.name), li = document.createElement("li");
+      const label = document.createElement("label"), box = document.createElement("input");
+      box.type = "checkbox"; box.dataset.i = i; box.checked = p.picked;
+      label.append(box, ` ${p.name}, ${d.company}`); li.append(label); return li;
     }));
   }
-  function apply(s) {
-    if (s && Array.isArray(s.picked)) { state = {picked: s.picked.filter(id => D.some(d => d.id === id))}; render(); }
+  function apply(s) {  // any valid state, from the user or pushed from outside: render all of it
+    if (!s || !Array.isArray(s.people)) return;
+    const picked = new Map(s.people.map(p => [p.name, !!p.picked]));
+    state = {people: D.map(d => ({name: d.name, picked: picked.has(d.name) ? picked.get(d.name) : true}))};
+    render();
   }
   document.getElementById("list").addEventListener("change", e => {
-    const id = e.target.dataset.id;
-    state.picked = e.target.checked ? [...state.picked, id] : state.picked.filter(x => x !== id);
+    state.people[e.target.dataset.i].picked = e.target.checked;
     if (api) api.setState(state);
   });
   document.getElementById("ok").addEventListener("click", () => {
-    if (api) api.submit(state, `Contact these ${state.picked.length} people`);
+    const names = state.people.filter(p => p.picked).map(p => p.name);
+    if (api) api.submit(state, names.length ? `Contact ${names.join(" and ")}` : "Contact no one");
   });
   render();
   if (api) { apply(api.getState()); api.onState(apply); }

@@ -287,12 +287,16 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "document. The renderer uses it to decide what to open by default. "
         "Skip when you don't know yet — the renderer falls back to a "
         "heuristic, and you can set it later via `update_artifact`.\n\n"
-        "Pass `display: \"inline\"` (html-app only) for a small interactive "
-        "chart that shows live inside your chat reply instead of as a card: "
-        "range tabs, toggles or linked views that a chart block cannot do, on "
-        "data that fits in a message. You write that page yourself: call "
+        "Pass `display` (html-app only) for a small page that shows live inside "
+        "your chat reply instead of as a card. `\"widget\"`: its point is the "
+        "user's input in this conversation (pick, confirm, approve, rank, fill "
+        "in, choose between options); it is not a deliverable, so it gets no "
+        "Share and stays out of the Artifacts list. `\"inline\"`: an interactive "
+        "view worth keeping or sharing (a chart with range tabs, toggles or "
+        "linked views that a chart block cannot do), on data that fits in a "
+        "message. You write either page yourself: call "
         "`recall_skill(\"build-html-dashboard\")` and follow its Inline section. "
-        "Omit it for anything the user opens, keeps or that holds a lot of data.\n\n"
+        "Omit it for anything the user opens as a page or that holds a lot of data.\n\n"
         "To MODIFY an existing artifact instead of creating a new one, call "
         "`list_artifacts` to find it; its folder is `<root>/<slug>`."
     ),
@@ -325,10 +329,12 @@ CREATE_ARTIFACT_TOOL = ToolDef(
             },
             "display": {
                 "type": "string",
-                "enum": ["inline"],
+                "enum": ["inline", "widget"],
                 "description": (
-                    "\"inline\" shows this html-app live inside the chat reply (a small "
-                    "interactive chart). Omit for the usual artifact card."
+                    "Shows this html-app live inside the chat reply. \"widget\": it "
+                    "collects the user's input in this conversation (no Share, not in "
+                    "the Artifacts list). \"inline\": an interactive view worth keeping "
+                    "or sharing. Omit for the usual artifact card."
                 ),
             },
         },
@@ -356,8 +362,9 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
         "captures which connections the deployable depends on. Slugs must match "
         "existing vault connections (see `Connected Data Sources` in the system "
         "prompt). Pass `[]` to clear.\n"
-        "- `display`: `\"inline\"` shows an html-app live inside the chat reply; "
-        "empty string goes back to the usual card."
+        "- `display`: `\"inline\"` or `\"widget\"` shows an html-app live inside "
+        "the chat reply; empty string goes back to the usual card. When the user "
+        "asks to keep or share a widget, set `\"inline\"`: same slug and files."
     ),
     input_schema={
         "type": "object",
@@ -388,8 +395,12 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
             },
             "display": {
                 "type": "string",
-                "enum": ["inline", ""],
-                "description": "\"inline\" to show an html-app inside the chat reply; empty string for the usual card.",
+                "enum": ["inline", "widget", ""],
+                "description": (
+                    "\"inline\" (worth keeping or sharing) or \"widget\" (the user's "
+                    "input in this conversation) to show an html-app inside the chat "
+                    "reply; empty string for the usual card."
+                ),
             },
         },
         "required": ["slug"],
@@ -404,7 +415,7 @@ LIST_ARTIFACTS_TOOL = ToolDef(
         "List the artifacts in this workspace, newest first. An artifact's folder "
         "is `<root>/<slug>`, and paths in the result are relative to it. Without "
         "`match` you get a summary (name, type, updatedAt, description, primary, "
-        "and, for an artifact shown inline, display and its saved state: the "
+        "and, for an artifact shown inline or as a widget, display and its saved state: the "
         "user's latest edits in the page, from `state.json` in its folder); "
         "with `match` the full record, including id, files and service_files "
         "(housekeeping and generation files, not what was built)."
