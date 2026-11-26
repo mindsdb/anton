@@ -49,6 +49,7 @@ from anton.core.backends.wire import (
     USAGE_MARKER,
     USAGE_MARKER_ENV,
 )
+from anton.core.llm.endpoints import mindshub_url_over_https
 from anton.core.llm.images import current_turn_images
 from anton.core.llm.provider import (
     USAGE_LOG_ENV,
@@ -1230,6 +1231,12 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env.pop(CLASSIFY_ENV, None)
         else:
             env[CLASSIFY_ENV] = "off"
+        # A saved http:// MindsHub URL reaches the pad over https, as
+        # AntonSettings loads it. Code in the pad reads these names as they
+        # stand, so without this it would send the key in clear.
+        for name in ("ANTON_MINDS_URL", "ANTON_OPENAI_BASE_URL", "OPENAI_BASE_URL"):
+            if env.get(name):
+                env[name] = mindshub_url_over_https(url=env[name])
         # Propagate provider credentials from the ANTON_* names into the SDK
         # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:

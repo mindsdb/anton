@@ -167,6 +167,19 @@ def classify_base_url(base_url: str) -> str:
     return ENDPOINT_THIRD_PARTY
 
 
+def mindshub_url_over_https(*, url: str) -> str:
+    """Return ``url`` with ``https://`` in place of ``http://`` when its host is MindsHub's.
+
+    MindsHub hosts answer plain HTTP only with a redirect to https, so the
+    rewrite loses nothing, and the key stops crossing the internet in clear
+    text on every request. Any other URL, a local or third-party ``http://``
+    one included, comes back unchanged.
+    """
+    if url.lower().startswith("http://") and classify_base_url(url) == ENDPOINT_MINDSHUB:
+        return "https://" + url[len("http://"):]
+    return url
+
+
 def classify_endpoint(settings: AntonSettings) -> str:
     """``local`` | ``mindshub`` | ``third-party``, or ``""`` when unrecognised.
 
