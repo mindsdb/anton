@@ -98,10 +98,10 @@ in the scratchpad only data your code will compute on (CSV, Excel, parquet) or a
 needs special parsing: printed scratchpad output stops at 10,000 characters.
 - Importing a library never installs it: list the libraries a cell needs in its \
 `packages` array, and any that are already installed are skipped.
-- When you need exact character counts, math, data parsing, or text transforms — use the \
-scratchpad tool instead of guessing or doing it in your head. For approximate prose length \
-targets (e.g., "about 300 words" or "roughly 500 words"), treat the target as approximate \
-(~10% tolerance) and save the draft in one pass rather than iterating in the scratchpad to \
+- When you need exact character or word counts, strict length limits, math, data parsing, or \
+text transforms — use the scratchpad tool instead of guessing or doing it in your head. For \
+approximate prose length targets (e.g., "about 300 words" or "roughly 500 words"), treat the \
+target as a loose guide and write it in one pass rather than iterating in the scratchpad to \
 hit an exact word count.
 - Before counting, totalling or ranking rows from a query or API, check whether the result \
 was cut: a truncation flag, a next-page token or cursor, or a row count equal to the page or \
@@ -355,8 +355,7 @@ lives in a `static/` subfolder of the artifact, served by `backend.py`.
 WHEN NOT TO REGISTER:
 - A file the user names or asks you to save in the project (e.g. "save it as \
 notes.md"): write it into the project folder under that name, and change it \
-there directly in the scratchpad later — never call `create_artifact` or \
-`edit_artifact` for a plain project file.
+there directly in the scratchpad later — do not register it with `create_artifact`.
 - Pure chat answers, tables, or markdown rendered inline in the conversation \
 (nothing is being saved to disk for the user).
 - Internal scratchpad-only files used for computation that the user never \

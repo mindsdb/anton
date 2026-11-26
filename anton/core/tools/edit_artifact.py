@@ -361,7 +361,9 @@ checks the page in a browser and repairs it, all in one call. Do NOT read the \
 files with read_text_file or patch them in a scratchpad cell first, and do not \
 rebuild the artifact with generate_artifact for a change like that. Use \
 generate_artifact(slug) only when the user asks for a different artifact \
-(a new page structure, new data sources, a rebuild). If edit_artifact says it \
+(a new page structure, new data sources, a rebuild). Only use edit_artifact \
+for registered artifacts — never for plain project files (edit those directly \
+in the scratchpad). If edit_artifact says it \
 could not make the change, follow its instruction."""
 
 
@@ -376,7 +378,8 @@ def _tool():
             "artifact's files, edits only what the task needs (usually in one model call), checks the page in a "
             "browser when one is available and repairs it, and puts every file back if it cannot make the change "
             "safely. Use it instead of reading the files and patching them in a scratchpad cell, and instead of "
-            "generate_artifact for any change short of a rebuild.\n\n"
+            "generate_artifact for any change short of a rebuild. Only for registered artifacts — never call "
+            "edit_artifact on plain project files (edit those directly in the scratchpad).\n\n"
             "Inputs:\n"
             "- `slug`: the artifact to change: its slug, or its exact name when you do not know the slug "
             "(no need to call list_artifacts first).\n"
