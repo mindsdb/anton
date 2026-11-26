@@ -159,8 +159,8 @@ def test_the_generator_prompts_state_the_preview_policy():
 
 def test_the_map_recipe_passes_the_static_check_it_is_written_for():
     """The recipe's own lines, put into a page, pass `verify_frontend`; the
-    same atlas loaded with `fetch()` fails it, which is why the recipe uses
-    `d3.json`."""
+    same atlas loaded with `fetch()` passes too, and a `fetch()` of any other
+    host fails."""
     rules = prompts._DESIGN_RULES
     bullet = rules[rules.index("- MAPS AND GLOBES"):rules.index("- d3 into an")]
     code = re.findall(r"^\s*`(.+)`$", bullet, re.M)
@@ -179,7 +179,9 @@ def test_the_map_recipe_passes_the_static_check_it_is_written_for():
     assert (result.errors, result.warnings) == ([], [])
     fetched = page.replace("d3.json(WORLD_ATLAS)",
                            "fetch('https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json')")
-    assert verifiers.verify_frontend(fetched, is_fullstack=False).errors
+    assert not verifiers.verify_frontend(fetched, is_fullstack=False).errors
+    elsewhere = page.replace("d3.json(WORLD_ATLAS)", "fetch('https://example.com/countries-110m.json')")
+    assert verifiers.verify_frontend(elsewhere, is_fullstack=False).errors
 
 
 def test_the_skill_loads_the_atlas_the_way_the_check_allows():

@@ -686,3 +686,43 @@ def test_long_whitespace_after_an_attribute_name_is_checked_quickly():
     started = time.perf_counter()
     verify_frontend(html, is_fullstack=False)
     assert time.perf_counter() - started < 2
+
+
+# ── rule 4's exception: data files from jsDelivr ────────────────────────────
+
+_JSDELIVR_FILE = "https://cdn.jsdelivr.net/npm/us-atlas@3.0.1/states-10m.json"
+
+
+def _absolute_fetch_errors(html: str, **kwargs) -> list[str]:
+    r = verify_frontend(html, is_fullstack=kwargs.pop("is_fullstack", False), **kwargs)
+    return [e for e in r.errors if e.startswith("Absolute URL is not allowed in fetch()")]
+
+
+@pytest.mark.parametrize("call", [
+    f"fetch('{_JSDELIVR_FILE}')",
+    f'fetch("{_JSDELIVR_FILE}")',
+    "fetch('HTTPS://CDN.JSDELIVR.NET/npm/us-atlas@3.0.1/states-10m.json')",
+])
+def test_a_jsdelivr_data_file_may_be_fetched(call):
+    html = GOOD.replace("fetch(api('/api/items'))", call)
+    assert _absolute_fetch_errors(html) == []
+
+
+@pytest.mark.parametrize("call", [
+    "fetch('http://cdn.jsdelivr.net/npm/us-atlas@3.0.1/states-10m.json')",
+    "fetch('https://cdn.jsdelivr.net/gh/someone/repo@1.0.0/data.json')",
+    "fetch('https://cdn.jsdelivr.net.evil.com/npm/us-atlas@3.0.1/states-10m.json')",
+    "fetch(api('https://cdn.jsdelivr.net/npm/us-atlas@3.0.1/states-10m.json'))",
+    "fetch('https://example.com/data.json')",
+])
+def test_any_other_absolute_fetch_is_still_an_error(call):
+    html = GOOD.replace("fetch(api('/api/items'))", call)
+    [err] = _absolute_fetch_errors(html)
+    assert "https://cdn.jsdelivr.net/npm/" in err
+    assert "api()" in err
+
+
+def test_a_jsdelivr_fetch_is_not_compared_with_the_api_contract():
+    html = _page(f"fetch(api('/api/items'));\nfetch('{_JSDELIVR_FILE}');")
+    r = verify_frontend(html, is_fullstack=True, api_paths=_PATHS)
+    assert r.ok, r.errors

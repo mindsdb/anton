@@ -45,6 +45,26 @@ _API_METHODS = ("get", "post", "put", "patch", "delete")
 _HEALTH_PATH = "/api/health"
 
 
+# Rule 4's one exception: a data file of an npm package on jsDelivr, such as a
+# map atlas. The artifact hosts allow this host in connect-src. A URL passed
+# through api() is not one: api() prefixes the backend's base and breaks it.
+_JSDELIVR_DATA_HOST = "https://cdn.jsdelivr.net"
+_JSDELIVR_DATA_PATH = "/npm/"
+_ABSOLUTE_FETCH = re.compile(r"""fetch\s*\(\s*(api\s*\(\s*)?['"]?(https?://[^'"\s)]*)""", re.I)
+
+
+def _fetch_allowed_absolute(via_api: bool, url: str) -> bool:
+    """Whether an absolute `fetch()` target is a jsDelivr npm file called
+    directly. Scheme and host compare case-insensitively and the path as
+    written, so `https://cdn.jsdelivr.net.evil.com/npm/` and `/gh/` fail."""
+    host_len = len(_JSDELIVR_DATA_HOST)
+    return (
+        not via_api
+        and url[:host_len].lower() == _JSDELIVR_DATA_HOST
+        and url[host_len:].startswith(_JSDELIVR_DATA_PATH)
+    )
+
+
 def normalise_api_path(path: str) -> str:
     """`/api/rooms/{code}/` and `/api/rooms/{id}` compare equal: parameter
     names are the contract writer's to choose, the segments are not."""
@@ -443,8 +463,17 @@ def verify_frontend(
     #    a full regeneration burned, and the model now knows the workaround.
     #    A check that a correct artifact fails and an incorrect one passes is
     #    worse than no check.
-    for m in re.finditer(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]?https?://""", html, re.I):
-        errors.append(f"Absolute URL is not allowed in fetch(): ...{html[m.start():m.start()+60]!r}")
+    #
+    #    A data file from jsDelivr (`https://cdn.jsdelivr.net/npm/...`) is the
+    #    one absolute URL allowed: the artifact hosts let a page reach it.
+    for m in _ABSOLUTE_FETCH.finditer(html):
+        if _fetch_allowed_absolute(bool(m.group(1)), m.group(2)):
+            continue
+        errors.append(
+            f"Absolute URL is not allowed in fetch(): ...{html[m.start():m.start()+60]!r}. "
+            f"Call the backend through api(); a data file may come only from "
+            f"{_JSDELIVR_DATA_HOST}{_JSDELIVR_DATA_PATH}."
+        )
         break
 
     # 4a. No root-relative path in a `src`/`href` value or a literal `fetch()`
@@ -464,7 +493,7 @@ def verify_frontend(
         for call in _FETCH_CALL.findall(html):
             path = call.strip()
             if path.startswith("http"):
-                continue  # already flagged above
+                continue  # absolute: rule 4 decides
             if path.startswith("/") and not path.startswith("/api/"):
                 errors.append(f"Backend call must use the /api/* prefix, got: {path!r}")
                 break
