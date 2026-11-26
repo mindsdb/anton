@@ -546,7 +546,7 @@ def image_call_error(exc: "openai.APIStatusError", model: str) -> Exception:
         )
     restriction = mindshub_model_restriction(exc=exc, body=body, status_code=status, model=model)
     if restriction is not None:
-        return ImageGenerationError(str(restriction), code="model_restricted", status_code=status)
+        return ImageGenerationError(str(restriction), code=restriction.code, status_code=status)
     if status == 403 and code in ("model_access_denied", "model_disabled") and not origin_is_known_third_party(exc):
         return ImageGenerationError(
             f"The image model '{model}' isn't available on the user's MindsHub plan, or is "
