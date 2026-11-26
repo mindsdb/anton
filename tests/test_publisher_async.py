@@ -139,6 +139,32 @@ def test_failed_job_raises_publish_job_failed_with_server_code_and_text(tmp_path
     assert str(exc) == "Publish failed (HTTP 400): pip install failed: no wheel [job " + "b" * 32 + "]"
 
 
+def _failed_job_exc(tmp_path, error):
+    fake, _ = _urlopen([
+        (202, {"job_id": "b" * 32, "report_id": "rid", "status": "queued", "poll_after_s": 3}),
+        (200, {"job_id": "b" * 32, "status": "failed", "error": error}),
+    ])
+    with mock.patch.object(urllib.request, "urlopen", fake), \
+            mock.patch.object(publisher, "_collect_datasource_secrets", return_value=({}, [])), \
+            mock.patch.object(publisher.time, "sleep", lambda s: None), \
+            pytest.raises(PublishJobFailed) as ei:
+        publish(_fullstack(tmp_path), api_key="k", publish_url="https://pub.test")
+    return ei.value
+
+
+def test_failed_job_carries_error_code(tmp_path):
+    exc = _failed_job_exc(tmp_path, {"status_code": 403, "message": "owner only",
+                                     "code": "website_requires_owner"})
+    assert exc.code == "website_requires_owner"
+    assert exc.status_code == 403 and exc.message == "owner only"
+
+
+def test_failed_job_without_code_has_none(tmp_path):
+    exc = _failed_job_exc(tmp_path, {"status_code": 400, "message": "pip install failed"})
+    assert exc.code is None
+    assert exc.status_code == 400 and exc.message == "pip install failed"
+
+
 def test_budget_exhausted_raises_publish_job_timeout(tmp_path):
     running = (200, {"job_id": "c" * 32, "status": "running"})
     fake, calls = _urlopen([(202, {"job_id": "c" * 32, "report_id": "rid", "status": "queued", "poll_after_s": 3})]

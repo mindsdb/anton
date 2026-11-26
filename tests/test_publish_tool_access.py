@@ -201,6 +201,42 @@ def test_publish_tool_schema_exposes_owner_only():
     assert props["owner_only"]["type"] == "boolean"
 
 
+def test_publish_tool_schema_never_offers_website():
+    from anton.publish_access import WEBSITE_MODE
+
+    enum = tools.PUBLISH_TOOL.input_schema["properties"]["access_mode"]["enum"]
+    assert "public" in enum
+    assert WEBSITE_MODE not in enum
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tc_access, stored", [
+    ({"access_mode": "website"}, None),
+    ({}, {"mode": "website", "requires_password": False}),
+    ({}, {"mode": "website", "requires_password": False, "confirmed_by_owner": True}),
+])
+async def test_tool_never_publishes_a_website(tmp_path, tc_access, stored):
+    f = _artifact(tmp_path)
+    published_json = f.parent / ".published.json"
+    if stored is not None:
+        published_json.write_text(json.dumps({
+            "report.html": {"report_id": "r", "url": "u", "last_md5": "m", **stored},
+        }))
+    before = published_json.read_text() if published_json.exists() else None
+    fake_publish = mock.Mock()
+    with mock.patch("anton.publisher.publish", fake_publish), \
+         mock.patch("anton.config.settings.AntonSettings", return_value=_settings(f.parent.parent)), \
+         mock.patch("webbrowser.open"):
+        out = await tools.handle_publish_or_preview(
+            _session(tmp_path), {"file_path": str(f), "action": "publish", **tc_access},
+        )
+    fake_publish.assert_not_called()
+    assert out.startswith("NOT PUBLISHED:")
+    assert "Share panel" in out
+    after = published_json.read_text() if published_json.exists() else None
+    assert after == before
+
+
 # ---------------------------------------------------------------------------
 # Password hash kept owner-side, and the 409 for another owner
 # ---------------------------------------------------------------------------

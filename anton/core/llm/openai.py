@@ -4,6 +4,7 @@ import inspect
 import json
 import logging
 import os
+import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, NoReturn
 
@@ -1047,6 +1048,41 @@ async def _aclose_stream(stream: object) -> None:
 _SDK_TIMEOUT = openai.Timeout(LONGEST_SILENCE_S, connect=5.0)
 
 
+def _keepalive_socket_options() -> list[tuple[int, int, int]]:
+    # A model can think for minutes before its first byte. With no traffic on
+    # the socket, NAT gateways and firewalls drop the idle connection.
+    options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    for name, value in (
+        ("TCP_KEEPIDLE", 30),  # Linux
+        ("TCP_KEEPALIVE", 30),  # macOS name for the idle time
+        ("TCP_KEEPINTVL", 10),
+        ("TCP_KEEPCNT", 6),
+    ):
+        if hasattr(socket, name):
+            options.append((socket.IPPROTO_TCP, getattr(socket, name), value))
+    return options
+
+
+def _http_client(*, verify: bool) -> openai.DefaultAsyncHttpxClient:
+    import urllib.request
+
+    import httpx2 as httpx
+
+    # Only the schemes httpx routes through a proxy; NO_PROXY or FTP_PROXY alone keep keepalive on.
+    proxies = urllib.request.getproxies()
+    if any(proxies.get(scheme) for scheme in ("http", "https", "all")):
+        # httpx applies HTTP(S)_PROXY and NO_PROXY only to a client without its
+        # own transport, so a proxied setup keeps the SDK's plain client.
+        return openai.DefaultAsyncHttpxClient(verify=verify)
+    transport = httpx.AsyncHTTPTransport(
+        verify=verify,
+        socket_options=_keepalive_socket_options(),
+        # The SDK's own pool size, which a custom transport would otherwise drop.
+        limits=httpx.Limits(max_connections=1000, max_keepalive_connections=100),
+    )
+    return openai.DefaultAsyncHttpxClient(transport=transport, verify=verify)
+
+
 class OpenAIProvider(LLMProvider):
     name: str = "openai"
 
@@ -1118,8 +1154,6 @@ class OpenAIProvider(LLMProvider):
         }:
             self._emit_trace_headers = True
 
-        import httpx2 as httpx
-
         client_api_key = api_key_provider if api_key_provider is not None else api_key
         if api_version and _is_azure_endpoint(base_url):
             # Azure OpenAI: use the dedicated client which handles deployment
@@ -1147,8 +1181,7 @@ class OpenAIProvider(LLMProvider):
                 azure_kwargs["api_key"] = client_api_key
             if base_url:
                 azure_kwargs["azure_endpoint"] = base_url
-            if not ssl_verify:
-                azure_kwargs["http_client"] = httpx.AsyncClient(verify=False)
+            azure_kwargs["http_client"] = _http_client(verify=ssl_verify)
             self._client = AsyncAzureOpenAI(**azure_kwargs, timeout=_SDK_TIMEOUT)
         else:
             kwargs: dict = {}
@@ -1156,8 +1189,7 @@ class OpenAIProvider(LLMProvider):
                 kwargs["api_key"] = client_api_key
             if base_url:
                 kwargs["base_url"] = base_url
-            if not ssl_verify:
-                kwargs["http_client"] = httpx.AsyncClient(verify=False)
+            kwargs["http_client"] = _http_client(verify=ssl_verify)
             self._client = openai.AsyncOpenAI(**kwargs, timeout=_SDK_TIMEOUT)
 
         # After the if/else, not per branch: a future client flavor must not be

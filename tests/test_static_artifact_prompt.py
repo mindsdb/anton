@@ -1,5 +1,9 @@
 from types import SimpleNamespace
 
+import pytest
+
+from anton.core.llm import prompts, static_artifact_prompt
+
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
 from anton.core.llm.prompts import CONVERSATION_DISCIPLINE_ASK_FIRST
 
@@ -37,3 +41,12 @@ def test_proactive_preference_and_ask_first_are_preserved():
     prompt = build(act_first=False)
     assert "configured ask-first/act-first behavior" in prompt
     assert CONVERSATION_DISCIPLINE_ASK_FIRST in prompt
+
+
+@pytest.mark.parametrize("text", [
+    static_artifact_prompt.ARTIFACTS, static_artifact_prompt.STATIC_ARTIFACTS,
+    prompts.ARTIFACTS_PROMPT, prompts.STATIC_ARTIFACTS_PROMPT,
+    prompts.NO_DIRECT_REPORTS_ARTIFACTS_PROMPT, prompts.NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT,
+])
+def test_a_file_the_user_names_goes_to_the_project_not_an_artifact(text):
+    assert "write it into the project folder under that name" in " ".join(text.split())

@@ -11,6 +11,7 @@ from anton.core.llm.anthropic import AnthropicProvider
 from anton.core.llm.openai import OpenAIProvider
 from anton.core.llm.provider import (
     ProviderOverloadedError,
+    StreamComplete,
     StreamTextDelta,
     TransientProviderError,
     is_stream_drop,
@@ -113,16 +114,18 @@ def test_is_stream_drop(exc, expected):
     assert is_stream_drop(exc) is expected
 
 
+_DROP = TransientProviderError(
+    "Lost the connection to Anthropic mid-response — try again in a moment.",
+    provider="Anthropic", code="connection_error", session_backoff=True,
+)
+
+
 def _dropping_session(drops: int, calls: dict):
     s = _session()
     # Spent before the first retry: drops must not depend on the incident window.
     s._transient_budget_s = 0.0
     s._backoff_sleep = AsyncMock(return_value=False)
-    drop = TransientProviderError(
-        "Lost the connection to Anthropic mid-response — try again in a moment.",
-        provider="Anthropic", code="connection_error", session_backoff=True,
-    )
-    s._stream_and_handle_tools = _stream_that_fails_then_succeeds(drops, calls, drop)
+    s._stream_and_handle_tools = _stream_that_fails_then_succeeds(drops, calls, _DROP)
     return s
 
 
@@ -151,3 +154,39 @@ async def test_turn_ends_after_the_third_drop():
     assert "incident" not in str(info.value)
     assert info.value.provider == "Anthropic"
     assert info.value.model == "latest:sonnet"
+
+
+def _session_that_drops_after_progress(drops: int, calls: dict):
+    """Each attempt completes one model call, then the connection drops."""
+    s = _dropping_session(0, calls)
+
+    async def _gen(user_msg):
+        calls["n"] += 1
+        yield StreamComplete(response=MagicMock())
+        if calls["n"] <= drops:
+            raise _DROP
+        yield StreamTextDelta(text="recovered-and-done")
+
+    s._stream_and_handle_tools = _gen
+    return s
+
+
+async def test_drops_apart_from_each_other_do_not_end_the_turn():
+    calls = {"n": 0}
+    s = _session_that_drops_after_progress(5, calls)
+
+    events = [e async for e in s.turn_stream("build it")]
+
+    assert "recovered-and-done" in "".join(e.text for e in events if isinstance(e, StreamTextDelta))
+    assert calls["n"] == 6
+
+
+async def test_a_connection_that_keeps_dropping_still_ends_the_turn():
+    calls = {"n": 0}
+    s = _session_that_drops_after_progress(100, calls)
+
+    with pytest.raises(ProviderOverloadedError) as info:
+        _ = [e async for e in s.turn_stream("build it")]
+
+    assert calls["n"] == 9
+    assert "did not recover after 9 attempts" in str(info.value)

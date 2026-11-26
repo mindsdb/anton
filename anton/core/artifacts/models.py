@@ -4,7 +4,7 @@ Schema split:
   Server-managed (deterministic):
     schemaVersion, id, slug, createdAt, updatedAt, files[], provenance[]
   Agent-supplied (validated at create_artifact / update_artifact time):
-    name, description, type, primary, port, datasources[]
+    name, description, type, primary, display, port, datasources[]
 
 The `Artifact` model is the on-disk source of truth — the README
 that sits alongside it is rendered FROM the metadata, not the other
@@ -159,6 +159,18 @@ GENERATOR_ARTIFACT_TYPES_ORDERED: tuple[str, ...] = tuple(
 )
 
 
+# How the chat shows an artifact (ENG-4684). Absent (None) is the usual card
+# the person opens. "inline" renders a small interactive html-app live inside
+# the chat reply: a deliverable worth keeping or sharing (a chart with
+# controls). "widget" renders the same way, but it is the user's input in this
+# conversation (pick, confirm, rank, fill in), not a deliverable: the app
+# offers no Share or publishing for it and keeps it out of the Artifacts list.
+# A closed enum so cowork-server and the renderer can rely on the values.
+ArtifactDisplay = Literal["inline", "widget"]
+
+ARTIFACT_DISPLAYS: tuple[str, ...] = ("inline", "widget")
+
+
 class FileEntry(BaseModel):
     """One file inside the artifact folder.
 
@@ -262,6 +274,9 @@ class Artifact(BaseModel):
     # most cases — they generally know the filename they're going
     # to write).
     primary: str | None = None
+    # `ArtifactDisplay`, or None for the usual card. Only an html-app may be
+    # shown inline or as a widget; the create/update handlers check that.
+    display: ArtifactDisplay | None = None
     port: int | None = None
 
     # ── Agent-declared datasources (fullstack apps) ─────────────

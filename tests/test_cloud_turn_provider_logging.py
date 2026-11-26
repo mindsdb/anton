@@ -59,10 +59,8 @@ async def test_cloud_turn_filters_real_sdk_bodies_and_terminal_cause_chains(
     original_client = getattr(sdk, client_name)
 
     def client(**kwargs: object):
-        return original_client(
-            **kwargs, max_retries=0,
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-        )
+        kwargs["http_client"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return original_client(**kwargs, max_retries=0)
 
     monkeypatch.setattr(sdk, client_name, client)
     if lane == "anthropic":

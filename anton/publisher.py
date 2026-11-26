@@ -30,7 +30,7 @@ from anton.core.artifacts.internal_files import (
 from anton.core.artifacts.models import Artifact, artifact_key as artifact_key_for
 from anton.core.datasources.data_vault import DataVault, LocalDataVault, withheld_fields
 from anton.minds_client import minds_request, minds_request_with_status
-from anton.publish_access import access_from_owner_side
+from anton.publish_access import WEBSITE_MODE, access_from_owner_side, website_access
 from anton.utils.datasources import scrub_credentials
 
 # LLM API key env vars whose values must be stripped from published files.
@@ -186,10 +186,15 @@ class PublishJobFailed(RuntimeError):
 
     `status_code`/`message` are what the synchronous /upload would have
     answered for the same failure, so callers can map them the same way.
+    `code` is the machine-readable error code from the job status, if any.
     """
 
-    def __init__(self, status_code: int, message: str, *, job_id: str, report_id: str | None = None):
+    def __init__(
+        self, status_code: int, message: str, *, job_id: str, report_id: str | None = None,
+        code: str | None = None,
+    ):
         self.status_code = status_code
+        self.code = code
         self.message = message
         self.job_id = job_id
         self.report_id = report_id
@@ -293,9 +298,11 @@ def _wait_for_publish_job(
                 return job.get("result") or {}
             if state == "failed":
                 err = job.get("error") or {}
+                err_code = err.get("code")
                 raise PublishJobFailed(
                     int(err.get("status_code") or 500), str(err.get("message") or "unknown error"),
                     job_id=job_id, report_id=job.get("report_id") or report_id,
+                    code=err_code if isinstance(err_code, str) else None,
                 )
             poll = _poll_interval(job.get("poll_after_s"), poll)
 
@@ -389,12 +396,14 @@ def build_access_payload(
         {"mode": "public"}                                          # or None
         {"mode": "password", "password": "plaintext"}
         {"mode": "restricted", "emails": [...], "org_allowed": bool}
+        {"mode": "website"}                     # + "confirmed_by_owner": True on the owner's save
 
     Output (what travels to anton-services):
 
         {"mode": "public"}
         {"mode": "password", "password_hash": "pbkdf2_sha256$...", "pwd_version": N}
         {"mode": "restricted", "allowed_emails": [...], "org_allowed": bool, "access_version": N}
+        {"mode": "website"} or {"mode": "website", "confirmed_by_owner": True}
 
     The plaintext password is hashed here and never forwarded. `previous` is
     the owner-side `.published.json` entry of the last publish: while the
@@ -417,6 +426,8 @@ def build_access_payload(
             "org_allowed": bool(access.get("org_allowed")),
             "access_version": access_version,
         }
+    if mode == WEBSITE_MODE:
+        return website_access(access, with_confirmation=True)
     return {"mode": "public"}
 
 # Patterns that capture relative paths from HTML attributes and CSS url()
@@ -722,7 +733,8 @@ def publish(
         access: Structured access spec, mutually exclusive with `password`:
                   {"mode": "public"} |
                   {"mode": "password", "password": "..."} |
-                  {"mode": "restricted", "emails": [...], "org_allowed": bool}.
+                  {"mode": "restricted", "emails": [...], "org_allowed": bool} |
+                  {"mode": "website"} (+ "confirmed_by_owner": True).
                   When omitted, a bare `password=` is mapped to password mode.
                   See `build_access_payload` for the outbound shape.
         access_version: Monotonic version bumped whenever the restricted list/

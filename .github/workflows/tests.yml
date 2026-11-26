@@ -76,11 +76,11 @@ jobs:
       - name: Run tests that need the sandbox packages
         env:
           ANTON_REQUIRE_SANDBOX_PACKAGES: "1"
-        run: uv run --locked --group dev --group scratchpad pytest tests/test_reading_files_skill.py tests/test_image_smoke.py -v -rs
+        run: uv run --locked --group dev --group scratchpad pytest tests/test_reading_files_skill.py tests/test_image_smoke.py tests/test_artifact_editor_ooxml.py -v -rs
 
   windows-installer:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -90,6 +90,8 @@ jobs:
         run: uv python install 3.12
       - name: Check PowerShell release installation
         run: uv run --locked --group dev pytest tests/test_release_installers.py -k powershell -v
+      - name: Check a cell's environment on Windows
+        run: uv run --locked --group dev pytest tests/test_agent_env.py tests/test_cell_env.py -v -rs
 
   # Preserve the required check name, and fail even if a dependency was skipped.
   run-tests:

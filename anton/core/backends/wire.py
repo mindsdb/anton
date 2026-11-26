@@ -42,6 +42,10 @@ ARTIFACTS_ROOT_ENV = "ANTON_SCRATCHPAD_ARTIFACTS_ROOT"
 # A cell's stdout limit, and how much more the worker sends for the parent to
 # scrub before it cuts, so a secret across the limit can still match whole.
 MAX_OUTPUT = 10_000
+# How the limit splits when output is cut: the end often holds the traceback
+# or the test summary, so it is kept too.
+HEAD_OUTPUT = 6_000
+TAIL_OUTPUT = MAX_OUTPUT - HEAD_OUTPUT
 STDOUT_SCRUB_MARGIN = 4_096
 
 
@@ -52,7 +56,7 @@ TRUNCATION_PREFIX = "\n\n... (truncated, "
 def truncation_note(total: int) -> str:
     """Appended where printed output is cut. The model tends to re-run code to
     print the rest in slices; this points it at the tool that returns files whole."""
-    return (f"{TRUNCATION_PREFIX}{total} chars total) Printed output stops at {MAX_OUTPUT:,} characters: "
+    return (f"{TRUNCATION_PREFIX}{total} chars total) Printed output is cut to {MAX_OUTPUT:,} characters: "
             "read text files with read_text_file (end_line=-1 returns a whole file), or print only the part you need.")
 
 

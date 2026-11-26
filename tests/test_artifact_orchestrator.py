@@ -1337,6 +1337,21 @@ def test_map_datasources_survives_a_vault_that_raises(tmp_path: Path):
     assert unmapped == ["DS_PG_MAIN__HOST"]
 
 
+@pytest.mark.parametrize("names", [["prod", "prod--db"], ["prod--db", "prod"]], ids=["prod-first", "prod--db-first"])
+def test_map_datasources_gives_a_key_to_the_longest_prefix(names):
+    """postgres/prod--db builds DS_POSTGRES_PROD__DB, which also starts with
+    postgres/prod's DS_POSTGRES_PROD__, whatever order the vault lists them in."""
+
+    class _Vault:
+        def list_connections(self):
+            return [{"engine": "postgres", "name": name} for name in names]
+
+    session = SimpleNamespace(_data_vault=_Vault())
+    refs, unmapped = orchestrator._map_datasources(session, ["DS_POSTGRES_PROD__DB__HOST", "DS_POSTGRES_PROD__PORT"])
+    assert [(r.engine, r.name) for r in refs] == [("postgres", "prod--db"), ("postgres", "prod")]
+    assert unmapped == []
+
+
 _CONTRACT = '{"paths": {"/api/items": {"get": {"responses": {"200": {}}}}}}'
 
 

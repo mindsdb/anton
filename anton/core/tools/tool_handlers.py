@@ -1419,11 +1419,16 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
             reason="invalid_type",
         )
 
+    display, display_error = _artifact_display(tc_input, artifact_type)
+    if display_error:
+        return SideEffectResult.failed(display_error, reason="invalid_display")
+
     artifact = store.create(  # type: ignore[arg-type]
         name=name,
         description=description,
         type=artifact_type,
         primary=primary if isinstance(primary, str) else None,
+        display=display,
     )
     folder = store.folder_for(artifact.slug)
     _track_artifact(session, store, artifact.slug, summary=f"Created artifact: {name}")
@@ -1433,6 +1438,9 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
             f"Created artifact `{artifact.slug}` ({artifact.type}). "
             f"Write output files under: {folder}"
             + (f" (primary: {artifact.primary})" if artifact.primary else "")
+            + (f" Shown in the chat reply as {'a widget' if artifact.display == 'widget' else 'inline'}: "
+               "follow the Inline section of `recall_skill(\"build-html-dashboard\")`."
+               if artifact.display else "")
         ),
         resource_id=artifact.slug,
         idempotency_key=artifact.slug,
@@ -1443,8 +1451,35 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
             "name": artifact.name,
             "type": artifact.type,
             "primary": artifact.primary,
+            "display": artifact.display,
         },
     ).to_outcome()
+
+
+def _artifact_display(tc_input: dict, artifact_type: str) -> tuple[str | None, str | None]:
+    """`display` from a create/update call as (value, error).
+
+    Absent, None or "" is the usual card (None). "inline" and "widget" are
+    the other values, and only an html-app can be shown live inside the chat
+    reply.
+    """
+    from anton.core.artifacts.models import ARTIFACT_DISPLAYS
+
+    raw = tc_input.get("display")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None, None
+    value = raw.strip().lower() if isinstance(raw, str) else raw
+    if value not in ARTIFACT_DISPLAYS:
+        return None, (
+            f"Error: `display` must be one of {ARTIFACT_DISPLAYS}, or omitted for the usual card. "
+            f"Got: {raw!r}."
+        )
+    if artifact_type != "html-app":
+        return None, (
+            f"Error: only an html-app can be shown inline or as a widget; this artifact is a {artifact_type}. "
+            "Omit `display`."
+        )
+    return value, None
 
 
 async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict) -> ToolOutcome:
@@ -1455,6 +1490,8 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     - `port`: backend port number (fullstack apps only)
     - `datasources`: list of vault-connection slugs the backend reads from.
       `engine`, `name`, and `env_prefix` are derived from the vault.
+    - `display`: "inline" or "widget" to show an html-app live in the chat
+      reply, empty string to go back to the usual card.
     """
     store = resolve_artifact_store(session)
     if store is None:
@@ -1516,6 +1553,17 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
             )
         kwargs["datasources"] = refs
 
+    if "display" in tc_input:
+        current = store.read_metadata(slug)
+        if current is None:
+            return SideEffectResult.failed(
+                f"Error: no artifact found for slug `{slug}`.", reason="artifact_not_found"
+            )
+        display, display_error = _artifact_display(tc_input, current.type)
+        if display_error:
+            return SideEffectResult.failed(display_error, reason="invalid_display")
+        kwargs["display"] = display
+
     earlier = store.open(slug) if "datasources" in kwargs else None
     artifact = store.update(slug, **kwargs)
     if artifact is None:
@@ -1535,7 +1583,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         message=(
             f"Updated artifact `{artifact.slug}` "
             f"(primary={artifact.primary}, port={artifact.port}, "
-            f"datasources={datasources})."
+            f"datasources={datasources}, display={artifact.display})."
         ) + live_app_block,
         resource_id=artifact.slug,
         idempotency_key=artifact.slug,
@@ -1545,6 +1593,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
             "primary": artifact.primary,
             "port": artifact.port,
             "datasources": datasources,
+            "display": artifact.display,
         },
     ).to_outcome()
 
@@ -2649,6 +2698,40 @@ async def handle_list_artifacts(
     return ToolOutcome(content=render_listing([(root, artifacts)], fields, unmatched), ok=True)
 
 
+async def handle_inspect_artifact(
+    session: "ChatSession", tc_input: dict
+) -> "str | ToolOutcome":
+    """What an inline html-app page reported: its saved state, form controls and visible text."""
+    from anton.core.artifacts.page_state import render_inspection
+
+    store = resolve_artifact_store(session)
+    if store is None:
+        return ToolOutcome(
+            content="Artifact store unavailable (no workspace bound to this session).",
+            ok=False, reason="store_unavailable",
+        )
+    slug = str(tc_input.get("slug") or "").strip()
+    if not slug:
+        return ToolOutcome(content="Error: `slug` is required.", ok=False, reason="missing_slug")
+    artifact = store.read_metadata(slug)
+    if artifact is None:
+        return ToolOutcome(
+            content=f"Error: no artifact found for slug `{slug}`.", ok=False, reason="artifact_not_found"
+        )
+    if artifact.type != "html-app":
+        return ToolOutcome(
+            content=(
+                f"Error: `{slug}` is a {artifact.type} artifact; inspect_artifact reads only "
+                "html-app pages. Read its files instead."
+            ),
+            ok=False, reason="invalid_type",
+        )
+    # Tier 1: the page files were read. "Nothing reported yet" is a correct
+    # answer, not a failure; the refusals above are tier 2 (a retry cannot help).
+    root = Path(store.root).absolute()
+    return ToolOutcome(content=render_inspection(artifact, root / artifact.slug), ok=True)
+
+
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
     """Process a recall tool call — search episodic memory."""
     if session._episodic is None or not session._episodic.enabled:
@@ -2940,6 +3023,11 @@ async def handle_scratchpad(
         )
 
 
+# Largest file read_image reads. Above the API limit, since a BMP shrinks
+# when it is converted to PNG.
+_READ_IMAGE_MAX_FILE_BYTES = 64 * 1024 * 1024
+
+
 async def handle_read_image(
     session: "ChatSession", tc_input: dict
 ) -> "ToolOutcome":
@@ -2998,7 +3086,8 @@ async def handle_read_image(
             base = getattr(getattr(session, "_workspace", None), "base", None)
             root = Path(base) if base else Path.cwd()
             path = (root / path).resolve()
-        if policy is not None:
+        restricted = policy is None and getattr(session, "_tool_allowlist", None) is not None
+        if policy is not None or restricted:
             path = path.resolve()
     except (OSError, RuntimeError, ValueError) as exc:
         # Tier 2: the model supplied a path that will not parse.
@@ -3023,6 +3112,22 @@ async def handle_read_image(
             ok=False, reason="access_denied",
         )
 
+    # A host that narrows the tool set (the cloud pod) keeps image reads to what
+    # read_text_file may read there; the desktop passes no allowlist and reads as before.
+    if restricted:
+        from anton.core.tools import file_access
+
+        base, owned_roots = _read_roots(session)
+        if file_access.read_refusal(path, workspace=base, owned_roots=owned_roots) is not None:
+            return ToolOutcome(
+                content=(
+                    f"Error: access denied: {file_path} is outside the project, the "
+                    "artifacts and the conversation's attachments. If the user wants "
+                    "you to see this image, ask them to attach it to the conversation."
+                ),
+                ok=False, reason="access_denied",
+            )
+
     if not path.is_file():
         # Tier 2: the file is genuinely absent. Unlike `recall_skill`'s NO
         # MATCH, there is no listing the model can consult to self-correct and
@@ -3045,7 +3150,10 @@ async def handle_read_image(
         )
 
     try:
-        raw = path.read_bytes()
+        # Bounded, so a huge file is refused without being loaded into memory.
+        with path.open("rb") as f:
+            too_big = os.fstat(f.fileno()).st_size > _READ_IMAGE_MAX_FILE_BYTES
+            raw = b"" if too_big else f.read(_READ_IMAGE_MAX_FILE_BYTES + 1)
     except OSError as exc:
         # Tier 2: the read itself failed. `ok=False` is certain — the model got
         # no image. The CAUSE is not: this wraps a bare `except Exception`, so
@@ -3054,6 +3162,16 @@ async def handle_read_image(
         return ToolOutcome(
             content=f"Error: cannot read '{path}': {exc}",
             ok=False, reason="read_failed",
+        )
+
+    if too_big or len(raw) > _READ_IMAGE_MAX_FILE_BYTES:
+        return ToolOutcome(
+            content=(
+                f"Error: image is too large (over {human_size(_READ_IMAGE_MAX_FILE_BYTES)}); "
+                "the API limit is ~3.7 MB raw / 5 MB base64. "
+                "Resize the image and try again."
+            ),
+            ok=False, reason="image_too_large",
         )
 
     # The format the bytes show, not the extension: a JPEG saved as .png

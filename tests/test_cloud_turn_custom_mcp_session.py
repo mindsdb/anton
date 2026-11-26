@@ -189,7 +189,8 @@ def test_every_definition_at_the_limits_registers_after_the_built_in_tools_sorte
     assert len(custom) == 2 + len(_USABLE_TEXTS)
     assert custom == sorted(custom)
     assert names == [name for name in names if not name.startswith("custom_mcp__")] + custom
-    assert set(names) == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}) | set(custom)
+    # No surface reported, so `inspect_artifact` is withheld too (ENG-4684).
+    assert set(names) == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image", "inspect_artifact"}) | set(custom)
 
 
 def test_custom_tools_come_right_after_the_built_in_mcp_tools(cloud, monkeypatch):
