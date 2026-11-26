@@ -31,7 +31,7 @@ from anton.core.backends.local import LocalScratchpadRuntime
 from anton.core.backends.remote import RemoteScratchpadRuntime
 from anton.core.backends.sandbox import CellSandbox
 from anton.core.backends.wire import NOTHING_KEPT
-from anton.core.interaction.elicit import AskAnswer, AskRequest
+from anton.core.interaction.elicit import APPROVAL_KIND, AskAnswer, AskRequest
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.llm.provider import (
     LLMResponse,
@@ -104,6 +104,12 @@ class _Pad:
         cell = Cell(code=code, stdout="done", stderr="", error=None)
         self.cells.append(cell)
         yield cell
+
+    async def execute(self, code: str, **kwargs: object) -> Cell:
+        """The cell, as `handle_scratchpad` runs it."""
+        async for cell in self.execute_streaming(code, **kwargs):
+            return cell
+        raise AssertionError("no cell")
 
     async def cancel(self) -> None:
         pass
@@ -363,6 +369,18 @@ async def test_an_update_without_approve_never_runs(project, answer):
     history = _history_text(harness.session)
     assert "The user didn't approve this change, so it must not be made another way" in history
     assert "try one or two more genuine workarounds" not in history
+
+
+@pytest.mark.parametrize("answer, runs", [(APPROVE, True), (CANCEL, False)], ids=["approve", "cancel"])
+async def test_an_approvals_only_elicitor_gets_the_card_and_its_answer_decides(project, answer, runs):
+    """A host lists only APPROVAL_KIND for a turn nobody is known to be
+    watching. The cell's card still reaches it, and its answer decides."""
+    harness = _session(project, UPDATE_CELL)
+    harness.elicitor.supported_kinds = (APPROVAL_KIND,)
+    seen = await _run(harness=harness, answers=[answer])
+    assert len(seen.cards) == 1 and seen.cards[0].id.startswith("write:")
+    assert seen.ran_before == [0], "nothing ran before the user answered"
+    assert harness.pad.ran == ([UPDATE_CELL] if runs else [])
 
 
 @pytest.mark.parametrize("answer", [APPROVE, CANCEL, SKIP, TIMEOUT], ids=["approve", "cancel", "skip", "timeout"])
@@ -978,7 +996,8 @@ async def test_a_hold_the_setting_drops_is_logged_without_the_code(project, capl
         outcome = await _hold()(session, pad=_pad_after(*pad), code=code)
     assert outcome is None and elicitor.asked == 0
     assert _decisions(caplog) == [
-        '{"kinds":[],"count":0,"status":"not_held_unchecked","mode":"' + unchecked + '","causes":' + causes + "}",
+        '{"kinds":[],"count":0,"status":"not_held_unchecked","origin":"chat","mode":"' + unchecked + '","causes":'
+        + causes + "}",
     ]
     assert "job_main" not in caplog.text and "SCRIPT" not in caplog.text
 
@@ -1035,7 +1054,7 @@ async def test_stop_while_the_card_waits_runs_nothing_and_logs_stopped(project, 
             await task
     await harness.session.close()
     assert harness.pad.ran == []
-    assert _decisions(caplog) == ['{"kinds":["sql"],"count":1,"status":"stopped"}']
+    assert _decisions(caplog) == ['{"kinds":["sql"],"count":1,"status":"stopped","origin":"chat"}']
 
 
 # ── What raises no card ───────────────────────────────────────────────────
@@ -1097,9 +1116,10 @@ def _hold():
 
 
 async def _gated_session(
-    project: Path, *, elicitor: _AnswersAtOnce | None = None, emitter: bool = True,
+    project: Path, *, elicitor: _AnswersAtOnce | None = None, emitter: bool = True, http: str = "",
+    relay_hosts: str = "",
 ) -> ChatSession:
-    harness = _session(project)
+    harness = _session(project, http=http, relay_hosts=relay_hosts)
     session = harness.session
     if elicitor is not None:
         session.elicitor = elicitor
@@ -1193,7 +1213,7 @@ async def test_each_decision_is_logged_without_the_code(project, caplog):
     session = await _gated_session(project, elicitor=_AnswersAtOnce(answer=CANCEL))
     with caplog.at_level(logging.WARNING, logger=GATE_LOG):
         await _hold()(session, pad=_Pad(), code=UPDATE_CELL)
-    assert _decisions(caplog) == ['{"kinds":["sql"],"count":1,"status":"cancelled"}']
+    assert _decisions(caplog) == ['{"kinds":["sql"],"count":1,"status":"cancelled","origin":"chat"}']
     assert "suppliers" not in caplog.text, "the log line holds kinds and counts, never the statement"
 
 
@@ -1205,7 +1225,7 @@ async def test_an_overwrite_of_an_existing_file_waits_and_names_it(project, capl
     assert outcome is not None and outcome.reason == "write_not_approved"
     assert "This step would overwrite:\n\n```\nreport.pdf\n```" in elicitor.prompts[0]
     assert "Not run: this step would overwrite `report.pdf`." in outcome.content
-    assert _decisions(caplog) == ['{"kinds":["overwrite"],"count":1,"status":"cancelled"}']
+    assert _decisions(caplog) == ['{"kinds":["overwrite"],"count":1,"status":"cancelled","origin":"chat"}']
 
 
 SQLITE_UPDATE_CELL = (
@@ -1240,7 +1260,7 @@ async def test_a_cancelled_write_to_a_database_file_is_refused_as_a_change(proje
         outcome = await _hold()(session, pad=_Pad(), code=SQLITE_UPDATE_CELL)
     assert outcome is not None and outcome.reason == "write_not_approved"
     assert "Not run: this step would change `shop.db`." in outcome.content
-    assert _decisions(caplog) == ['{"kinds":["overwrite"],"count":1,"status":"cancelled"}']
+    assert _decisions(caplog) == ['{"kinds":["overwrite"],"count":1,"status":"cancelled","origin":"chat"}']
 
 
 @pytest.mark.parametrize("code, kinds", [
@@ -1258,7 +1278,7 @@ async def test_an_append_or_an_overwrite_of_the_agents_own_file_runs_and_is_logg
     with caplog.at_level(logging.WARNING, logger=GATE_LOG):
         outcome = await _hold()(session, pad=_Pad(), code=code)
     assert outcome is None and elicitor.asked == 0
-    assert _decisions(caplog) == ['{"kinds":' + kinds + ',"count":1,"status":"not_held"}']
+    assert _decisions(caplog) == ['{"kinds":' + kinds + ',"count":1,"status":"not_held","origin":"chat"}']
 
 
 async def test_a_cell_that_changes_nothing_existing_logs_nothing(project, caplog):
@@ -1788,3 +1808,362 @@ def test_every_cell_that_never_ran_says_so_first():
     from anton.core.utils.write_check import CellWrites
 
     assert _refusal(CellWrites(unchecked=True), "cancelled").content.startswith("Not run: ")
+
+
+# ── The page builder only reads ───────────────────────────────────────────
+#
+# The page builder's cells reach the gate through `handle_scratchpad` with
+# its origin. Where a chat cell would get a card, a builder cell is refused
+# with none, no wait, and no change to the turn's unanswered-card memory.
+# Everything that lets a chat cell run with no card lets a builder cell run.
+
+READ_ONLY = "write_refused_read_only"
+READ_ONLY_NEXT = ("Continue from the data already gathered or available from the chat, and name any data you "
+                  "couldn't get when you finish.")
+# The builder's reset or removal of a scratchpad, refused whatever the setting.
+PAD_REFUSED = ToolOutcome(
+    content="Not run: the page builder doesn't reset or remove a scratchpad. It works in the chat's scratchpads, "
+            "and that would clear the conversation's earlier cells or a scratchpad the chat uses. Keep working in "
+            "the scratchpad as it is.",
+    ok=True, reason=READ_ONLY,
+)
+REWRITE_FORBIDDEN = "Don't rewrite or retry this step another way"
+READABLE_REREAD = "You may read the same data again in code that doesn't call into that earlier code."
+
+
+def _exec(code: str, **extra: object) -> dict:
+    return {"action": "exec", "name": "main", "code": code, "one_line_description": "step", **extra}
+
+
+async def _builder_session(project: Path, *, elicitor: _AnswersAtOnce, pad: _Pad | None = None,
+                           **settings: str) -> tuple[ChatSession, _Pad]:
+    session = await _gated_session(project, elicitor=elicitor, **settings)
+    pad = pad or _Pad()
+    session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+    return session, pad
+
+
+@pytest.mark.parametrize("code, http", [
+    (UPDATE_CELL, ""),
+    (RENAME_CELL, ""),
+    (PLANNER_POST, PLANNER_RULE),
+    (SCRIPT_CELL + EXEC_SCRIPT_CELL, ""),
+    ("import requests\nrequests.delete('https://erp.example.com/api/suppliers/S005')\n", ""),
+], ids=["sql", "held-file", "listed-post", "unread-code", "delete"])
+async def test_builder_refused_read_only_without_card(project, caplog, code, http):
+    from anton.core.tools.tool_handlers import handle_scratchpad
+    from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, WRITE_REFUSED_READ_ONLY, ReadOnlyRefusal
+
+    elicitor = _AnswersAtOnce(answer=APPROVE)
+    session, pad = await _builder_session(project, elicitor=elicitor, http=http)
+    try:
+        with caplog.at_level(logging.WARNING, logger=GATE_LOG):
+            outcome = await handle_scratchpad(session, _exec(code), origin="page_builder")
+        assert WRITE_REFUSED_READ_ONLY == READ_ONLY and READ_ONLY in CELL_NOT_RUN_REASONS
+        assert isinstance(outcome, ReadOnlyRefusal) and (outcome.reason, outcome.ok) == (READ_ONLY, True)
+        assert outcome.content.startswith("Not run: the page builder only reads data, and this step would ")
+        assert f"this step would {outcome.change}, which needs the user's approval." in outcome.content
+        assert "Nothing in this cell ran." in outcome.content and outcome.content.endswith(READ_ONLY_NEXT)
+        assert "**Approve this change?**" not in outcome.content and "```" not in outcome.content
+        assert elicitor.asked == 0, "no card and no wait"
+        assert session._write_gate.unanswered is False, "a builder refusal leaves the chat's own cards alone"
+        assert pad.ran == []
+        assert [json.loads(line)["status"] for line in _decisions(caplog)] == ["refused_read_only"]
+        assert _exec_ran(outcome) is False
+    finally:
+        await session.close()
+
+
+async def test_a_chat_step_through_the_tool_handler_still_asks(project):
+    from anton.core.tools.tool_handlers import handle_scratchpad
+
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session, pad = await _builder_session(project, elicitor=elicitor)
+    try:
+        outcome = await handle_scratchpad(session, _exec(UPDATE_CELL))
+        assert outcome.reason == "write_not_approved" and elicitor.asked == 1 and pad.ran == []
+    finally:
+        await session.close()
+
+
+async def test_origin_cannot_be_set_through_the_tool_input(project):
+    """The chat agent writes `tc_input`, so an `origin` there is ignored:
+    the step is the chat's and its card asks."""
+    from anton.core.tools.tool_handlers import handle_scratchpad
+    from anton.core.utils.scratchpad import prepare_scratchpad_exec
+
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session, pad = await _builder_session(project, elicitor=elicitor)
+    try:
+        through_handler = await handle_scratchpad(session, _exec(UPDATE_CELL, origin="page_builder"))
+        prepared = await prepare_scratchpad_exec(session, _exec(UPDATE_CELL, origin="page_builder"))
+        assert [through_handler.reason, prepared.reason] == ["write_not_approved"] * 2
+        assert elicitor.asked == 2 and pad.ran == []
+    finally:
+        await session.close()
+
+
+async def test_origin_cannot_be_set_through_the_tool_input_in_a_turn(project):
+    """The same on the chat's own streaming exec path, which every host runs."""
+    harness = _session(project)
+    plan_stream = harness.session._llm.plan_stream
+    sent = False
+
+    def with_origin(**kwargs):
+        nonlocal sent
+        if not sent:
+            sent = True
+            response = LLMResponse(
+                content="Working.", tool_calls=[ToolCall(id="tc_1", name="scratchpad",
+                                                         input=_exec(UPDATE_CELL, origin="page_builder"))],
+                usage=Usage(input_tokens=10, output_tokens=20), stop_reason="tool_use",
+            )
+
+            async def gen():
+                yield StreamComplete(response=response)
+
+            return gen()
+        return plan_stream(**kwargs)
+
+    harness.session._llm.plan_stream = with_origin
+    seen = await _run(harness=harness, answers=[CANCEL])
+    assert len(seen.cards) == 1 and harness.pad.ran == []
+
+
+# The cards the base anton showed for these steps, byte for byte. A chat
+# cell's card must not change.
+CHAT_CARDS = {
+    "update": (
+        UPDATE_CELL, (),
+        "**Approve this change?**\n\nThis step would change data in a connected source:\n\n```\nUPDATE suppliers\n"
+        "SET lead_time_days = %s\nWHERE supplier_id = %s\nwith values (21, 'S005')\n```\n\n"
+        "It runs only if you approve. Cancel, Skip or no answer stops it.",
+    ),
+    "put": (
+        PUT_CELL, (),
+        "**Approve this change?**\n\nThis step would send PUT to:\n\n```\nhttps://erp.example.com/api/suppliers/S005\n"
+        "```\n\n```\nr = requests.put('https://erp.example.com/api/suppliers/S005', json={'lead_time_days': 21})\n"
+        "```\n\nIt runs only if you approve. Cancel, Skip or no answer stops it.",
+    ),
+    "unread": (
+        EXEC_SCRIPT_CELL, (SCRIPT_CELL,),
+        "**Approve this change?**\n\nThis step can't be checked before it runs.\n\nIt runs code the check can't "
+        "read:\n\n```\nexec(compile(SCRIPT, \"job\", \"exec\"))\n```\n\nThe step's code:\n\n```\n"
+        "exec(compile(SCRIPT, \"job\", \"exec\"))\n\n```\n\nIt runs only if you approve. Cancel, Skip or no answer "
+        "stops it.",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(CHAT_CARDS))
+async def test_a_chat_cells_card_is_byte_identical_to_the_base(project, name):
+    from anton.core.tools.tool_handlers import handle_scratchpad
+    from anton.core.utils.scratchpad import _card_prompt
+    from anton.core.utils.write_check import EarlierCell, find_cell_writes
+
+    code, earlier, card = CHAT_CARDS[name]
+    writes = find_cell_writes(code=code, earlier=tuple(EarlierCell(code=c) for c in earlier), snapshots=())
+    assert _card_prompt(writes, code) == card
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session, _ = await _builder_session(project, elicitor=elicitor, pad=_pad_after(*earlier))
+    try:
+        await handle_scratchpad(session, _exec(code))
+        await _hold()(session, pad=_pad_after(*earlier), code=code, origin="chat")
+    finally:
+        await session.close()
+    assert elicitor.prompts == [card, card]
+
+
+@pytest.mark.parametrize("code", [
+    "print(1)\n",
+    "import pandas as pd\npd.read_csv('stock.csv').to_csv('stock.csv', mode='a', header=False)\n",
+    "open('summary.md', 'w').write('One line.')\n",
+    "import requests\nprint(requests.get('https://erp.example.com/api/suppliers').json())\n",
+], ids=["read", "append", "new-file", "get"])
+async def test_a_builder_step_that_needs_no_card_still_runs(project, code):
+    from anton.core.tools.tool_handlers import handle_scratchpad
+
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session, pad = await _builder_session(project, elicitor=elicitor)
+    try:
+        outcome = await handle_scratchpad(session, _exec(code), origin="page_builder")
+    finally:
+        await session.close()
+    assert outcome.reason != READ_ONLY and pad.ran == [code] and elicitor.asked == 0
+
+
+async def test_a_builder_step_a_waiver_lets_run_with_no_card_still_runs(project, caplog):
+    """`write_approval_unchecked` and the write relay let a chat cell run
+    with no card, and they let the builder's run the same way. So does a
+    session with no gate at all."""
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session, _ = await _builder_session(project, elicitor=elicitor, http=RELAY_RULE, relay_hosts=RELAYED)
+    session._write_gate.unchecked = "own"
+    try:
+        with caplog.at_level(logging.WARNING, logger=GATE_LOG):
+            unread = await _hold()(session, pad=_pad_after(SCRIPT_CELL, EXEC_SCRIPT_CELL), code=CALL_SCRIPT_CELL,
+                                   origin="page_builder")
+            relayed = await _hold()(session, pad=_Pad(), code=RELAYED_POST, origin="page_builder")
+    finally:
+        await session.close()
+    assert (unread, relayed, elicitor.asked) == (None, None, 0)
+    assert [json.loads(line) for line in _decisions(caplog)] == [
+        {"kinds": [], "count": 0, "status": "not_held_unchecked", "origin": "page_builder", "mode": "own",
+         "causes": ["uses"]},
+    ]
+    harness = _session(project, write_approval=False)
+    try:
+        assert await _hold()(harness.session, pad=_Pad(), code=UPDATE_CELL, origin="page_builder") is None
+    finally:
+        await harness.session.close()
+
+
+@pytest.mark.parametrize("action", ["reset", "remove"])
+async def test_the_builder_resets_and_removes_no_scratchpad(project, action):
+    """A reset or a removal would clear the conversation's cells or a pad
+    the chat uses, so the builder may do neither. View, dump and install
+    still work, and the chat's own reset and removal still go through."""
+    from anton.core.tools.tool_handlers import handle_scratchpad
+
+    session = await _gated_session(project)
+    pad = MagicMock(reset=AsyncMock(), close=AsyncMock(), view=MagicMock(return_value="cells"),
+                    render_notebook=MagicMock(return_value="notebook"),
+                    install_packages=AsyncMock(return_value="Installed polars."))
+    session._scratchpads.pads["main"] = pad
+    session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+    session._scratchpads.remove = AsyncMock(return_value="removed")
+    try:
+        outcome = await handle_scratchpad(session, {"action": action, "name": "main"}, origin="page_builder")
+        assert outcome == PAD_REFUSED
+        pad.reset.assert_not_awaited()
+        session._scratchpads.remove.assert_not_awaited()
+        for shown, text in (("view", "cells"), ("dump", "notebook")):
+            seen = await handle_scratchpad(session, {"action": shown, "name": "main"}, origin="page_builder")
+            assert seen.content == text
+        with patch("anton.analytics.send_event"):
+            installed = await handle_scratchpad(session, {"action": "install", "name": "main", "packages": ["polars"]},
+                                                origin="page_builder")
+        assert installed == "Installed polars."
+        pad.install_packages.assert_awaited_once_with(["polars"])
+        chat = await handle_scratchpad(session, {"action": action, "name": "main"})
+        assert chat in ("Scratchpad 'main' reset. All state cleared.", "removed")
+    finally:
+        await session.close()
+
+
+@pytest.mark.parametrize("action", ["reset", "remove"])
+async def test_the_builder_resets_and_removes_no_scratchpad_with_write_approval_off(project, caplog, action):
+    """The builder works in the chat's scratchpads on every host, so the
+    refusal holds with no write gate on the session too, and it writes the
+    decision line a refused builder cell writes. The chat's own reset and
+    removal still go through."""
+    from anton.core.tools.tool_handlers import handle_scratchpad
+
+    harness = _session(project, write_approval=False)
+    session = harness.session
+    pad = MagicMock(reset=AsyncMock(), close=AsyncMock())
+    session._scratchpads.pads["main"] = pad
+    session._scratchpads.remove = AsyncMock(return_value="removed")
+    try:
+        assert session._write_gate is None
+        with caplog.at_level(logging.WARNING, logger=GATE_LOG):
+            outcome = await handle_scratchpad(session, {"action": action, "name": "main"}, origin="page_builder")
+        assert outcome == PAD_REFUSED
+        pad.reset.assert_not_awaited()
+        session._scratchpads.remove.assert_not_awaited()
+        records = [r for r in caplog.records if r.name == GATE_LOG and r.levelno == logging.WARNING]
+        assert [r.msg for r in records] == ["write approval: %s"]
+        assert json.loads(records[0].args[0]) == {
+            "kinds": [action], "count": 1, "status": "refused_read_only", "origin": "page_builder",
+        }
+        chat = await handle_scratchpad(session, {"action": action, "name": "main"})
+        assert chat in ("Scratchpad 'main' reset. All state cleared.", "removed")
+    finally:
+        await session.close()
+
+
+async def test_a_hold_carried_over_from_an_earlier_step_invites_a_readable_read(project):
+    """The builder's call uses only what code an earlier step ran may have
+    set: it may read the same data again in code that doesn't call into
+    that code, so the refusal says so instead of forbidding a rewrite."""
+    elicitor = _AnswersAtOnce(answer=APPROVE)
+    session = await _gated_session(project, elicitor=elicitor)
+    try:
+        outcome = await _hold()(session, pad=_pad_after(SCRIPT_CELL, EXEC_SCRIPT_CELL), code=CALL_SCRIPT_CELL,
+                                origin="page_builder")
+    finally:
+        await session.close()
+    assert outcome.content == (
+        "Not run: the page builder only reads data, and this step would run code the check couldn't read, which "
+        "needs the user's approval. Nothing in this cell ran. The check held it only because it uses what code "
+        "an earlier step ran may have set (`job_main`), and the check couldn't read that code. " + READABLE_REREAD
+        + " " + READ_ONLY_NEXT
+    )
+    assert REWRITE_FORBIDDEN not in outcome.content and elicitor.asked == 0
+
+
+@pytest.mark.parametrize("earlier, code", [
+    ((), UPDATE_CELL),
+    ((SCRIPT_CELL,), EXEC_SCRIPT_CELL),
+    ((SCRIPT_CELL, EXEC_SCRIPT_CELL), UPDATE_CELL + CALL_SCRIPT_CELL),
+    ((), RENAME_CELL),
+], ids=["sql", "runs-unread-code", "uses-beside-an-update", "held-file"])
+async def test_any_other_hold_forbids_a_rewrite(project, earlier, code):
+    elicitor = _AnswersAtOnce(answer=APPROVE)
+    session = await _gated_session(project, elicitor=elicitor)
+    try:
+        outcome = await _hold()(session, pad=_pad_after(*earlier), code=code, origin="page_builder")
+    finally:
+        await session.close()
+    assert outcome.reason == READ_ONLY and elicitor.asked == 0
+    assert (REWRITE_FORBIDDEN + ": don't build the statement, path or URL at run time, and don't use another "
+            "tool for it. " + READ_ONLY_NEXT) in outcome.content
+    assert READABLE_REREAD not in outcome.content
+
+
+async def test_a_builder_refusal_after_a_chat_timeout_is_still_the_read_only_refusal(project):
+    """A chat card timed out earlier in the turn, so later chat cells are
+    refused without a card. A builder cell is refused for its own reason,
+    and it leaves that memory as it was."""
+    elicitor = _AnswersAtOnce(answer=TIMEOUT)
+    session = await _gated_session(project, elicitor=elicitor)
+    try:
+        chat = await _hold()(session, pad=_Pad(), code=UPDATE_CELL)
+        assert "no one answered in time" in chat.content and session._write_gate.unanswered is True
+        builder = await _hold()(session, pad=_Pad(), code=RENAME_CELL, origin="page_builder")
+        assert builder.reason == READ_ONLY
+        assert builder.content.startswith("Not run: the page builder only reads data, and this step would rename")
+        assert "unanswered" not in builder.content
+        assert session._write_gate.unanswered is True and elicitor.asked == 1
+        later_chat = await _hold()(session, pad=_Pad(), code=UPDATE_CELL)
+        assert "an earlier approval request in this turn went unanswered" in later_chat.content
+        assert elicitor.asked == 1
+    finally:
+        await session.close()
+
+
+async def test_each_decision_logs_its_origin_and_a_builder_refusal_logs_refused_read_only(project, caplog):
+    """Through the real call site: the chat's card and the builder's
+    refusal each write the decision line, with whose step it was."""
+    from anton.core.tools.tool_handlers import handle_scratchpad
+
+    session, _ = await _builder_session(project, elicitor=_AnswersAtOnce(answer=CANCEL))
+    try:
+        with caplog.at_level(logging.WARNING, logger=GATE_LOG):
+            await handle_scratchpad(session, _exec(UPDATE_CELL))
+            await handle_scratchpad(session, _exec(UPDATE_CELL), origin="page_builder")
+    finally:
+        await session.close()
+    records = [r for r in caplog.records if r.name == GATE_LOG and r.levelno == logging.WARNING]
+    assert [r.msg for r in records] == ["write approval: %s"] * 2
+    assert [json.loads(r.args[0]) for r in records] == [
+        {"kinds": ["sql"], "count": 1, "status": "cancelled", "origin": "chat"},
+        {"kinds": ["sql"], "count": 1, "status": "refused_read_only", "origin": "page_builder"},
+    ]
+    assert "suppliers" not in caplog.text, "the log line holds kinds and counts, never the statement"
+
+
+def test_the_read_only_refusal_maps_like_a_refused_write():
+    from anton.core.root_cause import _SENTINEL_REASONS, TIER_SELF
+
+    assert _SENTINEL_REASONS[READ_ONLY] == _SENTINEL_REASONS["write_not_approved"] == (TIER_SELF, "invalid_argument")

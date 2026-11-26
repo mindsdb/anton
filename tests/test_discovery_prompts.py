@@ -390,3 +390,79 @@ def test_the_redraw_asks_for_the_known_data_mark():
 
     assert "data_findings" in discovery_prompts._REDRAW_RESTATE
     assert 'verified_by: "known_data"' in discovery_prompts._REDRAW_RESTATE
+
+
+# ── Write approval: the page builder's cells only read ──────────────────────
+#
+# With write approval on, the write gate refuses a builder cell that would
+# need a card, and the act-first gathering says so. With it off, which every
+# hosted and desktop build runs with, the text is the one before the change.
+
+# The act-first gathering instruction before the read-only change, byte for byte.
+_ACT_FIRST_GATHERING = (
+    "Gather the evidence needed to build the ORIGINAL user request. Use the connected source's documented API "
+    "and credentials from the catalog. Reuse an existing scratchpad when present. Fetch ALL records/fields "
+    "needed for the views, not just a schema sample or head(). Compute exact requested aggregates with Python. "
+    "Save the complete relevant rows and exact calculated figures as canonical observed-data.json in the "
+    "artifact folder, with units, filters and time scope; print only a short manifest. Do not print "
+    "credentials. Batch independent queries in one cell when practical. A row count or summary does not "
+    "substitute for records the page must display. Check for truncation; retrieve the remaining records or "
+    "report the gap. Once the required data is observed, immediately call finish_gathering and declare the "
+    "type and sources. Do not draft a brief, PRD, design or implementation plan. Do not add requirements or "
+    "ask for preferences the request does not need. For a backend that must query data at runtime, verify its "
+    "access with a real sample and finish."
+)
+
+
+def _write_gated(**over) -> GenState:
+    from anton.core.utils.scratchpad import WriteGate
+
+    # A fullstack type takes the gathering text without one-call static completion.
+    return _state(act_first=True, artifact_type="fullstack-stateless-app",
+                  session=SimpleNamespace(question_count=0, _write_gate=WriteGate()), **over)
+
+
+def test_with_write_approval_off_the_act_first_gathering_is_unchanged():
+    from anton.core.tools.generate_artifact.discovery.prompts import _gathering_instruction
+    from anton.core.tools.generate_artifact.prompts import READ_ONLY_CELLS
+
+    assert _gathering_instruction(True) == _ACT_FIRST_GATHERING
+    message = step_message(sub_tools.STEP_GATHERING, _state(act_first=True, artifact_type="fullstack-stateless-app"))
+    assert _ACT_FIRST_GATHERING in message
+    assert READ_ONLY_CELLS not in message and "verified_by: \"known_data\"` for that source" not in message
+
+
+def test_with_write_approval_on_the_act_first_gathering_says_its_cells_only_read():
+    from anton.core.tools.generate_artifact.discovery.prompts import _gathering_instruction
+    from anton.core.tools.generate_artifact.prompts import KNOWN_DATA_HEADER, READ_ONLY_CELLS
+
+    assert READ_ONLY_CELLS == "Your cells only read: a cell that would need the user's approval does not run."
+    read_only = _gathering_instruction(True, read_only=True)
+    assert read_only == _ACT_FIRST_GATHERING.replace(
+        "when present. Fetch ALL",
+        "when present. " + READ_ONLY_CELLS + " For an `html-app` whose rows or values are already under `"
+        + KNOWN_DATA_HEADER + "`, record `verified_by: \"known_data\"` for that source instead of fetching it "
+        "again. Otherwise, fetch ALL",
+    )
+    assert read_only in step_message(sub_tools.STEP_GATHERING, _write_gated())
+
+
+def test_only_a_write_gated_fetch_prompt_says_its_cells_only_read(tmp_path):
+    from anton.core.tools.generate_artifact.prompts import READ_ONLY_CELLS, build_fetch_data_system_prompt
+
+    on = build_fetch_data_system_prompt(tmp_path, read_only=True)
+    off = build_fetch_data_system_prompt(tmp_path)
+    assert "Do NOT write any artifact files. " + READ_ONLY_CELLS + "\n\nFetch ONLY WHAT IS MISSING." in on
+    assert READ_ONLY_CELLS not in off
+    assert on.replace(" " + READ_ONLY_CELLS, "") == off
+
+
+def test_the_builders_scratchpad_actions_leave_out_reset_and_remove(tmp_path):
+    """The page builder never resets or removes a scratchpad, whatever the
+    setting (`handle_scratchpad`), so its prompt doesn't offer either."""
+    from anton.core.tools.generate_artifact.prompts import build_fetch_data_system_prompt
+
+    prompt = build_fetch_data_system_prompt(tmp_path)
+    tools = prompt[prompt.index("ALWAYS-AVAILABLE TOOLS:"):prompt.index("SCRATCHPAD DISCIPLINE")]
+    assert "(`exec`, `view`, `dump`, `install`)" in tools
+    assert "`reset`" not in tools and "`remove`" not in tools

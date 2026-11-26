@@ -40,6 +40,7 @@ from anton.cloud_turn.session import (
     resolve_trusted_workspace_path,
 )
 from anton.core.backends.local import local_scratchpad_runtime_factory
+from anton.core.interaction.elicit import APPROVAL_KIND
 
 
 class _FakeSession:
@@ -73,13 +74,30 @@ def test_no_elicitor_means_no_ask_user(tmp_path, monkeypatch):
     assert "ask_user" not in cfg.tool_allowlist
 
 
+class _Kinds:
+    """An elicitor stand-in: the allowlist reads only `supported_kinds`."""
+
+    def __init__(self, *kinds: str) -> None:
+        self.supported_kinds = kinds
+
+
 def test_an_elicitor_enables_ask_user(tmp_path, monkeypatch):
-    elicitor = object()
+    elicitor = _Kinds("choice")
     _, cfg = _build(tmp_path, monkeypatch, elicitor=elicitor)
     assert cfg.elicitor is elicitor
     assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {"ask_user"}
     # A console would let anton fall back to its terminal elicitor.
     assert cfg.console is None
+
+
+def test_an_approvals_only_elicitor_leaves_ask_user_off_the_allowlist(tmp_path, monkeypatch):
+    """Core registers `ask_user` only for an elicitor that lists "choice",
+    and an allowlist name that matches no registered tool is fatal."""
+    elicitor = _Kinds(APPROVAL_KIND)
+    _, cfg = _build(tmp_path, monkeypatch, elicitor=elicitor)
+    assert cfg.elicitor is elicitor
+    assert "ask_user" not in cfg.tool_allowlist
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST
 
 
 # ── config-level safety ──────────────────────────────────────────────────────
@@ -768,6 +786,20 @@ def test_final_tool_set_equals_allowlist_after_real_build(tmp_path, monkeypatch)
     )
 
 
+def test_the_tool_list_without_extra_tools_has_one_order_and_the_same_bytes_each_build(tmp_path, monkeypatch):
+    """The tool list sits in front of the cached prompt, so order and bytes matter, not only the set."""
+    session = _real_cloud_session(tmp_path, monkeypatch)
+
+    first = json.dumps(session._build_tools())
+    second = json.dumps(session._build_tools())
+
+    assert first == second
+    assert [tool["name"] for tool in json.loads(first)] == [
+        "scratchpad", "read_image", "read_text_file", "memorize", "recall_skill", "create_skill_draft",
+        "create_artifact", "list_artifacts", "update_artifact",
+    ]
+
+
 def test_connector_drafts_add_only_the_draft_tool(tmp_path, monkeypatch):
     _, cfg = _build(tmp_path, monkeypatch, connector_drafts=True)
     assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {"create_connector_draft"}
@@ -898,8 +930,8 @@ def test_tool_allowlist_none_preserves_desktop_tools(tmp_path):
     assert {"launch_backend", "select_path", "scratchpad", "create_artifact"} <= names
 
 
-async def test_scratchpad_inherits_parent_env(tmp_path, monkeypatch):
-    """The scratchpad subprocess inherits the parent env (no sanitizing)."""
+async def test_the_bare_factorys_scratchpad_gets_only_allowlisted_parent_names(tmp_path, monkeypatch):
+    """The factory the pod passes bare filters the parent env: PATH stays, an unlisted name goes."""
     monkeypatch.setenv("MY_DESKTOP_SENTINEL", "DESKTOP-VISIBLE")
     pad = local_scratchpad_runtime_factory(
         name="desktop-env", coding_provider="anthropic", coding_model="",
@@ -908,10 +940,11 @@ async def test_scratchpad_inherits_parent_env(tmp_path, monkeypatch):
     await pad.start()
     try:
         cell = await pad.execute(
-            "import os; print(os.environ.get('MY_DESKTOP_SENTINEL', 'MISSING'))"
+            "import os; print(os.environ.get('MY_DESKTOP_SENTINEL', 'MISSING'), "
+            "os.environ.get('PATH') == " + repr(os.environ["PATH"]) + ")"
         )
         assert cell.error is None, cell.error
-        assert cell.stdout.strip() == "DESKTOP-VISIBLE"
+        assert cell.stdout.strip() == "MISSING True"
     finally:
         await pad.close()
 
@@ -1769,6 +1802,8 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
         "list_artifacts",
         "update_artifact",
         "read_text_file",
+        # Takes only a path and returns the picture.
+        "read_image",
         "memorize",
         "recall_skill",
         "create_skill_draft",

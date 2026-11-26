@@ -159,7 +159,7 @@ async def test_a_swap_no_event_announces_keeps_the_rows_appended_after_it():
 
 def _seeded_session(*, messages: int = 10) -> ChatSession:
     llm = make_mock_llm()
-    llm.summarize = AsyncMock(return_value=LLMResponse(content="SUMMARY"))
+    llm.summarize = AsyncMock(return_value=LLMResponse(content="## Goal\nSUMMARY"))
     seed = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 50}
         for i in range(messages)

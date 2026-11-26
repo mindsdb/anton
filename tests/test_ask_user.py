@@ -10,10 +10,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from anton.core.interaction.elicit import (
+    APPROVAL_KIND,
     MAX_QUESTIONS_PER_TURN,
+    ApprovalRequest,
     AskAnswer,
     AskOption,
     AskRequest,
+    asks_approvals,
     elicit,
     validate_request,
 )
@@ -263,6 +266,105 @@ async def test_unavailable_when_kind_unsupported(make_session):
     session = _wired(make_session, _PathOnly())
     assert (await elicit(session, "q1", _choice())).status == "unavailable"
     assert _drain(session.emitter) == []
+
+
+# ─── approval cards and the approvals-only elicitor ─────────────────────
+
+
+class _ChoiceOnly(_RecordingElicitor):
+    supported_kinds = ("choice",)
+
+
+class _ApprovalsOnly(_RecordingElicitor):
+    """What a host lists for a turn nobody is known to be watching."""
+
+    supported_kinds = (APPROVAL_KIND,)
+
+
+_APPROVE_CANCEL = (AskOption(value="approve", label="Approve"), AskOption(value="cancel", label="Cancel"))
+
+
+def _approval() -> ApprovalRequest:
+    return ApprovalRequest(prompt="Approve this step?", options=_APPROVE_CANCEL)
+
+
+def test_the_approval_kind_is_the_name_cowork_server_reads():
+    """cowork-server reads this constant by name in
+    `cowork/harnesses/anton_harness/harness.py`; a rename here turns the
+    capability off there."""
+    assert APPROVAL_KIND == "approval"
+
+
+async def test_an_approvals_only_elicitor_answers_an_approval_card(make_session):
+    """An elicitor that lists only APPROVAL_KIND gets the approval card, and
+    the host sees it as the "choice" card it renders today."""
+    elicitor = _ApprovalsOnly(answer=AskAnswer(status="answered", values=("approve",)))
+    session = _wired(make_session, elicitor)
+
+    answer = await elicit(session, "write:1", _approval(), counted=False)
+
+    assert (answer.status, answer.values) == ("answered", ("approve",))
+    assert elicitor.calls == ["begin:write:1", "ask:write:1", "end:write:1"]
+    cards = [event for event in _drain(session.emitter) if isinstance(event, StreamAskUser)]
+    assert [(card.id, card.request.kind) for card in cards] == [("write:1", "choice")]
+
+
+async def test_an_approvals_only_elicitor_refuses_every_other_question_before_begin(make_session):
+    """A plain question shaped exactly like an approval card is still a
+    question: only an `ApprovalRequest` reaches this elicitor. A question
+    whose kind is APPROVAL_KIND is no approval card either: that names a
+    capability, and such a question would publish no card."""
+    elicitor = _ApprovalsOnly()
+    session = _wired(make_session, elicitor)
+    lookalike = AskRequest(prompt="Approve this step?", options=_APPROVE_CANCEL, allow_custom=False)
+    capability_as_kind = AskRequest(prompt="Approve this step?", kind=APPROVAL_KIND, options=_APPROVE_CANCEL)
+
+    for request in (
+        _choice(), lookalike, capability_as_kind, AskRequest(prompt="Pick a folder", kind="path"),
+    ):
+        assert (await elicit(session, "q1", request)).status == "unavailable", request
+    assert elicitor.calls == [], "no channel is opened for a question it can't take"
+    assert _drain(session.emitter) == [], "no card is published"
+    assert session.question_count == 0, "a refused question spends none of the budget"
+
+
+async def test_an_approval_card_to_an_approvals_only_elicitor_still_needs_an_emitter(make_session):
+    elicitor = _ApprovalsOnly()
+    session = make_session()
+    session.elicitor = elicitor
+    session.emitter = None
+    assert (await elicit(session, "write:1", _approval(), counted=False)).status == "unavailable"
+    assert elicitor.calls == []
+
+
+async def test_a_choice_elicitor_answers_approval_cards_and_questions_alike(make_session):
+    elicitor = _ChoiceOnly()
+    session = _wired(make_session, elicitor)
+    assert (await elicit(session, "write:1", _approval(), counted=False)).status == "answered"
+    assert (await elicit(session, "q1", _choice())).status == "answered"
+    assert elicitor.calls == ["begin:write:1", "ask:write:1", "end:write:1", "begin:q1", "ask:q1", "end:q1"]
+
+
+async def test_no_elicitor_refuses_approval_cards_and_questions_alike(make_session):
+    session = _wired(make_session, None)
+    assert (await elicit(session, "write:1", _approval(), counted=False)).status == "unavailable"
+    assert (await elicit(session, "q1", _choice())).status == "unavailable"
+    assert _drain(session.emitter) == []
+
+
+@pytest.mark.parametrize("kinds, expected", [
+    (None, False),
+    (("path",), False),
+    (("choice",), True),
+    ((APPROVAL_KIND,), True),
+    (("choice", "path"), True),
+])
+def test_asks_approvals_reads_choice_or_the_approval_kind(kinds, expected):
+    elicitor = None
+    if kinds is not None:
+        elicitor = _RecordingElicitor()
+        elicitor.supported_kinds = kinds
+    assert asks_approvals(elicitor=elicitor) is expected
 
 
 async def test_unavailable_when_request_is_invalid(make_session):
@@ -592,6 +694,12 @@ def test_ask_user_absent_for_a_path_only_elicitor(make_session):
 
     session = make_session(elicitor=_PathOnly())
     names = _tool_names(session)
+    assert "ask_user" not in names
+    assert "select_path" in names
+
+
+def test_ask_user_absent_for_an_approvals_only_elicitor(make_session):
+    names = _tool_names(make_session(elicitor=_ApprovalsOnly()))
     assert "ask_user" not in names
     assert "select_path" in names
 
@@ -1219,3 +1327,65 @@ async def test_cli_closed_choice_can_still_be_cancelled(cli_elicitor, monkeypatc
     prompt = AsyncMock(side_effect=["nope", ""])
     monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", prompt)
     assert (await cli_elicitor.ask("q1", _choice(allow_custom=False))).status == "cancelled"
+
+
+# ─── act first: whether to ask, and the default ───────────────────────────
+
+
+def _ask_user_def(session):
+    return next(t for t in session.tool_registry.dump() if t["name"] == "ask_user")
+
+
+def test_act_first_tells_the_card_that_whether_to_ask_is_not_its_call(make_session):
+    from anton.core.tools.tool_defs import ASK_USER_ACT_FIRST_DESCRIPTION
+
+    session = make_session(elicitor=_RecordingElicitor(), act_first=True)
+    session._build_tools()
+    description = _ask_user_def(session)["description"]
+    assert ASK_USER_ACT_FIRST_DESCRIPTION in description
+    assert description.endswith("hint")  # the host's answer hint still comes last
+
+
+def test_ask_first_keeps_the_card_exactly_as_it_was(make_session):
+    session = make_session(elicitor=_RecordingElicitor(), act_first=False)
+    session._build_tools()
+    assert _ask_user_def(session)["description"] == ASK_USER_TOOL.description + "\n\nhint"
+
+
+async def test_act_first_puts_the_whether_rule_and_the_default_in_the_prompt(make_session):
+    from anton.core.tools.tool_defs import ASK_USER_ACT_FIRST_PROMPT
+
+    on = make_session(elicitor=_RecordingElicitor(), act_first=True)
+    on._build_tools()
+    prompt = await on._build_system_prompt("my laptop is slow, fix it")
+    assert ASK_USER_ACT_FIRST_PROMPT in prompt
+    assert ASK_USER_TOOL.prompt in prompt  # how to ask is unchanged
+    assert prompt.index(ASK_USER_ACT_FIRST_PROMPT) < prompt.index(ASK_USER_TOOL.prompt)
+
+    off = make_session(elicitor=_RecordingElicitor(), act_first=False)
+    off._build_tools()
+    off_prompt = await off._build_system_prompt("my laptop is slow, fix it")
+    assert ASK_USER_ACT_FIRST_PROMPT not in off_prompt
+    assert ASK_USER_TOOL.prompt in off_prompt
+
+
+def test_ask_user_tool_never_mutates_the_singleton():
+    from anton.core.tools.tool_defs import ask_user_tool
+
+    pristine = (ASK_USER_TOOL.description, ASK_USER_TOOL.prompt)
+    ask_user_tool(True)
+    assert (ASK_USER_TOOL.description, ASK_USER_TOOL.prompt) == pristine
+    assert ask_user_tool(False) is ASK_USER_TOOL
+
+
+def test_act_first_discipline_covers_a_missing_detail_and_the_default():
+    from anton.core.llm.prompts import (
+        CONVERSATION_DISCIPLINE_ACT_FIRST,
+        CONVERSATION_DISCIPLINE_ASK_FIRST,
+    )
+
+    assert "A MISSING DETAIL IS NOT A REASON TO ASK FIRST" in CONVERSATION_DISCIPLINE_ACT_FIRST
+    assert "as text or shown as" in CONVERSATION_DISCIPLINE_ACT_FIRST.replace("whether written ", "")
+    assert "what you would do by default" in CONVERSATION_DISCIPLINE_ACT_FIRST
+    for rule in ("MISSING DETAIL", "by default"):
+        assert rule not in CONVERSATION_DISCIPLINE_ASK_FIRST

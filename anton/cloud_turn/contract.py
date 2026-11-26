@@ -116,6 +116,12 @@ Events written back on stdout (JSONL):
       by one `check_result` stdin line (below); no answer within timeout_s is
       "unverified". The controller must relay it (as a `turn_step`, step
       "artifact_check", like the ask_user kinds).
+  {"kind": "host_tool_call", "call_id": "htool:<32 hex>", "tool": "...",
+   "input": {...}}  - only for a tool the request listed in `host_tools`, and
+      only when stdin is open: the turn asks the host to run that tool.
+      Answered by `host_tool_progress` and `host_tool_result` stdin lines
+      (below). The controller relays it as a `turn_step` (step
+      "host_tool_call"). The host runs each call_id at most once.
   {"kind": "browser", "session_id": "..."}  - the browser tool opened (or
       reopened) the person's browser session. cowork shows the browser beside
       the chat, with a viewer link it mints with the person's own credential.
@@ -185,6 +191,15 @@ Check lines on stdin (requests with `preview_checks`, same 64 KB bound), ENG-422
       "unavailable" (no preview open, timed out) reads as unverified. A line for
       no pending check is ignored; pending checks resolve as unanswered when
       stdin closes or the turn ends.
+Host tool lines on stdin (requests with `host_tools`, same 64 KB bound):
+  {"kind": "host_tool_progress", "call_id", "entry_id", "text"}  - one step of
+      a running call, shown on the tool's line; text at most 500 characters.
+  {"kind": "host_tool_result", "call_id", "entry_id", "seq", "last", "ok",
+   "text"}  - one part of the call's result; parts join in seq order once the
+      `last` part and every part before it arrived. No complete result within
+      the tool's timeout_s, stdin closing, or the turn ending reads as ok false
+      with "The host did not answer. The call may have been applied; check
+      its effect before retrying." A line for no pending call is ignored.
 A stdin line of any other kind, or a malformed one, is logged and skipped.
 """
 
@@ -192,6 +207,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -220,6 +236,27 @@ _OPTIONAL_REF_KEYS = frozenset({"label", "engine"})
 _ENGINE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,31}")
 #: Auth caps a connection's name at this many characters; the prompt keeps the same bound.
 MAX_CONNECTION_LABEL_LEN = 128
+
+CUSTOM_MCP_PROTOCOL_VERSION = 1
+#: The most custom MCP connections one turn carries; auth holds the same cap per member.
+MAX_CUSTOM_MCP_CONNECTIONS = 25
+#: auth's published limits on one stored tool definition (custom-mcp-limits-v1.json).
+#: A definition past any of them did not come from auth's usable rule.
+CUSTOM_MCP_MAX_TOOL_NAME_LENGTH = 42
+CUSTOM_MCP_MAX_SCHEMA_DEPTH = 32
+CUSTOM_MCP_MAX_TOOL_BYTES = 16384
+#: auth's limits on a whole block: tools across every connection, and the UTF-8 bytes of their stored texts.
+#: Past either, the provider can refuse every request in the turn.
+CUSTOM_MCP_MAX_SWITCHED_ON_TOOLS = 100
+CUSTOM_MCP_MAX_MEMBER_CEILING_BYTES = 262144
+#: auth draws every custom MCP connection name in this form.
+_CUSTOM_MCP_CONNECTION_NAME = re.compile(r"cm-[0-9a-f]{32}")
+_CUSTOM_MCP_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]+")
+_CUSTOM_MCP_CONNECTION_KEYS = frozenset({"connection_id", "name", "label", "credential_version", "tools"})
+_CUSTOM_MCP_DEFINITION_KEYS = frozenset({"name", "description", "input_schema"})
+# auth's invisible characters: text the member cannot see but a model reads. The joiners U+200C and U+200D stay.
+_CUSTOM_MCP_INVISIBLE = re.compile("[\u061c\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff\U000e0000-\U000e007f]")
+_JSON_SCHEMA_TYPES = frozenset({"array", "boolean", "integer", "null", "number", "object", "string"})
 
 # The `turn_completed` key that names the artifact folders the turn touched.
 # scratchpad-controller's `scratchpad_controller/anton_turn.py` relays it and
@@ -384,6 +421,250 @@ def _parse_custom_api_block(value: object, conversation_id: str) -> CustomApiBlo
     return CustomApiBlockV1(CUSTOM_API_PROTOCOL_VERSION, refs)
 
 
+@dataclass(frozen=True)
+class CustomMcpToolV1:
+    """One switched-on tool of a member's custom MCP server, as auth stored its definition."""
+
+    name: str
+    description: str
+    input_schema: dict
+
+
+@dataclass(frozen=True)
+class CustomMcpConnectionV1:
+    """One custom MCP connection the turn may call, by auth id, with its switched-on tools.
+
+    ``label`` is the member's name for the server, cleaned for one line, and is
+    used in error messages only. No token or server address crosses.
+    """
+
+    connection_id: int
+    name: str
+    label: str | None
+    credential_version: int
+    tools: tuple[CustomMcpToolV1, ...]
+
+
+@dataclass(frozen=True)
+class CustomMcpBlockV1:
+    """The member's custom MCP connections for this turn."""
+
+    protocol_version: int
+    connections: tuple[CustomMcpConnectionV1, ...]
+
+
+def _within_depth(text: str, limit: int) -> bool:
+    """Whether no JSON object or array in ``text`` nests deeper than ``limit``.
+
+    Counts brackets outside strings without parsing, so a text nested past any
+    parser's recursion limit is refused before it reaches one. No side effects.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+            if depth > limit:
+                return False
+        elif ch in "}]":
+            depth -= 1
+    return True
+
+
+def _refuse_constant(name: str) -> float:
+    """Refuse ``NaN`` and ``Infinity``, which no strict JSON text holds."""
+    raise ValueError("not a finite number")
+
+
+def _finite_float(text: str) -> float:
+    """A JSON number as a float, refused when it overflows to infinity."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("not a finite number")
+    return value
+
+
+def _holds_unclean_text(value: object) -> bool:
+    """Whether any string or key inside ``value`` holds ``\\u0000``, an invisible character, or does not encode as UTF-8.
+
+    auth's text rule. An escaped lone surrogate passes the size step as ASCII
+    and decodes to text no request can encode. The parser has bounded the depth.
+    """
+    if isinstance(value, str):
+        if "\x00" in value or _CUSTOM_MCP_INVISIBLE.search(value):
+            return True
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return True
+        return False
+    if isinstance(value, dict):
+        return any(_holds_unclean_text(key) or _holds_unclean_text(item) for key, item in value.items())
+    if isinstance(value, list):
+        return any(_holds_unclean_text(item) for item in value)
+    return False
+
+
+def _known_schema_type(value: object) -> bool:
+    """Whether ``value`` is a JSON Schema ``type``: one type name, or a non-empty list of distinct ones."""
+    if isinstance(value, str):
+        return value in _JSON_SCHEMA_TYPES
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(item, str) and item in _JSON_SCHEMA_TYPES for item in value)
+        and len(set(value)) == len(value)
+    )
+
+
+def _misshapen_schema(schema: object) -> bool:
+    """Whether ``schema``, or a schema under its ``properties`` or ``items``, is not a schema or names an unknown type.
+
+    A narrow part of auth's metaschema check, which needs a JSON Schema validator
+    anton does not declare. The parser has bounded the depth. No side effects.
+    """
+    if isinstance(schema, bool):
+        return False
+    if not isinstance(schema, dict):
+        return True
+    if "type" in schema and not _known_schema_type(schema["type"]):
+        return True
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        return True
+    subschemas = list(properties.values())
+    if "items" in schema:
+        subschemas.append(schema["items"])
+    return any(_misshapen_schema(subschema) for subschema in subschemas)
+
+
+def _custom_mcp_tool(text: object) -> CustomMcpToolV1 | None:
+    """One stored definition parsed from its text, or None when it breaks a published limit.
+
+    Size in UTF-8 bytes first, then depth by a bracket scan, and only then the
+    parse, so no parse recurses past the depth limit. The text wraps the schema
+    in one more object, hence one more level than the schema's own limit. A text
+    that does not encode, or does not parse, raises ``ValueError`` or
+    ``RecursionError`` and reads as unusable either way. After the parse, the
+    name and the schema's shape are held to auth's usable rule. No side effects.
+    """
+    if not isinstance(text, str):
+        return None
+    try:
+        if len(text.encode("utf-8")) > CUSTOM_MCP_MAX_TOOL_BYTES:
+            return None
+        if not _within_depth(text, CUSTOM_MCP_MAX_SCHEMA_DEPTH + 1):
+            return None
+        definition = json.loads(text, parse_constant=_refuse_constant, parse_float=_finite_float)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(definition, dict) or set(definition) != _CUSTOM_MCP_DEFINITION_KEYS:
+        return None
+    name, description, schema = definition["name"], definition["description"], definition["input_schema"]
+    # auth validates the whole schema against the 2020-12 metaschema before storing it;
+    # this is a second line on the top level, properties and items only.
+    if (
+        not isinstance(name, str)
+        or not _CUSTOM_MCP_TOOL_NAME.fullmatch(name)
+        or name.startswith("_")
+        or "__" in name
+        or len(name) > CUSTOM_MCP_MAX_TOOL_NAME_LENGTH
+        or not isinstance(description, str)
+        or not isinstance(schema, dict)
+        or schema.get("type") != "object"
+        or not isinstance(schema.get("properties", {}), dict)
+        or {"anyOf", "oneOf", "allOf"} & set(schema)
+        or _misshapen_schema(schema)
+        or _holds_unclean_text(definition)
+    ):
+        return None
+    return CustomMcpToolV1(name, description, schema)
+
+
+def _custom_mcp_connection(connection: object) -> CustomMcpConnectionV1 | None:
+    """One connection with its parsed tools, or None when any part is not the producer's shape."""
+    if not isinstance(connection, dict) or set(connection) != _CUSTOM_MCP_CONNECTION_KEYS:
+        return None
+    texts = connection["tools"]
+    if (
+        not _positive_int(connection["connection_id"])
+        or not _positive_int(connection["credential_version"])
+        or not isinstance(connection["name"], str)
+        or not _CUSTOM_MCP_CONNECTION_NAME.fullmatch(connection["name"])
+        or not isinstance(connection["label"], str)
+        or not isinstance(texts, list)
+        or not texts
+    ):
+        return None
+    tools = [_custom_mcp_tool(text) for text in texts]
+    if None in tools or len({tool.name for tool in tools}) != len(tools):
+        return None
+    return CustomMcpConnectionV1(
+        connection["connection_id"],
+        connection["name"],
+        _usable_label(connection["label"]),
+        connection["credential_version"],
+        tuple(tools),
+    )
+
+
+def _custom_mcp_connections(value: object) -> tuple[CustomMcpConnectionV1, ...] | str:
+    """The block's connections, or a fixed phrase that names why ``value`` is not a version 1 block."""
+    if not isinstance(value, dict):
+        return "not an object"
+    if set(value) != {"protocol_version", "connections"}:
+        return "missing or unsupported top-level keys"
+    if not _is_version(value["protocol_version"], CUSTOM_MCP_PROTOCOL_VERSION):
+        return "unsupported protocol version"
+    connections = value["connections"]
+    if not isinstance(connections, list) or not connections or len(connections) > MAX_CUSTOM_MCP_CONNECTIONS:
+        return "invalid connection list"
+    parsed = [_custom_mcp_connection(connection) for connection in connections]
+    if (
+        None in parsed
+        or len({ref.connection_id for ref in parsed}) != len(parsed)
+        or len({ref.name for ref in parsed}) != len(parsed)
+    ):
+        return "invalid connection or tool definition"
+    texts = [text for connection in connections for text in connection["tools"]]
+    if len(texts) > CUSTOM_MCP_MAX_SWITCHED_ON_TOOLS:
+        return "too many tools"
+    if sum(len(text.encode("utf-8")) for text in texts) > CUSTOM_MCP_MAX_MEMBER_CEILING_BYTES:
+        return "tool definitions too large"
+    return tuple(parsed)
+
+
+def _parse_custom_mcp_block(value: object, conversation_id: str) -> CustomMcpBlockV1 | None:
+    """Parse the optional ``custom_mcp`` block, or drop it whole.
+
+    Input: the raw block and the request's conversation id. Output: the parsed block,
+    or None when it is absent or any part of it is unusable. A rejected block logs one
+    line naming the reason and the conversation id, never a definition, and the turn
+    goes on exactly as if the block were absent. No other side effects.
+    """
+    if value is None:
+        return None
+    connections = _custom_mcp_connections(value)
+    if isinstance(connections, str):
+        logger.warning(
+            "custom_mcp block dropped: %s",
+            connections,
+            extra={"event": "custom_mcp_dropped", "reason": connections, "conversation_id": conversation_id},
+        )
+        return None
+    return CustomMcpBlockV1(CUSTOM_MCP_PROTOCOL_VERSION, connections)
+
+
 def _usable_label(value: object) -> str | None:
     """The connection's name as one clean prompt line, or ``None`` when nothing usable is left.
 
@@ -525,6 +806,94 @@ def _parse_limits(value: object, conversation_id: str) -> dict[str, int]:
     return limits
 
 
+#: A host tool's name; cowork-server and the controller hold the same rule.
+_HOST_TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+DEFAULT_HOST_TOOL_TIMEOUT_S = 60
+MAX_HOST_TOOL_TIMEOUT_S = 120
+
+
+@dataclass(frozen=True)
+class HostToolSpecV1:
+    """One tool the host runs for this turn; the pod only forwards its calls."""
+
+    name: str
+    description: str
+    input_schema: dict
+    #: Added to the system prompt the way ``ToolDef.prompt`` is.
+    prompt: str | None = None
+    timeout_s: int = DEFAULT_HOST_TOOL_TIMEOUT_S
+    #: The tool waits until the agent recalls this skill, as ``ToolDef.unlock_skill``.
+    #: The host sends that skill in the turn's ``skills`` block, under this
+    #: slug and with this frontmatter ``name``: the recall unlocks by the name.
+    unlock_skill: str | None = None
+
+
+def _host_tool_spec(entry: object) -> HostToolSpecV1 | str:
+    """One ``host_tools`` entry as a spec, or a fixed phrase naming why it is malformed."""
+    if not isinstance(entry, dict):
+        return "entry_not_an_object"
+    name = entry.get("name")
+    if not isinstance(name, str) or not _HOST_TOOL_NAME.fullmatch(name):
+        return "invalid_name"
+    description = entry.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return "invalid_description"
+    input_schema = entry.get("input_schema")
+    if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
+        return "invalid_input_schema"
+    prompt = entry.get("prompt")
+    if prompt is not None and not isinstance(prompt, str):
+        return "invalid_prompt"
+    timeout_s = entry.get("timeout_s")
+    if timeout_s is None:
+        timeout_s = DEFAULT_HOST_TOOL_TIMEOUT_S
+    if not _positive_int(timeout_s) or timeout_s > MAX_HOST_TOOL_TIMEOUT_S:
+        return "invalid_timeout"
+    unlock_skill = entry.get("unlock_skill")
+    if unlock_skill is not None and not _is_skill_name(unlock_skill):
+        return "invalid_unlock_skill"
+    return HostToolSpecV1(name, description, input_schema, prompt or None, timeout_s, unlock_skill)
+
+
+def parse_host_tools(value: object, conversation_id: str) -> tuple[HostToolSpecV1, ...]:
+    """The usable entries of a request's ``host_tools`` block, in order.
+
+    Absent, null or empty means no host tools and logs nothing: the controller
+    always sends the key, null when the host sent no block. A block that is not
+    a list, a malformed entry, and a second entry with a name already taken are
+    dropped, each with one warning that names the reason, never a value; the turn
+    goes on with the rest. Names that clash with the turn's own tools are dropped
+    later, where the turn's tool set is known (``session.py``).
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        logger.warning(
+            "cloud turn ignoring a host_tools block that is not a list",
+            extra={
+                "event": "host_tools_ignored",
+                "reason": "host_tools_not_a_list",
+                "conversation_id": conversation_id,
+            },
+        )
+        return ()
+    specs: list[HostToolSpecV1] = []
+    seen: set[str] = set()
+    for entry in value:
+        spec = _host_tool_spec(entry)
+        if isinstance(spec, HostToolSpecV1) and spec.name in seen:
+            spec = "duplicate_name"
+        if isinstance(spec, str):
+            logger.warning(
+                "cloud turn dropping a host tool",
+                extra={"event": "host_tool_dropped", "reason": spec, "conversation_id": conversation_id},
+            )
+            continue
+        seen.add(spec.name)
+        specs.append(spec)
+    return tuple(specs)
+
+
 @dataclass
 class TurnRequestV1:
     """One turn to run in the pod. Sent as a single JSON line on stdin."""
@@ -588,6 +957,11 @@ class TurnRequestV1:
     #: Optional custom API connections of the member, by auth id: ``{"protocol_version": 1,
     #: "connections": [...]}``. No value. An unusable block reads as absent.
     custom_api: CustomApiBlockV1 | None = None
+    #: Optional custom MCP connections of the member: ``{"protocol_version": 1,
+    #: "connections": [{connection_id, name, label, credential_version, tools}]}``,
+    #: each tool auth's stored definition as a string. No token or server address.
+    #: Any unusable part drops the whole block, which then reads as absent.
+    custom_mcp: CustomMcpBlockV1 | None = None
     #: Optional ISO 8601 creation time of the conversation, as cowork-server
     #: resolved it. The pod is new every turn and cannot derive this: history
     #: rows carry no timestamps. Without it the session dates the conversation
@@ -653,6 +1027,10 @@ class TurnRequestV1:
     #: present replaces the pod's own default for this turn; an absent one (or
     #: an older controller that sends no block) leaves the default.
     limits: dict[str, int] = field(default_factory=dict)
+    #: Tools the host runs for this turn, from the request's ``host_tools``
+    #: block. Only a turn whose stdin is open offers them, one proxy tool each.
+    #: Empty means none.
+    host_tools: tuple[HostToolSpecV1, ...] = ()
 
     @staticmethod
     def from_json(raw: str) -> "TurnRequestV1":
@@ -681,6 +1059,7 @@ class TurnRequestV1:
             oauth=d.get("oauth") if isinstance(d.get("oauth"), dict) else None,
             datasource=_parse_datasource_block(d.get("datasource")),
             custom_api=_parse_custom_api_block(d.get("custom_api"), str(d["conversation_id"])),
+            custom_mcp=_parse_custom_mcp_block(d.get("custom_mcp"), str(d["conversation_id"])),
             # The controller always sends the key and sends None when
             # cowork-server could not resolve it, so the guard does real work.
             started_at=(
@@ -700,4 +1079,5 @@ class TurnRequestV1:
             reasoning_effort=reasoning_effort.strip() or None,
             browser=BrowserConfig.from_dict(d.get("browser")),
             limits=_parse_limits(d.get("limits"), str(d["conversation_id"])),
+            host_tools=parse_host_tools(d.get("host_tools"), str(d["conversation_id"])),
         )

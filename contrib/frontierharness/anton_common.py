@@ -1,4 +1,4 @@
-"""Anton adapter logic shared by the Harbor and Pier agent classes; run-task.sh sets its env."""
+"""Anton adapter logic shared by the Harbor and Pier agent classes."""
 
 from __future__ import annotations
 
@@ -6,29 +6,51 @@ import json
 import os
 import shlex
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
-# The benchmark fixes the model; the MindsHub alias serves Fireworks Kimi K3.
-BENCHMARK_MODEL = "kimi-k3"
+# Used when Harbor's -m names no model; the MindsHub alias serves Fireworks Kimi K3.
+DEFAULT_MODEL = "kimi-k3"
+# FrontierHarness v1.1 caps every harness's replies at 131,072 tokens.
+DEFAULT_MAX_TOKENS = "131072"
+# The v1.1 model proxy runs every harness at max reasoning effort.
+DEFAULT_REASONING_EFFORT = "max"
 
 EVENTS_FILE = "anton-events.jsonl"
 STDERR_FILE = "anton-stderr.log"
 USAGE_PREFIX = "llm_usage "
 
 
-def _required_env(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        raise RuntimeError(f"{name} is not set; run-task.sh sets it")
-    return value
+def _first(get_env: Callable[[str], str | None], *names: str) -> str:
+    for name in names:
+        value = (get_env(name) or "").strip()
+        if value:
+            return value
+    return ""
 
 
-def anton_ref() -> str:
-    return _required_env("ANTON_FH_REF")
+def anton_ref(get_env: Callable[[str], str | None] = os.environ.get) -> str:
+    ref = _first(get_env, "ANTON_FH_REF")
+    if not ref:
+        raise RuntimeError("ANTON_FH_REF is not set; pin the anton commit to install")
+    return ref
 
 
-def base_url() -> str:
-    return _required_env("ANTON_FH_BASE_URL")
+def base_url(get_env: Callable[[str], str | None] = os.environ.get) -> str:
+    # The v1.1 suite gives every agent OPENAI_BASE_URL and OPENAI_API_KEY for its model proxy.
+    url = _first(get_env, "ANTON_FH_BASE_URL", "OPENAI_BASE_URL")
+    if not url:
+        raise RuntimeError("set ANTON_FH_BASE_URL or OPENAI_BASE_URL")
+    return url
+
+
+def model_id(get_env: Callable[[str], str | None], model_name: str | None) -> str:
+    # Harbor's -m is provider/model; the endpoint is asked for the model part.
+    return (
+        _first(get_env, "ANTON_FH_MODEL")
+        or (model_name or "").split("/", 1)[-1]
+        or DEFAULT_MODEL
+    )
 
 
 def install_script(ref: str) -> str:
@@ -44,18 +66,24 @@ def install_script(ref: str) -> str:
     )
 
 
-def anton_env(api_key: str | None) -> dict[str, str]:
+def anton_env(get_env: Callable[[str], str | None], model_name: str | None) -> dict[str, str]:
+    api_key = _first(get_env, "ANTON_FH_API_KEY", "OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("ANTON_FH_API_KEY is not set; run-task.sh sets it")
-    # Fireworks directly names it accounts/fireworks/models/kimi-k3.
-    model = os.environ.get("ANTON_FH_MODEL", "").strip() or BENCHMARK_MODEL
+        raise RuntimeError("set ANTON_FH_API_KEY or OPENAI_API_KEY")
+    model = model_id(get_env, model_name)
+    effort = _first(get_env, "ANTON_FH_REASONING_EFFORT") or DEFAULT_REASONING_EFFORT
     return {
         "ANTON_PLANNING_PROVIDER": "openai-compatible",
         "ANTON_CODING_PROVIDER": "openai-compatible",
         "ANTON_PLANNING_MODEL": model,
         "ANTON_CODING_MODEL": model,
-        "ANTON_OPENAI_BASE_URL": base_url(),
+        "ANTON_OPENAI_BASE_URL": base_url(get_env),
         "ANTON_OPENAI_API_KEY": api_key,
+        "ANTON_MAX_TOKENS": _first(get_env, "ANTON_FH_MAX_TOKENS") or DEFAULT_MAX_TOKENS,
+        "ANTON_PLANNING_REASONING_EFFORT": effort,
+        "ANTON_CODING_REASONING_EFFORT": effort,
+        # Kimi K3's 1M window would otherwise let a long task resend 700k tokens a call.
+        "ANTON_CONTEXT_COMPACTION_MAX_TOKENS": "80000",
         "ANTON_USAGE_LOG": "1",
         # Artifacts would otherwise land under the workspace and in the graded diff.
         "ANTON_CLOUD_ARTIFACTS_ROOT": "/tmp/anton-artifacts",
@@ -63,6 +91,7 @@ def anton_env(api_key: str | None) -> dict[str, str]:
         "ANTON_VERIFIER_JEV": "off",
         "ANTON_DECISIONS_MODEL": "off",
         "ANTON_BROWSER_JEV": "off",
+        "ANTON_CLASSIFY_JEV": "off",
         "ANTON_ANALYTICS_ENABLED": "false",
         "ANTON_POSTHOG_KEY": "",
         "ANTON_DISABLE_AUTOUPDATES": "true",
@@ -76,6 +105,7 @@ def run_script(instruction: str, logs_dir: str) -> str:
         "input": instruction,
         # On api.mindshub.ai anton would otherwise ask Jev, a non-benchmark model.
         "jev_decisions": False,
+        "jev_classify": False,
     })
     events = f"{logs_dir}/{EVENTS_FILE}"
     stderr = f"{logs_dir}/{STDERR_FILE}"
@@ -147,9 +177,16 @@ def usage_summary(logs_dir: Path) -> dict | None:
         "cache_write_tokens": cache_write,
         "served_models": sorted(set(served)),
         # A call with no served model is counted too: the gateway may have fallen back.
-        "non_k3_calls": sum(BENCHMARK_MODEL not in model for model in served),
+        "other_model_calls": sum(not _served_as_requested(r) for r in records),
         "terminal": terminal_kind(logs_dir),
     }
+
+
+def _served_as_requested(record: dict) -> bool:
+    def name(key: str) -> str:
+        return str(record.get(key) or "").lower().rsplit("/", 1)[-1]
+
+    return bool(name("model")) and name("model") == name("served_model")
 
 
 def fill_context(context, logs_dir: Path) -> None:

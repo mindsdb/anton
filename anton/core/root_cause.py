@@ -166,6 +166,10 @@ _SENTINEL_REASONS = {
     # A cell held for the user's approval and not approved. The user's call,
     # never an environment wall; the model is told to report it, not retry.
     "write_not_approved": (TIER_SELF, "invalid_argument"),
+    # A page-builder step that would have needed the user's approval, refused
+    # with no card because the page builder only reads. The builder's own
+    # choice of step, never an environment wall; it is told not to retry.
+    "write_refused_read_only": (TIER_SELF, "invalid_argument"),
     # `read_image`, ENG-2248: both are the agent's own file choice, and both
     # messages tell it what to do instead (use a real image / resize).
     "not_an_image": (TIER_SELF, "invalid_argument"),
@@ -276,6 +280,20 @@ _SENTINEL_REASONS = {
     # wall, with nothing here to tell them apart — stays out of every trip
     # rung, same reasoning as `read_failed`/`bmp_convert_failed` above.
     "mcp_tool_error": (TIER_UNCLASSIFIED, "unclassified"),
+    # A cloud custom MCP tool the member switched off, or a connection the
+    # gateway does not know for this turn: only the member can change either.
+    "custom_mcp_tool_switched_off": (TIER_WALL, "service_unavailable"),
+    "custom_mcp_unknown_connection": (TIER_WALL, "service_unavailable"),
+    # Arguments that are not a JSON object or are too large, or an answer too
+    # large to show: the agent asks differently.
+    "custom_mcp_invalid_request": (TIER_SELF, "invalid_argument"),
+    "custom_mcp_too_large": (TIER_SELF, "invalid_argument"),
+    # The gateway's answer did not match the call contract: nothing says which side.
+    "custom_mcp_invalid_answer": (TIER_UNCLASSIFIED, "unclassified"),
+    # The gateway is switched off, or refused this turn's key: no call can
+    # work again in this turn, and only the operator or a new turn changes that.
+    "custom_mcp_gateway_disabled": (TIER_WALL, "service_unavailable"),
+    "custom_mcp_turn_key_refused": (TIER_WALL, "auth_missing"),
     # The browser tool. A malformed step, or an element number from
     # a page that has since changed: the agent re-reads the page and fixes it.
     "browser_bad_input": (TIER_SELF, "invalid_argument"),

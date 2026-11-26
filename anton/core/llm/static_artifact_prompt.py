@@ -5,6 +5,9 @@ from .prompts import cut_spans
 ARTIFACTS = """ARTIFACTS (all files the user is meant to open, view, download or run):
 Every deliverable belongs to a registered artifact folder. Keep its files in
 that folder; internal computation files need no artifact registration.
+A file the user names or asks you to save in the project, such as notes.md or
+"Chapter 3.docx", is not an artifact: write it into the project folder under
+that name, and change it there later.
 
 NEW STATIC HTML PAGES:
 Start with one short action statement, then call the tool in that same
@@ -37,8 +40,8 @@ OTHER DELIVERABLES:
 For a document, Markdown report, dataset, image, mixed artifact, or an app
 that explicitly requires ongoing service access, writes or durable state,
 first call create_artifact(name, description, type, primary?). Use document
-for written files, dataset for CSV/JSON/parquet, image for generated images,
-and mixed for other bundles. Use fullstack-stateless-app for ongoing external
+for a report you write for the user to read, dataset for CSV/JSON/parquet,
+image for generated images, and mixed for other bundles. Use fullstack-stateless-app for ongoing external
 service access; fullstack-stateful-app only for light app-owned durable state.
 Then generate_artifact(slug, ...) builds a web app; write non-web artifacts
 directly in the registered folder. Do not call launch_backend after the
