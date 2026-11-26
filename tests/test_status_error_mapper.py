@@ -1828,15 +1828,19 @@ def test_the_anthropic_twin_raises_the_same_restriction(carrier):
     _assert_restricted(exc=err.value)
 
 
+@pytest.mark.parametrize("door", ["openai", "anthropic"])
 @pytest.mark.parametrize("carrier", ["header", "body"])
-def test_a_zdr_refusal_raises_its_own_type(carrier):
-    """Zero data retention's 403 names the model and ZDR, never an admin."""
+def test_a_zdr_refusal_raises_its_own_type(carrier, door):
+    """Zero data retention's 403 names the model and ZDR, never an admin, on both mappers."""
     denial = _restricted_403(carrier=carrier)
     error = {**denial.error, "deny_detail": "zdr_restricted"} if "deny_detail" in denial.error else denial.error
     headers = {**denial.headers, "X-MindsHub-Deny-Detail": "zdr_restricted"} if carrier == "header" else denial.headers
-    exc = _sdk_error(403, json_body={"error": error}, headers=headers)
     with pytest.raises(ZdrRestrictedError) as err:
-        _raise_for_status_error(exc, "opus")
+        if door == "openai":
+            _raise_for_status_error(_sdk_error(403, json_body={"error": error}, headers=headers), "opus")
+        else:
+            exc = _anthropic_sdk_error(403, json_body={"type": "error", "error": error}, headers=headers)
+            _raise_anthropic(exc, model="opus")
     assert isinstance(err.value, ModelUnavailableError)
     assert err.value.code == "zdr_restricted"
     assert err.value.model == "opus"
