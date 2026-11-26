@@ -174,8 +174,8 @@ def test_a_file_at_the_anton_name_still_fails_initialize(tmp_path):
 
 @_posix_only
 def test_posix_never_runs_icacls(tmp_path, monkeypatch):
-    calls: list[list[str]] = []
-    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: calls.append(argv))
+    calls: list[Path] = []
+    monkeypatch.setattr(f"{_HELPER}._apply_owner_only_acl", lambda *, path: calls.append(path))
 
     Workspace(tmp_path).initialize(private=True)
     Workspace(tmp_path).set_secret("ANTON_TEST_PRIVATE_KEY", "value")
@@ -201,7 +201,10 @@ def icacls_calls(monkeypatch):
             raise result["returncode"]
         return subprocess.CompletedProcess(argv, result["returncode"])
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    # Libraries imported by the CLI use the real subprocess module as well.
+    acl_subprocess = SimpleNamespace(**vars(subprocess))
+    acl_subprocess.run = fake_run
+    monkeypatch.setattr(f"{_HELPER}.subprocess", acl_subprocess)
     return calls, result
 
 

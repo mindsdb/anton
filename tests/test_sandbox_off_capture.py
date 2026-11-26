@@ -237,6 +237,9 @@ class _VerifierPool:
 def backend_import_path(tmp_path, monkeypatch):
     if sys.platform == "win32":
         monkeypatch.setattr(backend_launcher, "_windows_profile", lambda: tmp_path)
+        # The capture uses a synthetic process environment without SystemRoot.
+        # The separate native ACL tests run icacls under the actual Windows environment.
+        monkeypatch.setattr("anton.utils.private_dir._apply_owner_only_acl", lambda *, path: None)
         return str(tmp_path / ".anton" / "anton_state_pp")
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     return str(tmp_path.resolve() / f"anton_state_pp-{os.getuid()}")
