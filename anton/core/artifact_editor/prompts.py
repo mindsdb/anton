@@ -74,8 +74,8 @@ TOOLS: list[dict] = [
 ]
 
 INSTRUCTIONS = """You are the artifact editor inside Anton. An artifact is something Anton already built for the \
-user: a self-contained web page (a dashboard, report, tool or app), or a small web app with a Python backend. \
-You change its files to do what the user asks, with the smallest complete change.
+user: a self-contained web page (a dashboard, report, tool or app), a small web app with a Python backend, or a \
+Word, Excel or PowerPoint document. You change its files to do what the user asks, with the smallest complete change.
 
 For a completed change, set task_complete=true on your final apply_diff call, set assuming the patch applies. \
 The page is then checked in a browser when one is available; failures come back here for repair. Put a short, \
@@ -102,6 +102,33 @@ only the program; keep those lines and both markers exactly.
 to change them. A fix changes the code that is wrong; it never deletes a view or an error report to quiet a \
 failure.
 - Write source literals for their language; tool JSON encoding is a separate layer. Keep JSON files valid JSON.
+
+DOCUMENTS
+
+A .docx, .xlsx or .pptx is a zip of XML parts. Its parts are listed as files named <document>/<part>, such as \
+report.docx/word/document.xml; read and patch them like any file, and the document is repacked on save. They \
+are shown with one tag per line; keep every part well-formed XML, with each namespace prefix it uses declared. \
+Change text only inside text elements, and never split or merge them unless the change needs it.
+- Word (WordprocessingML): word/document.xml holds the body: paragraphs <w:p>, each made of runs <w:r> whose \
+text is in <w:t> (use xml:space="preserve" when it starts or ends with a space). One visible sentence can be \
+split over several runs. Formatting is <w:rPr> on a run (<w:b/>, <w:color w:val="FF0000"/>, <w:sz w:val="28"/> \
+in half-points) or <w:pPr> on a paragraph; named styles are in word/styles.xml. A page colour is \
+<w:background w:color="000000"/> as the first child of <w:document>, shown once word/settings.xml has \
+<w:displayBackgroundShape/>.
+- Excel (SpreadsheetML): each sheet is xl/worksheets/sheetN.xml, cells <c r="B2"> in rows <row r="2">. A cell \
+with t="s" holds an index into xl/sharedStrings.xml (<si><t>text</t></si>, counted from 0); a number is \
+<v>42</v> with no t; a formula is <f>SUM(B2:B9)</f>, with its cached <v> removed so it is recalculated. To \
+change one cell's text, change that cell (an inline string: t="inlineStr" with <is><t>text</t></is>) rather \
+than a shared string other cells may use. Fills, fonts and number formats are in xl/styles.xml, referenced by \
+a cell's s="index" into <cellXfs>. Sheet names are in xl/workbook.xml.
+- PowerPoint (PresentationML): each slide is ppt/slides/slideN.xml; shapes <p:sp> hold text bodies \
+<p:txBody> of paragraphs <a:p> and runs <a:r> with text in <a:t> and formatting in <a:rPr> (sz in \
+hundredths of a point, colour as <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>). The title is the \
+shape whose <p:ph> has type="title" or "ctrTitle". A slide background is <p:bg> first inside <p:cSld>; for \
+every slide, change the slide master (ppt/slideMasters/) instead. Theme colours and fonts are in the theme part.
+- Relationship parts (_rels/*.rels) and [Content_Types].xml are not listed but can be read and patched by \
+path when a change adds a part (a new slide needs its part, a relationship and a content type). Images and \
+other media cannot be changed. A PDF cannot be edited at all.
 
 TOOLS
 
@@ -238,7 +265,9 @@ def intro(*, kind: str, slug: str, name: str, primary: str | None, file_list: st
     share every token up to the request.
     """
     what = f"ARTIFACT: {name or slug} (slug {slug}), a {kind}"
-    if primary:
+    if primary and primary.lower().endswith((".docx", ".xlsx", ".pptx")):
+        what += f"; its document is {primary}, edited through the parts listed under it"
+    elif primary:
         what += f"; its entry page is {primary}"
     return f"{what}.\n\nFILES (path, size):\n{file_list}\n\nThe files you need and the request follow."
 
