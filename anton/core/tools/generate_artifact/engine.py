@@ -36,7 +36,10 @@ from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 from . import sub_tools
 from .debug_trace import NullTrace
 from .spend import WIND_DOWN_ROUNDS
-from .state import GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY, BrowserCheckFailed, SkippedStep
+from .state import (
+    GEN_WRITE_MAX_TOKENS, SPEC_MAX_TOKENS, SPEC_MAX_TOKENS_RETRY, BrowserCheckFailed, SkippedStep,
+    scratchpad_switches,
+)
 from .streaming import _call_with_stream_retry, _drain_stream
 from .verifiers import normalise_api_path
 from .prompts import (
@@ -983,7 +986,7 @@ async def _run_loop(
     drop, so this happens at most once per loop; a second refusal raises.
     """
     trace = trace or NullTrace()
-    tools = sub_tools.tool_schemas()
+    tools = sub_tools.tool_schemas(**scratchpad_switches(session))
     default_cap = _output_token_cap(session)
     messages: list[dict] = [{"role": "user", "content": kickoff}]
 

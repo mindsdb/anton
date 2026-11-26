@@ -283,6 +283,16 @@ def language_name(user_language: str | None) -> str:
     return " ".join((user_language or "").split()) or DEFAULT_USER_LANGUAGE
 
 
+def scratchpad_switches(session: "ChatSession | Any") -> dict[str, bool]:
+    """The session's scratchpad switches, as `scratchpad_tool` kwargs. A session
+    object without an attribute (a test double) keeps that helper."""
+    return {
+        "internet_research": getattr(session, "_internet_research_enabled", True) is not False,
+        "classify": getattr(session, "_classify_enabled", True) is not False,
+        "web_search": getattr(session, "_scratchpad_web_search_enabled", True) is not False,
+    }
+
+
 def settled_artifact_type(state) -> str:
     """The type gathering settled on, or the registered one before it ran."""
     return state.final_artifact_type or state.artifact_type
@@ -550,17 +560,17 @@ class GenState:
         (`ChatSessionConfig.internet_research_enabled`): no web tools and no
         public-data-sources catalog in this run. A session object without the
         attribute (a test double) keeps them."""
-        return getattr(self.session, "_internet_research_enabled", True) is not False
+        return scratchpad_switches(self.session)["internet_research"]
 
     @property
     def classify(self) -> bool:
         """False when the session's scratchpad has no classify() to offer."""
-        return getattr(self.session, "_classify_enabled", True) is not False
+        return scratchpad_switches(self.session)["classify"]
 
     @property
     def web_search(self) -> bool:
         """False when the session's scratchpad has no web_search() to offer."""
-        return getattr(self.session, "_scratchpad_web_search_enabled", True) is not False
+        return scratchpad_switches(self.session)["web_search"]
 
     @property
     def buildable_types(self) -> tuple[str, ...]:

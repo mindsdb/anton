@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from anton.core.tools.generate_artifact import sub_tools
 from anton.core.tools.generate_artifact.sub_tools import WRITE_FILE_SCHEMA, write_file
@@ -225,3 +228,18 @@ def test_the_write_loop_offers_read_text_file_without_line_numbers():
     main = READ_TEXT_FILE_TOOL.input_schema["properties"]
     assert "line_numbers" in main
     assert main["path"]["description"] == "Absolute, or relative to the project root."
+
+
+@pytest.mark.parametrize("off", ["_internet_research_enabled", "_classify_enabled", "_scratchpad_web_search_enabled"])
+def test_the_write_loop_scratchpad_follows_the_session_switches(off):
+    """Each switch the session turns off trims the write loop's scratchpad as it does the main agent's."""
+    from anton.core.tools.generate_artifact.state import scratchpad_switches
+    from anton.core.tools.tool_defs import scratchpad_tool
+
+    switches = scratchpad_switches(SimpleNamespace(**{off: False}))
+    assert list(switches.values()).count(False) == 1
+    scratchpad = sub_tools.tool_schemas(**switches)[-1]
+    assert scratchpad["description"] == scratchpad_tool(**switches).description
+    assert scratchpad["description"] != sub_tools.tool_schemas()[-1]["description"]
+    if off != "_classify_enabled":
+        assert "web_search(query)" not in scratchpad["description"]
