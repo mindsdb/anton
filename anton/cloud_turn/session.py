@@ -981,7 +981,8 @@ def build_cloud_chat_session(
 
     History is DB-authoritative (from the request). The workspace path is the
     trusted pod mount, NOT ``request.workspace_path``. *elicitor* is given only
-    for an interactive turn; it is what makes ``ask_user`` available.
+    for an interactive turn; one that lists "choice" is what makes
+    ``ask_user`` available.
     *preview_checker* (``cloud_turn/preview_check.py``) is given only when the
     request set ``preview_checks``: it checks an edited artifact in the user's
     open preview. *host_tools* (``cloud_turn/host_tools.py``) is given only
@@ -1143,15 +1144,16 @@ def build_cloud_chat_session(
                 request.started_at, request.conversation_id,
             )
 
-    # `ask_user` only with an elicitor: core registers the tool only then, and
-    # an allowlist name that matches no registered tool is fatal.
+    # `ask_user` only with an elicitor that lists "choice": core registers the
+    # tool only then, and an allowlist name that matches no registered tool is
+    # fatal.
     # `browser` only with a router to drive, for the same reason: core
     # registers the tool only when the request carried one.
     tool_allowlist = (
         CLOUD_TOOL_ALLOWLIST
         | {td.name for td in mcp_tool_defs}
         | {td.name for td in custom_mcp_tool_defs}
-        | ({"ask_user"} if elicitor is not None else set())
+        | ({"ask_user"} if elicitor is not None and "choice" in elicitor.supported_kinds else set())
         | ({"browser"} if request.browser is not None else set())
     )
     # Only when cowork-server asked for it: the template a member saves can be

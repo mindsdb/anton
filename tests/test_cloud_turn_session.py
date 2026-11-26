@@ -40,6 +40,7 @@ from anton.cloud_turn.session import (
     resolve_trusted_workspace_path,
 )
 from anton.core.backends.local import local_scratchpad_runtime_factory
+from anton.core.interaction.elicit import APPROVAL_KIND
 
 
 class _FakeSession:
@@ -73,13 +74,30 @@ def test_no_elicitor_means_no_ask_user(tmp_path, monkeypatch):
     assert "ask_user" not in cfg.tool_allowlist
 
 
+class _Kinds:
+    """An elicitor stand-in: the allowlist reads only `supported_kinds`."""
+
+    def __init__(self, *kinds: str) -> None:
+        self.supported_kinds = kinds
+
+
 def test_an_elicitor_enables_ask_user(tmp_path, monkeypatch):
-    elicitor = object()
+    elicitor = _Kinds("choice")
     _, cfg = _build(tmp_path, monkeypatch, elicitor=elicitor)
     assert cfg.elicitor is elicitor
     assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {"ask_user"}
     # A console would let anton fall back to its terminal elicitor.
     assert cfg.console is None
+
+
+def test_an_approvals_only_elicitor_leaves_ask_user_off_the_allowlist(tmp_path, monkeypatch):
+    """Core registers `ask_user` only for an elicitor that lists "choice",
+    and an allowlist name that matches no registered tool is fatal."""
+    elicitor = _Kinds(APPROVAL_KIND)
+    _, cfg = _build(tmp_path, monkeypatch, elicitor=elicitor)
+    assert cfg.elicitor is elicitor
+    assert "ask_user" not in cfg.tool_allowlist
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST
 
 
 # ── config-level safety ──────────────────────────────────────────────────────

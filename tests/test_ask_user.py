@@ -10,10 +10,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from anton.core.interaction.elicit import (
+    APPROVAL_KIND,
     MAX_QUESTIONS_PER_TURN,
+    ApprovalRequest,
     AskAnswer,
     AskOption,
     AskRequest,
+    asks_approvals,
     elicit,
     validate_request,
 )
@@ -263,6 +266,105 @@ async def test_unavailable_when_kind_unsupported(make_session):
     session = _wired(make_session, _PathOnly())
     assert (await elicit(session, "q1", _choice())).status == "unavailable"
     assert _drain(session.emitter) == []
+
+
+# ─── approval cards and the approvals-only elicitor ─────────────────────
+
+
+class _ChoiceOnly(_RecordingElicitor):
+    supported_kinds = ("choice",)
+
+
+class _ApprovalsOnly(_RecordingElicitor):
+    """What a host lists for a turn nobody is known to be watching."""
+
+    supported_kinds = (APPROVAL_KIND,)
+
+
+_APPROVE_CANCEL = (AskOption(value="approve", label="Approve"), AskOption(value="cancel", label="Cancel"))
+
+
+def _approval() -> ApprovalRequest:
+    return ApprovalRequest(prompt="Approve this step?", options=_APPROVE_CANCEL)
+
+
+def test_the_approval_kind_is_the_name_cowork_server_reads():
+    """cowork-server reads this constant by name in
+    `cowork/harnesses/anton_harness/harness.py`; a rename here turns the
+    capability off there."""
+    assert APPROVAL_KIND == "approval"
+
+
+async def test_an_approvals_only_elicitor_answers_an_approval_card(make_session):
+    """An elicitor that lists only APPROVAL_KIND gets the approval card, and
+    the host sees it as the "choice" card it renders today."""
+    elicitor = _ApprovalsOnly(answer=AskAnswer(status="answered", values=("approve",)))
+    session = _wired(make_session, elicitor)
+
+    answer = await elicit(session, "write:1", _approval(), counted=False)
+
+    assert (answer.status, answer.values) == ("answered", ("approve",))
+    assert elicitor.calls == ["begin:write:1", "ask:write:1", "end:write:1"]
+    cards = [event for event in _drain(session.emitter) if isinstance(event, StreamAskUser)]
+    assert [(card.id, card.request.kind) for card in cards] == [("write:1", "choice")]
+
+
+async def test_an_approvals_only_elicitor_refuses_every_other_question_before_begin(make_session):
+    """A plain question shaped exactly like an approval card is still a
+    question: only an `ApprovalRequest` reaches this elicitor. A question
+    whose kind is APPROVAL_KIND is no approval card either: that names a
+    capability, and such a question would publish no card."""
+    elicitor = _ApprovalsOnly()
+    session = _wired(make_session, elicitor)
+    lookalike = AskRequest(prompt="Approve this step?", options=_APPROVE_CANCEL, allow_custom=False)
+    capability_as_kind = AskRequest(prompt="Approve this step?", kind=APPROVAL_KIND, options=_APPROVE_CANCEL)
+
+    for request in (
+        _choice(), lookalike, capability_as_kind, AskRequest(prompt="Pick a folder", kind="path"),
+    ):
+        assert (await elicit(session, "q1", request)).status == "unavailable", request
+    assert elicitor.calls == [], "no channel is opened for a question it can't take"
+    assert _drain(session.emitter) == [], "no card is published"
+    assert session.question_count == 0, "a refused question spends none of the budget"
+
+
+async def test_an_approval_card_to_an_approvals_only_elicitor_still_needs_an_emitter(make_session):
+    elicitor = _ApprovalsOnly()
+    session = make_session()
+    session.elicitor = elicitor
+    session.emitter = None
+    assert (await elicit(session, "write:1", _approval(), counted=False)).status == "unavailable"
+    assert elicitor.calls == []
+
+
+async def test_a_choice_elicitor_answers_approval_cards_and_questions_alike(make_session):
+    elicitor = _ChoiceOnly()
+    session = _wired(make_session, elicitor)
+    assert (await elicit(session, "write:1", _approval(), counted=False)).status == "answered"
+    assert (await elicit(session, "q1", _choice())).status == "answered"
+    assert elicitor.calls == ["begin:write:1", "ask:write:1", "end:write:1", "begin:q1", "ask:q1", "end:q1"]
+
+
+async def test_no_elicitor_refuses_approval_cards_and_questions_alike(make_session):
+    session = _wired(make_session, None)
+    assert (await elicit(session, "write:1", _approval(), counted=False)).status == "unavailable"
+    assert (await elicit(session, "q1", _choice())).status == "unavailable"
+    assert _drain(session.emitter) == []
+
+
+@pytest.mark.parametrize("kinds, expected", [
+    (None, False),
+    (("path",), False),
+    (("choice",), True),
+    ((APPROVAL_KIND,), True),
+    (("choice", "path"), True),
+])
+def test_asks_approvals_reads_choice_or_the_approval_kind(kinds, expected):
+    elicitor = None
+    if kinds is not None:
+        elicitor = _RecordingElicitor()
+        elicitor.supported_kinds = kinds
+    assert asks_approvals(elicitor=elicitor) is expected
 
 
 async def test_unavailable_when_request_is_invalid(make_session):
@@ -592,6 +694,12 @@ def test_ask_user_absent_for_a_path_only_elicitor(make_session):
 
     session = make_session(elicitor=_PathOnly())
     names = _tool_names(session)
+    assert "ask_user" not in names
+    assert "select_path" in names
+
+
+def test_ask_user_absent_for_an_approvals_only_elicitor(make_session):
+    names = _tool_names(make_session(elicitor=_ApprovalsOnly()))
     assert "ask_user" not in names
     assert "select_path" in names
 
