@@ -116,26 +116,26 @@ def test_double_count_check_does_not_false_positive_on_unrelated_measure_value()
     # the double-counted sum of a different subtotaled measure (2 * 117 = 234).
     data = {
         "activity": [
-            {"week": "w1", "dept": "A", "cancellations": 70},
-            {"week": "w1", "dept": "B", "cancellations": 47},
-            {"week": "w1", "dept": "All", "cancellations": 117},
-            {"week": "w2", "dept": "A", "cancellations": 30},
-            {"week": "w2", "dept": "B", "cancellations": 20},
-            {"week": "w2", "dept": "All", "cancellations": 50},
-            {"week": "w3", "dept": "A", "cancellations": 15},
-            {"week": "w3", "dept": "B", "cancellations": 10},
-            {"week": "w3", "dept": "All", "cancellations": 25},
+            {"week": "w1", "group": "A", "events": 70},
+            {"week": "w1", "group": "B", "events": 47},
+            {"week": "w1", "group": "All", "events": 117},
+            {"week": "w2", "group": "A", "events": 30},
+            {"week": "w2", "group": "B", "events": 20},
+            {"week": "w2", "group": "All", "events": 50},
+            {"week": "w3", "group": "A", "events": 15},
+            {"week": "w3", "group": "B", "events": 10},
+            {"week": "w3", "group": "All", "events": 25},
         ],
-        "sites": [{"site": "Main", "beds": 234}],
+        "locations": [{"name": "North", "capacity": 234}],
     }
-    program = """await CoworkPage({title:'Capacity',sections:[{type:'table',title:'Sites',
-      columns:[{key:'site',label:'Site'},{key:'beds',label:'Staffed beds'}],
-      rows:window.ARTIFACT_DATA.key.sites}]});"""
+    program = """await CoworkPage({title:'Capacity',sections:[{type:'table',title:'Locations',
+      columns:[{key:'name',label:'Location'},{key:'capacity',label:'Capacity'}],
+      rows:window.ARTIFACT_DATA.key.locations}]});"""
     errors, _ = render(program, data)
     assert errors == []
-    # Unrelated double-counted values (e.g. w1+w2+w3 total = 384) remain caught.
+    # The exact same numeric value (234) in a metric or events summary remains caught.
     bad_program = """const rows=window.ARTIFACT_DATA.key.activity;
-    await CoworkPage({title:'Capacity',metrics:[{label:'Total cancellations',
-      value:rows.reduce((s,r)=>s+r.cancellations,0)}]});"""
+    await CoworkPage({title:'Activity',metrics:[{label:'Week 1 events',
+      value:rows.filter(r=>r.week==='w1').reduce((s,r)=>s+r.events,0)}]});"""
     errors, _ = render(bad_program, data)
-    assert len(errors) == 1 and "384" in errors[0] and "counts rows twice" in errors[0]
+    assert len(errors) == 1 and "234" in errors[0] and "counts rows twice" in errors[0]

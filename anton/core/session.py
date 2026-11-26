@@ -6567,7 +6567,7 @@ class ChatSession:
         _transient_slept = 0.0
         _transient_total_slept = 0.0
         _transient_attempt = 0
-        _max_turn_transient_slept = 180.0
+        _max_turn_transient_slept = max(180.0, self._transient_budget_s)
         # ENG-1537: velocity rate-limits are budgeted separately from incidents
         # (see _rate_limit_budget_s) so neither starves the other in one turn.
         # Accounted as TIME SLEPT, not a wall-clock deadline: the cohort this

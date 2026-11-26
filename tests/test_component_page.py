@@ -185,85 +185,163 @@ async def test_fast_static_catches_inline_js_syntax_error_and_repairs(tmp_path, 
     assert result["status"] == "generated"
     assert len(seen) == 2
     assert "JavaScript syntax error" in seen[1][-1]["content"]
+    assert "SyntaxError:" in seen[1][-1]["content"]
+    assert "node:internal" not in seen[1][-1]["content"]
 
 
-def test_double_counts_excludes_raw_values_from_unrelated_columns():
-    from anton.core.tools.generate_artifact import observed_data
+def test_check_inline_js_syntax_edge_cases():
+    import shutil
+    from anton.core.tools.generate_artifact import verifiers
 
-    data = {
-        "key": {
-            "activity": [
-                {"week": "w1", "dept": "A", "cancellations": 70},
-                {"week": "w1", "dept": "B", "cancellations": 47},
-                {"week": "w1", "dept": "All", "cancellations": 117},
-                {"week": "w2", "dept": "A", "cancellations": 30},
-                {"week": "w2", "dept": "B", "cancellations": 20},
-                {"week": "w2", "dept": "All", "cancellations": 50},
-                {"week": "w3", "dept": "A", "cancellations": 15},
-                {"week": "w3", "dept": "B", "cancellations": 10},
-                {"week": "w3", "dept": "All", "cancellations": 25},
-            ],
-            "sites": [{"site": "Main", "beds": 234}],
-        }
-    }
-    doubled = observed_data.double_counts(data)
-    values = {round(item["value"]) for item in doubled}
-    # 234 matches a legitimate raw column value in `sites.beds` -> excluded
-    assert 234 not in values
-    # 384 (2 * (117+50+25)) is a genuine double-counted sum not present in other raw columns -> kept
-    assert 384 in values
+    if not shutil.which("node"):
+        pytest.skip("node not available")
+    # HTML comments, textarea, quoted '>' in attributes, and data-cowork-observed are handled cleanly.
+    safe_html = (
+        '<!doctype html><html><body>'
+        '<!-- <script>function broken( {</script> -->'
+        '<textarea><script>function also_broken( {</script></textarea>'
+        '<script data-note="a > b" type="text/javascript; charset=utf-8">const x = 1 + 2;</script>'
+        '<script type="application/json" data-cowork-observed>{"a":1}</script>'
+        '</body></html>'
+    )
+    assert verifiers.check_inline_js_syntax(safe_html) == []
+
+    # ES module syntax error preserves SyntaxError and strips Node internal frames.
+    bad_esm = '<!doctype html><html><body><script type="module">export const x = (1 + ;</script></body></html>'
+    esm_errs = verifiers.check_inline_js_syntax(bad_esm)
+    assert len(esm_errs) == 1
+    assert "SyntaxError:" in esm_errs[0]
+    assert "node:internal" not in esm_errs[0]
+
+    # Classic script with MIME charset parameter is checked and caught.
+    bad_classic = '<!doctype html><html><body><script type="text/javascript; charset=utf-8">function f(a {</script></body></html>'
+    classic_errs = verifiers.check_inline_js_syntax(bad_classic)
+    assert len(classic_errs) == 1
+    assert "SyntaxError:" in classic_errs[0]
+    assert "node:internal" not in classic_errs[0]
 
 
-def test_presentation_reconcile_js_honors_section_zero_reason_on_columns():
+def test_presentation_reconcile_js_zero_reason_and_per_cell_double_count_provenance():
+    import json as _json
     import shutil
     import subprocess
+    from anton.core.tools.generate_artifact import observed_data
 
     if not shutil.which("node"):
         pytest.skip("node not available")
     reconcile_js = (
         component_page.HERE / "presentation_reconcile.js"
     ).read_text(encoding="utf-8")
-    harness = r"""
+    data = {
+        "key": {
+            "activity": [
+                {"week": "w1", "group": "A", "events": 70},
+                {"week": "w1", "group": "B", "events": 47},
+                {"week": "w1", "group": "All", "events": 117},
+                {"week": "w2", "group": "A", "events": 30},
+                {"week": "w2", "group": "B", "events": 20},
+                {"week": "w2", "group": "All", "events": 50},
+                {"week": "w3", "group": "A", "events": 15},
+                {"week": "w3", "group": "B", "events": 10},
+                {"week": "w3", "group": "All", "events": 25},
+            ],
+            "locations": [{"name": "North", "capacity": 234}],
+        }
+    }
+    checks_json = _json.dumps({"doubleCounts": observed_data.double_counts(data)})
+    data_json = _json.dumps(data)
+    harness = f"""
 const errors = [];
-const origErr = console.error;
 console.error = (...args) => errors.push(args.join(' '));
 let drawn;
-global.window = {
-  ARTIFACT_DATA: { k: { rows: [{ a: 1 }] } },
+global.window = {{
+  ARTIFACT_DATA: {data_json},
   CoworkNumber: v => String(v),
   CoworkSelection: s => s,
-  CoworkPage: async cfg => { drawn = cfg; },
-};
-global.document = { getElementById: () => null };
-""" + reconcile_js + r"""
-(async () => {
-  await window.CoworkPage({
+  CoworkPage: async cfg => {{ drawn = cfg; }},
+}};
+global.document = {{
+  getElementById: id => id === 'cowork-figure-checks' ? {{ textContent: {_json.dumps(checks_json)} }} : null,
+}};
+{reconcile_js}
+(async () => {{
+  // 1. All-zero table honors section.zeroReason when EVERY numeric column is zero.
+  await window.CoworkPage({{
     title: 'T',
-    sections: [{
+    sections: [{{
       type: 'table', title: 'S', zeroReason: 'Baseline has zero delays',
-      columns: [{ key: 'n', label: 'Name' }, { key: 'd', label: 'Delay' }],
-      rows: [{ n: 'A', d: 0 }, { n: 'B', d: 0 }],
-    }],
-  });
-  if (errors.length !== 0) { console.log('UNEXPECTED_ERRORS:' + JSON.stringify(errors)); process.exit(1); }
-  if (!String(drawn.sections[0].caption || '').includes('Baseline has zero delays')) {
-    console.log('MISSING_CAPTION:' + JSON.stringify(drawn.sections[0])); process.exit(2);
-  }
-  // Without any zeroReason, the all-zero column MUST still be flagged.
-  await window.CoworkPage({
+      columns: [{{ key: 'n', label: 'Name' }}, {{ key: 'd', label: 'Delay' }}],
+      rows: [{{ n: 'A', d: 0 }}, {{ n: 'B', d: 0 }}],
+    }}],
+  }});
+  if (errors.length !== 0) {{ console.log('CASE1:' + JSON.stringify(errors)); process.exit(1); }}
+
+  // 2. Mixed table: section.zeroReason must NOT excuse an unannotated all-zero column.
+  await window.CoworkPage({{
     title: 'T',
-    sections: [{
-      type: 'table', title: 'S',
-      columns: [{ key: 'n', label: 'Name' }, { key: 'd', label: 'Delay' }],
-      rows: [{ n: 'A', d: 0 }, { n: 'B', d: 0 }],
-    }],
-  });
-  if (errors.length !== 1 || !errors[0].includes('shows 0 in every row of column "Delay"')) {
-    console.log('EXPECTED_FLAG:' + JSON.stringify(errors)); process.exit(3);
-  }
-  console.log('OK');
-})();
+    sections: [{{
+      type: 'table', title: 'S', zeroReason: 'Baseline row',
+      columns: [{{ key: 'n', label: 'Name' }}, {{ key: 'ok', label: 'Orders' }}, {{ key: 'broken', label: 'Revenue' }}],
+      rows: [{{ n: 'A', ok: 5, broken: 0 }}, {{ n: 'B', ok: 7, broken: 0 }}],
+    }}],
+  }});
+  if (errors.length !== 1 || !errors[0].includes('column "Revenue"')) {{ console.log('CASE2:' + JSON.stringify(errors)); process.exit(2); }}
+  errors.length = 0;
+
+  // 3. Whitespace-only zeroReason must NOT hide errors.
+  await window.CoworkPage({{
+    title: 'T',
+    metrics: [{{ label: 'Unmatched', value: 0, zeroReason: '   ' }}],
+  }});
+  if (errors.length !== 1) {{ console.log('CASE3:' + JSON.stringify(errors)); process.exit(3); }}
+  errors.length = 0;
+
+  // 4. Per-cell doubleCount provenance: unrelated raw column `capacity: 234` is NOT flagged.
+  await window.CoworkPage({{
+    title: 'T',
+    sections: [{{
+      type: 'table', title: 'Locations',
+      columns: [{{ key: 'name', label: 'Name' }}, {{ key: 'capacity', label: 'Capacity' }}],
+      rows: window.ARTIFACT_DATA.key.locations,
+    }}],
+  }});
+  if (errors.length !== 0) {{ console.log('CASE4:' + JSON.stringify(errors)); process.exit(4); }}
+
+  // 5. Same numeric value 234 shown in a metric or related column (`total_events`) IS still caught.
+  await window.CoworkPage({{
+    title: 'T',
+    metrics: [{{ label: 'Week 1 events', value: 234 }}],
+    sections: [{{
+      type: 'table', title: 'Summary',
+      columns: [{{ key: 'name', label: 'Name' }}, {{ key: 'total_events', label: 'Total events' }}],
+      rows: [{{ name: 'Week 1', total_events: 234 }}],
+    }}],
+  }});
+  if (errors.length !== 1 || !errors[0].includes('234') || !errors[0].includes('counts rows twice')) {{
+    console.log('CASE5:' + JSON.stringify(errors)); process.exit(5);
+  }}
+  console.log('ALL_OK');
+}})();
 """
     proc = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=5)
     assert proc.returncode == 0, f"stdout={proc.stdout} stderr={proc.stderr}"
-    assert "OK" in proc.stdout
+    assert "ALL_OK" in proc.stdout
+
+
+def test_rejects_chat_user_field_ignores_role_ordering_errors():
+    from types import SimpleNamespace
+    from anton.core.llm.openai import _rejects_chat_user_field
+
+    role_err = SimpleNamespace(body={"error": {"message": "Invalid role 'user' after assistant", "param": "messages"}})
+    consec_err = SimpleNamespace(body={"error": {"message": 'Consecutive "user" messages are not allowed'}})
+    real_param = SimpleNamespace(body={"error": {"message": "Invalid parameter", "param": "user"}})
+    real_unknown = SimpleNamespace(body={"error": {"message": "Unknown field 'user' in request"}})
+    real_422 = SimpleNamespace(body={"detail": [{"loc": ["body", "user"], "msg": "Extra inputs are not permitted"}]})
+    other_422 = SimpleNamespace(body={"detail": [{"loc": ["body", "messages", "user", "content"], "msg": "bad"}]})
+
+    assert _rejects_chat_user_field(role_err) is False
+    assert _rejects_chat_user_field(consec_err) is False
+    assert _rejects_chat_user_field(other_422) is False
+    assert _rejects_chat_user_field(real_param) is True
+    assert _rejects_chat_user_field(real_unknown) is True
+    assert _rejects_chat_user_field(real_422) is True

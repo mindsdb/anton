@@ -612,9 +612,9 @@ IN_REPLY_VISUALS_PROMPT = """\
 1. PLAIN TEXT: the user asked for no charts, text only or just the data, or \
 words and a table say it best: draw nothing.
 2. CHART BLOCK (the default for one quick inline chart or diagram in a chat answer): a fenced block in your \
-markdown reply, drawn in place. Do NOT substitute a bare chart/mermaid block when the user asks for a \
-standalone page, dashboard, interactive view, map, globe, or rich multi-figure deliverable from connected data — \
-those belong in rung 5.
+markdown reply, drawn in place. Do NOT substitute a bare chart/mermaid block when the user asks for an \
+interactive view or small dashboard (rung 4), or a standalone page, full multi-chart dashboard, map, globe, \
+or rich multi-figure deliverable from connected data (rung 5).
    - ```chartjs holds one Chart.js config as pure JSON: double-quoted keys, no \
 functions, callbacks, formatters or comments. Types: line, bar, pie, doughnut, \
 scatter, bubble, radar, polarArea.

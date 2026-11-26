@@ -19,6 +19,44 @@
   const quote = text => JSON.stringify(String(text ?? '').slice(0, 80));
   const join = (text, reason) => [text, reason].filter(Boolean).join(' · ');
   const list = items => items.slice(0, 4).join(', ') + (items.length > 4 ? ' and ' + (items.length - 4) + ' more' : '');
+  const hasReason = value => typeof value === 'string' && value.trim().length > 0;
+  const keyTokens = name => String(name || '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const keysDisjoint = (a, b) => {
+    const ta = keyTokens(a), tb = new Set(keyTokens(b));
+    return ta.length > 0 && tb.size > 0 && ta.every(tok => !tb.has(tok));
+  };
+  const keysRelated = (a, b) => {
+    const ta = keyTokens(a), tb = new Set(keyTokens(b));
+    return ta.length > 0 && ta.some(tok => tb.has(tok));
+  };
+  function collectRecordFields(value, out, depth = 0) {
+    if (depth > 6 || !value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      if (value.length && value.every(item => item && typeof item === 'object' && !Array.isArray(item))) {
+        for (const row of value) {
+          for (const [k, v] of Object.entries(row)) {
+            if (typeof v === 'number' && Number.isFinite(v)) {
+              const bucket = out.get(Math.round(v));
+              if (bucket) bucket.push([k, v]);
+              else out.set(Math.round(v), [[k, v]]);
+            }
+          }
+        }
+      }
+      return;
+    }
+    for (const item of Object.values(value)) collectRecordFields(item, out, depth + 1);
+  }
+  function isUnrelatedRawField(number, fieldKey, fact, rawFields) {
+    if (!fieldKey || !keysDisjoint(fieldKey, fact.measure)) return false;
+    const entries = rawFields.get(Math.round(number));
+    if (!entries) return false;
+    return entries.some(([k, v]) =>
+      Math.abs(v - number) <= 1e-6 * Math.max(1, Math.abs(v))
+      && keysDisjoint(k, fact.measure)
+      && keysRelated(fieldKey, k)
+    );
+  }
   function hasRows(value, depth = 0) {
     if (Array.isArray(value)) return value.length > 0;
     return depth < 7 && !!value && typeof value === 'object' && Object.values(value).some(item => hasRows(item, depth + 1));
@@ -47,20 +85,20 @@
     + 'observed values in the data contract. If this is the true answer, add zeroReason (why, in the page language) ';
 
   // Shows a true zero's reason and records unexplained zeros and double counts.
-  function review(page, where, findings, doubled, sourced) {
+  function review(page, where, findings, doubled, sourced, rawFields) {
     if (!page || typeof page !== 'object') return page;
     const shown = [], result = {...page};
     const zero = (what, owner) => sourced && findings.push(what + where + ZERO + 'to the ' + owner + '; the page shows it.');
     const lead = page.lead;
     if (lead && lead.value !== undefined) {
-      if (!blank(lead.value)) shown.push([lead.value, 'headline ' + quote(lead.text)]);
-      else if (lead.zeroReason) result.lead = {...lead, detail: join(lead.detail, lead.zeroReason)};
+      if (!blank(lead.value)) shown.push([lead.value, 'headline ' + quote(lead.text), null]);
+      else if (hasReason(lead.zeroReason)) result.lead = {...lead, detail: join(lead.detail, lead.zeroReason.trim())};
       else zero('headline ' + quote(lead.text) + ' shows ' + (lead.value === '' ? 'nothing' : String(lead.value)), 'lead');
     }
     result.metrics = (page.metrics || []).map(metric => {
-      if (!blank(metric?.value)) { shown.push([metric?.value, 'metric ' + quote(metric?.label)]); return metric; }
-      if (metric.zeroReason) return {...metric, detail: join(metric.detail, metric.zeroReason)};
-      zero('metric ' + quote(metric.label) + ' shows ' + (metric.value === '' ? 'nothing' : String(metric.value)), 'metric');
+      if (!blank(metric?.value)) { shown.push([metric?.value, 'metric ' + quote(metric?.label), null]); return metric; }
+      if (hasReason(metric?.zeroReason)) return {...metric, detail: join(metric.detail, metric.zeroReason.trim())};
+      zero('metric ' + quote(metric?.label) + ' shows ' + (metric?.value === '' ? 'nothing' : String(metric?.value)), 'metric');
       return metric;
     });
     if (!page.metrics) delete result.metrics;
@@ -69,16 +107,22 @@
       const name = section.type + ' ' + quote(section.title), reasons = [];
       if (section.type === 'table') {
         const rows = section.rows || [];
-        if (!rows.length) section.zeroReason ? reasons.push(section.zeroReason) : zero(name + ' has no rows', 'section');
+        if (!rows.length) hasReason(section.zeroReason) ? reasons.push(section.zeroReason.trim()) : zero(name + ' has no rows', 'section');
         const zeros = [], blocks = new Map();
+        const numericCols = [];
         for (const column of rows.length ? section.columns || [] : []) {
           const values = rows.map(row => amount(row?.[column.key])).filter(value => value !== undefined);
-          values.forEach(value => shown.push([value, name + ', column ' + quote(column.label)]));
+          values.forEach(value => shown.push([value, name + ', column ' + quote(column.label), column.key]));
           if (!values.length) continue;
           blocks.set(column.unit ?? '', [...blocks.get(column.unit ?? '') || [], column]);
-          if (values.every(value => value === 0 || !Number.isFinite(value))) {
-            const colReason = column.zeroReason || section.zeroReason;
-            colReason ? reasons.push(colReason) : zeros.push(quote(column.label));
+          numericCols.push({column, allZero: values.every(value => value === 0 || !Number.isFinite(value))});
+        }
+        const everyNumericZero = numericCols.length > 0 && numericCols.every(entry => entry.allZero);
+        for (const {column, allZero} of numericCols) {
+          if (allZero) {
+            if (hasReason(column.zeroReason)) reasons.push(column.zeroReason.trim());
+            else if (everyNumericZero && hasReason(section.zeroReason)) reasons.push(section.zeroReason.trim());
+            else zeros.push(quote(column.label));
           }
         }
         if (zeros.length) zero(name + ' shows 0 in every row of column' + (zeros.length > 1 ? 's ' : ' ') + list(zeros), 'column');
@@ -88,30 +132,33 @@
           const empty = rows.filter(row => block.every(column => amount(row?.[column.key]) === 0));
           if (!empty.length || empty.length === rows.length) continue;
           const names = empty.map(row => quote(Object.values(row).find(value => typeof value === 'string' && amount(value) === undefined) ?? '?'));
-          section.zeroReason ? reasons.push(section.zeroReason)
+          hasReason(section.zeroReason) ? reasons.push(section.zeroReason.trim())
             : zero(name + ' shows 0 in all ' + block.length + (unit ? ' ' + quote(unit) : '') + ' columns for row'
               + (names.length > 1 ? 's ' : ' ') + list(names), 'section');
         }
       } else if (section.type === 'chart' && !section.option?.dataset) {
         const {items, values} = chartValues(section.option);
-        values.forEach(value => shown.push([value, name]));
+        values.forEach(value => shown.push([value, name, null]));
         // Items without numbers, such as a graph's unweighted links, are not judged.
         if (!items || values.length === items && values.every(value => value === 0 || !Number.isFinite(value))) {
-          section.zeroReason ? reasons.push(section.zeroReason) : zero(name + (items ? ' plots only 0' : ' plots no values'), 'section');
+          hasReason(section.zeroReason) ? reasons.push(section.zeroReason.trim()) : zero(name + (items ? ' plots only 0' : ' plots no values'), 'section');
         }
       } else if (['map', 'globe'].includes(section.type) && !(section.points?.length || section.routes?.length)) {
-        section.zeroReason ? reasons.push(section.zeroReason) : zero(name + ' shows no points or routes', 'section');
+        hasReason(section.zeroReason) ? reasons.push(section.zeroReason.trim()) : zero(name + ' shows no points or routes', 'section');
       } else if (section.type === 'timeline' && !section.items?.length) {
-        section.zeroReason ? reasons.push(section.zeroReason) : zero(name + ' has no items', 'section');
+        hasReason(section.zeroReason) ? reasons.push(section.zeroReason.trim()) : zero(name + ' has no items', 'section');
       }
       return reasons.length ? {...section, caption: join(section.caption, [...new Set(reasons)].join(' · '))} : section;
     });
     if (!page.sections) delete result.sections;
-    for (const [value, label] of shown) {
+    for (const [value, label, fieldKey] of shown) {
       const number = amount(value);
       if (typeof number !== 'number' || !Number.isFinite(number)) continue;
       const fact = doubled.get(Math.round(number));
-      if (fact && Math.abs(fact.value - number) <= 1e-6 * Math.max(1, Math.abs(fact.value))) findings.push({fact, place: label + where});
+      if (fact && Math.abs(fact.value - number) <= 1e-6 * Math.max(1, Math.abs(fact.value))) {
+        if (isUnrelatedRawField(number, fieldKey, fact, rawFields)) continue;
+        findings.push({fact, place: label + where});
+      }
     }
     return result;
   }
@@ -137,16 +184,17 @@
 
   window.CoworkPage = async config => {
     if (!config || typeof config !== 'object') return draw(config);
-    const findings = [], doubled = facts(), sourced = hasRows(window.ARTIFACT_DATA);
+    const findings = [], doubled = facts(), sourced = hasRows(window.ARTIFACT_DATA), rawFields = new Map();
+    collectRecordFields(window.ARTIFACT_DATA, rawFields);
     const shown = typeof config.render === 'function'
-      ? {...config, render: selection => review(config.render(selection), '', [], doubled, sourced)}
-      : review(config, '', findings, doubled, sourced);
-    if (config.overview) shown.overview = review(config.overview, '', findings, doubled, sourced);
+      ? {...config, render: selection => review(config.render(selection), '', [], doubled, sourced, rawFields)}
+      : review(config, '', findings, doubled, sourced, rawFields);
+    if (config.overview) shown.overview = review(config.overview, '', findings, doubled, sourced, rawFields);
     await draw(shown);
     if (typeof config.render === 'function') {
       for (const {selection, where} of states(config)) {
         // A state that throws is reported by the page itself when it is opened.
-        try { review(config.render(CoworkSelection(selection)), where, findings, doubled, sourced); } catch {}
+        try { review(config.render(CoworkSelection(selection)), where, findings, doubled, sourced, rawFields); } catch {}
       }
     }
     // One message per wrong figure, naming where it is shown.

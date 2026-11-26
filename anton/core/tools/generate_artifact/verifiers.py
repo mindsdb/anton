@@ -568,21 +568,85 @@ def verify_frontend(
     return VerifyResult(errors=errors, warnings=warnings)
 
 
-_INLINE_SCRIPT_BLOCK = re.compile(
-    r"<script\b(?P<attrs>[^>]*)>(?P<body>.*?)</script\b[^>]*>", re.I | re.S
-)
-_SCRIPT_TYPE_ATTR = re.compile(
-    r"""(?<![\w-])type\s*=\s*(?:['"](?P<quoted>[^'"]*)['"]|(?P<bare>[^\s'"<>]+))""", re.I
-)
-_NON_JS_SCRIPT_TYPES = frozenset({
-    "application/json",
-    "application/ld+json",
-    "importmap",
-    "speculationrules",
-    "text/template",
-    "text/x-template",
-    "text/html",
+_EXEC_JS_SCRIPT_TYPES = frozenset({
+    "",
+    "text/javascript",
+    "application/javascript",
+    "application/ecmascript",
+    "text/ecmascript",
+    "module",
 })
+
+
+def _extract_inline_scripts(html: str) -> list[tuple[str, str]]:
+    """Return ``(mime_type, body)`` for executable inline ``<script>`` tags.
+
+    Uses stdlib ``HTMLParser`` so HTML comments, quoted ``>`` inside attributes,
+    and ``<textarea>``/``<title>`` text cannot create false matches. Host-injected
+    ``data-cowork-observed`` tags and external ``src=`` tags are skipped.
+    """
+    from html.parser import HTMLParser
+
+    found: list[tuple[str, str]] = []
+
+    class _ScriptCollector(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=False)
+            self._script_type: str | None = None
+            self._chunks: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag.lower() != "script":
+                return
+            attr_map = {k.lower(): (v or "") for k, v in attrs}
+            if "src" in attr_map or "data-cowork-observed" in attr_map:
+                self._script_type = None
+                return
+            raw_type = attr_map.get("type", "")
+            mime = raw_type.split(";", 1)[0].strip().lower()
+            if mime in _EXEC_JS_SCRIPT_TYPES:
+                self._script_type = mime
+                self._chunks = []
+            else:
+                self._script_type = None
+
+        def handle_data(self, data: str) -> None:
+            if self._script_type is not None:
+                self._chunks.append(data)
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag.lower() == "script" and self._script_type is not None:
+                body = "".join(self._chunks)
+                if body.strip():
+                    found.append((self._script_type, body))
+                self._script_type = None
+                self._chunks = []
+
+    parser = _ScriptCollector()
+    parser.feed(html)
+    parser.close()
+    return found
+
+
+def _format_node_syntax_error(stderr: str, tmp_path: str) -> str:
+    """Keep location, offending source snippet, and SyntaxError line; drop Node internal frames."""
+    kept: list[str] = []
+    for raw in stderr.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("Node.js v") or stripped.startswith("at "):
+            continue
+        kept.append(stripped.replace(tmp_path, "<script>"))
+    if not kept:
+        return "JavaScript syntax error"
+    # Keep the opening location/code lines and always include the SyntaxError line if present.
+    err_lines = [line for line in kept if "SyntaxError:" in line]
+    head = kept[:3]
+    for line in err_lines[:1]:
+        if line not in head:
+            head.append(line)
+    return " | ".join(head)[:300]
 
 
 def check_inline_js_syntax(html: str, *, timeout_s: float = 3.0) -> list[str]:
@@ -600,30 +664,10 @@ def check_inline_js_syntax(html: str, *, timeout_s: float = 3.0) -> list[str]:
     if not node or "<script" not in html.lower():
         return []
     errors: list[str] = []
-    for idx, match in enumerate(_INLINE_SCRIPT_BLOCK.finditer(html)):
-        attrs = match.group("attrs") or ""
-        if _SRC_ATTR.search(attrs):
-            continue
-        type_match = _SCRIPT_TYPE_ATTR.search(attrs)
-        script_type = (
-            (type_match["quoted"] if type_match["quoted"] is not None else type_match["bare"])
-            .strip()
-            .lower()
-            if type_match
-            else ""
-        )
-        if script_type in _NON_JS_SCRIPT_TYPES:
-            continue
-        if script_type and script_type not in (
-            "text/javascript",
-            "application/javascript",
-            "module",
-        ):
-            continue
-        body = match.group("body") or ""
-        if not body.strip():
-            continue
-        suffix = ".mjs" if script_type == "module" else ".js"
+    for idx, (script_type, body) in enumerate(_extract_inline_scripts(html), start=1):
+        # `.cjs` prevents ancestor package.json `"type":"module"` or Node 22+
+        # ESM auto-detection from misparsing classic browser `<script>` blocks.
+        suffix = ".mjs" if script_type == "module" else ".cjs"
         tmp_path: str | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -639,13 +683,8 @@ def check_inline_js_syntax(html: str, *, timeout_s: float = 3.0) -> list[str]:
                 check=False,
             )
             if proc.returncode != 0:
-                lines = [
-                    line.strip()
-                    for line in (proc.stderr or proc.stdout or "").splitlines()
-                    if line.strip() and not line.strip().startswith("Node.js ")
-                ]
-                detail = " | ".join(lines[-3:])[:260] if lines else "JavaScript syntax error"
-                errors.append(f"Inline <script> #{idx + 1} has a JavaScript syntax error: {detail}")
+                detail = _format_node_syntax_error(proc.stderr or proc.stdout or "", tmp_path)
+                errors.append(f"Inline <script> #{idx} has a JavaScript syntax error: {detail}")
                 break
         except (OSError, subprocess.TimeoutExpired):
             return []

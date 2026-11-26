@@ -144,13 +144,35 @@ def _rejects_chat_user_field(exc: "openai.APIStatusError") -> bool:
         if param == "user":
             return True
         msg = str(err.get("message") or "").lower()
-        if any(tok in msg for tok in ("'user'", '"user"', "field user", 'unknown name "user"')):
+        field_reject_phrases = (
+            "unknown",
+            "unrecognized",
+            "unsupported",
+            "extra",
+            "unexpected",
+            "forbidden",
+            "additional properties",
+            "invalid field",
+            "invalid parameter",
+            "not permitted",
+            "not allowed",
+        )
+        # Never mistake message-role ordering errors ("Invalid role 'user'",
+        # "Consecutive \"user\" messages") for rejection of the request `user` field.
+        if (
+            "role" not in msg
+            and "message" not in msg
+            and any(p in msg for p in field_reject_phrases)
+            and any(tok in msg for tok in ("'user'", '"user"', "field user", "parameter user"))
+        ):
             return True
     # Strict Pydantic 422 responses (e.g. FastAPI/Mistral) may place errors under `detail`.
     if isinstance(body, dict) and isinstance(body.get("detail"), list):
         for item in body["detail"]:
-            if isinstance(item, dict) and "user" in (item.get("loc") or ()):
-                return True
+            if isinstance(item, dict):
+                loc = item.get("loc") or ()
+                if loc and loc[-1] == "user":
+                    return True
     return False
 
 
