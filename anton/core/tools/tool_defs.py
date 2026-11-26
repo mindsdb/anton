@@ -4,6 +4,7 @@ from anton.core.tools.tool_handlers import (
     handle_create_artifact,
     handle_generate_artifact,
     handle_generate_image,
+    handle_inspect_artifact,
     handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
@@ -288,6 +289,16 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "document. The renderer uses it to decide what to open by default. "
         "Skip when you don't know yet — the renderer falls back to a "
         "heuristic, and you can set it later via `update_artifact`.\n\n"
+        "Pass `display` (html-app only) for a small page that shows live inside "
+        "your chat reply instead of as a card. `\"widget\"`: its point is the "
+        "user's input in this conversation (pick, confirm, approve, rank, fill "
+        "in, choose between options); it is not a deliverable, so it gets no "
+        "Share and stays out of the Artifacts list. `\"inline\"`: an interactive "
+        "view worth keeping or sharing (a chart with range tabs, toggles or "
+        "linked views that a chart block cannot do), on data that fits in a "
+        "message. You write either page yourself: call "
+        "`recall_skill(\"build-html-dashboard\")` and follow its Inline section. "
+        "Omit it for anything the user opens as a page or that holds a lot of data.\n\n"
         "To MODIFY an existing artifact instead of creating a new one, call "
         "`list_artifacts` to find it; its folder is `<root>/<slug>`."
     ),
@@ -318,6 +329,16 @@ CREATE_ARTIFACT_TOOL = ToolDef(
                 "type": "string",
                 "description": "Relative path of the entry-point file you'll write (e.g. \"index.html\"). Optional — skip if you don't know yet.",
             },
+            "display": {
+                "type": "string",
+                "enum": ["inline", "widget"],
+                "description": (
+                    "Shows this html-app live inside the chat reply. \"widget\": it "
+                    "collects the user's input in this conversation (no Share, not in "
+                    "the Artifacts list). \"inline\": an interactive view worth keeping "
+                    "or sharing. Omit for the usual artifact card."
+                ),
+            },
         },
         "required": ["name", "description", "type"],
     },
@@ -342,7 +363,10 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
         "`backend.py` so metadata.json "
         "captures which connections the deployable depends on. Slugs must match "
         "existing vault connections (see `Connected Data Sources` in the system "
-        "prompt). Pass `[]` to clear."
+        "prompt). Pass `[]` to clear.\n"
+        "- `display`: `\"inline\"` or `\"widget\"` shows an html-app live inside "
+        "the chat reply; empty string goes back to the usual card. When the user "
+        "asks to keep or share a widget, set `\"inline\"`: same slug and files."
     ),
     input_schema={
         "type": "object",
@@ -371,6 +395,15 @@ UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
                     "description": "Connection slug, e.g. \"postgres-prod_db\".",
                 },
             },
+            "display": {
+                "type": "string",
+                "enum": ["inline", "widget", ""],
+                "description": (
+                    "\"inline\" (worth keeping or sharing) or \"widget\" (the user's "
+                    "input in this conversation) to show an html-app inside the chat "
+                    "reply; empty string for the usual card."
+                ),
+            },
         },
         "required": ["slug"],
     },
@@ -383,7 +416,9 @@ LIST_ARTIFACTS_TOOL = ToolDef(
     description=(
         "List the artifacts in this workspace, newest first. An artifact's folder "
         "is `<root>/<slug>`, and paths in the result are relative to it. Without "
-        "`match` you get a summary (name, type, updatedAt, description, primary); "
+        "`match` you get a summary (name, type, updatedAt, description, primary, "
+        "and, for an artifact shown inline or as a widget, display and its saved state: the "
+        "user's latest edits in the page, from `state.json` in its folder); "
         "with `match` the full record, including id, files and service_files "
         "(housekeeping and generation files, not what was built)."
     ),
@@ -406,6 +441,30 @@ LIST_ARTIFACTS_TOOL = ToolDef(
         },
     },
     handler=handle_list_artifacts,
+)
+
+
+# Cowork only (ENG-4684): the pages it reads exist only where the chat shows
+# inline artifacts, so the session registers it with `renders_chart_blocks`.
+INSPECT_ARTIFACT_TOOL = ToolDef(
+    name="inspect_artifact",
+    description=(
+        "See what the user did in an html-app page shown in the chat (an inline "
+        "artifact or widget): its saved page state (`state.json`, from "
+        "anton.setState), its form controls with their current values and its "
+        "visible text (`snapshot.json`, captured by the app), and when they were "
+        "last saved. Call it before answering when the user refers to something "
+        "they did or picked in the page (\"what did I pick\", \"use these "
+        "settings\")."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "slug": {"type": "string", "description": "The html-app artifact's slug."},
+        },
+        "required": ["slug"],
+    },
+    handler=handle_inspect_artifact,
 )
 
 
@@ -801,6 +860,29 @@ GENERATE_ARTIFACT_TOOL = _single_call(GENERATE_ARTIFACT_TOOL)
 STATIC_GENERATE_ARTIFACT_TOOL = _single_call(STATIC_GENERATE_ARTIFACT_TOOL)
 CREATE_ARTIFACT_TOOL = _registration_only(CREATE_ARTIFACT_TOOL)
 STATIC_CREATE_ARTIFACT_TOOL = _registration_only(STATIC_CREATE_ARTIFACT_TOOL)
+
+
+def without_display(tool: ToolDef) -> ToolDef:
+    """`tool` with `display` (inline artifacts and widgets) left out (ENG-4684).
+
+    For a chat that does not draw pages inside a reply (the CLI, or a host
+    that reported no surface), where `renders_chart_blocks` is False. Applies
+    to any variant of create_artifact, update_artifact and list_artifacts.
+    """
+    if tool.name == "create_artifact":
+        description = cut_spans(tool.description, ("Pass `display` (html-app only)", "To MODIFY", ""))
+    elif tool.name == "update_artifact":
+        description = cut_spans(tool.description, ("\n- `display`: ", None, ""))
+    elif tool.name == "list_artifacts":
+        return replace(tool, description=cut_spans(
+            tool.description, (", and, for an artifact shown inline or as a widget,", "); ", "")
+        ))
+    else:
+        raise ValueError(f"{tool.name} has no `display` to leave out")
+    return replace(tool, description=description, input_schema={
+        **tool.input_schema,
+        "properties": {k: v for k, v in tool.input_schema["properties"].items() if k != "display"},
+    })
 
 
 RECALL_TOOL = ToolDef(

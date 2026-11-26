@@ -57,7 +57,7 @@ from anton.core.llm.liveness import (
     arm_turn_tracker,
     disarm_turn_tracker,
 )
-from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
+from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext, renders_chart_blocks
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
 from anton.core.root_cause import classify as classify_root_cause
@@ -133,6 +133,7 @@ from anton.core.tools.tool_defs import (
     GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     GENERATE_IMAGE_TOOL,
     GENERATE_IMAGE_TOOL_NO_PAD_HELPER,
+    INSPECT_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
@@ -150,6 +151,7 @@ from anton.core.tools.tool_defs import (
     UPDATE_ARTIFACT_METADATA_TOOL,
     scratchpad_tool as _scratchpad_tool_def,
     ToolDef,
+    without_display,
 )
 from anton.core.interaction.elicit import Elicitor, asks_approvals
 from anton.core.interaction.emitter import TurnEmitter
@@ -3422,6 +3424,8 @@ class ChatSession:
             workspace_context=workspace_ctx,
             # ENG-4149. Fixed for the session, so it sits with the stable lines.
             ui_locale_context=ui_locale_line(getattr(self, "_ui_locale", None)),
+            # ENG-4684. Fixed for the session like the surface it comes from.
+            chart_blocks=renders_chart_blocks(getattr(self, "_surface", None)),
         )
 
         return prompt
@@ -3525,6 +3529,8 @@ class ChatSession:
             # `generate_image` is offered only where an images API serves it
             # (`_settle_image_offer`), so a host may allow it unconditionally.
             withheld = set() if getattr(self, "_image_offer", None) else {GENERATE_IMAGE_TOOL.name}
+            # `inspect_artifact` is offered only where the chat shows inline pages.
+            withheld.add(INSPECT_ARTIFACT_TOOL.name)
             unknown = set(self._tool_allowlist) - built - deferred - withheld
             if unknown:
                 raise ValueError(
@@ -3712,11 +3718,18 @@ class ChatSession:
                 create = STATIC_CREATE_ARTIFACT_TOOL if direct else STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS
                 generate = (STATIC_GENERATE_ARTIFACT_TOOL if direct
                             else STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS)
+            update = UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
+            listing = LIST_ARTIFACTS_TOOL
+            # Inline pages and widgets exist only where the chat renders them
+            # (Cowork); elsewhere no tool offers `display` (ENG-4684).
+            inline_pages = renders_chart_blocks(getattr(self, "_surface", None))
+            if not inline_pages:
+                create, update, listing = (without_display(t) for t in (create, update, listing))
             self.tool_registry.register_tool(create)
-            self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
-            self.tool_registry.register_tool(
-                UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
-            )
+            self.tool_registry.register_tool(listing)
+            if inline_pages:
+                self.tool_registry.register_tool(INSPECT_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(update)
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             # The artifact editor (ENG-4207): changes to an existing artifact go

@@ -95,6 +95,10 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         # images API serves it: the session exempts it from the fatal
         # unknown-name check when it withholds the tool.
         "generate_image",
+        # Read-only over one artifact folder's state.json / snapshot.json.
+        # Core registers it only on a Cowork surface (web for a pod), so the
+        # session exempts it from the unknown-name check when withheld.
+        "inspect_artifact",
     }
 )
 

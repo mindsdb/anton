@@ -24,7 +24,9 @@ from .prompts import (
     STATIC_ARTIFACTS_PROMPT,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
+    in_reply_visuals,
 )
+from .tracing import SURFACE_DESKTOP, SURFACE_WEB
 
 if TYPE_CHECKING:
     from anton.core.memory.skills import SkillStore
@@ -37,11 +39,28 @@ if TYPE_CHECKING:
 # conversations; other transports send the prompt as one string.
 SESSION_CONTEXT_MARKER = "\n\n# SESSION CONTEXT (this project and conversation)\n"
 
+# Surfaces whose chat renders ```chartjs / ```mermaid blocks and inline
+# artifacts: the Cowork app, on the desktop and in the browser (ENG-4684). The
+# CLI prints a fence as raw text, and a host that reported no surface may too,
+# so neither is taught them.
+CHART_BLOCK_SURFACES = frozenset({SURFACE_DESKTOP, SURFACE_WEB})
+
+
+def renders_chart_blocks(surface: object) -> bool:
+    """Whether a session on `surface` is taught in-reply charts."""
+    return isinstance(surface, str) and surface in CHART_BLOCK_SURFACES
+
+
 # The build-html-dashboard skill's pointer to the DIRECT REPORTS path. Matched
 # rather than cut with `cut_spans`: a skill description is data a project can
 # override, and a missing note must not break the prompt.
 DIRECT_REPORTS_SKILL_NOTE = re.compile(
     r"\s*NOT needed to change the content of a report.*?DIRECT REPORTS\)\.", re.DOTALL
+)
+# Its pointer to inline charts and widgets (ENG-4684), matched the same way and
+# left out where the chat draws no inline pages.
+INLINE_SKILL_NOTE = re.compile(
+    r"\s*Also recall it to write an inline chart.*?state and submit API\.", re.DOTALL
 )
 
 
@@ -100,6 +119,7 @@ class ChatSystemPromptBuilder:
         direct_reports: bool = True,
         internet_research: bool = True,
         reading_files_offered: bool = True,
+        chart_blocks: bool = False,
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
@@ -113,6 +133,7 @@ class ChatSystemPromptBuilder:
         catalog of internet endpoints the session must not use.
         ``reading_files_offered`` False leaves out `reading-files`, whose code
         imports libraries this interpreter does not have.
+        ``chart_blocks`` False drops the dashboard skill's inline/widget note.
         """
         if skill_store is None:
             return ""
@@ -144,6 +165,8 @@ class ChatSystemPromptBuilder:
             when = s.get("description", "").strip()
             if not direct_reports:
                 when = DIRECT_REPORTS_SKILL_NOTE.sub("", when).strip()
+            if not chart_blocks:
+                when = INLINE_SKILL_NOTE.sub("", when).strip()
             if not label or (not fullstack_offered and label == "build-fullstack-backend"):
                 continue
             if not internet_research and label == "public-data-sources":
@@ -163,11 +186,16 @@ class ChatSystemPromptBuilder:
         output_dir: str,
         direct_generation: bool = False,
         direct_reports: bool = True,
+        chart_blocks: bool = False,
     ) -> str:
+        """``chart_blocks`` (`renders_chart_blocks`) adds the IN-REPLY VISUALS
+        block: chart fences and inline artifacts, only where the chat draws
+        them."""
+        in_reply = f"\n\n{in_reply_visuals(proactive=proactive_dashboards)}" if chart_blocks else ""
         if direct_generation:
             from .static_artifact_prompt import visualizations
 
-            return visualizations(proactive=proactive_dashboards)
+            return visualizations(proactive=proactive_dashboards) + in_reply
         if proactive_dashboards:
             template = (VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT if direct_reports
                         else NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT)
@@ -175,7 +203,7 @@ class ChatSystemPromptBuilder:
             template = (VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT if direct_reports
                         else NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT)
         output_format = template.format(output_dir=output_dir)
-        return BASE_VISUALIZATIONS_PROMPT.format(output_format=output_format)
+        return BASE_VISUALIZATIONS_PROMPT.format(output_format=output_format) + in_reply
 
     def build(
         self,
@@ -201,6 +229,7 @@ class ChatSystemPromptBuilder:
         classify: bool = True,
         reading_files_offered: bool = True,
         ui_locale_context: str = "",
+        chart_blocks: bool = False,
     ) -> str:
         """``fullstack_offered`` False (`live_app_slots.fullstack_offered`)
         leaves out the fullstack types, the backend section and the backend
@@ -211,7 +240,9 @@ class ChatSystemPromptBuilder:
         public-data-sources skill's line. ``classify`` False leaves out the
         scratchpad's classify() and classify_yes_no(). ``ui_locale_context`` is
         the language line (`anton.core.llm.ui_locale.ui_locale_line`); empty
-        adds nothing."""
+        adds nothing. ``chart_blocks`` True (`renders_chart_blocks` of the
+        session's surface) teaches ```chartjs / ```mermaid blocks and inline
+        artifacts, which only the Cowork chat draws."""
         direct_generation = any(getattr(tool, "name", "") == "generate_artifact"
                                 and "name" in tool.input_schema.get("properties", {})
                                 for tool in tool_defs or [])
@@ -220,6 +251,7 @@ class ChatSystemPromptBuilder:
             output_dir=output_dir,
             direct_generation=direct_generation,
             direct_reports=direct_reports,
+            chart_blocks=chart_blocks,
         )
         if fullstack_offered:
             artifacts_section = ARTIFACTS_PROMPT if direct_reports else NO_DIRECT_REPORTS_ARTIFACTS_PROMPT
@@ -299,7 +331,7 @@ class ChatSystemPromptBuilder:
         procedural_memory = self._build_procedural_memory_section(
             skill_store, direct_generation=direct_generation, fullstack_offered=fullstack_offered,
             direct_reports=direct_reports, internet_research=internet_research,
-            reading_files_offered=reading_files_offered,
+            reading_files_offered=reading_files_offered, chart_blocks=chart_blocks,
         )
         if procedural_memory:
             prompt += procedural_memory

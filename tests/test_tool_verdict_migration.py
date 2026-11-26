@@ -491,6 +491,7 @@ _ALL_HANDLERS = frozenset({
     "handle_edit_artifact",
     "handle_generate_artifact",
     "handle_generate_image",
+    "handle_inspect_artifact",
     "handle_launch_backend",
     "handle_list_artifacts",
     "handle_memorize",
@@ -526,6 +527,7 @@ _VERDICT_DECLARING_HANDLERS = frozenset({
     # failure, each with a reason tiered in root_cause.py (a safety refusal
     # self-inflicted, a rate limit transient, no credits a wall).
     "handle_generate_image",
+    "handle_inspect_artifact",
     "handle_list_artifacts",
     "handle_memorize",
     "handle_read_image",

@@ -1419,11 +1419,16 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
             reason="invalid_type",
         )
 
+    display, display_error = _artifact_display(tc_input, artifact_type)
+    if display_error:
+        return SideEffectResult.failed(display_error, reason="invalid_display")
+
     artifact = store.create(  # type: ignore[arg-type]
         name=name,
         description=description,
         type=artifact_type,
         primary=primary if isinstance(primary, str) else None,
+        display=display,
     )
     folder = store.folder_for(artifact.slug)
     _track_artifact(session, store, artifact.slug, summary=f"Created artifact: {name}")
@@ -1433,6 +1438,9 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
             f"Created artifact `{artifact.slug}` ({artifact.type}). "
             f"Write output files under: {folder}"
             + (f" (primary: {artifact.primary})" if artifact.primary else "")
+            + (f" Shown in the chat reply as {'a widget' if artifact.display == 'widget' else 'inline'}: "
+               "follow the Inline section of `recall_skill(\"build-html-dashboard\")`."
+               if artifact.display else "")
         ),
         resource_id=artifact.slug,
         idempotency_key=artifact.slug,
@@ -1443,8 +1451,35 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> Tool
             "name": artifact.name,
             "type": artifact.type,
             "primary": artifact.primary,
+            "display": artifact.display,
         },
     ).to_outcome()
+
+
+def _artifact_display(tc_input: dict, artifact_type: str) -> tuple[str | None, str | None]:
+    """`display` from a create/update call as (value, error).
+
+    Absent, None or "" is the usual card (None). "inline" and "widget" are
+    the other values, and only an html-app can be shown live inside the chat
+    reply.
+    """
+    from anton.core.artifacts.models import ARTIFACT_DISPLAYS
+
+    raw = tc_input.get("display")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None, None
+    value = raw.strip().lower() if isinstance(raw, str) else raw
+    if value not in ARTIFACT_DISPLAYS:
+        return None, (
+            f"Error: `display` must be one of {ARTIFACT_DISPLAYS}, or omitted for the usual card. "
+            f"Got: {raw!r}."
+        )
+    if artifact_type != "html-app":
+        return None, (
+            f"Error: only an html-app can be shown inline or as a widget; this artifact is a {artifact_type}. "
+            "Omit `display`."
+        )
+    return value, None
 
 
 async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict) -> ToolOutcome:
@@ -1455,6 +1490,8 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     - `port`: backend port number (fullstack apps only)
     - `datasources`: list of vault-connection slugs the backend reads from.
       `engine`, `name`, and `env_prefix` are derived from the vault.
+    - `display`: "inline" or "widget" to show an html-app live in the chat
+      reply, empty string to go back to the usual card.
     """
     store = resolve_artifact_store(session)
     if store is None:
@@ -1516,6 +1553,17 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
             )
         kwargs["datasources"] = refs
 
+    if "display" in tc_input:
+        current = store.read_metadata(slug)
+        if current is None:
+            return SideEffectResult.failed(
+                f"Error: no artifact found for slug `{slug}`.", reason="artifact_not_found"
+            )
+        display, display_error = _artifact_display(tc_input, current.type)
+        if display_error:
+            return SideEffectResult.failed(display_error, reason="invalid_display")
+        kwargs["display"] = display
+
     earlier = store.open(slug) if "datasources" in kwargs else None
     artifact = store.update(slug, **kwargs)
     if artifact is None:
@@ -1535,7 +1583,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         message=(
             f"Updated artifact `{artifact.slug}` "
             f"(primary={artifact.primary}, port={artifact.port}, "
-            f"datasources={datasources})."
+            f"datasources={datasources}, display={artifact.display})."
         ) + live_app_block,
         resource_id=artifact.slug,
         idempotency_key=artifact.slug,
@@ -1545,6 +1593,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
             "primary": artifact.primary,
             "port": artifact.port,
             "datasources": datasources,
+            "display": artifact.display,
         },
     ).to_outcome()
 
@@ -2647,6 +2696,40 @@ async def handle_list_artifacts(
     # Tier 1: a listing was produced. No artifacts, or unmatched keys, is still
     # a correct answer, not a failure.
     return ToolOutcome(content=render_listing([(root, artifacts)], fields, unmatched), ok=True)
+
+
+async def handle_inspect_artifact(
+    session: "ChatSession", tc_input: dict
+) -> "str | ToolOutcome":
+    """What an inline html-app page reported: its saved state, form controls and visible text."""
+    from anton.core.artifacts.page_state import render_inspection
+
+    store = resolve_artifact_store(session)
+    if store is None:
+        return ToolOutcome(
+            content="Artifact store unavailable (no workspace bound to this session).",
+            ok=False, reason="store_unavailable",
+        )
+    slug = str(tc_input.get("slug") or "").strip()
+    if not slug:
+        return ToolOutcome(content="Error: `slug` is required.", ok=False, reason="missing_slug")
+    artifact = store.read_metadata(slug)
+    if artifact is None:
+        return ToolOutcome(
+            content=f"Error: no artifact found for slug `{slug}`.", ok=False, reason="artifact_not_found"
+        )
+    if artifact.type != "html-app":
+        return ToolOutcome(
+            content=(
+                f"Error: `{slug}` is a {artifact.type} artifact; inspect_artifact reads only "
+                "html-app pages. Read its files instead."
+            ),
+            ok=False, reason="invalid_type",
+        )
+    # Tier 1: the page files were read. "Nothing reported yet" is a correct
+    # answer, not a failure; the refusals above are tier 2 (a retry cannot help).
+    root = Path(store.root).absolute()
+    return ToolOutcome(content=render_inspection(artifact, root / artifact.slug), ok=True)
 
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
