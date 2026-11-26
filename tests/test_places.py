@@ -59,3 +59,27 @@ def test_columns_of_array_rows_are_judged_one_by_one():
 def test_a_field_that_is_mostly_not_places_is_left_out():
     found = places.index({"lanes": [{"mode": m} for m in ("Rail", "Air", "Road", "Sea")]})
     assert found == {}
+
+
+def test_uppercase_canadian_and_australian_region_codes_resolve():
+    assert near(places.resolve("London, ON"), 42.98, -81.23)
+    assert near(places.resolve("Victoria, BC"), 48.43, -123.37)
+    assert near(places.resolve("St. John's, NL"), 47.56, -52.71)
+    assert near(places.resolve("Sydney, NSW"), -33.87, 151.21)
+    # Existing country-code and US state-code lookups remain intact.
+    assert places.resolve("Amsterdam, NL")["country"] == "The Netherlands"
+    assert places.resolve("Midland, WA")["country"] == "United States"
+
+
+def test_lowercase_or_titlecase_status_words_never_hijack_cities_in_index():
+    found = places.index({
+        "sites": [
+            {"city": "London", "alerts": "on", "action": "Act"},
+            {"city": "Paris", "alerts": "On", "action": "act"},
+            {"city": "Perth", "alerts": "on", "action": "Act"},
+        ]
+    })
+    assert found["London"]["country"] == "United Kingdom"
+    assert found["Paris"]["country"] == "France"
+    assert found["Perth"]["country"] == "Australia"
+    assert "London, on" not in found and "Paris, On" not in found

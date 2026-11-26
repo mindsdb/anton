@@ -17,6 +17,17 @@ DATA = Path(__file__).parent / "data" / "places.tsv.gz"
 DOMINANT = 10
 MAX_STRINGS = 4096
 
+# Uppercase-only postal codes for Canadian provinces/territories and non-US-colliding
+# Australian states (WA is omitted so US Washington lookups remain unambiguous).
+# Matched case-sensitively so ordinary words like "on" or "act" never hijack cities.
+_UPPERCASE_REGION_CODES: dict[str, tuple[str, ...]] = {
+    "CA.01": ("AB",), "CA.02": ("BC",), "CA.03": ("MB",), "CA.04": ("NB",),
+    "CA.05": ("NL",), "CA.07": ("NS",), "CA.08": ("ON",), "CA.09": ("PE",),
+    "CA.10": ("QC",), "CA.11": ("SK",), "CA.12": ("YT",), "CA.13": ("NT",), "CA.14": ("NU",),
+    "AU.01": ("ACT",), "AU.02": ("NSW",), "AU.03": ("NT",), "AU.04": ("QLD",),
+    "AU.05": ("SA",), "AU.06": ("TAS",), "AU.07": ("VIC",),
+}
+
 
 def normalized(value):
     return "".join(c for c in unicodedata.normalize("NFKD", str(value)).casefold() if c.isalnum())
@@ -24,7 +35,7 @@ def normalized(value):
 
 @lru_cache(maxsize=1)
 def _index():
-    countries, regions, names = {}, {}, {}
+    countries, regions, region_codes, names = {}, {}, {}, {}
     with gzip.open(DATA, "rt", encoding="utf-8") as rows:
         for row in rows:
             kind, *f = row.rstrip("\n").split("\t")
@@ -39,6 +50,8 @@ def _index():
                 keys = {name, ascii_name} | ({region} if country == "US" else set())  # US.CA is "CA"
                 for key in keys:
                     regions.setdefault(normalized(key), set()).add((country, region))
+                for abbr in _UPPERCASE_REGION_CODES.get(code, ()):
+                    region_codes.setdefault(abbr, set()).add((country, region))
             else:
                 name, lat, lon, country, region, population, alternates = f
                 place = {"name": name, "lat": float(lat), "lon": float(lon), "country": country,
@@ -46,7 +59,15 @@ def _index():
                 names.setdefault(normalized(name), []).append((place, True))
                 for alt in filter(None, alternates.split("|")):
                     names.setdefault(normalized(alt), []).append((place, False))
-    return countries, regions, names
+    return countries, regions, region_codes, names
+
+
+def _region_scopes(qualifier: str, regions: dict, region_codes: dict) -> set:
+    scopes = set(regions.get(normalized(qualifier), set()))
+    stripped = qualifier.strip()
+    if stripped.isupper():
+        scopes |= region_codes.get(stripped, set())
+    return scopes
 
 
 def resolve(text):
@@ -55,7 +76,7 @@ def resolve(text):
     if (not isinstance(text, str) or not 2 <= len(text) <= 120 or text == text.lower()
             or re.fullmatch(r"[A-Z]{2,4}", text.strip())):
         return None
-    countries, regions, names = _index()
+    countries, regions, region_codes, names = _index()
     town, *qualifiers = [part.strip() for part in text.split(",")]
     found = names.get(normalized(town), [])
     # A bare country name is no town ("Canada"), except a city-state's own city ("Hong Kong"). A
@@ -64,7 +85,7 @@ def resolve(text):
     if any(region is None for _, region in areas):
         found = [(p, own) for p, own in found if own and (p["country"], None) in areas]
     for qualifier in qualifiers:
-        scopes = regions.get(normalized(qualifier), set())
+        scopes = _region_scopes(qualifier, regions, region_codes)
         found = [(p, own) for p, own in found
                  if (p["country"], None) in scopes or (p["country"], p["region"]) in scopes]
     # A town's own name outranks another town's alternate name
@@ -100,7 +121,7 @@ def index(data):
     of "APAC" is not a town. A record that also names a country or region adds "<value>,
     <region>" ("London, Ontario"), and then the bare value no longer resolves elsewhere
     ("London" alone would be the English city)."""
-    _, regions, _ = _index()
+    _, regions, region_codes, _ = _index()
     keys, scoped, values_seen = {}, {}, set()
 
     def add(text, key):
@@ -109,7 +130,10 @@ def index(data):
 
     def record(items):
         fields = {k: v for k, v in items.items() if isinstance(v, str) and 2 <= len(v) <= 60}
-        for qualifier in (v for v in fields.values() if normalized(v) in regions):
+        for qualifier in (
+            v for v in fields.values()
+            if normalized(v) in regions or (v.strip().isupper() and v.strip() in region_codes)
+        ):
             for k, text in fields.items():
                 if text != qualifier and "," not in text:
                     add(f"{text}, {qualifier}", k)

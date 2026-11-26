@@ -78,7 +78,12 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
         "strict `<` in code. Always inspect actual date ranges and pagination "
         "metadata first: retrieve every page of paginated endpoints, and do not "
         "impose an unrequested date cut on a table already scoped to the "
-        "requested subject."
+        "requested subject.\n\n"
+        "PLACE NAMES. When source records already provide recognizable place "
+        "names (towns, cities, ports, or a town with its region/country), "
+        "preserve those source place names directly rather than calling "
+        "external web geocoders during gathering; the page builder resolves "
+        "unambiguous place names offline."
         + fullstack_choice
         + "\n\n" + GEOGRAPHY_GUIDANCE,
         state.project_rules,

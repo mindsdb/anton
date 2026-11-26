@@ -103,6 +103,9 @@ text transforms — use the scratchpad tool instead of guessing or doing it in y
 approximate prose length targets (e.g., "about 300 words" or "roughly 500 words"), treat the \
 target as a loose guide and write it in one pass rather than iterating in the scratchpad to \
 hit an exact word count.
+- Combine a file write with its verification — and print a few surrounding lines when \
+searching text files — in the same scratchpad cell so you don't spend an extra round-trip \
+re-reading a file you just wrote or re-opening matches.
 - Before counting, totalling or ranking rows from a query or API, check whether the result \
 was cut: a truncation flag, a next-page token or cursor, or a row count equal to the page or \
 row limit. If it was, page or split the query until you have every row, or say the figure is \

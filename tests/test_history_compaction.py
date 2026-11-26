@@ -470,3 +470,104 @@ class TestSkipWhenLittleNewMaterial:
 
         mock_llm.summarize.assert_called_once()
         assert session.last_compaction is not None
+
+
+class TestEmptySummaryRetry:
+    async def test_failed_ruled_out_heading_accepted(self):
+        history = _alternating_history(10, "x" * 2000)
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(
+            return_value=_summarize_response("## Failed / Ruled Out\n- Old query returned 404")
+        )
+
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+        ok = await session._summarize_history()
+
+        assert ok is True
+        mock_llm.summarize.assert_called_once()
+        assert session.last_compaction is not None
+        assert "Failed / Ruled Out" in session.last_compaction["summary"]
+
+    async def test_empty_first_summary_retries_once_and_recovers(self):
+        history = _alternating_history(10, "x" * 2000)
+        mock_llm = make_mock_llm()
+        mock_llm.max_tokens = 32768
+        mock_llm.summarize = AsyncMock(
+            side_effect=[
+                LLMResponse(content="", stop_reason="end_turn", usage=Usage(input_tokens=10, output_tokens=0)),
+                _summarize_response("## Goal\nrecovered summary"),
+            ]
+        )
+
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+        ok = await session._summarize_history()
+
+        assert ok is True
+        assert mock_llm.summarize.call_count == 2
+        assert mock_llm.summarize.call_args_list[1].kwargs["max_tokens"] == 8192
+        assert session.last_compaction is not None
+        assert "recovered summary" in session.last_compaction["summary"]
+
+    @pytest.mark.parametrize("stop_reason", ["content_filter", "refusal"])
+    async def test_safety_refusal_summary_does_not_retry(self, stop_reason):
+        history = _alternating_history(10, "x" * 2000)
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(
+            return_value=LLMResponse(content="", stop_reason=stop_reason, usage=Usage(input_tokens=10, output_tokens=0))
+        )
+
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+        ok = await session._summarize_history()
+
+        assert ok is False
+        mock_llm.summarize.assert_called_once()
+
+    async def test_last_resort_keeps_marker_fallback_when_retry_raises(self):
+        history = _alternating_history(10, "x" * 2000)
+        mock_llm = make_mock_llm()
+        mock_llm.summarize = AsyncMock(
+            side_effect=[
+                LLMResponse(content="", stop_reason="end_turn", usage=Usage(input_tokens=10, output_tokens=0)),
+                RuntimeError("transient upstream 503"),
+            ]
+        )
+
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+        ok = await session._summarize_history(last_resort=True)
+
+        assert ok is True
+        assert mock_llm.summarize.call_count == 2
+        assert session.last_compaction is None
+        assert any("No summary of them is available." in str(m.get("content", "")) for m in session.history)
+
+    @pytest.mark.parametrize(
+        ("client_cap", "expected_first", "expected_retry"),
+        [
+            (4096, 4096, 4096),
+            (32768, 8192, 16384),
+        ],
+    )
+    async def test_truncated_empty_retry_budget_respects_client_cap(
+        self, client_cap, expected_first, expected_retry
+    ):
+        history = _alternating_history(10, "x" * 2000)
+        mock_llm = make_mock_llm()
+        mock_llm.max_tokens = client_cap
+        mock_llm.summarize = AsyncMock(
+            side_effect=[
+                LLMResponse(
+                    content="",
+                    stop_reason="max_tokens",
+                    usage=Usage(input_tokens=10, output_tokens=expected_first),
+                ),
+                _summarize_response("## Goal\nrecovered after truncation"),
+            ]
+        )
+
+        session = ChatSession(ChatSessionConfig(llm_client=mock_llm, initial_history=history))
+        ok = await session._summarize_history()
+
+        assert ok is True
+        assert mock_llm.summarize.call_count == 2
+        assert mock_llm.summarize.call_args_list[0].kwargs["max_tokens"] == expected_first
+        assert mock_llm.summarize.call_args_list[1].kwargs["max_tokens"] == expected_retry
