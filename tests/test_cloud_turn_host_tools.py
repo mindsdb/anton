@@ -383,8 +383,9 @@ async def test_a_real_session_offers_the_proxy_and_puts_its_prompt_in_the_system
     session = _real_session(tmp_path, monkeypatch, bridge=CloudHostTools(lambda e: None), host_tools=[NOTE_TOOL])
     prompt = await session._build_system_prompt()
     names = {t.name for t in session.tool_registry.get_tool_defs()}
-    # `generate_image` is withheld where no images API serves it, as with this mock client.
-    assert names == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image"}) | {"read_note"}
+    # `generate_image` is withheld where no images API serves it, as with this mock client,
+    # and `inspect_artifact` outside a Cowork surface (ENG-4684); this session reports none.
+    assert names == (set(CLOUD_TOOL_ALLOWLIST) - {"generate_image", "inspect_artifact"}) | {"read_note"}
     assert NOTE_TOOL["prompt"] in prompt
 
 
