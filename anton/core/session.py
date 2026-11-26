@@ -1586,9 +1586,9 @@ def _stub_largest_results(*, messages: list[dict], model: str) -> list[dict]:
 _IMAGE_PLACEHOLDER = "[image]"
 
 # Input fields that name what a built-in tool acted on. Never code or file bodies.
-_VERIFY_TOOL_TARGET_KEYS = (
-    "action", "name", "one_line_description", "path", "file_path", "slug", "filename",
-)
+# Not the step description: plain searches then read as distinct failed approaches
+# and an honest "not in the data" answer is judged STUCK.
+_VERIFY_TOOL_TARGET_KEYS = ("action", "name", "path", "file_path", "slug", "filename")
 
 
 def _render_verify_tool_call(block: dict) -> str:

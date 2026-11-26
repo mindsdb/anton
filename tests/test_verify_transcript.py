@@ -371,28 +371,41 @@ def test_the_judged_reply_survives_a_thread_longer_than_the_convo_budget():
 
 def test_a_tool_call_names_its_target_but_not_its_code():
     history = [
-        {"role": "user", "content": "write the report to out/report.csv"},
+        {"role": "user", "content": "summarize out/report.csv"},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "read_text_file", "input": {
+            "path": "out/report.csv",
+        }}]},
         {"role": "assistant", "content": [{"type": "tool_use", "name": "scratchpad", "input": {
-            "action": "exec", "name": "main", "one_line_description": "Write out/report.csv",
-            "code": "SECRET_CODE_BODY = 1",
+            "action": "exec", "name": "main", "code": "SECRET_CODE_BODY = 1",
         }}]},
         {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]},
-        {"role": "assistant", "content": "Saved out/report.csv."},
+        {"role": "assistant", "content": "Summarized out/report.csv."},
     ]
     out = _render_verify_transcript(history)
-    assert (
-        "ASSISTANT called tool: scratchpad "
-        "(action=exec, name=main, one_line_description=Write out/report.csv)"
-    ) in out
+    assert "ASSISTANT called tool: read_text_file (path=out/report.csv)" in out
+    assert "ASSISTANT called tool: scratchpad (action=exec, name=main)" in out
     assert "SECRET_CODE_BODY" not in out
+
+
+def test_searches_that_found_nothing_do_not_read_as_distinct_attempts():
+    history = [{"role": "user", "content": "What is the delivery time for order 42?"}]
+    for step in ("Search the attached PDF", "Check the database tables", "Query the API endpoint"):
+        history.append({"role": "assistant", "content": [{"type": "tool_use", "name": "scratchpad", "input": {
+            "action": "exec", "name": "main", "one_line_description": step,
+        }}]})
+        history.append({"role": "user", "content": [{"type": "tool_result", "content": "no delivery time recorded"}]})
+    history.append({"role": "assistant", "content": "The data doesn't record a delivery time for that order."})
+
+    calls = [line for line in _render_verify_transcript(history).splitlines() if "called tool" in line]
+    assert calls == ["ASSISTANT called tool: scratchpad (action=exec, name=main)"] * 3
 
 
 def test_a_token_in_a_tool_target_is_scrubbed():
     token = "abcdefghijklmnopqrstuvwxyz0123456789"
     history = [
         {"role": "user", "content": "call the API"},
-        {"role": "assistant", "content": [{"type": "tool_use", "name": "scratchpad", "input": {
-            "one_line_description": f"GET /items with Authorization: Bearer {token}",
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "read_text_file", "input": {
+            "path": f"https://api.example.com/items?access_token={token}",
         }}]},
         {"role": "assistant", "content": "Done."},
     ]
