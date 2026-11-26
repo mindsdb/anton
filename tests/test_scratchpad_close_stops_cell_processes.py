@@ -1,5 +1,6 @@
-"""Closing a scratchpad stops the processes its cells started, as the tool
-description says; one in its own session is outside that and keeps running."""
+"""Closing a scratchpad, or a cell timing out, stops the processes its cells
+started, as the tool description says; one in its own session is outside that
+and keeps running."""
 from __future__ import annotations
 
 import asyncio
@@ -54,5 +55,32 @@ async def test_closing_the_scratchpad_stops_its_cells_processes():
         for pid in (plain, own_session):
             try:
                 os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+async def test_a_timed_out_cell_stops_the_processes_it_started(tmp_path, monkeypatch):
+    monkeypatch.setattr("anton.core.backends.local.compute_timeouts", lambda _estimate: (2.0, 2.0))
+    pid_file = tmp_path / "child.pid"
+    pad = LocalScratchpadRuntime(
+        name="timeout", coding_provider="anthropic", coding_model="", coding_api_key="", coding_base_url="",
+    )
+    await pad.start()
+    child = None
+    try:
+        cell = await pad.execute(
+            "import subprocess, time\n"
+            "child = subprocess.Popen(['sleep', '300'])\n"
+            f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+            "time.sleep(300)\n"
+        )
+        assert "timed out" in (cell.error or "").lower()
+        child = int(pid_file.read_text())
+        assert await _stopped(child)
+    finally:
+        await pad.close()
+        if child is not None:
+            try:
+                os.kill(child, signal.SIGKILL)
             except ProcessLookupError:
                 pass
