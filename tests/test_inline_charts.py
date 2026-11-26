@@ -478,3 +478,79 @@ def test_the_skill_example_uses_the_readable_state_shape():
     assert "api.onState(apply)" in example and "api.submit(" in example
     assert "Contact " in example  # a short, human submit message
     assert "innerHTML" not in example
+
+
+# ── gating: only a chat that draws inline pages is offered `display` ─────────
+
+
+@pytest.mark.parametrize("tool", [
+    tool_defs.CREATE_ARTIFACT_TOOL,
+    tool_defs.STATIC_CREATE_ARTIFACT_TOOL,
+    tool_defs.CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
+    tool_defs.STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
+    tool_defs.UPDATE_ARTIFACT_METADATA_TOOL,
+    tool_defs.STATIC_UPDATE_ARTIFACT_METADATA_TOOL,
+    tool_defs.LIST_ARTIFACTS_TOOL,
+])
+def test_without_display_leaves_no_inline_text(tool):
+    bare = tool_defs.without_display(tool)
+    assert "display" not in bare.input_schema["properties"]
+    for needle in ("widget", "inline", "chat reply"):
+        assert needle not in bare.description, needle
+    # Everything else is untouched.
+    assert bare.name == tool.name and bare.handler is tool.handler
+    if tool.name == "create_artifact":
+        assert "To MODIFY" in bare.description
+
+
+def _tools(session) -> dict:
+    session._build_tools()
+    return {t.name: t for t in session.tool_registry.get_tool_defs()}
+
+
+@pytest.mark.parametrize("surface", ["desktop", "web"])
+def test_a_cowork_session_offers_display_and_inspect_artifact(make_session, tmp_path, surface):
+    from anton.workspace import Workspace
+
+    tools = _tools(make_session(workspace=Workspace(tmp_path), surface=surface))
+    assert "inspect_artifact" in tools
+    assert "display" in tools["create_artifact"].input_schema["properties"]
+    assert "display" in tools["update_artifact"].input_schema["properties"]
+    assert "widget" in tools["list_artifacts"].description
+
+
+@pytest.mark.parametrize("surface", ["cli", None])
+def test_a_session_without_inline_pages_is_not_offered_display(make_session, tmp_path, surface):
+    from anton.workspace import Workspace
+
+    tools = _tools(make_session(workspace=Workspace(tmp_path), surface=surface))
+    assert "inspect_artifact" not in tools
+    for name in ("create_artifact", "update_artifact"):
+        assert "display" not in tools[name].input_schema["properties"], name
+        assert "widget" not in tools[name].description, name
+    assert "widget" not in tools["list_artifacts"].description
+
+
+def test_the_skill_list_drops_the_inline_note_where_the_chat_cannot_draw_it():
+    import yaml
+
+    from anton.core.llm.prompt_builder import INLINE_SKILL_NOTE
+
+    skill_md = Path(__file__).parents[1] / "anton/core/memory/builtin_skills/build-html-dashboard/SKILL.md"
+    description = yaml.safe_load(skill_md.read_text(encoding="utf-8").split("---")[1])["description"]
+    # Matched in the skill's real text, so a reworded note fails here.
+    assert INLINE_SKILL_NOTE.search(description)
+    store = SimpleNamespace(list_summaries=lambda: [{"label": "build-html-dashboard", "description": description}])
+
+    def build(chart_blocks):
+        return ChatSystemPromptBuilder().build(
+            conversation_started="2026-11-26T00:00:00+00:00",
+            system_prompt_context=SystemPromptContext(runtime_context="test runtime"),
+            proactive_dashboards=True, output_dir="", skill_store=store, chart_blocks=chart_blocks,
+        )
+
+    assert 'display="widget"' in build(True)
+    off = build(False)
+    assert 'display="inline"' not in off and "widget" not in off
+    assert "ONLY for writing dashboard or chart HTML BY HAND" in off
+    assert "Not needed to repair a page" in off

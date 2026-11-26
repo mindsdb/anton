@@ -81,20 +81,16 @@ def state_line(artifact: Artifact, folder: Path) -> str | None:
     """
     if not artifact.display:  # every display is shown in the reply with a page state
         return None
-    path = folder / INLINE_STATE_FILENAME
-    try:
-        info = path.lstat()
-    except OSError:
+    from anton.core.artifacts.page_state import read_page_file
+
+    # Read on one no-follow descriptor, capped: a link swapped in after a
+    # check is still refused, and a large file is never loaded.
+    page = read_page_file(folder, INLINE_STATE_FILENAME, max_bytes=STATE_INLINE_MAX_BYTES)
+    if page is None:
         return None
-    if not stat.S_ISREG(info.st_mode):
-        return None
-    flag = f"{INLINE_STATE_FILENAME}, {info.st_size} bytes: the user's latest edits; read it for the current selections"
-    if info.st_size > STATE_INLINE_MAX_BYTES:
-        return f"state: {flag}"
-    try:
-        compact = json.dumps(json.loads(path.read_text(encoding="utf-8")), ensure_ascii=False, separators=(",", ":"))
-    except (OSError, UnicodeDecodeError, ValueError):
-        return f"state: {flag}"
+    if page.problem:  # over the inline cap, or not JSON
+        return f"state: {INLINE_STATE_FILENAME}, {page.size} bytes: the user's latest edits; read it for the current selections"
+    compact = json.dumps(page.data, ensure_ascii=False, separators=(",", ":"))
     return f"state: {_escape(compact)} ({INLINE_STATE_FILENAME}, the user's latest edits)"
 
 

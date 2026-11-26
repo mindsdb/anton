@@ -57,6 +57,11 @@ def renders_chart_blocks(surface: object) -> bool:
 DIRECT_REPORTS_SKILL_NOTE = re.compile(
     r"\s*NOT needed to change the content of a report.*?DIRECT REPORTS\)\.", re.DOTALL
 )
+# Its pointer to inline charts and widgets (ENG-4684), matched the same way and
+# left out where the chat draws no inline pages.
+INLINE_SKILL_NOTE = re.compile(
+    r"\s*Also recall it to write an inline chart.*?state and submit API\.", re.DOTALL
+)
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,7 @@ class ChatSystemPromptBuilder:
         direct_reports: bool = True,
         internet_research: bool = True,
         reading_files_offered: bool = True,
+        chart_blocks: bool = False,
     ) -> str:
         """Build the '## Procedural memory' section listing available skills.
 
@@ -127,6 +133,7 @@ class ChatSystemPromptBuilder:
         catalog of internet endpoints the session must not use.
         ``reading_files_offered`` False leaves out `reading-files`, whose code
         imports libraries this interpreter does not have.
+        ``chart_blocks`` False drops the dashboard skill's inline/widget note.
         """
         if skill_store is None:
             return ""
@@ -158,6 +165,8 @@ class ChatSystemPromptBuilder:
             when = s.get("description", "").strip()
             if not direct_reports:
                 when = DIRECT_REPORTS_SKILL_NOTE.sub("", when).strip()
+            if not chart_blocks:
+                when = INLINE_SKILL_NOTE.sub("", when).strip()
             if not label or (not fullstack_offered and label == "build-fullstack-backend"):
                 continue
             if not internet_research and label == "public-data-sources":
@@ -322,7 +331,7 @@ class ChatSystemPromptBuilder:
         procedural_memory = self._build_procedural_memory_section(
             skill_store, direct_generation=direct_generation, fullstack_offered=fullstack_offered,
             direct_reports=direct_reports, internet_research=internet_research,
-            reading_files_offered=reading_files_offered,
+            reading_files_offered=reading_files_offered, chart_blocks=chart_blocks,
         )
         if procedural_memory:
             prompt += procedural_memory

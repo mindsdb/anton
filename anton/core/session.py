@@ -151,6 +151,7 @@ from anton.core.tools.tool_defs import (
     UPDATE_ARTIFACT_METADATA_TOOL,
     scratchpad_tool as _scratchpad_tool_def,
     ToolDef,
+    without_display,
 )
 from anton.core.interaction.elicit import Elicitor, asks_approvals
 from anton.core.interaction.emitter import TurnEmitter
@@ -3717,14 +3718,18 @@ class ChatSession:
                 create = STATIC_CREATE_ARTIFACT_TOOL if direct else STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS
                 generate = (STATIC_GENERATE_ARTIFACT_TOOL if direct
                             else STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS)
+            update = UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
+            listing = LIST_ARTIFACTS_TOOL
+            # Inline pages and widgets exist only where the chat renders them
+            # (Cowork); elsewhere no tool offers `display` (ENG-4684).
+            inline_pages = renders_chart_blocks(getattr(self, "_surface", None))
+            if not inline_pages:
+                create, update, listing = (without_display(t) for t in (create, update, listing))
             self.tool_registry.register_tool(create)
-            self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
-            # Inline pages exist only where the chat renders them (Cowork).
-            if renders_chart_blocks(getattr(self, "_surface", None)):
+            self.tool_registry.register_tool(listing)
+            if inline_pages:
                 self.tool_registry.register_tool(INSPECT_ARTIFACT_TOOL)
-            self.tool_registry.register_tool(
-                UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
-            )
+            self.tool_registry.register_tool(update)
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             # The artifact editor (ENG-4207): changes to an existing artifact go

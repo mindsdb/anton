@@ -862,6 +862,29 @@ CREATE_ARTIFACT_TOOL = _registration_only(CREATE_ARTIFACT_TOOL)
 STATIC_CREATE_ARTIFACT_TOOL = _registration_only(STATIC_CREATE_ARTIFACT_TOOL)
 
 
+def without_display(tool: ToolDef) -> ToolDef:
+    """`tool` with `display` (inline artifacts and widgets) left out (ENG-4684).
+
+    For a chat that does not draw pages inside a reply (the CLI, or a host
+    that reported no surface), where `renders_chart_blocks` is False. Applies
+    to any variant of create_artifact, update_artifact and list_artifacts.
+    """
+    if tool.name == "create_artifact":
+        description = cut_spans(tool.description, ("Pass `display` (html-app only)", "To MODIFY", ""))
+    elif tool.name == "update_artifact":
+        description = cut_spans(tool.description, ("\n- `display`: ", None, ""))
+    elif tool.name == "list_artifacts":
+        return replace(tool, description=cut_spans(
+            tool.description, (", and, for an artifact shown inline or as a widget,", "); ", "")
+        ))
+    else:
+        raise ValueError(f"{tool.name} has no `display` to leave out")
+    return replace(tool, description=description, input_schema={
+        **tool.input_schema,
+        "properties": {k: v for k, v in tool.input_schema["properties"].items() if k != "display"},
+    })
+
+
 RECALL_TOOL = ToolDef(
     name="recall",
     description=(
