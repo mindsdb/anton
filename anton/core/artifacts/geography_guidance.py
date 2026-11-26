@@ -19,7 +19,7 @@ GEOGRAPHY_GUIDANCE = """\
   `<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>`
   `const WORLD_ATLAS = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json';`
   `async function loadCountries() { const world = await d3.json(WORLD_ATLAS); return topojson.feature(world, world.objects.countries); }`
-  Load it with `d3.json`, never an absolute URL in `fetch()`. Await
+  Load it with `d3.json` as shown; a `fetch()` of the same URL works too. Await
   `loadCountries()` inside the view's async setup to obtain `countries`, then
   draw it there. Keep both declarations inside that setup. Await or return
   every promise the setup starts so a failed

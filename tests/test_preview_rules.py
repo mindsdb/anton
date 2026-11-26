@@ -157,6 +157,26 @@ def test_the_generator_prompts_state_the_preview_policy():
         assert "so the page renders on every deployment" in flat
 
 
+_NETWORK_RULE = "Requests to any other host fail once the page is published, and in some previews"
+
+
+def test_the_generator_prompts_and_the_skill_state_one_network_rule():
+    """The map recipe fetches from jsDelivr, the hosts allow only that host
+    besides the page's own, and no rule may forbid the recipe's request."""
+    for prompt in _GENERATOR_PROMPTS:
+        flat = " ".join(prompt.split())
+        assert _NETWORK_RULE in flat
+        assert "with `d3.json(...)` or `fetch(...)`" in flat
+        assert "No absolute URL in any `fetch()` call except a data file from `https://cdn.jsdelivr.net/npm/`" in flat
+        assert "relative paths only" not in flat
+    skill = " ".join(_skill().split())
+    assert _NETWORK_RULE in skill
+    assert "No absolute URL in any `fetch()` call except a data file from" in skill
+    frontend = " ".join(prompts.build_frontend_system_prompt(Path("/tmp/a")).split())
+    assert "NEVER hardcode the backend's address" in frontend
+    assert "NEVER hardcode an absolute URL in the source." not in frontend
+
+
 def test_the_map_recipe_passes_the_static_check_it_is_written_for():
     """The recipe's own lines, put into a page, pass `verify_frontend`; the
     same atlas loaded with `fetch()` passes too, and a `fetch()` of any other
@@ -185,11 +205,11 @@ def test_the_map_recipe_passes_the_static_check_it_is_written_for():
 
 
 def test_the_skill_loads_the_atlas_the_way_the_check_allows():
-    """The skill's item 3 said generate_artifact's checks allowed a literal
-    `fetch()` of the world atlas; they never did."""
+    """The skill's item 3 and the verifier agree: the atlas comes from
+    jsDelivr, through `d3.json` in the recipe."""
     skill = _skill()
     assert "with one exception: a map may fetch" not in skill
-    assert "with `d3.json(...)` (item 9), not with `fetch()`" in skill
+    assert "with `d3.json(...)` (item 9)." in skill
     assert "loading `countries-110m.json` with `d3.json` (item 3)" in skill
 
 

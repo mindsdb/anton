@@ -235,7 +235,7 @@ These are the same checks `generate_artifact` runs on its own output (see the `#
     const api = (path) => `${API_BASE}${path}`;
     // usage: fetch(api('/api/items'))
     ```
-  - NEVER hardcode an absolute URL in the source — no `fetch('http://localhost:PORT/...')`, no `fetch('https://api.example.com/...')`, no `const API_BASE = 'http://...'`. The meta tag is the ONLY place the base URL is configured.
+  - NEVER hardcode the backend's address in the source — no `fetch('http://localhost:PORT/...')`, no `fetch('https://api.example.com/...')`, no `const API_BASE = 'http://...'`. The meta tag is the ONLY place the base URL is configured. CDN addresses (scripts and data files from `https://cdn.jsdelivr.net/npm/`) are not the backend and stay as written.
   - API addresses go ONLY through `api()`, with the path's leading `/` kept: `api('/api/items')`. When one is needed in an attribute (a download link, an `<img>`), set it from JS — `a.href = api('/api/export')` — and never write `href="/api/export"` in the markup: a root-relative path drops the path prefix the page is served under, in the app preview and once published, and the request fails.
 
 6. LAUNCH THE BACKEND: Call the `launch_backend` tool with the artifact's slug:

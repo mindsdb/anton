@@ -276,8 +276,9 @@ async def run(state):
         "Match all visible UI text to the user's language. Include viewport meta, responsive layout, "
         "legible phone tables and an explicit body. Fulfil requested map or 3D views as actual views. "
         "The preview is an opaque sandboxed iframe: no localStorage, cookies, relative asset files, "
-        "backend, or external fonts. The allowed script CDN is https://cdn.jsdelivr.net; "
-        "pin exact library versions. Prefer SVG/CSS/native browser capabilities for non-geographic presentation where suitable. "
+        "backend, or external fonts. The only external host is https://cdn.jsdelivr.net/npm/, for "
+        "scripts and data files at pinned exact versions; requests to any other host fail once the "
+        "page is published. Prefer SVG/CSS/native browser capabilities for non-geographic presentation where suitable. "
         "Do not use placeholder data or print code as UI. When editing, make the requested change and "
         "keep existing correct figures, views and interactions. Do not claim a check you did not run."
     )
