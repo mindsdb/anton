@@ -360,7 +360,10 @@ def test_a_host_tool_named_like_any_tool_of_the_turn_is_skipped(clash, extra, tm
     over: dict = {}
     elicitor = None
     if extra == "elicitor":
-        elicitor = object()
+        from anton.cloud_turn.elicitor import CloudElicitor
+
+        # `ask_user` is offered only to an elicitor that lists "choice".
+        elicitor = CloudElicitor(lambda e: None)
     elif extra == "browser":
         over["browser"] = ROUTER
     elif extra == "drafts":
