@@ -4849,8 +4849,10 @@ class _Reader:
     def path_set(self) -> bool:
         """Whether a cell of the conversation, or literal code one runs, may
         set `PATH`, which picks the program a bare `python` names: its text
-        matches `_PATH_SETTING`."""
-        return any(_PATH_SETTING.search(cell.code) for cell in self.cells)
+        matches `_PATH_SETTING`, or it stores to the environment a key that
+        names `PATH` or one the check can't read (`_Reader.environ_sets`), as
+        `os.environ |= dict(PATH=...)` or `operator.setitem` does."""
+        return any(_PATH_SETTING.search(cell.code) for cell in self.cells) or self.environ_sets(_PATH_KEY)
 
     def function_named(self, node: ast.Name) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
         """The def a call to the name `node` reaches by the function table:
@@ -12047,8 +12049,8 @@ _SCRIPT_TEXT_LIMIT = 24_000
 # the script builds as it runs, as `getattr(os, "ch" + "dir")`, holds none
 # of these words. A script Python runs from another folder than its own
 # stays unread too when it reads `sys.path`, or imports `path` or `*` from
-# `sys` (`_SYS_PATH_SIGNS`): the prelude leaves `sys.path[0]` at the
-# working folder, where a run of the file puts the script's own.
+# `sys` (`_SYS_PATH_SIGNS`): a run of the file and the prelude both put the
+# script's own folder at `sys.path[0]`, but the check keeps these unread.
 _SCRIPT_UNREAD_SIGNS = {
     "source": re.compile(r"multiprocessing|concurrent|chdir|SetCurrentDirectory|ctypes|_winapi"),
     "argv": re.compile(r"multiprocessing|concurrent|chdir|SetCurrentDirectory|ctypes|_winapi|__file__"),
@@ -12104,6 +12106,9 @@ def _reaches_subprocess(names: Sequence[str]) -> bool:
 _PATH_SETTING = re.compile(
     r"""['"]PATH['"]|putenv|environ\s*\.\s*(?:update|setdefault|__setitem__)|environ\s*\[[^\]]*\]\s*=(?!=)"""
 )
+# The key of the setting that picks the program a bare `python` names; a
+# Windows environment reads it in any letter case.
+_PATH_KEY = re.compile(r"PATH", re.IGNORECASE)
 # What a step may make in a `cwd=` folder that sends a path elsewhere: a
 # link, such as `os.link`, `symlink_to`, `mklink` or a tar member's
 # `linkname` or `linkpath`. The prelude stops a run whose folder, or a part
@@ -12128,8 +12133,10 @@ _BARE_PYTHON = re.compile(r"python(?:3(?:\.\d+)?)?")
 # Otherwise it runs that text in `__main__` under the script's name, with
 # its own name gone. It imports `hashlib` with only the folders of
 # Python's own install on `sys.path`, so no module that the run's folder or
-# a `PYTHONPATH` folder holds runs. `sys.path` keeps the working folder, as
-# `-c` gives it and the check reads it (`_launch_entries`), and nothing
+# a `PYTHONPATH` folder holds runs. `sys.path[0]`, which `-c` leaves at the
+# working folder, becomes the script's own real folder, as a run of the file
+# gives it, so a module beside the script imports as it did (the check reads
+# both folders, `_launch_entries`), and nothing
 # names the file, so no child process runs the file again.
 _SCRIPT_PRELUDE = (
     "def _anton_run():\n"
@@ -12152,6 +12159,8 @@ _SCRIPT_PRELUDE = (
     "        text = file.read()\n"
     "    if hashlib.sha256(text.encode('utf-8', 'surrogateescape')).hexdigest() != digest:\n"
     "        raise SystemExit(f'anton: {sys.argv[0]!r} did not run: it changed after the write check read it')\n"
+    "    if sys.path[:1] == ['']:\n"
+    "        sys.path[0] = os.path.dirname(os.path.realpath(sys.argv[0]))\n"
     "    return compile(text, sys.argv[0], 'exec')\n"
     "exec(_anton_run())\n"
 )

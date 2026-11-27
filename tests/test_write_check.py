@@ -4869,7 +4869,7 @@ def _prelude_run(*, checked: str, real_folder: str, cwd: Path, pythonpath: str =
 @pytest.mark.parametrize("where", ["run-folder", "pythonpath-folder"])
 def test_the_prelude_runs_the_checked_file_as_running_it_does(tmp_path, where):
     """`sys.argv` holds the path, `__main__` holds none of the prelude's own
-    names, and `sys.path[0]` stays the working folder, as `-c` gives it. A
+    names, and `sys.path[0]` is the script's own folder, as a file run gives it. A
     module named as one the prelude imports doesn't run, whether the run's
     folder or a folder `PYTHONPATH` names, ahead of Python's own, holds it."""
     held = tmp_path if where == "run-folder" else tmp_path / "src"
@@ -4883,6 +4883,46 @@ def test_the_prelude_runs_the_checked_file_as_running_it_does(tmp_path, where):
     assert (ran.returncode, ran.stderr) == (0, "")
     assert ran.stdout == "[] __main__\n['job.py'] True\n"
     assert not (tmp_path / "imported.txt").exists()
+
+
+def test_the_prelude_puts_the_scripts_own_folder_first_on_sys_path(tmp_path):
+    """A script saved in a subfolder and run from the project root imports a
+    module beside it, as a run of the file does: `sys.path[0]` is the
+    script's own real folder, not the working folder."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "helpers.py").write_text("NAME = 'beside'\n")
+    text = "import helpers, os, sys\nprint(helpers.NAME, os.path.basename(sys.path[0]))\n"
+    (tmp_path / "scripts" / "job.py").write_text(text)
+    import hashlib
+    import subprocess
+    import sys
+
+    from anton.core.utils import write_check
+
+    ran = subprocess.run(
+        [sys.executable, "-c", write_check._SCRIPT_PRELUDE, os.path.normcase(os.path.realpath(tmp_path)),
+         hashlib.sha256(text.encode()).hexdigest(), "scripts/job.py"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=60,
+    )
+    assert (ran.returncode, ran.stderr) == (0, "")
+    assert ran.stdout == "beside scripts\n"
+
+
+@pytest.mark.parametrize("sets_path", [
+    "os.environ |= dict(PATH='/tmp/x')",
+    "os.environ |= {'PA' + 'TH': '/tmp/x'}",
+    "import operator\noperator.setitem(os.environ, 'PA' + 'TH', '/tmp/x')",
+], ids=["or-assign-dict", "or-assign-joined-key", "setitem"])
+def test_a_bare_python_run_stays_unread_when_a_step_sets_path_in_a_way_the_text_doesnt_show(
+    tmp_path, monkeypatch, sets_path,
+):
+    """`python` names the program `PATH` picks, so a step that may have set
+    `PATH` keeps the run unread, however it spells the store."""
+    code = "import os\n" + sets_path + "\n" + _SAVED_SCRIPT.format(
+        body=_PRINTS, run="subprocess.run(['python', 'job.py'])")
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert writes.unchecked
+    assert writes.run_code is None or "-c" not in writes.run_code
 
 
 @pytest.mark.parametrize("why", ["folder-made-a-link", "text-changed"])
