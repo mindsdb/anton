@@ -235,6 +235,12 @@ _GATHERING_TEMPLATE = (
     "description of the page."
 )
 
+_WEB_FETCH_FOR_PAGES = "; web_fetch for pages)"
+if _WEB_FETCH_FOR_PAGES not in _GATHERING_TEMPLATE:
+    raise ValueError("the gathering template no longer names web_fetch where its variant expects it")
+# For a session that offers no web_fetch: pages are read in the scratchpad.
+_GATHERING_TEMPLATE_NO_WEB_FETCH = _GATHERING_TEMPLATE.replace(_WEB_FETCH_FOR_PAGES, "; pages too, read with code)")
+
 _WHEN_TO_ASK = (
     "- When the request leaves something open, either ask the user or write "
     "your choice as ONE line under `assumptions`. Ask only when the answer "
@@ -244,7 +250,9 @@ _WHEN_TO_ASK = (
 )
 
 
-def _gathering_instruction(act_first: bool, *, static_completion: bool = False, read_only: bool = False) -> str:
+def _gathering_instruction(
+    act_first: bool, *, static_completion: bool = False, read_only: bool = False, web_fetch: bool = True,
+) -> str:
     """The gathering step's instruction. `read_only` is true when write
     approval is on, so the write gate refuses a builder cell that would need
     the user's approval (`hold_unapproved_write`): the act-first text then
@@ -275,7 +283,8 @@ def _gathering_instruction(act_first: bool, *, static_completion: bool = False, 
             "requirements or ask for preferences the request does not need. For a backend that "
             "must query data at runtime, verify its access with a real sample and finish."
         )
-    return _GATHERING_TEMPLATE.format(
+    template = _GATHERING_TEMPLATE if web_fetch else _GATHERING_TEMPLATE_NO_WEB_FETCH
+    return template.format(
         when_to_ask=_WHEN_TO_ASK,
     )
 
@@ -317,6 +326,7 @@ def _redraw_suffix(act_first: bool) -> str:
 
 def _step_instructions(
     act_first: bool = False, *, static_completion: bool = False, read_only: bool = False,
+    web_fetch: bool = True,
 ) -> dict[str, str]:
     """Built lazily so the instruction texts stay in the modules that own
     them — brief.py and prd.py — rather than being copied here. `act_first`
@@ -329,7 +339,7 @@ def _step_instructions(
 
     return {
         sub_tools.STEP_GATHERING: _gathering_instruction(
-            act_first, static_completion=static_completion, read_only=read_only,
+            act_first, static_completion=static_completion, read_only=read_only, web_fetch=web_fetch,
         ),
         sub_tools.STEP_DRAFT_BRIEF: draft_brief_instruction(act_first),
         sub_tools.STEP_REDRAW_BRIEF: draft_brief_instruction(act_first) + _redraw_suffix(act_first),
@@ -365,6 +375,7 @@ def step_message(step: str, state: PrdState, *, extra: str = "") -> str:
         state.act_first, static_completion=static_gathering.enabled(state),
         # Write approval on: the write gate refuses a builder cell that would need a card.
         read_only=isinstance(getattr(state.session, "_write_gate", None), WriteGate),
+        web_fetch="web_fetch" in state.web_tools,
     )[step]
     # No history to continue → the step is handed the restored material
     # instead. The redraw suffix in particular refers to a correction that is

@@ -540,6 +540,7 @@ class GenState:
 
             self._pipeline_tools = pipeline_tool_schemas(
                 self.buildable_types, internet_research=self.internet_research,
+                web_tools=self.web_tools,
                 classify=self.classify,
             )
         return self._pipeline_tools
@@ -551,6 +552,18 @@ class GenState:
         public-data-sources catalog in this run. A session object without the
         attribute (a test double) keeps them."""
         return getattr(self.session, "_internet_research_enabled", True) is not False
+
+    @property
+    def web_tools(self) -> frozenset[str]:
+        """The web tools the session offers the agent: its native and fallback
+        sets, which already fold in the web tool flags and internet research.
+        A session object without them (a test double) offers both tools when
+        internet research is on."""
+        native = getattr(self.session, "_native_web_tools", None)
+        fallback = getattr(self.session, "_fallback_web_tools", None)
+        if isinstance(native, (set, frozenset)) and isinstance(fallback, (set, frozenset)):
+            return frozenset(native) | frozenset(fallback)
+        return frozenset({"web_search", "web_fetch"}) if self.internet_research else frozenset()
 
     @property
     def classify(self) -> bool:

@@ -770,3 +770,26 @@ async def test_a_refused_static_completion_does_not_ask_for_a_successful_exec(tm
     assert "Completion requires a successful exec" not in result
     assert state.gathering_complete and session._llm.code.call_count == 1
     assert state.unverified_sources == []
+
+
+async def test_a_web_call_is_refused_when_the_session_offers_no_web_tools(monkeypatch):
+    """cloud_turn: internet research on, no web tools for the agent."""
+    import anton.core.tools.web_tools as web_tools
+
+    fetch = AsyncMock(return_value="page body")
+    monkeypatch.setattr(web_tools, "handle_web_fetch_fallback", fetch)
+    session = _session_with_plan_sequence(
+        _response(tool_calls=[_tc("web_fetch", {"url": "https://example.com/a"})]),
+        _response(tool_calls=[_tc("finish_gathering", {
+            "artifact_type": "html-app", "notes": "n", "data_sources": [],
+        })]),
+    )
+    session._native_web_tools = set()
+    session._fallback_web_tools = set()
+    state = _state(session)
+
+    await engine.run_gathering_loop(state)
+
+    fetch.assert_not_awaited()
+    assert state.web_calls == []
+    assert any("Fetch pages and APIs with code in the scratchpad" in str(m.get("content")) for m in state.messages)

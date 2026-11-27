@@ -190,3 +190,40 @@ def test_the_unsupported_factory_warning_is_logged_once(monkeypatch, caplog):
                 coding_api_key="", coding_base_url="", internet_research_enabled=False,
             )
     assert sum("internet_research_enabled" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_the_gathering_loop_offers_only_the_web_tools_the_session_offers(tmp_path):
+    """cloud_turn offers the agent no web tools but keeps internet research on."""
+    state = _gen_state(tmp_path, _native_web_tools=set(), _fallback_web_tools=set())
+    tools = {tool["name"]: tool for tool in state.pipeline_tools}
+
+    assert state.web_tools == frozenset()
+    assert "web_search" not in tools and "web_fetch" not in tools
+    assert "web_search(query)" in tools["scratchpad"]["description"]
+
+
+def test_the_gathering_loop_keeps_the_web_tools_a_session_offers(tmp_path):
+    state = _gen_state(tmp_path, _native_web_tools={"web_fetch"}, _fallback_web_tools={"web_search"})
+    assert {"web_search", "web_fetch"} <= {tool["name"] for tool in state.pipeline_tools}
+
+
+async def test_a_real_session_with_web_fetch_off_gives_the_pipeline_no_web_fetch(tmp_path):
+    """The pipeline follows the host's web tool switches outside the cloud too."""
+    llm = make_mock_llm()
+    llm.planning_provider.native_web_tools.return_value = {"web_search", "web_fetch"}
+    session = ChatSession(ChatSessionConfig(llm_client=llm, web_fetch_enabled=False))
+    try:
+        state = GenState(session=session, artifact_type="html-app", artifact_path=tmp_path, slug="demo", brief="b")
+        assert state.web_tools == frozenset({"web_search"})
+        assert "web_fetch" not in {tool["name"] for tool in state.pipeline_tools}
+    finally:
+        await session.close()
+
+
+def test_the_gathering_instruction_names_web_fetch_only_when_it_is_offered():
+    from anton.core.tools.generate_artifact.discovery.prompts import _gathering_instruction
+
+    assert "web_fetch for pages" in _gathering_instruction(False)
+    without = _gathering_instruction(False, web_fetch=False)
+    assert "web_fetch for pages" not in without
+    assert "pages too, read with code" in without
