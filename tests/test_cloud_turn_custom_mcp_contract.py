@@ -24,8 +24,8 @@ from anton.cloud_turn.contract import (
 _LIMITS_FILE = Path(__file__).parent / "fixtures" / "custom_mcp_limits_v1.json"
 #: Copied byte for byte from auth's docs/contracts/custom-mcp-limits-v1.json at this commit.
 #: Copy again, and update both, when auth's file changes.
-_LIMITS_SOURCE = "8d77ac719604e4e0f89bb79a8209f2b583734b27"
-_LIMITS_SHA256 = "6eefefbe250fe1497b9321aaa7269027237f1fd7f9915fefc3e757c4d2c656d1"
+_LIMITS_SOURCE = "de38d4c7bbb6f3207cf2e2d7f3d5e220170298ed"
+_LIMITS_SHA256 = "d6b9a350eabfff881aa8b3d88dbcd9308848cc9a95be081d50457c2c74260298"
 _LIMITS = json.loads(_LIMITS_FILE.read_text(encoding="utf-8"))
 _SAMPLES = {sample["name"]: sample for sample in _LIMITS["samples"]}
 _USABLE = [name for name, sample in _SAMPLES.items() if sample["usable"]]

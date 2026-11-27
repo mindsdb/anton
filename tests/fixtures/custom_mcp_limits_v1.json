@@ -495,6 +495,12 @@
       "reason": null
     },
     {
+      "name": "mongolian_selector_then_joiner",
+      "text": "{\"description\":\"\u1820\u180d\u200d\u1820 \u1820\u180f\u200d\u1820\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mongolian_selector_then_joiner\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
       "name": "ideograph_variation_selector",
       "text": "{\"description\":\"\u845b\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_variation_selector\"}",
       "usable": true,
