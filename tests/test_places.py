@@ -148,6 +148,14 @@ def test_a_large_dataset_still_scopes_a_town_to_its_region():
     assert "London" not in found
 
 
+def test_ids_in_region_rows_do_not_crowd_out_a_late_town():
+    rows = [{"order": f"order-{i:05d}", "city": "Toronto", "state": "Ontario"}
+            for i in range(places.MAX_STRINGS + 50)]
+    found = places.index([*rows, {"order": "last", "city": "London", "state": "Ontario"}])
+    assert found["London, Ontario"]["country"] == "Canada"
+    assert "London" not in found
+
+
 def test_index_resolves_each_code_pair_once(monkeypatch):
     calls = []
     real = places.resolve

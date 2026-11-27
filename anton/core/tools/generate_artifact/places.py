@@ -131,7 +131,7 @@ def index(data):
     of "APAC" is not a town. A record that also names a country or region adds "<value>,
     <region>" ("London, Ontario"), and then the bare value no longer resolves elsewhere
     ("London" alone would be the English city)."""
-    _, regions, region_codes, _ = _index()
+    _, regions, region_codes, names = _index()
     keys, scoped, values_seen = {}, {}, set()
     made_keys: set[str] = set()
     lookups: dict[str, object] = {}
@@ -192,6 +192,8 @@ def index(data):
                 if text == qualifier or "," in text:
                     continue
                 if in_regions:
+                    if normalized(text) not in names:
+                        continue  # ids, dates and products never spend the made-name cap
                     made_name = f"{text}, {qualifier}"
                     add(made_name, k, made=True)
                     scoped.setdefault(text, set()).add(made_name)
