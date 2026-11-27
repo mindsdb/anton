@@ -508,7 +508,13 @@
     },
     {
       "name": "ordinary_text",
-      "text": "{\"description\":\"\u201cQuoted\u201d \u2018text\u2019 \u2013 dash \u2014 ellipsis\u2026 no\u00a0break ~\u00a1\u00ac\u00ae\u034e\u0350\u061b\u061d\u115e\u1161\u17b3\u17b6\u180a\u1810\u200a\u2010\u2027\u202f\u205f\u2070\u3163\u3165\ufdfd\ufe10\ufefc\uff9f\ufffc\ud80d\udc2f\ud80d\udc40\ud82f\udc9f\ud834\udd72\ud834\udd7b\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ordinary_text\"}",
+      "text": "{\"description\":\"\u201cQuoted\u201d \u2018text\u2019 \u2013 dash \u2014 ellipsis\u2026 no\u00a0break ~\u00a1\u061b\u061d\u17b3\u17b6\u200a\u2010\u2027\u202f\u205f\u2070\u3163\u3165\ufefc\uff9f\uffa1\ufffc\ud80d\udc2f\ud80d\udc40\ud82f\udc9f\ud834\udd72\ud834\udd7b\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ordinary_text\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_neighbours",
+      "text": "{\"description\":\"a\u200d\u00ac a\u200d\u00ae a\u200d\u034e a\u200d\u0350 a\u200d\u115e a\u200d\u1161 a\u200d\u180a a\u200d\u1810 a\u200d\ufdff a\u200d\ufe10\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_neighbours\"}",
       "usable": true,
       "reason": null
     },
