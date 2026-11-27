@@ -174,11 +174,12 @@ VISUAL DESIGN (for every HTML file you produce):
   to that policy so the page renders on every deployment: no external
   stylesheet or web font, no external image or map tile (embed an image as a
   `data:` URI), no `eval` or `new Function`, and no web workers.
-- NETWORK: the page makes requests only to its own address and to
+- NETWORK: apart from the calls another rule of this prompt allows, the page
+  makes requests only to
   `https://cdn.jsdelivr.net/npm/<package>@<exact version>/...`. Load a data
-  file from there with `d3.json(...)` or `fetch(...)`. Requests to any other
-  host fail once the page is published, and in some previews, so the data
-  you gathered is embedded in the page.
+  file from there with `d3.json(...)`, or `fetch(...)` followed by `.json()`.
+  Requests to any other host fail once the page is published, and in some
+  previews, so the data you gathered is embedded in the page.
 - Chart type by purpose: line for change over time, bar for comparing
   categories (horizontal when labels are long), stacked bar for composition
   across categories, scatter for the relation between two measures. Pie or
@@ -1685,7 +1686,7 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
   locally and as an AWS Lambda.
 - All API endpoints live under the `/api/*` prefix.
 - The launcher assigns the port at run time: never mention a port number or
-  an absolute URL anywhere in the spec.
+  the backend's address anywhere in the spec.
 - Frontend: one self-contained HTML file (`static/index.html` for fullstack
   types) — vanilla JavaScript, Tailwind CSS via CDN for styling (hand-written
   CSS where needed), Apache ECharts for charts. For Earth geography, use

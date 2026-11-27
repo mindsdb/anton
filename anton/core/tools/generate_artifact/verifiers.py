@@ -45,24 +45,36 @@ _API_METHODS = ("get", "post", "put", "patch", "delete")
 _HEALTH_PATH = "/api/health"
 
 
-# Rule 4's one exception: a data file of an npm package on jsDelivr, such as a
-# map atlas. The artifact hosts allow this host in connect-src. A URL passed
-# through api() is not one: api() prefixes the backend's base and breaks it.
+# Rule 4's one exception: a data file of an npm package on jsDelivr, pinned to
+# an exact version, such as a map atlas. The artifact hosts allow this host in
+# connect-src. A URL passed through api() is not one: api() prefixes the
+# backend's base and breaks it.
 _JSDELIVR_DATA_HOST = "https://cdn.jsdelivr.net"
 _JSDELIVR_DATA_PATH = "/npm/"
-_ABSOLUTE_FETCH = re.compile(r"""fetch\s*\(\s*(api\s*\(\s*)?['"]?(https?://[^'"\s)]*)""", re.I)
+_JSDELIVR_PINNED_HINT = f"{_JSDELIVR_DATA_HOST}{_JSDELIVR_DATA_PATH}<package>@<exact version>/..."
+# Each segment after the version must not start with `.`: that rejects `.` and
+# `..`, which a CDN would resolve out of the pinned package.
+_JSDELIVR_PINNED_PATH = re.compile(
+    r"/npm/(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*@[0-9]+\.[0-9]+\.[0-9]+"
+    r"(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)+"
+)
+_ABSOLUTE_FETCH = re.compile(
+    r"""(?<![\w$.])(?:(?:window|self|globalThis)\.)?fetch\s*\(\s*(api\s*\(\s*)?['"]?(https?://[^'"\s)]*)""",
+    re.I,
+)
 
 
 def _fetch_allowed_absolute(via_api: bool, url: str) -> bool:
-    """Whether an absolute `fetch()` target is a jsDelivr npm file called
-    directly. Scheme and host compare case-insensitively and the path as
-    written, so `https://cdn.jsdelivr.net.evil.com/npm/` and `/gh/` fail."""
+    """Whether an absolute `fetch()` target is a file of an exact-version npm
+    package on jsDelivr, called directly. Scheme and host compare
+    case-insensitively and the path as written, so
+    `https://cdn.jsdelivr.net.evil.com/npm/`, `/gh/`, a version range or tag,
+    and a path with a `.`/`..` segment or an encoded dot all fail."""
     host_len = len(_JSDELIVR_DATA_HOST)
-    return (
-        not via_api
-        and url[:host_len].lower() == _JSDELIVR_DATA_HOST
-        and url[host_len:].startswith(_JSDELIVR_DATA_PATH)
-    )
+    if via_api or url[:host_len].lower() != _JSDELIVR_DATA_HOST:
+        return False
+    path = re.split(r"[?#]", url[host_len:], maxsplit=1)[0]
+    return "%2e" not in path.lower() and _JSDELIVR_PINNED_PATH.fullmatch(path) is not None
 
 
 def normalise_api_path(path: str) -> str:
@@ -464,7 +476,7 @@ def verify_frontend(
     #    A check that a correct artifact fails and an incorrect one passes is
     #    worse than no check.
     #
-    #    A data file from jsDelivr (`https://cdn.jsdelivr.net/npm/...`) is the
+    #    A data file of an exact-version npm package on jsDelivr is the
     #    one absolute URL allowed: the artifact hosts let a page reach it.
     for m in _ABSOLUTE_FETCH.finditer(html):
         if _fetch_allowed_absolute(bool(m.group(1)), m.group(2)):
@@ -472,12 +484,12 @@ def verify_frontend(
         if is_fullstack:
             hint = (
                 f"Call the backend through api(); a data file may come only from "
-                f"{_JSDELIVR_DATA_HOST}{_JSDELIVR_DATA_PATH}."
+                f"{_JSDELIVR_PINNED_HINT}."
             )
         else:
             hint = (
                 f"A data file may come only from "
-                f"{_JSDELIVR_DATA_HOST}{_JSDELIVR_DATA_PATH}; embed other data in the page."
+                f"{_JSDELIVR_PINNED_HINT}; embed other data in the page."
             )
         errors.append(
             f"Absolute URL is not allowed in fetch(): ...{html[m.start():m.start()+60]!r}. "

@@ -166,7 +166,7 @@ def test_the_generator_prompts_and_the_skill_state_one_network_rule():
     for prompt in _GENERATOR_PROMPTS:
         flat = " ".join(prompt.split())
         assert _NETWORK_RULE in flat
-        assert "with `d3.json(...)` or `fetch(...)`" in flat
+        assert "with `d3.json(...)`, or `fetch(...)` followed by `.json()`" in flat
         assert "No absolute URL in any `fetch()` call except a data file from `https://cdn.jsdelivr.net/npm/`" in flat
         assert "relative paths only" not in flat
     skill = " ".join(_skill().split())
@@ -179,8 +179,8 @@ def test_the_generator_prompts_and_the_skill_state_one_network_rule():
 
 def test_the_map_recipe_passes_the_static_check_it_is_written_for():
     """The recipe's own lines, put into a page, pass `verify_frontend`; the
-    same atlas loaded with `fetch()` passes too, and a `fetch()` of any other
-    host fails."""
+    same atlas loaded with `fetch(...).then(r => r.json())` is a working page and
+    passes too, and a `fetch()` of any other host fails."""
     rules = prompts._DESIGN_RULES
     bullet = rules[rules.index("- MAPS AND GLOBES"):rules.index("- d3 into an")]
     code = re.findall(r"^\s*`(.+)`$", bullet, re.M)
@@ -197,8 +197,10 @@ def test_the_map_recipe_passes_the_static_check_it_is_written_for():
     )
     result = verifiers.verify_frontend(page, is_fullstack=False)
     assert (result.errors, result.warnings) == ([], [])
-    fetched = page.replace("d3.json(WORLD_ATLAS)",
-                           "fetch('https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json')")
+    fetched = page.replace(
+        "d3.json(WORLD_ATLAS)",
+        "fetch('https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json').then(r => r.json())",
+    )
     assert not verifiers.verify_frontend(fetched, is_fullstack=False).errors
     elsewhere = page.replace("d3.json(WORLD_ATLAS)", "fetch('https://example.com/countries-110m.json')")
     assert verifiers.verify_frontend(elsewhere, is_fullstack=False).errors

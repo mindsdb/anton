@@ -702,6 +702,8 @@ def _absolute_fetch_errors(html: str, **kwargs) -> list[str]:
     f"fetch('{_JSDELIVR_FILE}')",
     f'fetch("{_JSDELIVR_FILE}")',
     "fetch('HTTPS://CDN.JSDELIVR.NET/npm/us-atlas@3.0.1/states-10m.json')",
+    "fetch('https://cdn.jsdelivr.net/npm/@scope/pkg@1.2.3/data.json')",
+    "fetch('https://cdn.jsdelivr.net/npm/us-atlas@3.0.1/states-10m.json?x=1#y')",
 ])
 def test_a_jsdelivr_data_file_may_be_fetched(call):
     html = GOOD.replace("fetch(api('/api/items'))", call)
@@ -714,12 +716,36 @@ def test_a_jsdelivr_data_file_may_be_fetched(call):
     "fetch('https://cdn.jsdelivr.net.evil.com/npm/us-atlas@3.0.1/states-10m.json')",
     "fetch(api('https://cdn.jsdelivr.net/npm/us-atlas@3.0.1/states-10m.json'))",
     "fetch('https://example.com/data.json')",
+    "fetch('https://cdn.jsdelivr.net/npm/world-atlas/countries-110m.json')",
+    "fetch('https://cdn.jsdelivr.net/npm/world-atlas@latest/countries-110m.json')",
+    "fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json')",
+    "fetch('https://cdn.jsdelivr.net/npm/world-atlas@^2.0.2/countries-110m.json')",
+    "fetch('https://cdn.jsdelivr.net/npm/../gh/someone/repo@main/data.json')",
+    "fetch('https://cdn.jsdelivr.net/npm/us-atlas@3.0.1/../x.json')",
+    "fetch('https://cdn.jsdelivr.net/npm/%2e%2e/gh/someone/repo@main/data.json')",
+    "fetch('https://cdn.jsdelivr.net/npm/us-atlas@3.0.1/%2E%2E/x.json')",
 ])
 def test_any_other_absolute_fetch_is_still_an_error(call):
     html = GOOD.replace("fetch(api('/api/items'))", call)
     [err] = _absolute_fetch_errors(html)
     assert "https://cdn.jsdelivr.net/npm/" in err
+    assert "exact version" in err
     assert "api()" not in err
+
+
+@pytest.mark.parametrize("call", [
+    "cache.fetch('https://example.com/x')",
+    "prefetch('https://example.com/x')",
+    "myfetch('https://example.com/x')",
+])
+def test_rule_4_ignores_other_functions_named_like_fetch(call):
+    html = GOOD.replace("fetch(api('/api/items'))", call)
+    assert _absolute_fetch_errors(html) == []
+
+
+def test_rule_4_still_sees_window_fetch():
+    html = GOOD.replace("fetch(api('/api/items'))", "window.fetch('https://example.com/x')")
+    assert len(_absolute_fetch_errors(html)) == 1
 
 
 def test_fullstack_absolute_fetch_error_points_at_api():
