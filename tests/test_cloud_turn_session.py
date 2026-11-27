@@ -1841,7 +1841,7 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
         "generate_image",
         # Takes an artifact slug and reads two page files: no credential field.
         "inspect_artifact",
-        # The pipeline and the editor write only into an artifact folder.
+        # Take an artifact slug or name and free-text request fields: no field a credential is asked for.
         "generate_artifact",
         "edit_artifact",
     }

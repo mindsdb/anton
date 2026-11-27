@@ -1,9 +1,11 @@
 """Sub-tools exposed to the pipeline's shared-prefix region (phases A-D).
 
-Four tools are always offered: `scratchpad`, `web_search`, `web_fetch` (thin
+Four tools are offered: `scratchpad`, `web_search`, `web_fetch` (thin
 schema copies of the existing top-level tools — dispatch reuses their real
 handlers, see engine.py) and `finish_gathering` (the control tool the model
 calls once the artifact type is clear and enough data has been gathered).
+The web tools are offered only where the session offers them (internet
+research on and the session's web tools).
 
 `ask_user` is offered conditionally (see `tool_schemas`'s `include_ask_user`)
 and, unlike every other sub-tool here, is NOT dispatched through the existing

@@ -20,8 +20,8 @@ from anton.core.artifacts import ArtifactStore
 from anton.core.artifacts.models import DatasourceRef
 from anton.core.llm.client import LLMClient
 from anton.core.llm.provider import LLMProvider, LLMResponse, StreamComplete, Usage
-from anton.core.tools.progress import ToolProgress
 from anton.core.tools import tool_handlers as th
+from anton.core.tools.progress import ToolProgress
 from anton.core.tools.tool_handlers import handle_generate_artifact
 from tests.streaming_llm import StreamingLLM
 
@@ -1404,6 +1404,9 @@ async def _published_instruction(tmp_path: Path, monkeypatch, *, datasources=(),
 def test_every_generated_instruction_carries_the_url_sentence_the_variant_replaces():
     for key in ("generated", "generated_unverified", "generated_live_app"):
         assert th._URL_REPORTING in th._STATUS_INSTRUCTIONS[key], key
+    # generated_live_app tells the agent to give the live address, so it has no variant.
+    assert set(th._STATUS_INSTRUCTIONS_PUBLISHED_APPS) == {"generated", "generated_unverified"}
+    for key in th._STATUS_INSTRUCTIONS_PUBLISHED_APPS:
         assert th._URL_REPORTING not in th._STATUS_INSTRUCTIONS_PUBLISHED_APPS[key], key
         assert th._PUBLISHED_APP_REPORTING in th._STATUS_INSTRUCTIONS_PUBLISHED_APPS[key], key
 

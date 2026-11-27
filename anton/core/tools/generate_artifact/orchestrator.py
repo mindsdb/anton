@@ -1425,9 +1425,8 @@ async def _run_and_verify_app(state: GenState) -> "str | object | None":
             port = launch["port"]
             state.app_port = port
             state.app_url = launch.get("url") or f"http://127.0.0.1:{port}"
-            from anton.core.tools.tool_handlers import resolve_artifact_store
-
             from anton.core.artifacts.backend_launcher import app_backends_reachable
+            from anton.core.tools.tool_handlers import resolve_artifact_store
 
             reachable = app_backends_reachable(state.session)
             store = resolve_artifact_store(state.session)

@@ -2195,6 +2195,7 @@ _STATUS_INSTRUCTIONS = {
     ),
 }
 
+
 def _published_apps_variant(text: str) -> str:
     if _URL_REPORTING not in text:
         raise ValueError("a generated instruction lost the entry-point sentence the published variant replaces")
@@ -2203,7 +2204,7 @@ def _published_apps_variant(text: str) -> str:
 
 _STATUS_INSTRUCTIONS_PUBLISHED_APPS = {
     key: _published_apps_variant(_STATUS_INSTRUCTIONS[key])
-    for key in ("generated", "generated_unverified", "generated_live_app")
+    for key in ("generated", "generated_unverified")
 }
 
 
@@ -2218,7 +2219,6 @@ def _published_app_facts(store, slug: str) -> tuple[bool, bool]:
         return False, False
     fullstack = str(getattr(artifact, "type", "")) in ("fullstack-stateless-app", "fullstack-stateful-app")
     return fullstack, fullstack and bool(getattr(artifact, "datasources", None))
-
 
 
 async def handle_generate_artifact(session: "ChatSession", tc_input: dict):

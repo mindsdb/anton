@@ -52,6 +52,7 @@ def app_backends_reachable(session) -> bool:
     the attribute (a test double) counts as reachable."""
     return getattr(session, "_app_backends_reachable", True) is not False
 
+
 # What this launcher answers on a sandboxed deployment with live apps on.
 SLOT_ONLY_MESSAGE = (
     "Error: on this deployment a live app runs only in an app slot, started by "

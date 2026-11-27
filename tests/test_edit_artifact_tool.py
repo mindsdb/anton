@@ -247,17 +247,23 @@ def _fullstack_artifact(tmp_path):
     return store, artifact.slug
 
 
-async def _never_asked(slug, timeout_s):
-    raise AssertionError("the published preview shows the old version and must not be asked")
+def _recording_preview(asked):
+    async def preview(slug, timeout_s):
+        asked.append(slug)
+        return {"status": "passed", "errors": [], "ms": 5}
+
+    return preview
 
 
 async def test_a_published_only_fullstack_edit_skips_the_preview_and_says_when_it_shows(tmp_path):
     store, slug = _fullstack_artifact(tmp_path)
+    asked = []
     session = _session(tmp_path, ScriptedLLM([reply(diff(FULLSTACK_COLOR_PATCH, note="Heading is navy."))]),
-                       _app_backends_reachable=False, _preview_checker=_never_asked)
+                       _app_backends_reachable=False, _preview_checker=_recording_preview(asked))
 
     _, outcome = await _drive(session, {"slug": slug, "task": "make the heading navy"})
 
+    assert asked == []
     assert isinstance(outcome, ToolOutcome) and outcome.ok is True
     assert "The app's preview shows its published version" in outcome.content
     # Neither the result line nor the internal check line may promise a reloading viewer.
@@ -269,11 +275,13 @@ async def test_a_published_only_fullstack_edit_skips_the_preview_and_says_when_i
 async def test_a_published_only_fullstack_edit_with_connections_mentions_the_approval(tmp_path):
     store, slug = _fullstack_artifact(tmp_path)
     store.update(slug, datasources=[DatasourceRef(engine="postgres", name="sales")])
+    asked = []
     session = _session(tmp_path, ScriptedLLM([reply(diff(FULLSTACK_COLOR_PATCH))]),
-                       _app_backends_reachable=False, _preview_checker=_never_asked)
+                       _app_backends_reachable=False, _preview_checker=_recording_preview(asked))
 
     _, outcome = await _drive(session, {"slug": slug, "task": "make the heading navy"})
 
+    assert asked == []
     assert "This app uses saved connections." in outcome.content
 
 
