@@ -4248,7 +4248,7 @@ def test_a_long_alias_chain_of_a_routine_is_read_in_well_under_a_second(snap):
     earlier = ORA + "a0 = cur.callfunc\n" + "".join(f"a{i} = a{i - 1}\n" for i in range(1, 6000))
     started = time.perf_counter()
     assert not _held("print(len([1, 2]))", snap, earlier=(earlier,))
-    assert time.perf_counter() - started < 5
+    assert time.perf_counter() - started < 1
     assert _held("a5999('purge_suppliers', int, [1])", snap, earlier=(earlier,))
 
 
