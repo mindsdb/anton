@@ -9,6 +9,7 @@ import logging
 import os
 import hashlib
 import re
+import secrets
 import shutil
 import sys
 import tempfile
@@ -29,6 +30,7 @@ from anton.core.backends.sandbox import (
 from anton.core.backends.wire import (
     CELL_DELIM,
     CELL_IMAGES_MARKER,
+    CELL_TOKEN_MARKER,
     CELL_TRACE_MARKER,
     ARTIFACTS_ROOT_ENV,
     HEARTBEAT_MARKER,
@@ -42,12 +44,11 @@ from anton.core.backends.wire import (
     truncation_note,
     NOTHING_KEPT,
     PROGRESS_MARKER,
-    RESULT_END,
-    RESULT_START,
     STDOUT_CHUNK_MARKER,
     STDOUT_SCRUB_MARGIN,
     USAGE_MARKER,
     USAGE_MARKER_ENV,
+    result_markers,
 )
 from anton.core.llm.images import current_turn_images
 from anton.core.llm.provider import (
@@ -1673,6 +1674,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             if allowed == 0 and images.spend_limited():
                 line["spend_limit"] = True
             payload = f"{CELL_IMAGES_MARKER} {json.dumps(line)}\n" + payload
+        # A child process the cell starts shares the pad's stdout, so only the
+        # result block under this cell's own token is its result (`CELL_TOKEN_MARKER`).
+        token = secrets.token_hex(16)
+        payload = f"{CELL_TOKEN_MARKER} {token}\n" + payload
         try:
             self._proc.stdin.write(_encode_cell_payload(payload))  # type: ignore[union-attr]
             self._running_code = code
@@ -1701,6 +1706,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         try:
             result_data: dict | None = None
             async for item in self._read_result(
+                token=token,
                 total_timeout=total_timeout,
                 inactivity_timeout=inactivity_timeout,
             ):
@@ -1858,11 +1864,17 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
     async def _read_result(
         self,
         *,
+        token: str,
         total_timeout: float | None = None,
         inactivity_timeout: float | None = None,
     ):
-        """Read stdout until result delimiters; yield progress strings then dict."""
+        """Read stdout until the result block under the cell's `token`; yield
+        progress strings then dict. A result block under another token or
+        none, which a child process the cell started printed, or which the
+        pad wrote for an earlier cell, is not this cell's result."""
         import time as _time
+
+        result_start, result_end = result_markers(token)
 
         s = CoreSettings()
         if total_timeout is None:
@@ -2076,10 +2088,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     installing = None
                 continue
 
-            if line == RESULT_START:
+            if line == result_start:
                 in_result = True
                 continue
-            if line == RESULT_END:
+            if line == result_end:
                 break
             if in_result:
                 lines.append(line)

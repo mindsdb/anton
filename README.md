@@ -305,9 +305,22 @@ A request with no `skills` block at all stages no skills, with one rollout fallb
 
 The write check asks the person to approve a cell before it changes a database, a listed endpoint or an existing file. A card on a cell that writes nothing costs a click, or an unattended answer the whole card timeout, so the check is measured both ways: what it catches and what it asks about for no reason.
 
-A cell that runs code the check can't read gets the "This step can't be checked" card. One exception is a script the cell binds to a literal, saves, and runs in the same cell, as an agent asked to "write and run a script" does. On a local pad, the pad runs the cell with the script's text in place of the file: Python gets `-c` and the text, and `exec()` gets the text in place of the name or the read (`CellWrites.run_code`). So the check reads that text, and a script that writes nothing gets no card. A script that writes gets that write's card, which names the script and quotes the line. The script stays unread when another cell wrote it, when the project held it, or when an earlier cell ran code the check couldn't read, rebound what runs it or changed `PATH`. It also stays unread when the run passes `env=`, a shell or more words, or a `cwd=` folder reached through a link, and when the script uses multiprocessing, changes folder or reads `__file__`, which the pad doesn't set. A cell the check can't read whole runs as written, on the Approve that showed its code.
+A cell that runs code the check can't read gets the "This step can't be checked" card. A script the step saves or binds from a literal and runs is the exception. The check reads its text, and a local pad runs only that text (`CellWrites.run_code`). Python runs the file through a prelude, which stops the run unless the file holds that text in the folder the check read. Unlike a file run, `__file__` and `__cached__` are unset, `__loader__` is `BuiltinImporter`, a traceback starts with a `<string>` frame, and `sys.path[0]` is the working folder. So a script that writes nothing gets no card.
 
-`scripts/write_check_replay.py` replays `tests/fixtures/write_check_replay_corpus.yaml` through one anton tree's write check, cell by cell with each chat's earlier cells. The corpus holds about 100 synthetic analysis chats. They mix pandas, SQL reads, helper modules, restarts between turns, page builds and real writes, and each cell is labeled by hand. Each must-hold cell is paired with must-stay-free cells that share its `pair` id. The replay prints cards per 100 cells and per 100 questions by kind, real writes carded, cards on cells that write nothing, each pair's result, and the causes the cards name. It takes a few seconds:
+The step stays unchecked when:
+
+- the text isn't one literal the step saved or bound before the run;
+- an earlier step ran unread code, or a script as written;
+- a cell rebinds what the run calls, such as `subprocess.run`, `sys` or `exec`, or sets `PATH` for a bare `python`;
+- the run passes more words, `env=` or `shell=`;
+- the path lies in a temp folder or is picked at run time, or it or `cwd=` is a link;
+- the step runs or reads a saved file, and a cell calls `os.chdir` or sets a start-up setting such as `PYTHONPATH`;
+- the script defines a class, writes a path the check can't place, or names `chdir` or `multiprocessing`;
+- `exec()` gets a namespace other than `globals()` or a dict literal with string keys.
+
+Other routes, such as `sys.settrace`, still free a script, as under `python -c`. Under `write_approval_unchecked: all`, an unchecked step runs as written on Approve.
+
+`scripts/write_check_replay.py` replays `tests/fixtures/write_check_replay_corpus.yaml` through one anton tree's write check, cell by cell with each chat's earlier cells. The corpus holds about 130 synthetic analysis chats. They mix pandas, SQL reads, helper modules, restarts between turns, page builds and real writes, and each cell is labeled by hand. Each must-hold cell is paired with must-stay-free cells that share its `pair` id. The replay prints cards per 100 cells and per 100 questions by kind, real writes carded, cards on cells that write nothing, each pair's result, and the causes the cards name. It takes a few seconds:
 
 ```bash
 uv run python -I scripts/write_check_replay.py                         # this tree

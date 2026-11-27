@@ -518,6 +518,24 @@ def _state_text(held: HeldRequest) -> str:
     return "It expired before it was sent. Nothing was sent."
 
 
+# What the refusal tells the model to tell the user, as `scratchpad._NEXT`
+# says it for a step. anton cancels a request no one approved
+# (`_drop_unapproved`). So after a card no one answered in time, this one or
+# an earlier one in the turn, the user asks again when they can answer one.
+_ASK_AGAIN = (
+    "Tell the user what the request would change, that no one approved it in time so it wasn't sent, and "
+    "that they can ask again when they can answer the approval card."
+)
+_NEEDS_APPROVAL = "Tell the user what the request would change and that it needs their approval."
+_NEXT: dict[RefusalCause, str] = {
+    "cancelled": _NEEDS_APPROVAL,
+    "timeout": _ASK_AGAIN,
+    "unavailable": _NEEDS_APPROVAL,
+    "error": _NEEDS_APPROVAL,
+    "unanswered_earlier": _ASK_AGAIN,
+}
+
+
 def _refusal(held: HeldRequest, cause: RefusalCause) -> ToolOutcome:
     """The cell gate's refusal (`scratchpad._refusal`), for a held request.
     reason=write_not_approved, so the turn's report lists the step as one
@@ -527,8 +545,7 @@ def _refusal(held: HeldRequest, cause: RefusalCause) -> ToolOutcome:
             f"Not sent: the {_request(held)} needs the user's approval, and "
             f"{refusal_why(cause)}. Nothing was sent. The user didn't approve this change, so it must not be "
             "made another way: don't send the request again, rewrite the cell, build the URL at run time, or "
-            "use another tool for it. Tell the user what the request would change and that it needs their "
-            "approval."
+            f"use another tool for it. {_NEXT[cause]}"
         ),
         ok=True,
         reason="write_not_approved",

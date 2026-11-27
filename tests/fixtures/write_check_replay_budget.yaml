@@ -76,6 +76,7 @@ real_writes_carded:
   - V2.0  # V2 big sql on postgres same cell relative
   - V3.0  # V3 big sql 900KB
   - V4.1  # V4 big text posted to listed host
+  - R13.1  # R13 exec with a params dict that posts to the listed host
 
 real_writes_carded_only_unchecked:
   - C05.6  # C05 exec open gateway skill
@@ -93,6 +94,15 @@ real_writes_carded_only_unchecked:
   - X1.1  # X1 unread builder save over a project file
   - R04.0  # R04 scripts nested or run after a rebinding
   - R04.2  # R04 scripts nested or run after a rebinding
+  - R06.0  # R06 class-based script that writes through self
+  - R07.0  # R07 class-based script that posts through a session on self
+  - R09.0  # R09 subfolder script that writes through sys.path[0]
+  - R11.0  # R11 subfolder script that writes through sys.argv[0]
+  - R14.1  # R14 exec with a params dict that overwrites its source
+  - R16.1  # R16 script built with += after an unchecked command, then cleanup()
+  - R19.0  # R19 script built with += saved and run
+  - R21.0  # R21 script in a period folder from the config that writes
+  - R23.0  # R23 shell script that deletes, run with bash
 
 real_writes_missed:
   - E04.3  # E04 large seed sql file
@@ -226,6 +236,11 @@ no_write_carded:
   - T15.2  # T15 restart free re-derives the path
   - T18.1  # T18 plotly html export and to_sql through helper
   - R04.1  # R04 scripts nested or run after a rebinding: the delete in the lambda it binds
+  - R05.0  # R05 class-based script that only prints: a script that defines a class stays unread
+  - R17.1  # R17 script built with += after an unchecked command, then report(): calls what an unchecked step's exec defined
+  - R18.0  # R18 script built with += saved and execed, then report(): a script built with += stays unread
+  - R18.1  # R18 script built with += saved and execed, then report(): calls what that unread script defined
+  - R22.0  # R22 shell script that only prints, run with bash: a shell script file stays unread
 
 broken_pairs:
   - c2-exec
@@ -233,3 +248,6 @@ broken_pairs:
   - c5-ddl
   - c7-restart
   - c8-big
+  - r05-class
+  - r16-augassign
+  - r22-bash

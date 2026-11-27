@@ -12,6 +12,7 @@ from anton.core.backends.wire import (
     CELL_DELIM,
     CELL_FILENAME,
     CELL_IMAGES_MARKER,
+    CELL_TOKEN_MARKER,
     CELL_TRACE_MARKER,
     CLASSIFY_ENV,
     ARTIFACTS_ROOT_ENV,
@@ -20,12 +21,11 @@ from anton.core.backends.wire import (
     IMAGE_MODEL_ENV,
     INTERNET_RESEARCH_ENV,
     MISSING_MODULE_HINT,
-    RESULT_START,
-    RESULT_END,
     USAGE_MARKER,
     USAGE_MARKER_ENV,
     cell_stopped_at,
     heal_surrogate_source,
+    result_markers,
 )
 
 
@@ -1713,7 +1713,15 @@ if _cloud_turn and os.environ.get("ANTON_CLOUD_CUSTOM_API_CONNECTIONS"):
 
 # Read-execute loop
 _real_stdout = sys.stdout
-_real_stdin = sys.stdin
+# Cells arrive on a copy of the host's pipe that no child process inherits
+# (`os.dup`), read as `sys.stdin` reads, and fd 0 reads nothing from here
+# on. A program a cell starts inherits fd 0, so it can't read a later
+# cell, with that cell's result token (`CELL_TOKEN_MARKER`), before the pad.
+_real_stdin = open(os.dup(sys.stdin.fileno()), encoding=sys.stdin.encoding, errors=sys.stdin.errors,
+                   newline=None if sys.platform == "win32" else "\n")
+_devnull_fd = os.open(os.devnull, os.O_RDONLY)
+os.dup2(_devnull_fd, sys.stdin.fileno())
+os.close(_devnull_fd)
 
 import threading
 
@@ -1781,6 +1789,17 @@ def progress(message=""):
 
 
 _inject_helper("progress", progress)
+
+
+def _send_result(result: dict, token: str | None) -> None:
+    """Write a cell's result block to the host, under the token the host
+    sent with the cell (`wire.result_markers`)."""
+    start, end = result_markers(token)
+    with _wire_lock:
+        _real_stdout.write(start + "\n")
+        _real_stdout.write(json.dumps(result) + "\n")
+        _real_stdout.write(end + "\n")
+        _real_stdout.flush()
 
 
 def sample(var, mode="preview", _name=None):
@@ -2070,6 +2089,14 @@ while True:
     if eof:
         break
 
+    _cell_token = None
+    if lines and lines[0].startswith(CELL_TOKEN_MARKER + " "):
+        _token = lines[0][len(CELL_TOKEN_MARKER) + 1:].strip()
+        # Hex, as the host makes it, so a cell line like `__ANTON_CELL_TOKEN__ = 1` stays code.
+        if _token and all(c in "0123456789abcdef" for c in _token):
+            _cell_token = _token
+            lines.pop(0)
+
     _cell_image_allowance = None
     _cell_spend_limit = False
     if lines and lines[0].startswith(CELL_IMAGES_MARKER + " {"):
@@ -2095,12 +2122,7 @@ while True:
     # "surrogates not allowed" (ENG-981).
     code = heal_surrogate_source(code)
     if not code.strip():
-        result = {"stdout": "", "stderr": "", "logs": "", "error": None}
-        with _wire_lock:
-            _real_stdout.write(RESULT_START + "\n")
-            _real_stdout.write(json.dumps(result) + "\n")
-            _real_stdout.write(RESULT_END + "\n")
-            _real_stdout.flush()
+        _send_result({"stdout": "", "stderr": "", "logs": "", "error": None}, _cell_token)
         continue
 
     # Liveness heartbeat: a daemon thread pings the real pipe while this cell
@@ -2238,8 +2260,4 @@ while True:
         result["stdout_head"] = stdout_full[: MAX_OUTPUT + STDOUT_SCRUB_MARGIN]
         result["stdout_total"] = len(stdout_full)
         result["cwd_note"] = cwd_note
-    with _wire_lock:
-        _real_stdout.write(RESULT_START + "\n")
-        _real_stdout.write(json.dumps(result) + "\n")
-        _real_stdout.write(RESULT_END + "\n")
-        _real_stdout.flush()
+    _send_result(result, _cell_token)

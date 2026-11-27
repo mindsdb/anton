@@ -1524,6 +1524,29 @@ def test_a_concatenation_is_read_once(snap, monkeypatch):
     assert calls < 2 * terms
 
 
+@pytest.mark.parametrize("run", ["exec(compile(script, 'job.py', 'exec'))", "exec(script)"])
+def test_a_long_sum_in_a_script_exec_runs_is_not_walked_up_from_each_part(run, snap, monkeypatch):
+    """The check looks for a binding of the exec and compile the run calls
+    (`_Reader.bound_aside`). It finds the scope only of a node that binds
+    the name, so a script with a `+` chain of 3,000 parts isn't walked up
+    from each part to its top."""
+    from anton.core.utils import write_check
+
+    calls = 0
+    scope_of = write_check._Cell.scope_of
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return scope_of(*args, **kwargs)
+
+    monkeypatch.setattr(write_check._Cell, "scope_of", counting)
+    script = "out = 'x'" + " + 'a'" * 3000 + "\nprint(out)\n"
+    writes = find_cell_writes(code=f"script = {script!r}\n{run}", earlier=(), snapshots=(snap,), swaps=True)
+    assert not writes.needs_approval() and writes.run_code is not None
+    assert calls < 1000
+
+
 @pytest.mark.parametrize("item", ["UPDATE t SET a = {i} WHERE id = {i}", "Delete orders where the quantity is {i}."])
 def test_each_read_of_a_list_is_read_once(item, snap, monkeypatch):
     """Each value appended to a list asks what every read of the list holds,
@@ -1704,7 +1727,7 @@ def test_cells_that_delete_or_rename_existing_files(code, snap):
     "import os\ndef add(acc, name):\n    acc.append(name)\nown = []\nadd(own, 'part_0.csv')\n"
     "open('part_0.csv', 'w').write('x')\nfor p in own:\n    os.remove(p)",
     "import subprocess, sys\nsubprocess.run('ls -la'.split())\nsubprocess.run(['bash'], input='echo hi', text=True)\n"
-    "subprocess.run([sys.executable, '-m', 'pip', 'install', 'x'])\nsubprocess.run(['bash', 'run.sh'])",
+    "subprocess.run([sys.executable, '-m', 'pip', 'install', 'x'])",
 ], ids=["df-rename-columns", "series-rename", "series-replace", "df-rename-callable", "str-replace",
         "temp-renamed-into-place", "tempfile-name", "mkstemp", "tempdir", "outside-project",
         "new-file-in-existing-folder", "new-path-in-existing-folder", "move-into-folder",
@@ -3246,6 +3269,245 @@ def test_a_path_in_another_case_is_held_where_the_filesystem_ignores_case(tmp_pa
     ]
 
 
+# A step that saves a script and runs it, the script's text `{body}`, as the
+# argv kind and as the source kind run it.
+_SAVED_AND_RUN = (
+    "from pathlib import Path\nimport subprocess, sys\nscript = {body!r}\npath = Path('job.py')\n"
+    "path.write_text(script)\nsubprocess.run([sys.executable, str(path)])",
+    "from pathlib import Path\nscript = {body!r}\npath = Path('job.py')\npath.write_text(script)\n"
+    "exec(compile(path.read_text(), str(path), 'exec'))",
+)
+
+
+@pytest.mark.parametrize("step", ["{body}", *_SAVED_AND_RUN], ids=["cell", "argv", "source"])
+@pytest.mark.parametrize("body, expected", [
+    ("import os\nos.remove('current/old.csv')\n", [("delete", ("releases/v2/old.csv",))]),
+    ("open('current/old.csv', 'w').write('z')\n", [("overwrite", ("releases/v2/old.csv",))]),
+    ("import glob, os\nfor p in glob.glob('current/*.csv'):\n    os.remove(p)\n",
+     [("delete", ("releases/v2/old.csv",))]),
+    ("open('{root}/current/old.csv', 'w').write('z')\n", [("overwrite", ("releases/v2/old.csv",))]),
+    ("import os\nos.remove('up/notes.txt')\n", [("delete", ("notes.txt",))]),
+    ("open('current/summary.csv', 'w').write('new')\nprint(open('current/old.csv').read())\n", []),
+    ("import glob, os\nfor p in glob.glob('cur*/old.csv'):\n    os.remove(p)\n", [("delete", ("releases/v2/old.csv",))]),
+    ("import glob, os\nfor p in glob.glob('*/old.csv'):\n    os.remove(p)\n", [("delete", ("releases/v2/old.csv",))]),
+    ("from pathlib import Path\nfor p in Path('.').glob('curren?/*.csv'):\n    p.write_text('x')\n",
+     [("overwrite", ("releases/v2/old.csv",))]),
+    ("import os\nos.remove(os.path.join('current', '..', 'keep.txt'))\n", [("delete", ("releases/keep.txt",))]),
+    ("open('{root}/current/../keep.txt', 'w').write('x')\n", [("overwrite", ("releases/keep.txt",))]),
+    ("import glob, os\nfor p in glob.glob('reports/*/summary.csv'):\n    os.remove(p)\n",
+     [("delete", ("archive/2024/summary.csv",))]),
+    ("import glob, os\nfor p in glob.iglob('reports/**/summary.csv', recursive=True):\n    os.remove(p)\n",
+     [("delete", ("archive/2024/summary.csv",))]),
+    ("from pathlib import Path\nfor p in Path('.').rglob('current/*.csv'):\n    p.write_text('x')\n",
+     [("overwrite", ("releases/v2/old.csv",))]),
+    ("import glob\nprint(sorted(glob.glob('**/*.csv', recursive=True)))\n", []),
+])
+def test_a_write_through_a_link_in_the_project_names_the_file_it_reaches(step, body, expected, tmp_path, monkeypatch):
+    """The walk records a link to a folder but not what is under it, so a
+    path through the link is read through it as well, on disk when the
+    check runs, in a cell and in a saved script alike: a glob's matches
+    among the links, and a `..` after a link from where the link points,
+    as the system reads them, a `**` among each link below its folder, and
+    a link back up the tree once; a new file there, or a read, stays free."""
+    (tmp_path / "releases" / "v2").mkdir(parents=True)
+    (tmp_path / "releases" / "v2" / "old.csv").write_text("a,b")
+    (tmp_path / "releases" / "keep.txt").write_text("k")
+    (tmp_path / "archive" / "2024").mkdir(parents=True)
+    (tmp_path / "archive" / "2024" / "summary.csv").write_text("s")
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "latest").symlink_to("../archive/2024")
+    (tmp_path / "notes.txt").write_text("x")
+    (tmp_path / "current").symlink_to("releases/v2")
+    (tmp_path / "up").symlink_to(".")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    code = step.format(body=body.replace("{root}", str(tmp_path)))
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,), swaps=True)
+    assert not writes.unchecked
+    assert [(c.action, c.paths) for c in writes.held_files] == expected
+
+
+@pytest.mark.parametrize("code", [
+    "from pathlib import Path\nfor p in Path('.').rglob('*.tmp'):\n    p.unlink()",
+    "from pathlib import Path\nfor p in Path('.').glob('*/a.tmp'):\n    p.unlink()",
+], ids=["a-walk-below-it", "a-glob-across-it"])
+def test_a_glob_past_a_link_whose_type_the_system_wont_give_is_read_with_no_error(code, tmp_path, monkeypatch):
+    """A link that points at itself has no type the system gives, so the
+    check counts it as a link it can't follow, and reads its neighbors."""
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "a.tmp").write_text("x")
+    (tmp_path / "data" / "stale").symlink_to("stale")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    assert ("delete", ("data/a.tmp",)) in _files(code, (snap,))
+
+
+def test_a_module_whose_place_the_lookup_fails_to_find_is_none(monkeypatch):
+    """A lookup that fails, as a namespace package below another does when
+    the check never imported its parent, finds no module, with no error."""
+    from anton.core.utils import write_check
+
+    def fails(*args, **kwargs):
+        raise KeyError("parent")
+
+    monkeypatch.setattr(write_check.importlib.machinery.PathFinder, "find_spec", fails)
+    assert write_check._python_spec("anton_no_such_package.sub") is None
+
+
+def test_a_script_write_built_from_a_long_concatenation_is_read_with_no_deep_recursion(tmp_path, monkeypatch):
+    """A write in a saved script to a path built from a long `+` chain the
+    check can't place holds the step, without exhausting recursion."""
+    chain = " + ".join(f"'a{i}'" for i in range(900))
+    code = _SAVED_SCRIPT.format(body=f"out = {chain}\nopen(out[:20], 'w').write('x')",
+                                run="exec(compile(script, str(path), 'exec'))")
+    assert _script_writes(tmp_path, monkeypatch, code).unchecked
+
+
+def test_a_setting_stored_beside_a_long_concatenation_is_read_with_no_deep_recursion(tmp_path, monkeypatch):
+    """A PYTHONPATH key stored in a dict whose other value is a long `+`
+    chain leaves a print-only saved script read, without exhausting
+    recursion."""
+    monkeypatch.chdir(tmp_path)
+    chain = " + ".join(["'<td>'"] * 1200)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    writes = find_cell_writes(
+        code="from pathlib import Path\nimport subprocess, sys\nPath('job.py').write_text(\"print('rows', 3)\\n\")\n"
+             "subprocess.run([sys.executable, 'job.py'])",
+        earlier=_earlier([f"cfg = {{'banner': {chain}}}\ncfg['PYTHONPATH'] = 'src'\nprint(len(cfg['banner']))"]),
+        snapshots=(snap,), swaps=True,
+    )
+    assert not writes.needs_approval() and writes.scripts
+
+
+def test_a_write_through_a_link_an_earlier_cell_made_is_held(tmp_path, monkeypatch):
+    """A link made after the turn began is on disk when a later cell is
+    checked, so a write through it names the file it reaches."""
+    (tmp_path / "releases" / "v2").mkdir(parents=True)
+    (tmp_path / "releases" / "v2" / "old.csv").write_text("a,b")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    (tmp_path / "current").symlink_to("releases/v2")
+    assert _files("import os\nos.remove('current/old.csv')", (snap,),
+                  earlier=("import os\nos.symlink('releases/v2', 'current')",)) == [
+        ("delete", ("releases/v2/old.csv",))
+    ]
+
+
+@pytest.mark.parametrize("code, expected", [
+    ("open('latest.csv', 'w').write('regenerated')", [("overwrite", ("reports/final.csv",))]),
+    ("import shutil\nshutil.copy('old.csv', 'current')", [("overwrite", ("releases/v2/old.csv",))]),
+    ("import os\nos.remove('latest.csv')", []),
+    ("from pathlib import Path\nfor p in Path('.').rglob('latest.csv'):\n    p.write_text('x')",
+     [("overwrite", ("reports/final.csv",))]),
+])
+def test_a_write_through_a_file_link_or_into_a_folder_link_an_earlier_cell_made(code, expected, tmp_path, monkeypatch):
+    """A write that opens a link to a file an earlier cell made replaces
+    the file it points at, and a copy into a link to a folder lands under
+    the folder; a delete of the link removes only the link."""
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "final.csv").write_text("f")
+    (tmp_path / "releases" / "v2").mkdir(parents=True)
+    (tmp_path / "releases" / "v2" / "old.csv").write_text("a,b")
+    (tmp_path / "old.csv").write_text("new")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    (tmp_path / "latest.csv").symlink_to("reports/final.csv")
+    (tmp_path / "current").symlink_to("releases/v2")
+    earlier = ("import os\nos.symlink('reports/final.csv', 'latest.csv')\nos.symlink('releases/v2', 'current')",)
+    assert _files(code, (snap,), earlier=earlier) == expected
+
+
+@pytest.mark.parametrize("code", [
+    "open('sub/a\\x00b/c.txt', 'w').write('x')",
+    "open('<root>/sub/a\\x00b/c.txt', 'w').write('x')",
+    "import os\nos.remove('sub/a\\x00b/keep.txt')",
+    "open('sub/a\\ud800b/c.txt', 'w').write('x')",
+])
+def test_a_path_the_system_refuses_is_read_without_a_crash(code, tmp_path, monkeypatch):
+    """A NUL or an unpaired surrogate in a path makes the system refuse it
+    as the check resolves links, so it reads as a path through none."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "keep.txt").write_text("k")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    assert _files(code.replace("<root>", str(tmp_path)), (snap,)) == []
+
+
+@pytest.mark.parametrize("statement", ["import json.{parts}", "from json.{parts} import x"], ids=["import", "from"])
+def test_a_launched_import_of_a_deep_dotted_name_is_read_without_a_crash(statement, tmp_path, monkeypatch):
+    """The check finds where each part of a dotted name lies one part after
+    another, so a name thousands of parts deep raises no recursion error:
+    it loads what `json` loads, which a calendar.py beside it isn't."""
+    (tmp_path / "calendar.py").write_text("import os\nos.remove('notes.txt')\n")
+    monkeypatch.chdir(tmp_path)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+    launched = statement.format(parts=".".join(["a"] * 1500))
+    code = f"import subprocess, sys\nsubprocess.run([sys.executable, '-c', {launched!r}])"
+    writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,))
+    assert not writes.unchecked and not writes.held_files
+
+
+@pytest.mark.parametrize("step", ["{body}", *_SAVED_AND_RUN], ids=["cell", "argv", "source"])
+def test_a_name_in_another_unicode_form_is_held_where_the_filesystem_ignores_it(step, tmp_path, monkeypatch):
+    """Read as APFS reads names, whatever this filesystem does: `é` as one
+    code point and as `e` and an accent name one file, so a write that
+    spells the name the other way replaces it."""
+    nfd, nfc = "cafe\u0301", "caf\u00e9"
+    (tmp_path / f"{nfd}.txt").write_text("precious")
+    (tmp_path / "Re\u0301sume\u0301").mkdir()
+    (tmp_path / "Re\u0301sume\u0301" / "cv.txt").write_text("x")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("anton.core.utils.write_check._folds_case", lambda _folder: True)
+    snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
+
+    def held(body: str) -> list[tuple[str, tuple[str, ...]]]:
+        code = step.format(body=body)
+        writes = find_cell_writes(code=code, earlier=_earlier(()), snapshots=(snap,), swaps=True)
+        return [(c.action, c.paths) for c in writes.held_files]
+
+    assert held(f"from pathlib import Path\nPath('{nfc}.txt').write_text('z')\n") == [("overwrite", (f"{nfd}.txt",))]
+    assert held(f"import os\nos.remove('{str(tmp_path)}/{nfc.upper()}.TXT')\n") == [("delete", (f"{nfd}.txt",))]
+    assert held("import os\nos.remove('r\u00e9sum\u00e9/cv.txt')\n") == [("delete", ("Re\u0301sume\u0301/cv.txt",))]
+    assert held(f"open('{nfc}_v2.txt', 'w').write('new')\n") == []
+    # A glob lists a name as the disk spells it, so `cafe*` names it.
+    assert held("import glob, os\nfor p in glob.glob('cafe*'):\n    os.remove(p)\n") == [("delete", (f"{nfd}.txt",))]
+
+
+def _windows_os(monkeypatch) -> None:
+    """The check's `os` with Windows paths: `ntpath` for `os.path` and `\\`
+    between parts. On another system `ntpath.realpath` is `abspath`, as
+    Windows's own is for a path that passes no link."""
+    import ntpath
+
+    win = SimpleNamespace(**{name: getattr(os, name) for name in dir(os) if not name.startswith("__")})
+    win.path, win.sep, win.altsep = ntpath, "\\", "/"
+    monkeypatch.setattr("anton.core.utils.write_check.os", win)
+
+
+@pytest.mark.parametrize("code, expected", [
+    (r"open(r'C:\proj\reports\summary.csv', 'w').write('y')", [("overwrite", ("reports/summary.csv",))]),
+    ("open('C:/proj/reports/summary.csv', 'w').write('y')", [("overwrite", ("reports/summary.csv",))]),
+    (r"import os" "\n" r"os.remove(r'c:\PROJ\Data\2024\clean.csv')", [("delete", ("data/2024/clean.csv",))]),
+    ("import os\nopen(os.path.join(r'C:\\proj', 'reports', 'summary.csv'), 'w').write('y')",
+     [("overwrite", ("reports/summary.csv",))]),
+    (r"from pathlib import Path" "\n" r"Path(r'C:\proj\notes.txt').write_text('y')", [("overwrite", ("notes.txt",))]),
+    (r"open(r'C:\proj\reports\new.csv', 'w').write('y')", []),
+    (r"open(r'C:\other\reports\summary.csv', 'w').write('y')", []),
+])
+def test_an_absolute_windows_path_to_a_nested_file_is_held(code, expected, monkeypatch):
+    """On Windows the root and a real path come with `\\` between their
+    parts, and the check spells paths with `/`, so both are compared with
+    `/`: a nested turn-start file is held at any depth."""
+    _windows_os(monkeypatch)
+    files = frozenset({"notes.txt", "reports/summary.csv", "data/2024/clean.csv"})
+    dirs = frozenset({"reports", "data", "data/2024"})
+    snap = ProjectSnapshot(root=Path("C:\\proj"), label="project", files=files, dirs=dirs,
+                           taken_at=time.time() + 60, casefold=True,
+                           spellings={p.casefold(): p for p in (*files, *dirs)})
+    assert snap.roots() == ("C:/proj",)
+    assert _files(code, (snap,)) == expected
+
+
 # ── The card ──────────────────────────────────────────────────────────────
 #
 # One Approve runs the whole cell, so the card shows every statement and
@@ -4414,11 +4676,13 @@ _SAVED_SCRIPT = (
 _PRINTS = "import sys\nprint('ran', sys.argv[0])"
 
 
-def _script_writes(tmp_path: Path, monkeypatch, code: str, *, swaps: bool = True) -> CellWrites:
+def _script_writes(
+    tmp_path: Path, monkeypatch, code: str, *, swaps: bool = True, earlier: Sequence[str] = (),
+) -> CellWrites:
     (tmp_path / "notes.txt").write_text("x")
     monkeypatch.chdir(tmp_path)
     snap = snapshot_project_files(root=tmp_path, label="project", taken_at=time.time() + 60)
-    return find_cell_writes(code=code, earlier=(), snapshots=(snap,), swaps=swaps)
+    return find_cell_writes(code=code, earlier=_earlier(earlier), snapshots=(snap,), swaps=swaps)
 
 
 def _run_step(code: str, folder: Path) -> str:
@@ -4437,23 +4701,33 @@ def _run_step(code: str, folder: Path) -> str:
     return out.getvalue()
 
 
-@pytest.mark.parametrize("run", [
-    "r = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)\nprint(r.stdout, end='')",
-    "r = subprocess.run(['python', 'job.py'], capture_output=True, text=True)\nprint(r.stdout, end='')",
-    "exec(compile(path.read_text(), str(path), 'exec'))",
-    "exec(compile(script, str(path), 'exec'))",
-], ids=["sys-executable", "python-word", "exec-read", "exec-name"])
-def test_a_saved_script_runs_as_the_text_the_check_read_and_every_line_keeps_its_number(tmp_path, monkeypatch, run):
-    """The step runs with no card, and the pad runs `run_code`: Python gets
-    `-c` and the script's text in place of the file, or exec() the text in
-    place of the name or the read, on the same line. It prints what running
-    the file prints."""
+@pytest.mark.parametrize("run,scripts", [
+    ("r = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)\nprint(r.stdout, end='')",
+     ("job.py",)),
+    ("r = subprocess.run(['python', 'job.py'], capture_output=True, text=True)\nprint(r.stdout, end='')",
+     ("job.py",)),
+    ("r = subprocess.run([sys.executable, (str(path))], capture_output=True, text=True)\nprint(r.stdout, end='')",
+     ("job.py",)),
+    ("r = subprocess.run([sys.executable,  # the venv's, not PATH's\n    str(path)], capture_output=True, text=True)\n"
+     "print(r.stdout, end='')", ("job.py",)),
+    ("exec(compile(path.read_text(), str(path), 'exec'))", ("job.py",)),
+    # exec() runs the text the name holds, not the saved file, so the card names no script.
+    ("exec(compile(script, str(path), 'exec'))", ()),
+], ids=["sys-executable", "python-word", "word-in-brackets", "comment-between-words", "exec-read", "exec-name"])
+def test_a_saved_script_runs_as_the_text_the_check_read_and_every_line_keeps_its_number(
+    tmp_path, monkeypatch, run, scripts,
+):
+    """The step runs with no card, and the pad runs `run_code`: Python runs
+    the file through `-c` and the prelude, or exec() gets the text in place
+    of the name or the read, on the same line. It prints what running the
+    file prints. A path word in brackets of its own, or a comment between
+    the words, keeps the run one list of words."""
     if "'python'" in run and not shutil.which("python"):
         pytest.skip("no `python` on PATH")
     code = _SAVED_SCRIPT.format(body=_PRINTS, run=run)
     writes = _script_writes(tmp_path, monkeypatch, code)
     assert not writes.needs_approval()
-    assert writes.scripts == ("job.py",)
+    assert writes.scripts == scripts
     assert writes.run_code is not None
     assert len(writes.run_code.splitlines()) == len(code.splitlines())
     assert _run_step(writes.run_code, tmp_path) == _run_step(code, tmp_path)
@@ -4477,10 +4751,9 @@ def test_a_swapped_script_sees_its_argv_name_and_folder_as_running_the_file_does
 
 
 def test_a_script_python_runs_that_reads_its_own_file_stays_unread(tmp_path, monkeypatch):
-    """The pad runs the text with `-c`, which names no file, so a script
-    that reads `__file__` keeps "can't be checked" and runs as written; so
-    does one that may start multiprocessing children, spelled in pieces too,
-    or change folder."""
+    """The prelude sets no `__file__`, so a script that names it keeps
+    "can't be checked" and runs as written; so does one that names
+    `multiprocessing`, in adjacent string literals too, or `chdir`."""
     run = "subprocess.run([sys.executable, str(path)])"
     for body in ("from pathlib import Path\nprint(Path(__file__).parent)",
                  "m = __import__('multi' 'processing')\nprint(m)",
@@ -4489,12 +4762,19 @@ def test_a_script_python_runs_that_reads_its_own_file_stays_unread(tmp_path, mon
         assert writes.unchecked and writes.run_code is None, body
 
 
-def test_a_swapped_run_runs_the_checked_text_while_another_writer_changes_the_file(tmp_path, monkeypatch):
-    """What runs is what the check read: a writer outside the step that keeps
-    rewriting the script never changes what the run prints."""
+# What a swapped run prints when the prelude stops it because the file
+# changed after the check read it (`_SCRIPT_PRELUDE`).
+_CHANGED = "did not run: it changed after the write check read it"
+
+
+def test_a_swapped_run_never_runs_text_another_writer_puts_in_the_file(tmp_path, monkeypatch):
+    """What runs is what the check read: while a writer outside the step
+    keeps rewriting the script, each run prints the checked text or stops
+    with the prelude's message, and the other text never runs."""
     import threading
 
-    run = "r = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)\nprint(r.stdout, end='')"
+    run = ("r = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)\n"
+           "print(r.stdout or r.stderr.strip(), end='')")
     code = _SAVED_SCRIPT.format(body="print('checked')", run=run)
     writes = _script_writes(tmp_path, monkeypatch, code)
     assert writes.run_code is not None
@@ -4511,12 +4791,322 @@ def test_a_swapped_run_runs_the_checked_text_while_another_writer_changes_the_fi
     finally:
         stop.set()
         racer.join()
-    assert outs == {"checked\n"}
+    assert all(out == "checked\n" or out.endswith(_CHANGED) for out in outs), outs
+
+
+_EDITED_BY_A_PROGRAM = "import os\nos.system(\"printf 'import os\\\\nos.remove(\\\"notes.txt\\\")' > job.py\")"
+
+
+@pytest.mark.parametrize("change,runner", [
+    (_EDITED_BY_A_PROGRAM, "subprocess.run"),
+    ("Path('JOB.py').write_text(\"import os\\nos.remove('notes.txt')\")", "subprocess.run"),
+    (f"from subprocess import run as launch\n{_EDITED_BY_A_PROGRAM}", "launch"),
+], ids=["edited-by-a-program", "written-again-in-another-case", "edited-then-run-under-another-name"])
+def test_a_swapped_run_stops_when_the_step_changes_the_file_after_the_write_the_check_read(
+    tmp_path, monkeypatch, change, runner,
+):
+    """The prelude runs the file only while it holds the text the check
+    read, so a step that changes the file between its write and its run
+    stops before the script runs, and the delete never happens; a launcher
+    under another name gets the prelude too. The check reads `JOB.py` as
+    another file, which it is where names differ by case."""
+    if "JOB.py" in change:
+        (tmp_path / "case.txt").write_text("x")
+        if not (tmp_path / "CASE.txt").exists():
+            pytest.skip("the file system tells names apart by case")
+    run = (f"r = {runner}([sys.executable, str(path)], capture_output=True, text=True)\n"
+           "print(r.stdout or r.stderr.strip(), end='')")
+    code = _SAVED_SCRIPT.format(body="print('checked')", run=f"{change}\n{run}")
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert not writes.needs_approval() and writes.run_code is not None, writes
+    assert _run_step(writes.run_code, tmp_path).endswith(_CHANGED)
+    assert (tmp_path / "notes.txt").exists()
+
+
+def test_a_swapped_run_hands_python_only_literals_and_no_script_text(tmp_path, monkeypatch):
+    """The run's words gain `-c`, the prelude, the real folder the check read
+    the run in and the SHA-256 of the text, each a literal, so nothing is
+    looked up in the pad and the text, a secret in it too, stays out of the
+    words any local user may read, and out of the environment."""
+    import hashlib
+
+    from anton.core.utils import write_check
+
+    body = "TOKEN = 'sk-live-0123'\nprint('ok')"
+    code = _SAVED_SCRIPT.format(body=body, run="subprocess.run([sys.executable, (str(path))])")
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert writes.run_code is not None
+    run = next(node for node in ast.walk(ast.parse(writes.run_code))
+               if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "run")
+    assert not run.keywords
+    program, *added, word = run.args[0].elts
+    assert ast.unparse(program) == "sys.executable" and ast.unparse(word) == "str(path)"
+    assert all(isinstance(a, ast.Constant) for a in added)
+    assert [a.value for a in added] == [
+        "-c", write_check._SCRIPT_PRELUDE, os.path.normcase(os.path.realpath(tmp_path)),
+        hashlib.sha256(body.encode()).hexdigest(),
+    ]
+    assert writes.run_code.count("sk-live-0123") == code.count("sk-live-0123") == 1
+    assert _run_step(writes.run_code, tmp_path) == _run_step(code, tmp_path)
+
+
+def _prelude_run(*, checked: str, real_folder: str, cwd: Path, pythonpath: str = ""):
+    """Run `job.py` in `cwd` through the prelude, as a swapped run does, with
+    `checked` as the text the check read, `real_folder` the folder it read
+    the run in, and `PYTHONPATH` set to `pythonpath` when given."""
+    import hashlib
+    import subprocess
+    import sys
+
+    from anton.core.utils import write_check
+
+    digest = hashlib.sha256(checked.encode()).hexdigest()
+    env = {**os.environ, "PYTHONPATH": pythonpath} if pythonpath else None
+    return subprocess.run([sys.executable, "-c", write_check._SCRIPT_PRELUDE, real_folder, digest, "job.py"],
+                          cwd=cwd, capture_output=True, text=True, timeout=60, env=env)
+
+
+@pytest.mark.parametrize("where", ["run-folder", "pythonpath-folder"])
+def test_the_prelude_runs_the_checked_file_as_running_it_does(tmp_path, where):
+    """`sys.argv` holds the path, `__main__` holds none of the prelude's own
+    names, and `sys.path[0]` stays the working folder, as `-c` gives it. A
+    module named as one the prelude imports doesn't run, whether the run's
+    folder or a folder `PYTHONPATH` names, ahead of Python's own, holds it."""
+    held = tmp_path if where == "run-folder" else tmp_path / "src"
+    held.mkdir(exist_ok=True)
+    (held / "hashlib.py").write_text("open('imported.txt', 'w').write('x')\nraise SystemExit(3)\n")
+    text = ("print(sorted(k for k in globals() if not k.startswith('__')), __name__)\nimport os, sys\n"
+            "print(sys.argv, os.path.realpath(sys.path[0] or '.') == os.path.realpath(os.getcwd()))\n")
+    (tmp_path / "job.py").write_text(text)
+    ran = _prelude_run(checked=text, real_folder=os.path.normcase(os.path.realpath(tmp_path)), cwd=tmp_path,
+                       pythonpath=str(held) if where == "pythonpath-folder" else "")
+    assert (ran.returncode, ran.stderr) == (0, "")
+    assert ran.stdout == "[] __main__\n['job.py'] True\n"
+    assert not (tmp_path / "imported.txt").exists()
+
+
+@pytest.mark.parametrize("why", ["folder-made-a-link", "text-changed"])
+def test_the_prelude_stops_the_run_before_the_script_runs(tmp_path, why):
+    """A run that starts in another folder than the one the check read it in,
+    as when the step made that folder a link, or of a file that doesn't hold
+    the text the check read, stops with one line and a non-zero exit, before
+    any of the script runs."""
+    (tmp_path / "real").mkdir()
+    text = "open('ran.txt', 'w').write('x')\n"
+    (tmp_path / "real" / "job.py").write_text(text)
+    if why == "folder-made-a-link":
+        (tmp_path / "w").symlink_to(tmp_path / "real", target_is_directory=True)
+        # The check read the run in `w`, which didn't exist yet, as a plain folder.
+        cwd, checked, message = tmp_path / "w", text, "it would run in another folder than the one"
+        real_folder = os.path.normcase(os.path.join(os.path.realpath(tmp_path), "w"))
+    else:
+        cwd, checked, message = tmp_path / "real", "print('checked')\n", "it changed after the write check read it"
+        real_folder = os.path.normcase(os.path.realpath(tmp_path / "real"))
+    ran = _prelude_run(checked=checked, real_folder=real_folder, cwd=cwd)
+    assert ran.returncode != 0 and ran.stdout == ""
+    assert ran.stderr.count("\n") == 1 and ran.stderr.startswith("anton: 'job.py' did not run: ")
+    assert message in ran.stderr
+    assert not (tmp_path / "real" / "ran.txt").exists()
+
+
+def test_a_swapped_read_over_several_lines_keeps_every_line_number(tmp_path, monkeypatch):
+    """The text takes the read's place with the line breaks the read spanned,
+    so an error after it stops on the line it stops on in the step as
+    written, which the check reads back as `stopped_at`."""
+    import sys
+
+    run = ("exec(compile(\n    path.read_text(\n        encoding='utf-8',\n    ),\n    str(path),\n    'exec',\n))\n"
+           "raise ValueError('after')")
+    code = _SAVED_SCRIPT.format(body="print('ran')", run=run)
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert not writes.needs_approval() and writes.run_code is not None
+
+    def stop_line(text: str) -> int:
+        try:
+            _run_step(text, tmp_path)
+        except ValueError:
+            tb = sys.exc_info()[2]
+            while tb.tb_frame.f_code.co_filename != "<cell>":
+                tb = tb.tb_next
+            return tb.tb_lineno
+        raise AssertionError("the step ran to its end")
+
+    assert len(writes.run_code.splitlines()) == len(code.splitlines())
+    assert stop_line(writes.run_code) == stop_line(code) == len(code.splitlines())
+
+
+@pytest.mark.parametrize("write,run", [
+    ("path.write_text(script, encoding='latin-1')", "subprocess.run([sys.executable, str(path)])"),
+    ("path.write_text(script, encoding='utf-16')", "subprocess.run([sys.executable, str(path)])"),
+    ("path.write_text(script, errors='ignore')", "subprocess.run([sys.executable, str(path)])"),
+    ("path.write_text(script, encoding='utf-8\\x00')", "subprocess.run([sys.executable, str(path)])"),
+    ("path.write_text(script, encoding='\\udcff')", "subprocess.run([sys.executable, str(path)])"),
+    ("path.write_text(script)", "exec(compile(path.read_text(encoding='latin-1'), str(path), 'exec'))"),
+    ("path.write_text(script)", "exec(compile(open(path, errors='replace').read(), str(path), 'exec'))"),
+], ids=["latin-1-write", "utf-16-write", "errors-write", "nul-in-name", "surrogate-in-name", "latin-1-read",
+        "errors-read"])
+def test_a_script_written_or_read_as_another_encoding_stays_unread(tmp_path, monkeypatch, write, run):
+    """A write or a read that doesn't turn the text into or out of UTF-8
+    as written leaves a file, or a text, other than the one the check read,
+    so the script keeps "can't be checked" and runs as written on Approve."""
+    code = _SAVED_SCRIPT.format(body="print('caf\u00e9')", run=run).replace("path.write_text(script)", write)
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert writes.unchecked and writes.run_code is None
+
+
+@pytest.mark.parametrize("body,unread", [
+    ("# -*- coding: latin-1 -*-\nprint('caf\u00e9')", True),
+    ("# -*- coding: utf-8 -*-\nprint('caf\u00e9')", False),
+], ids=["latin-1-cookie", "utf-8-cookie"])
+def test_a_script_python_would_read_as_other_text_stays_unread(tmp_path, monkeypatch, body, unread):
+    """Running the file follows a coding cookie, which compile() of the text
+    ignores, so such a script keeps "can't be checked"; a UTF-8 cookie reads."""
+    for encoding in ("", ", encoding='UTF8'"):
+        code = _SAVED_SCRIPT.format(body=body, run="subprocess.run([sys.executable, str(path)])")
+        code = code.replace("path.write_text(script)", f"path.write_text(script{encoding})")
+        writes = _script_writes(tmp_path, monkeypatch, code)
+        assert writes.unchecked is unread and (writes.run_code is None) is unread, encoding
+
+
+@pytest.mark.parametrize("newline", ["", ", newline=''", ", newline='\\r'", ", newline='\\r\\n'"],
+                         ids=["default", "none", "cr", "crlf"])
+@pytest.mark.parametrize("run", [
+    "r = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)\n"
+    "print(r.stdout or r.stderr, end='')",
+    "exec(compile(path.read_text(), str(path), 'exec'))",
+], ids=["run", "read"])
+def test_a_script_with_a_carriage_return_runs_as_its_file_reads_back(tmp_path, monkeypatch, newline, run):
+    """A read of the file with universal newlines, as the prelude's and
+    `read_text()`'s, gives back each carriage return, and each line break
+    the write made, as a line break, so a write that turns "\\n" into one
+    with a carriage return makes two of a carriage return before it. The
+    check reads that text, so a script that only prints runs with no card
+    and prints what it prints when it runs as written."""
+    body = "import sys\\r\\nprint(repr(\"\"\"a\\r\\nb\\rc\"\"\"))\\rprint('done')\\r\\n"
+    code = _SAVED_SCRIPT.format(body=body, run=run).replace(
+        "path.write_text(script)", f"path.write_text(script{newline})")
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert not writes.needs_approval() and writes.run_code is not None
+    assert _run_step(writes.run_code, tmp_path) == _run_step(code, tmp_path)
+    assert _run_step(writes.run_code, tmp_path).endswith("done\n")
+
+
+def test_a_script_with_a_carriage_return_and_a_newline_the_check_cannot_read_stays_unread(tmp_path, monkeypatch):
+    """The line breaks a file gives back depend on the write's `newline=`
+    when its text holds a carriage return, so a `newline=` the check can't
+    read keeps such a script "can't be checked"."""
+    code = _SAVED_SCRIPT.format(body="print(1)\\r\\nprint(2)", run="subprocess.run([sys.executable, str(path)])")
+    writes = _script_writes(tmp_path, monkeypatch, code.replace(
+        "path.write_text(script)", "path.write_text(script, newline=chr(13))"))
+    assert writes.unchecked and writes.run_code is None
+
+
+@pytest.mark.parametrize("body,kinds", [
+    ("import os\nprint([os.readlink(p) for p in os.listdir('.') if os.path.islink(p)], 'linkedin')", ()),
+    ("from pathlib import Path\nPath('notes.txt').unlink()", ("delete",)),
+], ids=["print-only", "unlink"])
+def test_a_cwd_script_that_names_a_link_word_is_read(tmp_path, monkeypatch, body, kinds):
+    """A word with "link" in it that makes no link, as `islink`, `readlink`,
+    `unlink()` or `linkedin`, doesn't keep a `cwd=` script unread
+    (`_LINK_SIGNS`). So a script that only prints runs with no card, and
+    one that deletes with `unlink()` gets the delete's card."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "notes.txt").write_text("x")
+    code = _SAVED_SCRIPT.format(body=body, run="subprocess.run([sys.executable, 'job.py'], cwd='sub')")
+    writes = _script_writes(tmp_path, monkeypatch, code.replace("Path('job.py')", "Path('sub/job.py')"))
+    assert not writes.unchecked and writes.kinds() == kinds and writes.scripts == ("sub/job.py",)
+    assert writes.run_code is not None
+
+
+@pytest.mark.parametrize("step,body", [
+    ("from os import link as mk\nmk('notes.txt', 'sub/out.txt')\n", "open('out.txt', 'w').write('x')"),
+    ("getattr(os, 'sym' 'link')('..', 'sub/up')\n", "open('up/notes.txt', 'w').write('x')"),
+    ("", "import os\nos.symlink('../notes.txt', 'out.txt')\nopen('out.txt', 'w').write('x')"),
+    ("ti = tarfile.TarInfo('sub/up')\nti.type = tarfile.SYMTYPE\nti.linkname = '..'\n",
+     "open('up/notes.txt', 'w').write('x')"),
+    ("ti = tarfile.TarInfo('sub/up')\nti.type = tarfile.SYMTYPE\nti.linkpath = '..'\n",
+     "open('up/notes.txt', 'w').write('x')"),
+    ("", "import tarfile\nti = tarfile.TarInfo('up')\nti.type = tarfile.SYMTYPE\nti.linkpath = '..'\n"
+         "open('up/notes.txt', 'w').write('x')"),
+], ids=["step-hardlinks-a-file-in", "step-symlinks-by-getattr", "script-symlinks", "tar-member-link",
+        "tar-member-linkpath", "script-tar-member-linkpath"])
+def test_a_cwd_script_in_a_step_that_makes_a_link_stays_unread(tmp_path, monkeypatch, step, body):
+    """A link the step or its script makes inside the `cwd=` folder can send
+    the script's write to a turn-start file. The prelude stops only a run
+    whose folder, or a part before it, became a link, so such a script keeps
+    "can't be checked", as a plain cell that runs code the check can't read."""
+    (tmp_path / "sub").mkdir()
+    code = _SAVED_SCRIPT.format(body=body, run="subprocess.run([sys.executable, 'job.py'], cwd='sub')")
+    code = code.replace("Path('job.py')", "Path('sub/job.py')").replace(
+        "import subprocess, sys\n", f"import os, subprocess, sys, tarfile\n{step}")
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert writes.unchecked and writes.run_code is None and writes.scripts == ()
+
+
+def test_a_run_in_a_folder_the_step_picks_starts_under_the_placed_part(tmp_path, monkeypatch):
+    """A `cwd=` folder with a part the step picks when it runs is read, and
+    the prelude gets the real path of the parts before that one, with a
+    separator at its end. A run anywhere under it runs, and one outside it,
+    as through a `..` in the value the step picks, stops before the script
+    runs."""
+    from anton.core.utils import write_check
+
+    (tmp_path / "reports" / "2024" / "q1").mkdir(parents=True)
+    (tmp_path / "outside").mkdir()
+    code = (
+        "import subprocess, sys\nfrom pathlib import Path\n"
+        "out = f\"reports/{open('period.txt').read()}\"\n"
+        "Path(f'{out}/job.py').write_text(\"print('ran')\")\n"
+        "r = subprocess.run([sys.executable, 'job.py'], cwd=out, capture_output=True, text=True)\n"
+        "print(r.stdout or r.stderr.strip(), end='')\n"
+    )
+    (tmp_path / "period.txt").write_text("2024/q1")
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert not writes.needs_approval() and writes.run_code is not None
+    placed = os.path.join(os.path.normcase(os.path.realpath(tmp_path / "reports")), "")
+    assert repr(placed) in writes.run_code and repr(write_check._RUN_TIME_PART)[1:-1] not in writes.run_code
+    assert _run_step(writes.run_code, tmp_path) == "ran\n"
+    (tmp_path / "period.txt").write_text("../outside")
+    assert _run_step(writes.run_code, tmp_path).endswith(
+        "it would run in another folder than the one the write check read it in")
+
+
+def test_a_project_root_given_in_another_letter_case_runs_its_scripts(tmp_path, monkeypatch):
+    """`anton --folder` keeps the root as typed, and a disk that finds a name
+    in any letter case gives `os.getcwd()` the case it holds. The check
+    gives the prelude the root as the disk spells it, so the run starts in
+    the folder the check read it in, and the script runs."""
+    (tmp_path / "CaseProj").mkdir()
+    typed = tmp_path / "caseproj"
+    if not typed.exists():
+        pytest.skip("the file system tells names apart by case")
+    run = "r = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)\nprint(r.stdout, end='')"
+    code = _SAVED_SCRIPT.format(body="print('ran')", run=run)
+    writes = _script_writes(typed, monkeypatch, code)
+    assert not writes.needs_approval() and writes.run_code is not None
+    assert _run_step(writes.run_code, typed) == "ran\n"
+
+
+def test_an_exec_of_a_bound_literal_with_a_carriage_return_is_read(tmp_path, monkeypatch):
+    """exec() of a name gets the literal's text as it is, with no file in
+    between to turn a carriage return into a line break, so it is read."""
+    code = "script = 'print(1)\\rprint(2)'\nexec(compile(script, 'job', 'exec'))\n"
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert not writes.needs_approval() and writes.run_code is not None
+    assert _run_step(writes.run_code, tmp_path) == _run_step(code, tmp_path) == "1\n2\n"
+
+
+def test_a_cwd_folder_the_system_cannot_name_keeps_its_script_unread(tmp_path, monkeypatch):
+    """A NUL in a `cwd=` folder makes the folder one no path names, so the
+    check keeps the script unread rather than fail."""
+    run = "subprocess.run([sys.executable, 'job.py'], cwd='a\\x00b')"
+    writes = _script_writes(tmp_path, monkeypatch, _SAVED_SCRIPT.format(body=_PRINTS, run=run))
+    assert writes.unchecked and writes.run_code is None
 
 
 def test_a_script_past_the_size_limit_stays_unread(tmp_path, monkeypatch):
-    """The pad hands the text to `python -c` as one argument, which a Windows
-    command line caps, so a longer script keeps "can't be checked"."""
+    """The check reads at most `_SCRIPT_TEXT_LIMIT` bytes of a script's text,
+    so a longer script keeps "can't be checked"."""
     run = "subprocess.run([sys.executable, str(path)])"
     short = _SAVED_SCRIPT.format(body="x = 1\n" * 100, run=run)
     long = _SAVED_SCRIPT.format(body="x = 1\n" * 5000, run=run)
@@ -4545,6 +5135,48 @@ def test_a_saved_script_after_unread_code_in_an_earlier_step_keeps_its_card(tmp_
     assert writes.unchecked and writes.run_code is None
 
 
+@pytest.mark.parametrize("launch", [
+    "from subprocess import run as r\nr([sys.executable, str(path)], capture_output=True, text=True)",
+    "launch = subprocess.run\nlaunch([sys.executable, str(path)], capture_output=True, text=True)",
+    "from subprocess import check_output as co\nco([sys.executable, str(path)], text=True)",
+], ids=["import-as", "name-bound", "check-output-as"])
+def test_a_saved_script_run_through_a_launcher_alias_runs_the_text_the_check_read(tmp_path, monkeypatch, launch):
+    """A run through a name bound to a launcher is read as the run by the
+    launcher's own name is, and the pad runs it through the prelude too,
+    so the file on disk never runs in place of the text the check read."""
+    code = _SAVED_SCRIPT.format(body=_PRINTS, run=launch)
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert not writes.needs_approval()
+    assert writes.scripts == ("job.py",)
+    assert writes.run_code is not None and "'-c', " in writes.run_code
+
+
+_HELPER_BUILT_UP = (
+    "script = 'def cleanup():\\n    print(\"cleaning\")\\n'\n"
+    "script += '    import os\\n    os.remove(\"notes.txt\")\\n'\n"
+    "exec(compile(script, 'helpers.py', 'exec'))\n"
+)
+_PAST_DEPTH = "".join(f"def f{i}(x):\n    return f{i + 1}(x) + 1\n" for i in range(1, 9)) + (
+    "def f9(x):\n    return len(open(x).read())\nprint(f1('notes.txt'))\n"
+)
+
+
+@pytest.mark.parametrize("earlier", [
+    "import subprocess, os\nsubprocess.run(os.environ.get('MY_TOOL', 'true').split())\n" + _HELPER_BUILT_UP,
+    _HELPER_BUILT_UP + _PAST_DEPTH,
+], ids=["after-unread-code", "after-a-depth-limit"])
+def test_a_later_call_into_what_an_unchecked_step_s_script_defined_keeps_the_uses_cause(
+    tmp_path, monkeypatch, earlier,
+):
+    """An earlier step the check couldn't read whole, for code it couldn't
+    read or for a depth limit, ran as written on its Approve, so its
+    helper is the one the whole text defined. A later call into it keeps
+    the "can't be checked" card and says it uses that helper."""
+    writes = _script_writes(tmp_path, monkeypatch, "cleanup()", earlier=[earlier])
+    assert writes.unchecked
+    assert any(c.kind == "uses" and c.name == "cleanup" for c in writes.causes)
+
+
 def test_the_card_names_the_saved_script_and_quotes_the_line_that_makes_the_change(tmp_path, monkeypatch):
     code = _SAVED_SCRIPT.format(body="import os\nos.remove('notes.txt')",
                                 run="subprocess.run([sys.executable, str(path)])")
@@ -4556,6 +5188,140 @@ def test_the_card_names_the_saved_script_and_quotes_the_line_that_makes_the_chan
     assert "This step would delete:\n\n```\nnotes.txt\n```" in card
     assert "It's this line in `job.py`:\n\n```\nos.remove('notes.txt')\n```" in card
     assert "can't be checked" not in card
+
+
+# Names an agent may give the script it saves that would break the card's
+# Markdown if the card showed them raw, each with the code span the card
+# shows it in, or None where the span is too long to spell out.
+_HOSTILE_SCRIPT_NAMES = {
+    "comment-open": ("job<!--.py", "`job<​!--.py`"),
+    "comment-close": ("a-->b.py", "`a--​>b.py`"),
+    "blank-line-heading": ("job.py\n\n# Dry run: nothing is deleted\n\nx.py",
+                           "`'job.py\\n\\n# Dry run: nothing is deleted\\n\\nx.py'`"),
+    "direction-override": ("clean‮yp.txt.py", "`'clean\\u202eyp.txt.py'`"),
+    "fake-card": ("x.py`\n\n**Approve this change?**\n\nThis step would delete:\n\n```\nold.tmp\n```\n\n<!--", None),
+}
+
+
+@pytest.mark.parametrize("run", [
+    "subprocess.run([sys.executable, str(path)])",
+    "exec(compile(path.read_text(), str(path), 'exec'))",
+], ids=["argv", "exec-read"])
+@pytest.mark.parametrize("name,span", list(_HOSTILE_SCRIPT_NAMES.values()), ids=list(_HOSTILE_SCRIPT_NAMES))
+def test_a_script_name_on_the_card_stays_inert(tmp_path, monkeypatch, run, name, span):
+    """The agent picks the name of the script it saves. Shown raw, a `<!--`
+    made Cowork drop the rest of the card, the delete included, and a line
+    break ended the code span so the rest of the name read as the card's
+    own prose. The card shows the name as it shows a path: on one line,
+    written with escapes, with its comment marks split."""
+    code = _SAVED_SCRIPT.format(body="import os\nos.remove('notes.txt')", run=run)
+    code = code.replace("Path('job.py')", f"Path({name!r})")
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert writes.kinds() == ("delete",) and writes.scripts == (name,)
+    card = _card_prompt(writes, code)
+    assert "<!--" not in card and "-->" not in card
+    assert "This step would delete:\n\n```\nnotes.txt\n```" in re.sub(r"<!--[\s\S]*?-->", "", card)
+    assert _fenced(card) == ["notes.txt", "os.remove('notes.txt')"]
+    assert [line for line in card.splitlines() if line == "**Approve this change?**"] == ["**Approve this change?**"]
+    assert not any(line.startswith(("#", ">")) for line in card.splitlines())
+    assert "‮" not in card
+    if span is not None:
+        assert f"This step saves the script {span} and runs it." in card
+        assert f"It's this line in {span}:" in card
+    escaped = "A name in quotes is written with escapes" in card
+    assert escaped == (not name.isprintable())
+
+
+@pytest.mark.parametrize("label", ["<string>", "notes.txt", "job.py", "job<!--.py"])
+def test_an_exec_of_a_bound_literal_names_no_saved_script(tmp_path, monkeypatch, label):
+    """`exec(compile(script, label, 'exec'))` runs the text `script` holds,
+    and `label` is only what compile() calls it: the step saves no script,
+    so the card says none, and the delete reads as the step's own."""
+    delete = f"script = '''import os\nos.remove('notes.txt')'''\nexec(compile(script, {label!r}, 'exec'))\n"
+    writes = _script_writes(tmp_path, monkeypatch, delete)
+    assert writes.kinds() == ("delete",) and writes.scripts == () and writes.run_code is not None
+    card = _card_prompt(writes, delete)
+    assert "saves the script" not in card and "It's this line in" not in card and "It's in" not in card
+    assert "<!--" not in card
+    assert "This step would delete:\n\n```\nnotes.txt\n```" in card
+    prints = _script_writes(tmp_path, monkeypatch, delete.replace("import os\nos.remove('notes.txt')", "print(1)"))
+    assert not prints.needs_approval() and prints.scripts == ()
+
+
+# A step that saves two scripts and runs both; `a.py` only prints.
+_TWO_SCRIPTS = (
+    "from pathlib import Path\nimport subprocess, sys\n"
+    "Path('a.py').write_text({a!r})\nPath({b_name!r}).write_text({b!r})\n"
+    "subprocess.run([sys.executable, 'a.py'])\nsubprocess.run([sys.executable, {b_name!r}])\n"
+)
+
+
+@pytest.mark.parametrize("b_name,b_span", [("b.py", "`b.py`"), ("b<!--.py", "`b<​!--.py`")],
+                         ids=["plain", "comment-mark"])
+@pytest.mark.parametrize("body,block", [
+    ("import os\nos.remove('notes.txt')",
+     "This step would delete:\n\n```\nnotes.txt\n```\n\nIt's this line in {b}:\n\n```\nos.remove('notes.txt')\n```"),
+    ("import os\nos.remove(os.environ['TARGET'])",
+     "in this code:\n\n```\nos.remove(os.environ['TARGET'])\n```\n\nIt's in {b}."),
+    (PG + "cur.execute('DELETE FROM orders WHERE id = 5')",
+     "This step would change data in a connected source:\n\n```\nDELETE FROM orders WHERE id = 5\n```\n\nIt's in {b}."),
+    ("import sqlite3\nc = sqlite3.connect('data.db')\nc.execute('DELETE FROM t')\nc.commit()",
+     "It would run:\n\n```\nDELETE FROM t\n```\n\nIt's in {b}."),
+    ("import requests\nrequests.delete('https://erp.example.com/api/orders/1')",
+     "```\nrequests.delete('https://erp.example.com/api/orders/1')\n```\n\nIt's in {b}."),
+    ("import pymongo\npymongo.MongoClient().db.users.delete_many({})",
+     "```\npymongo.MongoClient().db.users.delete_many({{}})\n```\n\nIt's in {b}."),
+], ids=["placed-delete", "unplaced-delete", "sql", "database-file", "request", "data-store"])
+def test_the_card_names_the_script_that_holds_each_write_of_a_two_script_step(
+    tmp_path, monkeypatch, body, block, b_name, b_span,
+):
+    """With two scripts, the line under each write says which one makes it,
+    whatever kind of write it is; the script that only prints is named in
+    the scripts line alone."""
+    (tmp_path / "data.db").write_text("x")
+    code = _TWO_SCRIPTS.format(a="print('a')", b=body, b_name=b_name)
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert writes.scripts == ("a.py", b_name) and not writes.unchecked
+    card = _card_prompt(writes, code)
+    assert f"This step saves the scripts `a.py` and {b_span} and runs them." in card
+    assert block.format(b=b_span) in card
+    assert card.count("`a.py`") == 1
+    assert "<!--" not in card
+
+
+def test_a_write_a_script_makes_through_an_earlier_helper_names_the_script(tmp_path, monkeypatch):
+    """A script that calls a function an earlier step defined makes that
+    function's writes, which the card quotes at the script's call, so the
+    line under each names the script."""
+    helpers = ("import os, requests\ndef wipe(p):\n    os.remove(p)\n"
+               "def drop(i):\n    requests.delete(f'https://erp.example.com/api/orders/{i}')\n")
+    run = "exec(compile(Path({0!r}).read_text(), {0!r}, 'exec'))"
+    code = (
+        "from pathlib import Path\n"
+        "Path('a.py').write_text(\"print('a')\")\nPath('b.py').write_text(\"wipe('notes.txt')\\ndrop(1)\")\n"
+        + run.format("a.py") + "\n" + run.format("b.py") + "\n"
+    )
+    writes = _script_writes(tmp_path, monkeypatch, code, earlier=[helpers])
+    assert writes.scripts == ("a.py", "b.py") and set(writes.kinds()) == {"delete", "http"}
+    card = _card_prompt(writes, code)
+    assert "It's this line in `b.py`:\n\n```\nwipe('notes.txt')\n```" in card
+    assert "```\ndrop(1)\n```\n\nIt's in `b.py`." in card
+    assert card.count("`a.py`") == 1
+
+
+def test_a_statement_the_step_runs_beside_its_script_names_no_script(tmp_path, monkeypatch):
+    """The step's own statement has no script line under it, so the card
+    tells it apart from the one its script runs."""
+    script = PG + "cur.execute('DELETE FROM orders WHERE id = 5')"
+    code = (PG + "cur.execute('UPDATE orders SET seen = true')\n"
+            + _SAVED_SCRIPT.format(body=script, run="subprocess.run([sys.executable, str(path)])"))
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert [(w.statement, w.script) for w in writes.sql] == [
+        ("UPDATE orders SET seen = true", ""), ("DELETE FROM orders WHERE id = 5", "job.py"),
+    ]
+    card = _card_prompt(writes, code)
+    assert ("```\nUPDATE orders SET seen = true\n```\n\n```\nDELETE FROM orders WHERE id = 5\n```\n\n"
+            "It's in `job.py`.") in card
 
 
 def test_a_refused_step_whose_card_no_one_answered_tells_the_user_to_ask_again():
@@ -4591,3 +5357,41 @@ def test_a_saved_script_run_in_a_folder_spelled_in_another_case_stays_unread(tmp
                                 run="subprocess.run([sys.executable, 'job.py'], cwd='SUB')")
     writes = _script_writes(tmp_path, monkeypatch, code.replace("Path('job.py')", "Path('SUB/job.py')"))
     assert writes.unchecked and writes.run_code is None
+
+
+@pytest.mark.parametrize("saved,setup", [
+    ("link/job.py", "link-folder"),
+    ("job.py", "link-file"),
+    ("SUB/job.py", "case-alias"),
+], ids=["in-a-linked-folder", "through-a-link", "in-a-folder-spelled-in-another-case"])
+def test_a_saved_script_whose_own_folder_or_file_is_another_spelling_stays_unread(
+    tmp_path, monkeypatch, saved, setup,
+):
+    """A script saved into a linked folder or a folder spelled in another
+    case, or through a link on disk, lies elsewhere than its spelling says,
+    so it stays unread even when it only prints; one in a plain folder is
+    read."""
+    (tmp_path / "sub").mkdir()
+    if setup == "link-folder":
+        (tmp_path / "link").symlink_to(tmp_path / "sub", target_is_directory=True)
+    elif setup == "link-file":
+        (tmp_path / "sub" / "real.py").write_text("")
+        (tmp_path / "job.py").symlink_to(tmp_path / "sub" / "real.py")
+    elif not (tmp_path / "SUB").exists():
+        pytest.skip("the file system tells names apart by case")
+    run = f"subprocess.run([sys.executable, '{saved}'])"
+    for where, unread in ((saved, True), ("sub/job.py", False)):
+        code = _SAVED_SCRIPT.format(body=_PRINTS, run=run.replace(saved, where))
+        writes = _script_writes(tmp_path, monkeypatch, code.replace("Path('job.py')", f"Path('{where}')"))
+        assert writes.unchecked is unread and (writes.run_code is None) is unread, where
+
+
+def test_a_script_reads_no_name_only_the_step_binds(tmp_path, monkeypatch):
+    """A script runs in a process of its own, so a name only the step binds
+    holds nothing in it: the card for a delete of that name names no file
+    of the step's, as one the script picks when it runs."""
+    code = "victim = 'notes.txt'\n" + _SAVED_SCRIPT.format(
+        body="import os\nos.remove(victim)", run="subprocess.run([sys.executable, str(path)])")
+    writes = _script_writes(tmp_path, monkeypatch, code)
+    assert [(f.action, f.paths) for f in writes.files] == [("delete", ())]
+    assert "notes.txt" not in _card_prompt(writes)

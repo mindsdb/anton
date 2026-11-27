@@ -296,13 +296,16 @@ def _replay_chat(check: WriteCheck, chat: Chat, rules, seed: int, first_turn: in
                     kinds = _bucket(writes.kinds()) if card else []
                     causes = sorted({c.kind for c in getattr(writes, "causes", ())}) if card else []
                     recorded = dict(getattr(writes, "code_files", {}) or {})
+                    # The pad runs the code the check hands it, and says so
+                    # for later checks (`EarlierCell.ran_checked`).
+                    ran_checked = getattr(writes, "run_code", None) is not None and not writes.unchecked
                 except Exception:  # the product asks when the check fails
-                    card, crashed, kinds, causes, recorded = True, True, ["unchecked"], ["crash"], {}
+                    card, crashed, kinds, causes, recorded, ran_checked = True, True, ["unchecked"], ["crash"], {}, False
                 results.append(CellResult(
                     id=cell.id, chat=chat.name, cell=i, turn=turn, style=chat.style, card=card, crashed=crashed, kinds=kinds,
                     causes=causes, real_write=cell.real_write, runs_unread=cell.runs_unread, pair=cell.pair,
                     role=cell.role, secs=round(time.time() - started, 3)))
-                entry = {"code": code, "errored": cell.errored, "ended_process": False}
+                entry = {"code": code, "errored": cell.errored, "ended_process": False, "ran_checked": ran_checked}
                 if recorded:
                     entry["code_files"] = recorded
                 earlier.append(entry)

@@ -1097,9 +1097,10 @@ def _hold():
 
 
 async def _gated_session(
-    project: Path, *, elicitor: _AnswersAtOnce | None = None, emitter: bool = True,
+    project: Path, *, elicitor: _AnswersAtOnce | None = None, emitter: bool = True, http: str = "",
+    relay_hosts: str = "",
 ) -> ChatSession:
-    harness = _session(project)
+    harness = _session(project, http=http, relay_hosts=relay_hosts)
     session = harness.session
     if elicitor is not None:
         session.elicitor = elicitor
@@ -1464,6 +1465,49 @@ def test_compaction_keeps_code_and_outcome_in_order(project):
     )
 
 
+def test_a_compacted_cell_that_gives_the_line_it_stopped_at_stays_one_that_failed(project):
+    """A cell's result gives the line it stopped at only when it stopped on
+    an error, so compaction keeps it as one that failed, whatever its error
+    says."""
+    pad = _runtime(project, *_FILLERS, "total_6 = 6")
+    pad.cells[1].stopped_at = 1
+    assert pad._compact_cells()
+    assert pad.compacted_cells[1] == CompactedCell(code="total_1 = 1", errored=True, stopped_at=1)
+
+
+_SAVED_HELPER = (
+    "from pathlib import Path\nscript = 'def report():\\n    print(3)\\n'\n"
+    "path = Path('helpers.py')\npath.write_text(script)\nexec(compile(script, str(path), 'exec'))\n"
+)
+
+
+async def test_a_later_step_reads_an_earlier_script_as_its_text_only_when_the_pad_ran_it_checked(project):
+    """A local pad records a cell that ran the code its check handed it
+    (`Cell.ran_checked`), compaction keeps that, and the next check reads
+    the cell's script as the text that ran only then: a call into what the
+    script defined runs with no card, but keeps its card after the same
+    step ran as written, as one does on the Approve of a step the check
+    couldn't read whole."""
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    pad = _runtime(project)
+    assert await _hold()(session, pad=pad, code=_SAVED_HELPER) is None
+    ran = pad.code_to_run(_SAVED_HELPER)
+    assert ran != _SAVED_HELPER
+    pad._record_cell(Cell(code=_SAVED_HELPER, stdout="", stderr="", error=None))
+    pad._record_cell(Cell(code="report()", stdout="", stderr="", error=None))
+    assert [cell.ran_checked for cell in pad.cells] == [True, False]
+    assert await _hold()(session, pad=pad, code="report()") is None
+    pad.cells.extend(Cell(code=code, stdout="", stderr="", error=None) for code in _FILLERS)
+    assert pad._compact_cells()
+    assert pad.compacted_cells[0].ran_checked
+    assert await _hold()(session, pad=pad, code="report()") is None
+    assert elicitor.asked == 0
+    as_written = _runtime(project, _SAVED_HELPER)
+    assert await _hold()(session, pad=as_written, code="report()") is not None
+    assert elicitor.asked == 1
+
+
 async def test_a_reset_forgets_the_compacted_cells(project):
     pad = _runtime(project, *_FILLERS, "total_6 = 6")
     assert pad._compact_cells()
@@ -1754,14 +1798,17 @@ _FORGED_LINE = (
     ("FileNotFoundError: x", 2, True),
     ("KeyError: 'amount'", None, True),
     (_FORGED_LINE, 2, True),
-], ids=["stopped-after-the-def", "stopped-before-the-def", "no-stop-line", "a-line-the-error-text-names"])
+    (None, 2, True),
+], ids=["stopped-after-the-def", "stopped-before-the-def", "no-stop-line", "a-line-the-error-text-names",
+        "a-stop-line-with-no-error-text"])
 async def test_a_helper_a_failed_cell_defined_before_it_stopped_is_bound(project, error, stopped_at, held):
     """After a script ran, a call to a name no read code binds holds the
     cell. A cell that failed bound what it ran before the line the boot read
     from its traceback (`Cell.stopped_at`), so a later call to a helper it
     defined there runs with no card; one it defined past that line, or with
     no line to go by, may never have been bound. A line the error's text
-    names, which the cell can shape, counts for nothing."""
+    names, which the cell can shape, counts for nothing. A cell that gives
+    the line it stopped at stopped there, whatever its error says."""
     pad = _runtime(
         project,
         "import subprocess, sys\nsubprocess.run([sys.executable, 'scripts/clean.py'], check=True)",
@@ -1794,8 +1841,8 @@ def test_every_cell_that_never_ran_says_so_first():
 #
 # Asked to "write and run a script", agents save the script from a literal
 # and run the file in the same step. A local pad runs the code the check hands
-# it in place of the step's own, with the script's text in place of the file,
-# so the check reads the text and a script that writes nothing needs no card.
+# it in place of the step's own, which runs the file only while it holds the
+# text the check read, so a script that writes nothing needs no card.
 
 _SAVED = (
     "from pathlib import Path\nimport subprocess, sys\n"
@@ -1850,9 +1897,52 @@ async def test_a_delete_in_a_saved_script_waits_on_its_card_which_names_the_scri
         assert outcome is not None and outcome.reason == "write_not_approved"
 
 
+@pytest.mark.parametrize("body,lead", [
+    (PUT_CELL, "This step would send PUT to:"),
+    (UPDATE_CELL, "This step would change data in a connected source:"),
+], ids=["request", "statement"])
+async def test_a_request_or_a_statement_in_a_saved_script_waits_on_a_card_that_names_the_script(
+    project, body, lead,
+):
+    """A saved script's request or SQL statement gets its own card, not the
+    "can't be checked" one, with a line under it that names the script."""
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor)
+    outcome = await _hold()(session, pad=_runtime(project), code=_SAVED.format(body=body))
+    assert outcome is not None and outcome.reason == "write_not_approved"
+    assert elicitor.asked == 1
+    prompt = elicitor.prompts[0]
+    assert "This step saves the script `job.py` and runs it." in prompt
+    assert lead in prompt and "It's in `job.py`." in prompt
+    assert "can't be checked" not in prompt
+
+
+@pytest.mark.parametrize("beside", ["", "import os\nos.remove('notes.txt')\n"], ids=["post-alone", "post-and-a-delete"])
+async def test_a_saved_script_s_post_to_a_relayed_host_adds_no_card_of_its_own(project, beside):
+    """The write relay holds a POST to a host it relays and raises its own
+    card for it, so a saved script's POST there adds none to the step's: a
+    script that only posts runs with no card, as the text the check read,
+    and one that also deletes waits on a card for the delete alone."""
+    (project / "notes.txt").write_text("x")
+    elicitor = _AnswersAtOnce(answer=CANCEL)
+    session = await _gated_session(project, elicitor=elicitor, http=RELAY_RULE, relay_hosts=RELAYED)
+    pad = _runtime(project)
+    code = _SAVED.format(body=RELAYED_POST + beside)
+    outcome = await _hold()(session, pad=pad, code=code)
+    if not beside:
+        assert outcome is None and elicitor.asked == 0
+        assert "'-c', " in pad.code_to_run(code)
+        return
+    assert outcome is not None and elicitor.asked == 1
+    prompt = elicitor.prompts[0]
+    assert "This step saves the script `job.py` and runs it." in prompt
+    assert "This step would delete:\n\n```\nnotes.txt\n```" in prompt
+    assert "would send" not in prompt and "can't be checked" not in prompt
+
+
 async def test_a_saved_script_the_turn_runs_reaches_the_pad_as_the_checked_text(project):
-    """Through a whole turn: no card, and the pad gets the step with the
-    script's text in place of its file."""
+    """Through a whole turn: no card, and the pad gets the step with its
+    run of the file through `-c` and the prelude."""
     from anton.core.backends.base import ScratchpadRuntime
 
     class _SwappingPad(_Pad):
