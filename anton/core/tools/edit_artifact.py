@@ -95,7 +95,7 @@ async def _run_with_progress(work: asyncio.Task, queue: asyncio.Queue):
         yield ToolProgress(queue.get_nowait())
 
 
-def _check_lines(outcome: "Outcome", label: str) -> list[str]:
+def _check_lines(outcome: "Outcome", label: str, *, published: bool = False) -> list[str]:
     check = outcome.check
     if check is None:
         return []
@@ -104,8 +104,12 @@ def _check_lines(outcome: "Outcome", label: str) -> list[str]:
     elif check.status == "unverified":
         # Internal: why nothing could load the page here. Not something to relay.
         why = f" ({check.note})" if check.note else ""
-        lines = [f"{label} — the page could not be checked in a browser from here{why}; the user's open viewer "
-                 "reloads with the change and shows any errors itself."]
+        if published:
+            # The preview shows the published version, which this edit has not reached yet.
+            lines = [f"{label} — the page could not be checked in a browser here{why}."]
+        else:
+            lines = [f"{label} — the page could not be checked in a browser from here{why}; the user's open "
+                     "viewer reloads with the change and shows any errors itself."]
     else:
         lines = [f"{label} — the {check.channel} check failed:"]
         lines += [f"  {finding.line()}" for finding in check.findings[:8]]
@@ -163,6 +167,7 @@ async def handle_edit_artifact(session: "ChatSession", tc_input: dict):
     from anton.core.artifact_editor.editor import ArtifactEditor
     from anton.core.artifact_editor.workspace import ArtifactWorkspace
     from anton.core.artifacts import live_app_slots
+    from anton.core.artifacts.backend_launcher import CONNECTIONS_NEED_APPROVAL, app_backends_reachable
     from anton.core.artifacts.page_copies import turn_pages_of
     from anton.core.backends.sandbox import cell_sandbox_of
     from anton.core.tools.tool_handlers import (
@@ -233,6 +238,8 @@ async def handle_edit_artifact(session: "ChatSession", tc_input: dict):
     key = PageKey(slug=slug, page=ws.primary or "index.html")
     previous_html = turn_pages.previous(key) if turn_pages is not None else None
     fullstack = kind in ("fullstack-stateless-app", "fullstack-stateful-app")
+    # The published preview answers for the pre-edit version, never for this edit.
+    published_only = fullstack and not app_backends_reachable(session)
 
     live_address = None
     if fullstack and live_app_slots.live_apps_enabled() and sandbox is not None:
@@ -244,7 +251,8 @@ async def handle_edit_artifact(session: "ChatSession", tc_input: dict):
     screenshots = not render_screenshots_refused(session)
     checker = select_checker(
         kind, slug=slug, cell_sandbox=sandbox, previous_html=previous_html, screenshot=screenshots,
-        preview_checker=getattr(session, "_preview_checker", None), live_app_address=live_address,
+        preview_checker=None if published_only else getattr(session, "_preview_checker", None),
+        live_app_address=live_address,
     )
     settings = getattr(session, "_settings", None)
     queue: asyncio.Queue = asyncio.Queue()
@@ -285,7 +293,7 @@ async def handle_edit_artifact(session: "ChatSession", tc_input: dict):
             )
         lines = [f"Error: the edit of “{name}” (`{slug}`) could not be made safely, so every file is back as it "
                  f"was before this call. Why: {outcome.error}."]
-        lines += _check_lines(outcome, label)
+        lines += _check_lines(outcome, label, published=published_only)
         if failed_check:
             lines.append(
                 "The change failed its browser check twice. Do not call edit_artifact for this page again this "
@@ -335,13 +343,18 @@ async def handle_edit_artifact(session: "ChatSession", tc_input: dict):
     ]
     if outcome.reply:
         lines.append(f"What changed: {outcome.reply}")
-    lines += _check_lines(outcome, label)
+    lines += _check_lines(outcome, label, published=published_only)
     lines += live_lines
     if status == "passed":
         lines.append(
             "The change is applied and a browser loaded the page without finding a problem. Do NOT re-read, "
             "re-parse or re-verify the files: report the change to the user, and act only on problems they "
             "report. Say \"browser-verified\" only of what the check names.")
+    elif published_only:
+        line = _PUBLISHED_EDIT_LINE
+        if getattr(artifact, "datasources", None):
+            line = f"{line} {CONNECTIONS_NEED_APPROVAL}"
+        lines.append(line)
     else:
         lines.append(
             "The change is applied. It could not be checked in a browser from here; the user's open viewer "
@@ -363,6 +376,14 @@ rebuild the artifact with generate_artifact for a change like that. Use \
 generate_artifact(slug) only when the user asks for a different artifact \
 (a new page structure, new data sources, a rebuild). If edit_artifact says it \
 could not make the change, follow its instruction."""
+
+# An unverified full-stack edit where the user sees the app only through its
+# published preview, which shows the old version until the next publish.
+_PUBLISHED_EDIT_LINE = (
+    "The change is applied. The app's preview shows its published version, which updates a few minutes after "
+    "this turn ends. Tell the user what changed and when they will see it; never say the change was tested or "
+    "verified. Do not open the files looking for problems."
+)
 
 
 def _tool():

@@ -8,6 +8,7 @@ import pytest
 
 from anton.core.artifact_editor.records import LOG_ENV_VAR
 from anton.core.artifacts import ArtifactStore
+from anton.core.artifacts.models import DatasourceRef
 from anton.core.settings import CoreSettings
 from anton.core.tools.edit_artifact import (
     SECTION_ROUTES,
@@ -229,3 +230,67 @@ async def test_a_loose_name_finds_the_artifact_and_a_wrong_one_lists_them(tmp_pa
     assert outcome.ok is True
     _, outcome = await _drive(_session(tmp_path, ScriptedLLM([])), {"slug": "Inventory", "task": "navy"})
     assert outcome.ok is False and f"`{slug}` (Sales)" in outcome.content
+
+
+FULLSTACK_COLOR_PATCH = COLOR_PATCH.replace("@index.html", "@static/index.html")
+
+
+def _fullstack_artifact(tmp_path):
+    store = ArtifactStore(tmp_path / "artifacts")
+    artifact = store.create(name="Orders", description="orders app", type="fullstack-stateless-app",
+                            primary="static/index.html")
+    folder = store.folder_for(artifact.slug)
+    (folder / "static").mkdir(parents=True, exist_ok=True)
+    (folder / "static" / "index.html").write_text(PAGE)
+    (folder / "backend.py").write_text("def total():\n    return 1\n")
+    (folder / "requirements.txt").write_text("fastapi\n")
+    return store, artifact.slug
+
+
+async def _never_asked(slug, timeout_s):
+    raise AssertionError("the published preview shows the old version and must not be asked")
+
+
+async def test_a_published_only_fullstack_edit_skips_the_preview_and_says_when_it_shows(tmp_path):
+    store, slug = _fullstack_artifact(tmp_path)
+    session = _session(tmp_path, ScriptedLLM([reply(diff(FULLSTACK_COLOR_PATCH, note="Heading is navy."))]),
+                       _app_backends_reachable=False, _preview_checker=_never_asked)
+
+    _, outcome = await _drive(session, {"slug": slug, "task": "make the heading navy"})
+
+    assert isinstance(outcome, ToolOutcome) and outcome.ok is True
+    assert "The app's preview shows its published version" in outcome.content
+    # Neither the result line nor the internal check line may promise a reloading viewer.
+    assert "open viewer" not in outcome.content
+    assert "could not be checked in a browser here" in outcome.content
+    assert "saved connections" not in outcome.content
+
+
+async def test_a_published_only_fullstack_edit_with_connections_mentions_the_approval(tmp_path):
+    store, slug = _fullstack_artifact(tmp_path)
+    store.update(slug, datasources=[DatasourceRef(engine="postgres", name="sales")])
+    session = _session(tmp_path, ScriptedLLM([reply(diff(FULLSTACK_COLOR_PATCH))]),
+                       _app_backends_reachable=False, _preview_checker=_never_asked)
+
+    _, outcome = await _drive(session, {"slug": slug, "task": "make the heading navy"})
+
+    assert "This app uses saved connections." in outcome.content
+
+
+async def test_a_published_only_html_edit_still_asks_the_preview(tmp_path, monkeypatch):
+    # A local Electron would pass first and the chain would stop before the preview.
+    monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    store, slug = _artifact(tmp_path)
+    asked = []
+
+    async def preview(checked_slug, timeout_s):
+        asked.append(checked_slug)
+        return {"status": "passed", "errors": [], "ms": 5}
+
+    session = _session(tmp_path, ScriptedLLM([reply(diff(COLOR_PATCH))]),
+                       _app_backends_reachable=False, _preview_checker=preview)
+
+    _, outcome = await _drive(session, {"slug": slug, "task": "make the heading navy"})
+
+    assert asked == [slug]
+    assert "The app's preview shows its published version" not in outcome.content
