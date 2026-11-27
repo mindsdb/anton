@@ -329,6 +329,23 @@ def test_without_a_bridge_no_proxy_is_registered(tmp_path, monkeypatch):
     assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST
 
 
+@pytest.mark.asyncio
+async def test_scheduled_connector_reporting_needs_no_bridge_and_checks_the_saved_exclusion(tmp_path, monkeypatch):
+    excluded = [{"engine": "gmail", "name": "Work mail"}, {"engine": "other"}, None]
+    cfg = _config(tmp_path, monkeypatch, bridge=None, scheduled_excluded_connectors=excluded)
+    (tool,) = cfg.tools
+    assert tool.name == "report_blocked_connector"
+    assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST | {tool.name}
+    assert "Work mail" in tool.prompt
+    accepted = await tool.handler(None, excluded[0])
+    assert json.loads(accepted) == {"blocked_connector": "Work mail (gmail)"}
+    assert await tool.handler(None, {"engine": "gmail", "name": "Personal mail"}) == (
+        "Choose a connector that this task excludes."
+    )
+    interactive = _config(tmp_path, monkeypatch, bridge=None, interactive=True, scheduled_excluded_connectors=excluded)
+    assert not interactive.tools
+
+
 def test_a_request_without_host_tools_builds_as_before(tmp_path, monkeypatch):
     cfg = _config(tmp_path, monkeypatch, bridge=CloudHostTools(lambda e: None))
     assert cfg.tools == []

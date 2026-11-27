@@ -37,6 +37,7 @@ from urllib.parse import urlsplit
 
 from anton.cloud_turn.contract import TurnRequestV1, TurnSkillEntry, parse_turn_skills
 from anton.cloud_turn.host_tools import CloudHostTools, proxy_tool_defs
+from anton.cloud_turn.scheduled_connectors import blocked_connector_tool
 from anton.core.llm.tracing import HARNESS_ANTON
 from anton.core.memory.always_on_skills import AlwaysOnSkill, render_always_on_skills
 from anton.core.tools.connector_draft import ConnectorDraftBox, connector_draft_tool
@@ -1170,6 +1171,11 @@ def build_cloud_chat_session(
         draft_tool = connector_draft_tool(connector_drafts)
         extra_tools.append(draft_tool)
         tool_allowlist |= {draft_tool.name}
+    if request.scheduled_excluded_connectors and not request.interactive:
+        report_tool = blocked_connector_tool(request.scheduled_excluded_connectors)
+        if report_tool.name not in tool_allowlist:
+            extra_tools.append(report_tool)
+            tool_allowlist |= {report_tool.name}
 
     # Tools the host runs, offered only with a bridge to carry their answers.
     # A name another tool of this turn has, or one core may register, is
