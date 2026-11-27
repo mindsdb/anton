@@ -17,9 +17,11 @@ import pytest
 
 import anton.core.tools.generate_artifact as gen_pkg
 from anton.core.artifacts import ArtifactStore
+from anton.core.artifacts.models import DatasourceRef
 from anton.core.llm.client import LLMClient
 from anton.core.llm.provider import LLMProvider, LLMResponse, StreamComplete, Usage
 from anton.core.tools.progress import ToolProgress
+from anton.core.tools import tool_handlers as th
 from anton.core.tools.tool_handlers import handle_generate_artifact
 from tests.streaming_llm import StreamingLLM
 
@@ -1381,3 +1383,66 @@ def test_no_rule_forbids_the_repair_and_each_names_the_one_path():
         flat = " ".join(text.split())
         assert "browser_check_failed" in flat, name
     assert "The one exception is `browser_check_failed`: repair that page in place" in " ".join(rules["tool"].split())
+
+
+async def _published_instruction(tmp_path: Path, monkeypatch, *, datasources=(), type="fullstack-stateless-app") -> str:
+    slug = _make_artifact(tmp_path, type=type)
+    if datasources:
+        ArtifactStore(tmp_path / "artifacts").update(slug, datasources=list(datasources))
+
+    async def fake_generate(**kw):
+        return {"files_written": ["backend.py"], "summary": "ok", "trace": [], "verified_in_browser": False,
+                "checks_skipped": ["browser load of the page: no browser"]}
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    session = _session(tmp_path)
+    session._app_backends_reachable = False
+    _, out = await _collect(session, {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
+    return json.loads(out)["instruction"]
+
+
+def test_every_generated_instruction_carries_the_url_sentence_the_variant_replaces():
+    for key in ("generated", "generated_unverified", "generated_live_app"):
+        assert th._URL_REPORTING in th._STATUS_INSTRUCTIONS[key], key
+        assert th._URL_REPORTING not in th._STATUS_INSTRUCTIONS_PUBLISHED_APPS[key], key
+        assert th._PUBLISHED_APP_REPORTING in th._STATUS_INSTRUCTIONS_PUBLISHED_APPS[key], key
+
+
+async def test_a_published_app_gets_no_url_or_path_and_hears_when_the_preview_shows_it(tmp_path, monkeypatch):
+    instruction = await _published_instruction(tmp_path, monkeypatch)
+
+    assert "appears in the artifact card's preview a few minutes after the turn ends" in instruction
+    assert "give the user the URL" not in instruction
+    assert "the entry point is `<path>/<primary>`" not in instruction
+    assert "saved connections" not in instruction
+    assert "`checks_skipped` lists" in instruction
+
+
+async def test_a_published_app_with_connections_hears_about_the_approval(tmp_path, monkeypatch):
+    instruction = await _published_instruction(
+        tmp_path, monkeypatch, datasources=[DatasourceRef(engine="postgres", name="sales")],
+    )
+    assert instruction.endswith(
+        "approves its connections, unless they approved them for this app before. Tell the user that."
+    )
+
+
+async def test_a_published_only_html_app_keeps_the_usual_instruction(tmp_path, monkeypatch):
+    """Its preview shows the file on disk at once; nothing waits for a publish."""
+    instruction = await _published_instruction(
+        tmp_path, monkeypatch, type="html-app", datasources=[DatasourceRef(engine="postgres", name="sales")],
+    )
+    assert th._URL_REPORTING in instruction
+    assert "A full-stack app cannot be opened" not in instruction
+    assert "saved connections" not in instruction
+
+
+async def test_a_reachable_app_keeps_the_url_instruction(tmp_path, monkeypatch):
+    slug = _make_artifact(tmp_path)
+
+    async def fake_generate(**kw):
+        return {"files_written": ["backend.py"], "summary": "ok", "trace": [], "verified_in_browser": False}
+
+    monkeypatch.setattr(gen_pkg, "generate", fake_generate)
+    _, out = await _collect(_session(tmp_path), {"slug": slug, "user_request": "build it", "agent_understanding": "an app"})
+    assert th._URL_REPORTING in json.loads(out)["instruction"]
