@@ -2029,6 +2029,10 @@ class ChatSessionConfig:
     # the agent, not a network block. Separate from the web tool flags:
     # cloud_turn turns those off while its scratchpads keep the internet.
     internet_research_enabled: bool = True
+    # False: the user's browser cannot open a backend this session starts
+    # (cloud turns). A full-stack app then reaches the user only through its
+    # published preview, so no backend address or port is handed out.
+    app_backends_reachable: bool = True
     # When the task (conversation) was created. Rendered as a fixed
     # "Conversation started: …" line in the cache-stable prompt prefix — it
     # never changes across turns, so it doesn't bust the prefix cache. The
@@ -2452,6 +2456,7 @@ class ChatSession:
         from anton.core.artifacts.live_app_slots import fullstack_offered
 
         self._fullstack_offered = fullstack_offered(config.cell_sandbox)
+        self._app_backends_reachable = config.app_backends_reachable
 
         self.tool_registry = ToolRegistry()
         # Procedural memory: brain-inspired skills (Stage 1 = declarative).
