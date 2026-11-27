@@ -37,11 +37,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# The reason a page-builder step carries when it did not run: an exec the
+# write check would have held for a card, refused because the page builder
+# only reads (`hold_unapproved_write`), or a reset or removal of a
+# scratchpad, refused whatever the setting (`handle_scratchpad`).
+WRITE_REFUSED_READ_ONLY = "write_refused_read_only"
 # Reasons a scratchpad exec result carries when its cell never ran, so a
 # caller that records executed cells can tell them from a cell that did
 # (`discovery.engine`, `generate_artifact.engine._run_loop` and the turn's
 # hand-back report).
-CELL_NOT_RUN_REASONS = frozenset({"new_scratchpad_challenged", "write_not_approved"})
+CELL_NOT_RUN_REASONS = frozenset({"new_scratchpad_challenged", "write_not_approved", WRITE_REFUSED_READ_ONLY})
 
 # Every `action` the scratchpad tool takes, in the order its schema lists them.
 SCRATCHPAD_ACTIONS: tuple[str, ...] = ("exec", "view", "reset", "remove", "dump", "install")
@@ -73,10 +78,17 @@ def fill_in_scratchpad_action(tc_input: dict) -> None:
 
 
 RefusalCause = Literal["cancelled", "timeout", "unavailable", "error", "unanswered_earlier"]
+# Whose step a scratchpad call runs: the chat agent's, or the page builder's
+# (`generate_artifact`), which only reads. Only the builder's own loops pass
+# "page_builder"; nothing reads it from a tool call's input.
+CardOrigin = Literal["chat", "page_builder"]
 # What a logged decision says came of a held cell: "stopped" when the turn
 # ended while its card waited, so no refusal went back to the model;
-# "not_held_unchecked" when `write_approval_unchecked` let it run with no card.
-DecisionStatus = RefusalCause | Literal["approved", "not_held", "not_held_unchecked", "stopped"]
+# "not_held_unchecked" when `write_approval_unchecked` let it run with no card;
+# "refused_read_only" when a page-builder cell would have needed a card and
+# was refused with none, or the page builder's reset or removal of a
+# scratchpad was refused (`log_builder_pad_refusal`).
+DecisionStatus = RefusalCause | Literal["approved", "not_held", "not_held_unchecked", "stopped", "refused_read_only"]
 
 _WHY = {
     "cancelled": "they declined it",
@@ -154,14 +166,16 @@ class WriteGate:
 
 
 class WriteApprovalDecision(BaseModel):
-    """One logged decision: what a held cell would change and what came of it.
-    Never the code or the statement itself."""
+    """One logged decision: what a held cell would change, what came of it,
+    and whose step it was (`origin`). Never the code or the statement itself."""
 
     model_config = ConfigDict(frozen=True)
 
     kinds: tuple[str, ...]
     count: int
     status: DecisionStatus
+    # No default, so the logged line names it on every decision.
+    origin: CardOrigin
     # For "not_held_unchecked": the setting's value, and the kinds of the
     # reasons the card would have given.
     mode: UncheckedMode | None = None
@@ -482,6 +496,63 @@ def _refusal(writes: CellWrites, cause: RefusalCause) -> ToolOutcome:
     )
 
 
+@dataclass
+class ReadOnlyRefusal(ToolOutcome):
+    """The gate's refusal of a page-builder cell that would have needed a
+    card (`_read_only_refusal`). `change` is what the cell would have
+    changed, in the refusal's words, so the builder's result can name the
+    step it skipped."""
+
+    change: str = ""
+
+
+def _carried_over_only(*, writes: CellWrites) -> bool:
+    """Whether every reason the check held the cell is carried over from an
+    earlier step: the cell uses a name that code an earlier step ran may
+    have set, and the check couldn't read that code (`UncheckedCause` kind
+    `uses`). Nothing else holds it: no write it reads, no code it runs
+    itself, no restart and no depth limit."""
+    return (
+        bool(writes.causes)
+        and all(cause.kind == "uses" for cause in writes.causes)
+        and not (writes.unread_here or writes.stopped)
+        and not writes.model_copy(update={"unchecked": False, "causes": ()}).needs_approval()
+    )
+
+
+def _read_only_refusal(*, writes: CellWrites) -> ReadOnlyRefusal:
+    """A page-builder cell that would have needed a card, refused with no
+    card and no wait: the page builder only reads. It names what the cell
+    would change as the chat's refusal does (`_summary`). A hold carried
+    over from an earlier step (`_carried_over_only`) leaves the builder a
+    way to read the same data again; any other hold doesn't. "Not run:"
+    opens it, as it opens every cell that never ran."""
+    change = _summary(writes)
+    if _carried_over_only(writes=writes):
+        names = ", ".join(dict.fromkeys(_code_span(cause.name) for cause in writes.causes if cause.name))
+        uses = "what code an earlier step ran may have set" + (f" ({names})" if names else "")
+        next_step = (
+            f"The check held it only because it uses {uses}, and the check couldn't read that code. You may "
+            "read the same data again in code that doesn't call into that earlier code."
+        )
+    else:
+        next_step = (
+            "Don't rewrite or retry this step another way: don't build the statement, path or URL at run "
+            "time, and don't use another tool for it."
+        )
+    return ReadOnlyRefusal(
+        content=(
+            f"Not run: the page builder only reads data, and this step would {change}, which needs the "
+            f"user's approval. Nothing in this cell ran. {next_step} Continue from the data already "
+            "gathered or available from the chat, and name any data you couldn't get when you finish."
+        ),
+        # ok=True: as for a refused card, a refusal is no tool failure.
+        ok=True,
+        reason=WRITE_REFUSED_READ_ONLY,
+        change=change,
+    )
+
+
 async def _ask_approval(session: ChatSession, writes: CellWrites, code: str) -> RefusalCause | None:
     """Ask Approve or Cancel for a held cell. None when the user picks Approve, else why not."""
     return await ask_approval_card(
@@ -568,21 +639,40 @@ async def ask_approval_choice(
     return ApprovalChoice(None, "error")
 
 
-def _log_decision(*, writes: CellWrites, status: DecisionStatus, mode: UncheckedMode | None = None) -> None:
-    """Log what came of a cell: for one that ran with no card, the changes
-    it was let make (appends, and overwrites of the agent's own files),
-    and, for one `write_approval_unchecked` let run (`mode`), the setting
-    and the kinds of its reasons; otherwise what its card held."""
+def _log_decision(
+    *, writes: CellWrites, status: DecisionStatus, origin: CardOrigin, mode: UncheckedMode | None = None,
+) -> None:
+    """Log what came of a cell and whose step it was (`origin`): for one
+    that ran with no card, the changes it was let make (appends, and
+    overwrites of the agent's own files), and, for one
+    `write_approval_unchecked` let run (`mode`), the setting and the kinds
+    of its reasons; otherwise what its card held, or would have held for a
+    page-builder cell refused with no card."""
     if status in ("not_held", "not_held_unchecked"):
         kinds = tuple(sorted({f.action for f in writes.not_held_files}))
         count = len(writes.not_held_files)
     else:
         kinds, count = writes.kinds(), len(writes.sql) + len(writes.calls) + len(writes.held_files) + len(writes.http)
     causes = tuple(dict.fromkeys(c.kind for c in writes.causes)) if mode is not None else ()
-    decision = WriteApprovalDecision(kinds=kinds, count=count, status=status, mode=mode, causes=causes)
-    # WARNING: hosts log at WARNING by default, and this line is the record of
-    # a held write. `mode` and `causes` show only on a "not_held_unchecked" line.
+    _write_decision_line(decision=WriteApprovalDecision(
+        kinds=kinds, count=count, status=status, origin=origin, mode=mode, causes=causes,
+    ))
+
+
+def _write_decision_line(*, decision: WriteApprovalDecision) -> None:
+    """Log one decision. WARNING: hosts log at WARNING by default, and this
+    line is the record of a held write. `origin` shows on every line; `mode`
+    and `causes` only on a "not_held_unchecked" line."""
     logger.warning("write approval: %s", decision.model_dump_json(exclude_defaults=True))
+
+
+def log_builder_pad_refusal(*, action: str) -> None:
+    """Log a page-builder reset or removal of a scratchpad, which
+    `handle_scratchpad` refuses whatever the write approval setting, on the
+    line a refused page-builder cell gets (`_log_decision`)."""
+    _write_decision_line(decision=WriteApprovalDecision(
+        kinds=(action,), count=1, status="refused_read_only", origin="page_builder",
+    ))
 
 
 def _unchecked_hold_dropped(writes: CellWrites, mode: UncheckedMode) -> bool:
@@ -600,7 +690,9 @@ def _unchecked_hold_dropped(writes: CellWrites, mode: UncheckedMode) -> bool:
     return not writes.model_copy(update={"unchecked": False, "causes": ()}).needs_approval()
 
 
-async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> ToolOutcome | None:
+async def hold_unapproved_write(
+    session: ChatSession, *, pad, code: str, origin: CardOrigin = "chat",
+) -> ToolOutcome | None:
     """Hold a cell that changes a database, existing files, or data behind
     an HTTP API until the user approves it. None when the cell may run;
     otherwise the refusal to return in its place, before any of it runs.
@@ -609,6 +701,12 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     anything. A check that fails asks too, since it can't clear the cell.
     `write_approval_unchecked` lets a cell held only because the check
     can't read all of it run (`_unchecked_hold_dropped`).
+
+    `origin` says whose step it is. The page builder only reads, so where a
+    chat cell would get its card, a page-builder cell is refused with none
+    (`_read_only_refusal`): no question, no wait, and `gate.unanswered`
+    neither read nor set. A builder cell that a chat cell's checks would let
+    run with no card still runs.
     """
     # Drop code to run that an earlier check left for a cell that never ran.
     expect = getattr(pad, "expect_run", None)
@@ -670,19 +768,24 @@ async def hold_unapproved_write(session: ChatSession, *, pad, code: str) -> Tool
     # After the relay's requests are left out: a request the relay holds
     # doesn't keep the cell's card on its own.
     if _unchecked_hold_dropped(writes, gate.unchecked):
-        _log_decision(writes=writes, status="not_held_unchecked", mode=gate.unchecked)
+        _log_decision(writes=writes, status="not_held_unchecked", origin=origin, mode=gate.unchecked)
         return None
     if not writes.needs_approval():
         if writes.not_held_files:
-            _log_decision(writes=writes, status="not_held")
+            _log_decision(writes=writes, status="not_held", origin=origin)
         return None
+    if origin == "page_builder":
+        # The point a chat cell's card is asked, after every waiver above and
+        # before the turn's unanswered-card memory (`ask_approval_choice`).
+        _log_decision(writes=writes, status="refused_read_only", origin=origin)
+        return _read_only_refusal(writes=writes)
     try:
         cause = await _ask_approval(session, writes, code)
     except asyncio.CancelledError:
         # Stop, or the host ending the turn, while the card waited.
-        _log_decision(writes=writes, status="stopped")
+        _log_decision(writes=writes, status="stopped", origin=origin)
         raise
-    _log_decision(writes=writes, status=cause or "approved")
+    _log_decision(writes=writes, status=cause or "approved", origin=origin)
     if cause is None:
         return None
     return _refusal(writes, cause)
@@ -956,7 +1059,7 @@ def observe_scratchpad_cell(session, name: str, cell) -> None:
         )
 
 
-async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
+async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict, *, origin: CardOrigin = "chat"):
     """Validate and prepare a scratchpad exec call.
 
     Returns (pad, code, description, estimated_time, estimated_seconds) or
@@ -970,7 +1073,9 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
     (CLI) and the inline streaming exec in `ChatSession.turn_stream` (cowork)
     both call it — so the single-scratchpad guard and the pre-execute ACC
     events live here, not in `handle_scratchpad` (which the streaming path
-    bypasses).
+    bypasses). `origin` says whose step it is: the page builder's loops
+    pass "page_builder" through `handle_scratchpad`; every other path,
+    the streaming one included, is the chat's.
     """
     name = tc_input.get("name", "")
     code = tc_input.get("code", "")
@@ -1073,7 +1178,7 @@ async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):
     pad = await session._scratchpads.get_or_create(name)
 
     # Before the installs, so a refused cell installs nothing either.
-    held = await hold_unapproved_write(session, pad=pad, code=code)
+    held = await hold_unapproved_write(session, pad=pad, code=code, origin=origin)
     if held is not None:
         return held
 

@@ -133,6 +133,10 @@ class DiscoveryCheckpoint:
     # `GenState.known_data_verified`: what a new iteration without
     # `known_data` has to read again.
     known_data_verified: list[str] = field(default_factory=list)
+    # `GenState.skipped_steps` as `SkippedStep.model_dump()` records. A call
+    # that continues the same run builds on the notes these steps left gaps
+    # in, so its result names them too. A new iteration does not inherit them.
+    skipped_steps: list[dict] = field(default_factory=list)
 
 
 def load(artifact_path: Path) -> DiscoveryCheckpoint | None:

@@ -25,10 +25,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from anton.core.artifacts.models import (
+    ARTIFACT_DISPLAYS,
     ARTIFACT_ID_SLUG_PREFIX_LEN,
     ARTIFACT_TYPES,
     METADATA_SCHEMA_VERSION,
     Artifact,
+    ArtifactDisplay,
     ArtifactType,
     DatasourceRef,
     FileEntry,
@@ -231,6 +233,7 @@ class ArtifactStore:
         description: str,
         type: ArtifactType,
         primary: str | None = None,
+        display: ArtifactDisplay | None = None,
     ) -> Artifact:
         """Create a fresh artifact folder + metadata.json + README.
 
@@ -264,7 +267,14 @@ class ArtifactStore:
         Stored as-is — we don't validate it against the (empty)
         folder at create time, since the agent is about to write
         the file in the next scratchpad cell.
+
+        `display` (optional) is how the chat shows it: None for the usual
+        card, "inline" for a page shown live inside the chat reply that is
+        worth keeping or sharing, "widget" for one that collects the user's
+        input in this conversation (no Share, not in the Artifacts list).
         """
+        if display is not None and display not in ARTIFACT_DISPLAYS:
+            raise ValueError(f"`display` must be one of {ARTIFACT_DISPLAYS} or None. Got: {display!r}.")
         self.ensure_root()
         # The id prefix is part of the slug, so the id has to exist before it.
         artifact_id = _new_id()
@@ -285,6 +295,7 @@ class ArtifactStore:
             description=description.strip(),
             type=type,
             primary=(primary.strip() if isinstance(primary, str) and primary.strip() else None),
+            display=display,
             files=[],
             provenance=[],
         )
@@ -301,13 +312,17 @@ class ArtifactStore:
         port: int | None = _UNSET,  # type: ignore[assignment]
         datasources: list[DatasourceRef] | None = _UNSET,  # type: ignore[assignment]
         type: ArtifactType | None = _UNSET,  # type: ignore[assignment]  # noqa: A002 (shadows builtin `type` — matches `create()`'s existing param name below)
+        display: ArtifactDisplay | None = _UNSET,  # type: ignore[assignment]
     ) -> Artifact | None:
         """Update mutable agent-supplied fields on an existing artifact.
 
         Only fields explicitly passed are modified; omitted fields are
         left unchanged. Pass `primary=None` or `primary=""` to clear
         the entry-point pointer. Pass `port=None` to clear the port.
-        Pass `datasources=[]` to clear the datasource list.
+        Pass `datasources=[]` to clear the datasource list. Pass
+        `display=None` to go back to the usual card. Turning a "widget" into
+        "inline" (the user wants to keep or share it) is this metadata
+        change alone; the slug and files stay.
 
         `type` is validated against `ARTIFACT_TYPES` after the slug is
         confirmed to exist, but before anything is mutated — Pydantic's
@@ -328,6 +343,10 @@ class ArtifactStore:
             raise ValueError(
                 f"`type` must be one of {ARTIFACT_TYPES}. Got: {type!r}."
             )
+        if display is not _UNSET and display is not None and display not in ARTIFACT_DISPLAYS:
+            raise ValueError(
+                f"`display` must be one of {ARTIFACT_DISPLAYS} or None. Got: {display!r}."
+            )
         if primary is not _UNSET:
             artifact.primary = (
                 primary.strip() if isinstance(primary, str) and primary.strip() else None
@@ -338,6 +357,8 @@ class ArtifactStore:
             artifact.datasources = list(datasources or [])
         if type is not _UNSET:
             artifact.type = type
+        if display is not _UNSET:
+            artifact.display = display
         artifact.updatedAt = _utc_now()
         self._save(artifact)
         return artifact

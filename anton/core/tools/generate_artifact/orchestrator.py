@@ -7,6 +7,7 @@ reuse `engine._run_loop`; verification uses `verifiers`.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import json
 import logging
@@ -26,6 +27,7 @@ from anton.core.artifacts import live_app_slots
 from anton.core.llm.client import asked_model
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
 from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox, cell_sandbox_of
+from anton.core.utils.scratchpad import WriteGate
 from anton.utils.datasources import scrub_output
 from anton.utils.nofollow import read_text_nofollow, write_text_nofollow
 
@@ -46,11 +48,14 @@ from .state import (
     GEN_VERIFY_MAX_RETRIES,
     NOT_ENOUGH_DATA_PREFIX,
     RUNAPP_MAX_RETRIES,
+    SKIPPED_READ_ONLY_PREFIX,
     BrowserCheck,
     BrowserCheckFailed,
+    FetchOutcome,
     FetchVerdict,
     GenState,
     RequiredData,
+    SkippedStep,
     VerifyResult,
     known_data_usable,
     settled_artifact_type,
@@ -88,15 +93,19 @@ async def _decide(state: GenState, schema, prompt_pair, node: str) -> object:
     return result
 
 
-async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[str, bool]:
+async def _fetch_data_sample(*, state: GenState, required_text: str = "") -> FetchOutcome:
     """Run a scratchpad loop that pulls a data sample.
 
-    Returns the notes for `data_notes` and whether the loop ran at least one
-    cell that succeeded — the only evidence the data loop accepts that data
-    was read.
+    Returns the notes for `data_notes`, whether the loop ran at least one
+    cell that succeeded, and whether the write gate refused every cell it
+    tried because the page builder only reads (`FetchOutcome`). The notes
+    name each step this loop skipped, so the next steps don't take its
+    source as read.
     """
     if state.public_sources is None:
         state.public_sources = _public_data_sources_skill(state.session)
+    # The steps this loop adds to the run's list are the ones after this mark.
+    first_skipped = len(state.skipped_steps)
     try:
         result = await engine._run_loop(
             on_text=state.peek_for("fetch_data_sample"),
@@ -108,6 +117,7 @@ async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[
                 project_rules=state.project_rules,
                 artifact_skills=state.artifact_skills,
                 user_language=state.user_language,
+                read_only=isinstance(getattr(state.session, "_write_gate", None), WriteGate),
             ),
             kickoff=prompts.build_fetch_data_kickoff(state, required_text),
             artifact_path=state.artifact_path,
@@ -115,17 +125,19 @@ async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[
             node_label="fetch_data_sample",
             trace=state.trace_log,
             spend=state.spend,
+            skipped_steps=state.skipped_steps,
         )
     finally:
         state.peek_done("fetch_data_sample")
+    skipped = state.skipped_steps[first_skipped:]
     if isinstance(result, str):
         # Loop failed — surface as a note so the next define / can-fetch decision sees it.
-        return f"(data fetch step reported: {result})", False
+        return FetchOutcome(notes=f"(data fetch step reported: {result})", ok=False)
     if result.get("over_budget"):
         # The guard is sticky, so the caller's next `winding_down()` check is
         # what stops the pipeline. Said plainly rather than folded into a
         # summary, which would read as a fetch that completed.
-        return "(data fetch stopped: the turn's budget ran out mid-fetch)", False
+        return FetchOutcome(notes="(data fetch stopped: the turn's budget ran out mid-fetch)", ok=False)
     summary = result.get("summary") or "(fetch produced no summary)"
     execs = result.get("scratchpad_execs") or []
     exec_notes = _render_exec_notes(execs)
@@ -134,7 +146,15 @@ async def _fetch_data_sample(state: GenState, required_text: str = "") -> tuple[
     ok = any(e.get("ok", True) for e in execs)
     if not ok:
         summary += "\n\n(the fetch step ran no cell that succeeded)"
-    return summary, ok
+    if skipped:
+        # Beside a cell that ran, the summary may still say the skipped step's source was read.
+        summary += "\n\n" + "\n".join(
+            "(not read: the page builder skipped this step, which would have needed the user's approval: "
+            f"{phrase})"
+            for phrase in _skipped_step_phrases(steps=skipped)
+        )
+    # `execs` holds only the cells that ran: every cell was refused when none ran and one was.
+    return FetchOutcome(notes=summary, ok=ok, all_refused=bool(skipped) and not execs)
 
 
 def _absorb_discovery_notes(state: GenState) -> None:
@@ -213,13 +233,36 @@ def _mark_data_covered(state: GenState) -> None:
     state.gathering_complete = True
 
 
-def _not_enough_data(state: GenState, reasoning: str, required: RequiredData | None) -> str:
-    """The "not enough data" error. After a forced fetch it names where the
-    fetch looked: the connections the required data mentions (or the first
-    few when it mentions none), then where each item was expected."""
-    message = f"{NOT_ENOUGH_DATA_PREFIX} {reasoning.strip()}"
+# The last line of a data stop for an html-app, whose page embeds a
+# snapshot (`_known_data_line`).
+_KNOWN_DATA_STANDS_IN = (
+    "Data passed in `known_data` can stand in for these reads: if the data the artifact needs is already in "
+    "this chat, call generate_artifact again and pass it in `known_data`, naming the scratchpad and cell it "
+    "lives in."
+)
+# The last line of a data stop for any other type (`_known_data_line`).
+_KNOWN_DATA_CANNOT_STAND_IN = (
+    "Data passed in `known_data` can't stand in for these reads: this artifact's backend reads its data at "
+    "run time, so tell the user which data the page builder couldn't read."
+)
+
+
+def _known_data_line(*, state: GenState) -> str:
+    """The last line of a data stop, chosen by the settled artifact type:
+    whether data passed in `known_data` can stand in for the reads the
+    builder couldn't make. Only an html-app's page embeds a snapshot; any
+    other type's backend reads its source at run time (`known_data_usable`)."""
+    return _KNOWN_DATA_STANDS_IN if settled_artifact_type(state) == "html-app" else _KNOWN_DATA_CANNOT_STAND_IN
+
+
+def _missing_data_reason(*, state: GenState, reasoning: str, required: RequiredData | None) -> str:
+    """Why the data isn't there, as the agent quotes it to the user. After a
+    forced fetch it names where the fetch looked: the connections the
+    required data mentions (or the first few when it mentions none), then
+    where each item was expected."""
+    reason = reasoning.strip()
     if not state.forced_fetch_used:
-        return message
+        return reason
     wheres = [it.where for it in (required.items if required else []) if it.where.strip()]
     catalog = state.datasource_catalog
     connections = list(catalog.connections) if catalog is not None else []
@@ -228,10 +271,56 @@ def _not_enough_data(state: GenState, reasoning: str, required: RequiredData | N
     mentioned = [c.slug for c in connections if prompts.is_declared(c, lowered)]
     looked = list(dict.fromkeys((mentioned or [c.slug for c in connections[:5]]) + wheres))
     if not looked:
-        return message
+        return reason
     # The agent quotes this to the user, so the reasoning ends as a sentence.
-    base = message if message.endswith((".", "!", "?")) else message + "."
+    base = reason if reason.endswith((".", "!", "?")) else reason + "."
     return f"{base} Looked in: {', '.join(looked)}."
+
+
+def _not_enough_data(*, state: GenState, reasoning: str, required: RequiredData | None) -> str:
+    """The "not enough data" error: why the data isn't there and where the
+    fetch looked (`_missing_data_reason`), then whether `known_data` can
+    stand in for it (`_known_data_line`)."""
+    reason = _missing_data_reason(state=state, reasoning=reasoning, required=required)
+    return f"{NOT_ENOUGH_DATA_PREFIX} {reason}\n{_known_data_line(state=state)}"
+
+
+def _skipped_step_phrases(*, steps: Sequence[SkippedStep]) -> list[str]:
+    """Each distinct step the page builder skipped: its own description,
+    when it gave one, and what it would have changed."""
+    return [
+        f"{step.description} (it would {step.change})" if step.description else f"a step that would {step.change}"
+        for step in dict.fromkeys(steps)
+    ]
+
+
+def _skipped_steps_list(*, state: GenState) -> str:
+    """The run's skipped steps as a text list under `Skipped steps:`."""
+    steps = "\n".join(f"- {phrase}" for phrase in _skipped_step_phrases(steps=state.skipped_steps))
+    return f"Skipped steps:\n{steps}"
+
+
+def _read_only_stop(*, state: GenState, reasoning: str, required: RequiredData | None) -> str:
+    """The error the data loop stops with once the page builder skipped
+    steps that would have needed the user's approval: why the data isn't
+    there and where the fetch looked, as `_not_enough_data` says it, then
+    each step it skipped, then whether `known_data` can stand in for the
+    reads. Another define, can-fetch and fetch would be refused the same
+    way."""
+    lead = _missing_data_reason(state=state, reasoning=reasoning, required=required)
+    if lead and not lead.endswith((".", "!", "?")):
+        lead += "."
+    return f"{SKIPPED_READ_ONLY_PREFIX} {lead}\n{_skipped_steps_list(state=state)}\n{_known_data_line(state=state)}"
+
+
+def _data_stop(*, state: GenState, reasoning: str, required: RequiredData | None) -> str:
+    """The error the data loop stops with: the read-only text once the
+    page builder skipped a step that would have needed the user's approval,
+    since that step may be why the data isn't there; else "not enough
+    data"."""
+    if state.skipped_steps:
+        return _read_only_stop(state=state, reasoning=reasoning, required=required)
+    return _not_enough_data(state=state, reasoning=reasoning, required=required)
 
 
 async def _data_phase(state: GenState) -> str | None:
@@ -316,21 +405,28 @@ async def _data_phase(state: GenState) -> str | None:
                 state.record("is_possible_to_fetch", "no_but_trying", can.reasoning)
             else:
                 state.record("is_possible_to_fetch", "no", can.reasoning)
-                state.error = _not_enough_data(state, can.reasoning, required)
+                state.error = _data_stop(state=state, reasoning=can.reasoning, required=required)
                 return state.error
         else:
             state.record("is_possible_to_fetch", "yes", can.reasoning)
 
         state.step_started("fetch_data_sample", attempt=state.data_iterations)
-        notes, ok = await _fetch_data_sample(state, required_text)
+        fetched = await _fetch_data_sample(state=state, required_text=required_text)
         state.data_iterations += 1
-        state.data_notes = (state.data_notes + "\n\n" + notes).strip()
-        if not ok:
+        state.data_notes = (state.data_notes + "\n\n" + fetched.notes).strip()
+        if fetched.all_refused:
+            # Every cell the fetch tried would have needed the user's
+            # approval, and the page builder only reads: the next fetch
+            # would be refused the same way.
+            state.record("fetch_data_sample", "refused_read_only", fetched.notes[:200])
+            state.error = _read_only_stop(state=state, reasoning=last_reasoning, required=last_required)
+            return state.error
+        if not fetched.ok:
             # The sources stay unverified; the next iteration reads the
             # failure in the notes.
-            state.record("fetch_data_sample", "fail", notes[:200])
+            state.record("fetch_data_sample", "fail", fetched.notes[:200])
             continue
-        state.record("fetch_data_sample", "done", notes[:200])
+        state.record("fetch_data_sample", "done", fetched.notes[:200])
         fetched_ok = True
         if forced:
             # The decisions said the data was not there; the next define
@@ -342,11 +438,11 @@ async def _data_phase(state: GenState) -> str | None:
         _mark_data_covered(state)
         return None
 
-    state.error = _not_enough_data(
-        state,
-        f"the data loop did not converge within {DATA_LOOP_MAX} iterations. "
+    state.error = _data_stop(
+        state=state,
+        reasoning=f"the data loop did not converge within {DATA_LOOP_MAX} iterations. "
         f"Last assessment: {last_reasoning}",
-        last_required,
+        required=last_required,
     )
     return state.error
 
@@ -675,7 +771,9 @@ def _map_datasources(session, ds_keys: list[str]) -> tuple[list, list[str]]:
     """Map DS_* env keys used by backend.py to vault `DatasourceRef`s.
 
     Returns `(refs, unmapped)`. A key maps when some connection's
-    `DS_<ENGINE>_<NAME>` prefix matches `DS_..._<FIELD>`. Mirrors the vault
+    `DS_<ENGINE>_<NAME>` prefix matches `DS_..._<FIELD>`, to the longest such
+    prefix: postgres/prod--db builds DS_POSTGRES_PROD__DB, which also starts
+    with postgres/prod's DS_POSTGRES_PROD__. Mirrors the vault
     lookup already used by `handle_update_artifact` (tool_handlers.py): the
     session attribute is `_data_vault`, falling back to `LocalDataVault()`.
     """
@@ -694,9 +792,10 @@ def _map_datasources(session, ds_keys: list[str]) -> tuple[list, list[str]]:
     refs: list = []
     unmapped: list[str] = []
     for key in ds_keys:
-        match = next(
+        match = max(
             ((e, n) for (e, n) in conns if key.startswith(_slug_env_prefix(e, n) + "__")),
-            None,
+            key=lambda conn: len(_slug_env_prefix(*conn)),
+            default=None,
         )
         if match is None:
             unmapped.append(key)
@@ -832,7 +931,7 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
                 artifact_path=state.artifact_path,
                 node_label="generate_backend", attempt=attempt, trace=state.trace_log,
                 step_injections=injections, spend=state.spend,
-                on_text=state.peek_for("generate_backend"),
+                on_text=state.peek_for("generate_backend"), skipped_steps=state.skipped_steps,
             )
         finally:
             state.peek_done("generate_backend")
@@ -1051,7 +1150,7 @@ async def _gen_verify_frontend(
                 artifact_path=state.artifact_path,
                 node_label="generate_frontend", attempt=attempt, trace=state.trace_log,
                 spend=state.spend,
-                on_text=state.peek_for("generate_frontend"),
+                on_text=state.peek_for("generate_frontend"), skipped_steps=state.skipped_steps,
             )
         finally:
             state.peek_done("generate_frontend")
@@ -1657,7 +1756,56 @@ def _note_skipped(state: GenState, text: str) -> None:
         state.checks_skipped.append(text)
 
 
-def _result_shell(state: GenState) -> dict:
+def _skipped_steps_warning(*, state: GenState, built: bool) -> str:
+    """The warning that names the steps the page builder skipped because
+    they would have needed the user's approval. Only a result that `built`
+    a page says the page uses the data the builder could read."""
+    skipped = "; ".join(_skipped_step_phrases(steps=state.skipped_steps))
+    uses = " The page uses the data it could read." if built else ""
+    return (
+        "The page builder only reads data, so it skipped these steps, which would have needed the user's "
+        f"approval: {skipped}.{uses} Don't run these steps yourself unless the user asked for them."
+    )
+
+
+def _result_warnings(*, state: GenState, built: bool) -> list[str]:
+    """The result's warnings: the checks' own, then, when the page builder
+    skipped steps that would have needed the user's approval, one line that
+    names them (`_skipped_steps_warning`). The line goes on the result only;
+    the state keeps its own list."""
+    if not state.skipped_steps:
+        return state.verify_warnings
+    return [*state.verify_warnings, _skipped_steps_warning(state=state, built=built)]
+
+
+def with_skipped_steps(
+    *, state: GenState, result: "dict | str | BrowserCheckFailed",
+) -> "dict | str | BrowserCheckFailed":
+    """The run's outcome as the tool handler gets it, naming the steps the
+    page builder skipped on every ending: a failure's text ends with the
+    list, unless it is the data loop's read-only stop, which already lists
+    them (`SKIPPED_READ_ONLY_PREFIX`); a page left for a browser repair, or
+    a result with no warnings of its own (`cancelled`,
+    `needs_confirmation`), carries the warning (`_skipped_steps_warning`).
+    A result built on `_result_shell` already carries it."""
+    if not state.skipped_steps:
+        return result
+    if isinstance(result, str):
+        if result.startswith(SKIPPED_READ_ONLY_PREFIX):
+            return result
+        return f"{result}\n{_skipped_steps_list(state=state)}"
+    warning = _skipped_steps_warning(state=state, built=False)
+    if isinstance(result, BrowserCheckFailed):
+        return dataclasses.replace(result, warnings=(warning,))
+    if "warnings" not in result:
+        return {**result, "warnings": [warning]}
+    return result
+
+
+def _result_shell(state: GenState, *, built: bool = False) -> dict:
+    """The fields a generated, not-launched or budget-stopped result
+    carries. `built` is true only for a result that built a page
+    (`_finish`)."""
     shell = {
         "files_written": state.files_written,
         # Generation input, not output: it physically sits in the artifact folder
@@ -1666,7 +1814,7 @@ def _result_shell(state: GenState) -> dict:
         # Always present, empty lists included: the agent's instruction
         # branches on them, and an absent key reads as "nothing to say"
         # only if the agent knows the key exists (S-03).
-        "warnings": state.verify_warnings,
+        "warnings": _result_warnings(state=state, built=built),
         "checks_skipped": state.checks_skipped,
         # True only when a browser loaded the page and found nothing wrong.
         # The handler picks the agent's instruction by it.
@@ -1737,6 +1885,7 @@ def _save_checkpoint(state: GenState, stage: str) -> None:
             attachments=[a.to_dict() for a in state.attachments],
             known_data=state.known_data,
             known_data_verified=list(state.known_data_verified),
+            skipped_steps=[step.model_dump() for step in state.skipped_steps],
         ),
     )
 
@@ -1777,7 +1926,7 @@ def _brief_fields(state: GenState) -> dict:
 
 def _finish(state: GenState) -> dict:
     _save_checkpoint(state, cp.STAGE_GENERATED)
-    return {"status": "generated", **_result_shell(state), **_brief_fields(state)}
+    return {"status": "generated", **_result_shell(state, built=True), **_brief_fields(state)}
 
 
 def _not_launched(state: GenState) -> dict:

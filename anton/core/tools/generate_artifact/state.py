@@ -11,9 +11,9 @@ import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from anton.core.llm.client import ModelRoute
 
@@ -41,6 +41,10 @@ RUNAPP_MAX_RETRIES: int = 1
 # Every "not enough data" error starts with this; the tool handler keys the
 # text it gives the agent on it.
 NOT_ENOUGH_DATA_PREFIX = "not enough data:"
+# A run whose data step stopped after the page builder skipped steps that
+# would have needed the user's approval starts with this instead; the tool
+# handler gives the agent its own text for it.
+SKIPPED_READ_ONLY_PREFIX = "steps skipped read-only:"
 
 # Per-line detail cap for GenState.journal() — keeps the journal compact when
 # a step's detail is long (full text still lives in data_notes / trace_log).
@@ -166,6 +170,29 @@ class FetchVerdict(BaseModel):
     reasoning: str
 
 
+class FetchOutcome(NamedTuple):
+    """What one `fetch_data_sample` loop brought back: the notes for
+    `data_notes`, whether it ran a cell that succeeded (the only evidence
+    the data loop accepts that data was read), and whether the write gate
+    refused every cell it tried because the page builder only reads."""
+
+    notes: str
+    ok: bool
+    all_refused: bool = False
+
+
+class SkippedStep(BaseModel):
+    """A page-builder step the write gate refused because the page builder
+    only reads (`scratchpad.ReadOnlyRefusal`): the step's own one-line
+    description, "" when it gave none, and what it would have changed, in
+    the refusal's words."""
+
+    model_config = ConfigDict(frozen=True)
+
+    description: str
+    change: str
+
+
 # ── Verifier result ──────────────────────────────────────────────────────────
 @dataclass
 class VerifyResult:
@@ -219,7 +246,9 @@ class BrowserCheckFailed:
     it comes from the last build's own check: an earlier build's browser
     fields on `GenState` can name a page a later build deleted.
     `comparison` is that check's comparison with the page as the turn found
-    it, when there was one.
+    it, when there was one. `warnings` holds the line that names the steps
+    the page builder skipped, when it skipped any
+    (`orchestrator.with_skipped_steps`).
     """
 
     page: str
@@ -228,6 +257,7 @@ class BrowserCheckFailed:
     screenshot: "RenderScreenshot | None"
     error: str
     comparison: "Comparison | None" = None
+    warnings: tuple[str, ...] = ()
 
 
 # ── FSM state ────────────────────────────────────────────────────────────────
@@ -469,6 +499,14 @@ class GenState:
     # `needs_confirmation`, and their late answer to the still-open card
     # arrives as a repeat call carrying it. Not persisted.
     question_unanswered: bool = False
+    # The steps the write gate refused, in every builder loop of this run,
+    # because the page builder only reads. The result names them. Saved in
+    # the checkpoint, so a call that continues the run names them too.
+    skipped_steps: list[SkippedStep] = field(default_factory=list)
+    # The fast path's `observed-data.json` (`static_gathering.fingerprint`)
+    # before its gathering ran, so `fast_static.run` binds only a hand-off
+    # that gathering wrote. None when there was no file, or no gathering ran.
+    handoff_before: "tuple | None" = None
     # Installed by the entry point. None on the bench harness and in unit
     # tests that construct a state directly, so every read goes through
     # `winding_down()`.

@@ -148,7 +148,7 @@ async def test_both_exec_paths_keep_the_turns_copies_before_their_snapshot(servi
         _record_cell_explainability=lambda **kw: None,
     )
 
-    async def prepared(session, tc_input):
+    async def prepared(session, tc_input, *, origin):
         return pad, tc_input["code"], "edit", "", 5
 
     monkeypatch.setattr(tool_handlers, "prepare_scratchpad_exec", prepared)
@@ -339,10 +339,24 @@ async def test_a_cell_that_edits_a_held_main_page_checks_no_other_page_in_its_pl
     assert again.page_checks == {}
 
 
-async def test_a_rebuild_with_no_repair_cells_left_puts_back_the_page_the_turn_found(service, tmp_path, monkeypatch):
+_SKIPPED_WARNING = (
+    "The page builder only reads data, so it skipped these steps, which would have needed the user's approval: "
+    "Update the sites (it would change data in a connected source). Don't run these steps yourself unless the user "
+    "asked for them."
+)
+
+
+@pytest.mark.parametrize("warnings", [(), (_SKIPPED_WARNING,)], ids=["no skipped step", "a skipped step"])
+async def test_a_rebuild_with_no_repair_cells_left_puts_back_the_page_the_turn_found(
+    service, tmp_path, monkeypatch, warnings
+):
     """The turn breaks the page, which passes only on its second repair, so
     both repair cells are spent. A later rebuild fails only its browser
-    check: the page goes back as the turn found it, and the result says so."""
+    check: the page goes back as the turn found it, and the result says so.
+    When the page builder skipped steps, the result keeps `warnings`, and
+    the instruction says to name them."""
+    from dataclasses import replace
+
     store, slug = _artifact(tmp_path)
     session = _session(_out_of_repairs=set(), _workspace=SimpleNamespace(artifacts_dir=store.root))
     key = PageKey(slug, "index.html")
@@ -350,14 +364,17 @@ async def test_a_rebuild_with_no_repair_cells_left_puts_back_the_page_the_turn_f
     for text in ("breaks the map", "first repair", "second repair passes"):
         await _cell(session, store, slug, text)
     assert session._repair_cells == {key: 2}
-    monkeypatch.setattr(gen_pkg, "generate", _run(_LEFT_TO_REPAIR))
+    monkeypatch.setattr(gen_pkg, "generate", _run(replace(_LEFT_TO_REPAIR, warnings=warnings)))
 
     result = await _result(session, slug)
 
     assert (store.root / slug / "index.html").read_text() == _BEFORE
     body = json.loads(result.content)
-    assert body["instruction"] == tool_handlers._BUILD_RESTORED_NO_REPAIRS_LEFT
-    assert body["instruction"].endswith(
+    assert body["instruction"] == tool_handlers._BUILD_RESTORED_NO_REPAIRS_LEFT + (
+        " " + tool_handlers._SKIPPED_STEPS_INSTRUCTION if warnings else ""
+    )
+    assert body.get("warnings") == (list(warnings) if warnings else None)
+    assert tool_handlers._BUILD_RESTORED_NO_REPAIRS_LEFT.endswith(
         "do not call the edit or any view it changed browser-verified, tested or working."
     )
     assert "findings" not in body

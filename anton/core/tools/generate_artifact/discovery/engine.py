@@ -43,11 +43,23 @@ def _web_tools() -> dict[str, tuple]:
     }
 
 
+# Why completion waits after a step in the same response that the page
+# builder's read-only rule refused: the model reads that result first, then
+# finishes from what it has. It never says the step needs to succeed, since
+# it won't run if sent again.
+_REFUSED_IN_BATCH = (
+    "a step in this response did not run because the page builder only reads data, and it won't run if "
+    "sent again. Read its result, then call finish_gathering on its own with the data already gathered or "
+    "available from the chat, or name the data you couldn't get."
+)
+
+
 def _exec_ran(outcome) -> bool:
     """Whether a scratchpad exec result describes a cell that executed.
 
     False for an `ok=True` result whose cell never ran (the single-scratchpad
-    guard's challenge, a change the user didn't approve), hence the `reason`,
+    guard's challenge, a change the user didn't approve, a step the page
+    builder's read-only rule refused), hence the `reason`,
     and for a cell the runtime reported as failed: none is working
     data-access code.
     """
@@ -190,6 +202,10 @@ async def run_gathering_loop(state: "PrdState") -> None:
         result_blocks: list[dict] = []
         finished = False
         batch_failed = False
+        # A step the page builder's read-only rule refused: not a failure to
+        # fix, but completion waits for the next response, unless this round
+        # is the last.
+        batch_refused = False
         for call_index, tc in enumerate(response.tool_calls):
             if tc.parse_error:
                 batch_failed = True
@@ -214,9 +230,16 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 continue
 
             if name == "finish_gathering":
-                if batch_failed or call_index != len(response.tool_calls) - 1:
-                    reason = ("A source execution in this batch failed; inspect and fix it before finishing."
-                              if batch_failed else "finish_gathering must follow all source tool calls in the batch.")
+                # The last round has no next response to finish in, so there a
+                # finish after a refused step stands, with the data it has.
+                wait_for_next = batch_refused and round_idx < MAX_ROUNDS - 1
+                if batch_failed or wait_for_next or call_index != len(response.tool_calls) - 1:
+                    if batch_failed:
+                        reason = "A source execution in this batch failed; inspect and fix it before finishing."
+                    elif wait_for_next:
+                        reason = "Not finished: " + _REFUSED_IN_BATCH
+                    else:
+                        reason = "finish_gathering must follow all source tool calls in the batch."
                     state.trace_log.tool_rejected(node=step, tool=name, reason=reason)
                     result_blocks.append(protocol.tool_result(tc.id, reason))
                     continue
@@ -244,8 +267,14 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 atomic = static_gathering.enabled(state) and completion is not None
                 before = static_gathering.fingerprint(state.artifact_path) if atomic else None
                 execution_input = {k: v for k, v in inp.items() if k != "complete_static_artifact"}
-                outcome = await handle_scratchpad(state.session, execution_input)
-                if scratchpad_action(inp) == "exec" and not _exec_ran(outcome):
+                # The page builder only reads: the write gate refuses, with no
+                # card, a cell that would need one.
+                outcome = await handle_scratchpad(state.session, execution_input, origin="page_builder")
+                skipped = protocol.skipped_step(outcome=outcome, inp=inp)
+                if skipped is not None:
+                    state.skipped_steps.append(skipped)
+                    batch_refused = True
+                elif scratchpad_action(inp) == "exec" and not _exec_ran(outcome):
                     batch_failed = True
                 content = protocol.unwrap_outcome(outcome)
                 state.trace_log.scratchpad(node="scratchpad", input=inp, output=content)
@@ -267,6 +296,8 @@ async def run_gathering_loop(state: "PrdState") -> None:
                                 or not isinstance(completion.get("data_sources"), list)
                                 or not all(isinstance(s, str) for s in completion["data_sources"])):
                             raise ValueError("Completion metadata needs a summary and source names.")
+                        if batch_refused:
+                            raise ValueError(_REFUSED_IN_BATCH)
                         if (scratchpad_action(inp) != "exec" or not inp.get("code") or not _exec_ran(outcome)
                                 or batch_failed or call_index != len(response.tool_calls) - 1):
                             raise ValueError("Completion requires a successful exec after all source work in this response.")

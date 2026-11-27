@@ -173,7 +173,7 @@ async def test_each_step_builds_its_prompt_with_the_run_skills(
     )
 
     with pytest.raises(_Built):
-        await getattr(orchestrator, step)(state)
+        await getattr(orchestrator, step)(state=state)
 
     assert seen["artifact_skills"] == "SKILLS"
 

@@ -36,6 +36,13 @@ from anton.core.idle_scratchpad import (
     round_is_idle,
     without_scratchpad,
 )
+from anton.core.repeated_calls import (
+    REPEATS_BEFORE_NOTICE,
+    REPEATS_BEFORE_WITHHOLD,
+    RepeatedCalls,
+    repeat_notice,
+    without_tools,
+)
 from anton.core.llm import jev as _jev
 from anton.core.llm.effort import (
     TRUNCATION_RETRY_NOTE,
@@ -57,7 +64,7 @@ from anton.core.llm.liveness import (
     arm_turn_tracker,
     disarm_turn_tracker,
 )
-from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext
+from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptContext, renders_chart_blocks
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
 from anton.core.root_cause import classify as classify_root_cause
@@ -101,6 +108,7 @@ from anton.core.llm.provider import (
     TokenLimitExceeded,
     ToolCall,
     TransientProviderError,
+    Usage,
     context_window,
     damaged_tool_call_result,
     is_stream_drop,
@@ -125,13 +133,14 @@ from anton.core.tools.registry import ToolOutcome, ToolRegistry
 from anton.core.turn_cost import UNKNOWN_ROLE, TurnCost
 from anton.core.tools.tool_defs import (
     APPROVE_HELD_WRITE_TOOL,
-    ASK_USER_TOOL,
+    ask_user_tool,
     CREATE_ARTIFACT_TOOL,
     CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     GENERATE_ARTIFACT_TOOL,
     GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS,
     GENERATE_IMAGE_TOOL,
     GENERATE_IMAGE_TOOL_NO_PAD_HELPER,
+    INSPECT_ARTIFACT_TOOL,
     LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
@@ -149,8 +158,9 @@ from anton.core.tools.tool_defs import (
     UPDATE_ARTIFACT_METADATA_TOOL,
     scratchpad_tool as _scratchpad_tool_def,
     ToolDef,
+    without_display,
 )
-from anton.core.interaction.elicit import Elicitor
+from anton.core.interaction.elicit import Elicitor, asks_approvals
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
     CELL_NOT_RUN_REASONS,
@@ -1374,6 +1384,18 @@ _SOLVABILITY_CLAUSE = (
 )
 
 
+# Tool rounds after a compaction before the next one, so a history that stays
+# large after compacting is not summarized again every round.
+_COMPACTION_COOLDOWN_ROUNDS = 15
+# What a compaction keeps unsummarized, so a compacted history has a known size.
+_COMPACTION_RECENT_TOKENS = 30_000
+# A summarizer can miss its record once and succeed on the next try, so one
+# failure does not end compaction for a long turn.
+_MAX_COMPACTION_FAILURES = 2
+# Most stream drops a single turn may retry, however far apart they are.
+_MAX_TURN_DROPS = 8
+
+
 def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
     """Clip ``text`` to ~``cap`` chars keeping both ends, biased to the tail.
 
@@ -1416,6 +1438,14 @@ def _clip_keep_cause(text: str, cap: int, *, keep: str = "ends") -> str:
 # ceiling. Bounded rather than generous because the record then lives in the
 # context window compaction just freed.
 _SUMMARY_OUTPUT_BUDGET = 8192
+
+# A reply with none of these headings is not a record: a model can answer as
+# the agent ("Let me re-read the files") instead, and keeping that loses the task.
+_SUMMARY_HEADINGS = r"(?:Goal|Constraints|Completed|Active state|Blocked|Decisions|Remaining)"
+_SUMMARY_SECTION = re.compile(
+    rf"^\s*(?:(?:#{{1,6}}|\*\*)\s*(?:\d+[.)]\s*)?{_SUMMARY_HEADINGS}\b|(?:\d+[.)]\s*)?{_SUMMARY_HEADINGS}\s*:)",
+    re.M | re.I,
+)
 
 # A structured, in-place-updated STATE RECORD rather than a freeform blob, so
 # "Remaining" work survives compaction instead of being flattened into prose.
@@ -1562,6 +1592,29 @@ def _stub_largest_results(*, messages: list[dict], model: str) -> list[dict]:
 # real reply.
 _IMAGE_PLACEHOLDER = "[image]"
 
+# Input fields that name what a built-in tool acted on. Never code or file bodies.
+_VERIFY_TOOL_TARGET_KEYS = (
+    "action", "name", "one_line_description", "path", "file_path", "slug", "filename",
+)
+
+
+def _render_verify_tool_call(block: dict) -> str:
+    """One line naming the tool and what it acted on, so the verifier can tell
+    which file was written or checked, not only that some tool ran."""
+    line = f"ASSISTANT called tool: {block.get('name')}"
+    tool_input = block.get("input")
+    if not isinstance(tool_input, dict):
+        return line
+    parts = []
+    for key in _VERIFY_TOOL_TARGET_KEYS:
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            # Scrubbed whole before clipping, so no cut can leave part of a secret.
+            # Both ends kept: a path's file name is at its end.
+            text = _clip_keep_cause(" ".join(scrub_output(value).split()), 120)
+            parts.append(f"{key}={' '.join(text.split())}")
+    return f"{line} ({', '.join(parts)})" if parts else line
+
 
 def _render_verify_transcript(
     history: list[dict],
@@ -1653,7 +1706,7 @@ def _render_verify_transcript(
                 elif btype in ("image", "image_url"):
                     convo.append((i, speaker, _IMAGE_PLACEHOLDER))
                 elif btype == "tool_use":
-                    tools.append((i, f"ASSISTANT called tool: {block.get('name')}"))
+                    tools.append((i, _render_verify_tool_call(block)))
                 elif btype == "tool_result":
                     rendered = _render_tool_result_content(block.get("content"), tool_cap)
                     tools.append((i, f"TOOL RESULT: {rendered}"))
@@ -1683,7 +1736,14 @@ def _render_verify_transcript(
             f"{_clip_keep_cause(text, final_cap if n == judged else text_cap)}",
         )
         for n, (i, speaker, text) in enumerate(kept_convo)
-    ] + tools[-max_tool:]
+    ]
+    kept_tools = tools[-max_tool:]
+    if len(tools) > len(kept_tools):
+        # Otherwise the verifier reads a missing earlier step as one never taken.
+        kept.append(
+            (kept_tools[0][0] - 0.5, f"[... {len(tools) - len(kept_tools)} earlier tool events omitted ...]")
+        )
+    kept += kept_tools
     kept.sort(key=lambda entry: entry[0])
     return "\n".join(line for _, line in kept) or "(no conversation)"
 
@@ -2072,6 +2132,7 @@ class ChatSession:
         # count spans verifier continuations and provider-error retries alike.
         # Reset per turn in turn_stream.
         self._turn_tool_rounds = 0
+        self._repeated_calls = RepeatedCalls()
         # Verifier-forced continuations this turn has run, against
         # `max_continuations`. Per turn for the same reason: a retry must
         # not hand out a fresh set. Reset per turn in turn_stream.
@@ -2132,6 +2193,7 @@ class ChatSession:
         else:
             self._verifier_latch = _VerifierLatch()
         self._context_pressure_threshold = s.context_pressure_threshold
+        self._context_compaction_max_tokens = s.context_compaction_max_tokens
         self._max_consecutive_errors = s.max_consecutive_errors
         self._resilience_nudge_at = s.resilience_nudge_at
         self._llm = config.llm_client
@@ -2320,7 +2382,8 @@ class ChatSession:
         # subtracted from the tool's reported elapsed time.
         self.answer_wait_s = 0.0
         # The write relay's control address (`write_relay_url`). With it, and
-        # an elicitor that can ask, the session offers `approve_held_write`.
+        # an elicitor that takes approval cards (`asks_approvals`), the
+        # session offers `approve_held_write`.
         # `isinstance` so a MagicMock settings object reads unset.
         relay_url = getattr(s, "write_relay_url", None)
         self._write_relay_url: str | None = (relay_url.strip() or None) if isinstance(relay_url, str) else None
@@ -2539,10 +2602,11 @@ class ChatSession:
         # at the start of each turn. Prevents double-summarization when
         # the post-recovery response still reports high pressure.
         self._compacted_this_turn = False
-        # Stops a *failed* proactive compaction from being re-attempted every
-        # tool round. A transient blip still gets a fresh attempt next
-        # turn (both flags reset per turn).
-        self._compaction_failed_this_turn = False
+        # Failed proactive compactions this turn. Past `_MAX_COMPACTION_FAILURES`
+        # none is attempted until the next turn.
+        self._compaction_failures_this_turn = 0
+        # Tool round of this turn's latest compaction attempt, None before one.
+        self._last_compaction_round: int | None = None
         # Backends launched via the launch_backend tool. Keyed by
         # artifact slug; each entry holds the asyncio.subprocess.Process
         # plus its port. Reaped in close() so backend processes don't
@@ -3368,6 +3432,8 @@ class ChatSession:
             workspace_context=workspace_ctx,
             # ENG-4149. Fixed for the session, so it sits with the stable lines.
             ui_locale_context=ui_locale_line(getattr(self, "_ui_locale", None)),
+            # ENG-4684. Fixed for the session like the surface it comes from.
+            chart_blocks=renders_chart_blocks(getattr(self, "_surface", None)),
         )
 
         return prompt
@@ -3471,6 +3537,8 @@ class ChatSession:
             # `generate_image` is offered only where an images API serves it
             # (`_settle_image_offer`), so a host may allow it unconditionally.
             withheld = set() if getattr(self, "_image_offer", None) else {GENERATE_IMAGE_TOOL.name}
+            # `inspect_artifact` is offered only where the chat shows inline pages.
+            withheld.add(INSPECT_ARTIFACT_TOOL.name)
             unknown = set(self._tool_allowlist) - built - deferred - withheld
             if unknown:
                 raise ValueError(
@@ -3590,25 +3658,20 @@ class ChatSession:
             # Copy, don't mutate: ToolDefs are module-level singletons and the
             # hint is per-host, so an in-place edit would leak across every
             # session sharing this process.
+            ask_user = ask_user_tool(self._act_first)
             self.tool_registry.register_tool(
                 replace(
-                    ASK_USER_TOOL,
-                    description=(
-                        ASK_USER_TOOL.description
-                        + "\n\n"
-                        + self.elicitor.answer_hint
-                    ),
+                    ask_user,
+                    description=ask_user.description + "\n\n" + self.elicitor.answer_hint,
                 )
             )
 
         # A request the write relay held: the tool reads it from the relay and
-        # asks the user on a card. Only with a relay to read and a way to ask,
-        # since without the card the tool could only refuse.
-        if (
-            self._write_relay_url is not None
-            and self.elicitor is not None
-            and "choice" in self.elicitor.supported_kinds
-        ):
+        # asks the user on an approval card. Only with a relay to read and an
+        # elicitor that takes approval cards, since without the card the tool
+        # could only refuse. An approvals-only elicitor (APPROVAL_KIND) gets
+        # this tool and none of the questions above.
+        if self._write_relay_url is not None and asks_approvals(elicitor=self.elicitor):
             self.tool_registry.register_tool(APPROVE_HELD_WRITE_TOOL)
 
         if self._cortex is not None or self._self_awareness is not None:
@@ -3663,11 +3726,18 @@ class ChatSession:
                 create = STATIC_CREATE_ARTIFACT_TOOL if direct else STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS
                 generate = (STATIC_GENERATE_ARTIFACT_TOOL if direct
                             else STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS)
+            update = UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
+            listing = LIST_ARTIFACTS_TOOL
+            # Inline pages and widgets exist only where the chat renders them
+            # (Cowork); elsewhere no tool offers `display` (ENG-4684).
+            inline_pages = renders_chart_blocks(getattr(self, "_surface", None))
+            if not inline_pages:
+                create, update, listing = (without_display(t) for t in (create, update, listing))
             self.tool_registry.register_tool(create)
-            self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
-            self.tool_registry.register_tool(
-                UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
-            )
+            self.tool_registry.register_tool(listing)
+            if inline_pages:
+                self.tool_registry.register_tool(INSPECT_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(update)
             if fullstack:
                 self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
             # The artifact editor (ENG-4207): changes to an existing artifact go
@@ -3848,7 +3918,7 @@ class ChatSession:
                 pass
         self._tracked_backends.clear()
 
-    async def _summarize_history(self, *, last_resort: bool = False) -> bool:
+    async def _summarize_history(self, *, last_resort: bool = False) -> bool | None:
         """Compress old conversation turns into a summary.
 
         Splits history into old (first 60%) and recent (last 40%), keeping at
@@ -3857,12 +3927,12 @@ class ChatSession:
         model when no distinct one is configured) and replaced with a single
         user message.
 
-        Returns True only if history was actually replaced. Every no-op path
-        (too short, negligible new material, summarization failure) returns
-        False so callers don't set `_compacted_this_turn` or emit a
-        StreamContextCompacted event for a compaction that didn't happen. On a
-        failure specifically, proactive callers also set
-        `_compaction_failed_this_turn` so it isn't re-attempted every round.
+        Returns True only if history was actually replaced, so callers don't
+        set `_compacted_this_turn` or emit a StreamContextCompacted event for a
+        compaction that didn't happen. A failed summarization returns False,
+        and proactive callers count it in `_compaction_failures_this_turn` so it
+        isn't re-attempted every round. Too little history to fold returns None,
+        which leaves a later round free to try once the history has grown.
 
         ``last_resort`` marks the reactive callers, which run *after* the
         provider already rejected the request as too long. There, declining to
@@ -3873,16 +3943,27 @@ class ChatSession:
         replay as a summary.
         """
         if len(self._history) < 6:
-            return False  # Too short to summarize
+            return None  # Too short to summarize
 
         min_recent = 4
         # Number of leading messages to fold into the summary; doubles as the
         # cut index (old = history[:compacted_count], recent = the rest).
         compacted_count = max(int(len(self._history) * 0.6), 1)
+        # In a tool loop the large results are the newest messages, so a cut by
+        # count can fold too little to act on. Also fold everything older than
+        # the newest `_COMPACTION_RECENT_TOKENS` (about 4 chars per token).
+        recent_chars, size_cut = 0, len(self._history)
+        while size_cut > 0:
+            content = self._history[size_cut - 1].get("content", "")
+            recent_chars += len(content) if isinstance(content, str) else len(str(content))
+            if recent_chars > _COMPACTION_RECENT_TOKENS * 4:
+                break
+            size_cut -= 1
+        compacted_count = max(compacted_count, size_cut)
         # Ensure we keep at least min_recent turns
         compacted_count = min(compacted_count, len(self._history) - min_recent)
         if compacted_count < 2:
-            return False
+            return None
 
         # Walk the cut backward to avoid breaking tool_use / tool_result
         # pairs. A user message containing tool_result blocks must stay with
@@ -3899,16 +3980,13 @@ class ChatSession:
             )
             if not has_tool_result:
                 break
-            # This user message has tool_results — keep it (and its paired
-            # assistant message) in the recent portion.
+            # Cut before its assistant message so the pair stays in the recent
+            # portion. One step: a second lands on the previous tool_result and
+            # walks a tool loop back to the start, so nothing is ever compacted.
             compacted_count -= 1
-            # Also pull back over the preceding assistant message so the
-            # pair stays together.
-            if compacted_count > 1 and self._history[compacted_count].get("role") == "assistant":
-                compacted_count -= 1
 
         if compacted_count < 2:
-            return False
+            return None
 
         old_turns = self._history[:compacted_count]
         recent_turns = self._history[compacted_count:]
@@ -3937,7 +4015,7 @@ class ChatSession:
         new_old_len = _approx_len(new_old_turns)
         recent_len = _approx_len(recent_turns)
         if new_old_len < 0.10 * (new_old_len + recent_len):
-            return False
+            return None
 
         # Serialize old turns. Pull out any prior compacted summary so we
         # UPDATE it in place rather than summarize a summary (which compounds
@@ -3993,16 +4071,26 @@ class ChatSession:
             )
             old_text = clipped
 
+        # Framed, with the instruction last: a bare transcript ending in the
+        # agent's own words gets continued as the agent instead of summarized.
+        conversation = (
+            "Below is an earlier part of an agent's conversation, to compact. It is a "
+            f"record to summarize, not a task to continue.\n\n<conversation>\n{old_text}\n</conversation>\n\n"
+        )
         if prior_summary:
             user_content = (
                 "PREVIOUS SUMMARY (update this in place — merge the new turns into it, "
                 "don't restate it verbatim):\n"
                 f"{prior_summary}\n\n"
-                "NEW TURNS TO FOLD IN:\n"
-                f"{old_text}"
+                f"NEW TURNS TO FOLD IN:\n{conversation}"
+                "Write the updated STATE RECORD now. Start with `## Goal`. "
+                "Do not continue the task or speak as the agent."
             )
         else:
-            user_content = old_text
+            user_content = (
+                f"{conversation}Write the STATE RECORD for the conversation above now. "
+                "Start with `## Goal`. Do not continue the task or speak as the agent."
+            )
 
         # Set only where a durable compaction is recorded, and read at the end
         # of this function: the record's text must be the body built there, and
@@ -4042,15 +4130,15 @@ class ChatSession:
                 )
             # An empty 200 reaches here: `raise_on_empty_response` returns early
             # on any truthy stop_reason, so a cut-off-before-any-text generation
-            # is a "success" carrying no record. Whitespace-only counts as empty,
-            # same as every other content check in this file.
-            if not (summary_response.content or "").strip():
+            # is a "success" carrying no record. A reply with no record heading
+            # counts as empty too (see `_SUMMARY_SECTION`).
+            if not _SUMMARY_SECTION.search(summary_response.content or ""):
                 if not last_resort:
                     # Proactive: nothing is broken yet, so decline rather than
                     # replace real turns with a fact-free line that can never
                     # self-heal (ENG-1274).
                     logger.warning(
-                        "history summarization: empty record (stop_reason=%s) — "
+                        "history summarization: no state record (stop_reason=%s), "
                         "keeping %d turns intact",
                         summary_response.stop_reason,
                         len(old_turns),
@@ -4060,7 +4148,7 @@ class ChatSession:
                 # behind a factual marker keeps the newest ~40%; declining sends
                 # the retry into `hard_truncate_history`, which keeps 4 messages.
                 logger.warning(
-                    "history summarization: empty record (stop_reason=%s) — "
+                    "history summarization: no state record (stop_reason=%s), "
                     "folding %d turns behind a marker to survive the overflow",
                     summary_response.stop_reason,
                     len(old_turns),
@@ -4104,7 +4192,8 @@ class ChatSession:
             "Compacted record of earlier conversation, for REFERENCE ONLY — not a new "
             "request. The most recent user message takes priority; if the user changed "
             "direction, narrowed scope, or cancelled something, follow that and do NOT "
-            "resume superseded work described below.\n\n"
+            "resume superseded work described below. Do not repeat approaches already "
+            "recorded under Completed or Blocked; work on what is under Remaining.\n\n"
             f"{summary}"
         )
         summary_msg = {"role": "user", "content": summary_body}
@@ -4563,6 +4652,7 @@ class ChatSession:
         self._compact_scratchpads()
         if compacted:
             self._compacted_this_turn = True
+            self._last_compaction_round = self._turn_tool_rounds
         try:
             return await self._llm.plan(messages=factory_validated(), **kwargs)
         except ContextOverflowError:
@@ -5356,7 +5446,8 @@ class ChatSession:
         """Whether a "choice" question can reach a person this turn: the same
         test `elicit` applies before publishing one. Inferred from what the
         host injects, so a host whose turn has no one to answer must not
-        inject an elicitor."""
+        inject an elicitor that lists "choice". An approvals-only elicitor
+        (APPROVAL_KIND) reads False here."""
         return (
             self.emitter is not None
             and self.elicitor is not None
@@ -5765,6 +5856,7 @@ class ChatSession:
         self._compact_scratchpads()
         if compacted:
             self._compacted_this_turn = True
+            self._last_compaction_round = self._turn_tool_rounds
             yield StreamContextCompacted(
                 message="Context was getting long — older history has been summarized."
             )
@@ -6440,7 +6532,11 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        # Drops in a row, reset by each completed model call, so isolated
+        # drops across a long turn do not add up to a failure. The turn-wide
+        # count still caps a connection that keeps dropping.
         _drop_retries = 0
+        _turn_drops = 0
         # The one resend this turn allows after the model refused a request
         # over a render-check screenshot (see the handler below), and whether
         # it still waits for a request that goes through without them. The
@@ -6457,6 +6553,10 @@ class ChatSession:
         self._spend_ceiling_continued_tokens = 0
         self._round_cap_continued_rounds = 0
         self._turn_tool_rounds = 0
+        self._repeated_calls = RepeatedCalls()
+        self._compacted_this_turn = False
+        self._compaction_failures_this_turn = 0
+        self._last_compaction_round = None
         self._turn_continuations = 0
         self._time_limit_continued_s = 0
         self._time_limit_resumed = False
@@ -6548,6 +6648,8 @@ class ChatSession:
             while True:
                 try:
                     async for event in self._stream_and_handle_tools(user_msg_str):
+                        if isinstance(event, StreamComplete):
+                            _drop_retries = 0
                         # The first model call after the drop sends the
                         # history without the dropped images; its completion
                         # shows they caused the refusal. Before the generator
@@ -6606,18 +6708,19 @@ class ChatSession:
                     # note, as for any provider blip.
                     if is_stream_drop(_agent_exc):
                         self._seal_dangling_tool_uses("interrupted by a transient provider error")
-                        if _drop_retries < _max_auto_retries:
+                        if _drop_retries < _max_auto_retries and _turn_drops < _MAX_TURN_DROPS:
                             delay = self._transient_backoff_delay(_drop_retries)
                             _drop_retries += 1
+                            _turn_drops += 1
                             if await self._backoff_sleep(delay):
                                 break
                             continue
                         _stamp_retry_terminal(
                             self._turn_cost, _agent_exc, "request_attempt_limit"
                         )
-                        raise self._attempt_limit_error(
-                            _agent_exc, _drop_retries + 1
-                        ) from _agent_exc
+                        # At the turn cap the in-a-row count may have just reset; report the turn's total.
+                        attempts = _drop_retries + 1 if _turn_drops < _MAX_TURN_DROPS else _turn_drops + 1
+                        raise self._attempt_limit_error(_agent_exc, attempts) from _agent_exc
 
                     # ENG-673: a mid-stream transient failure that had NO prior
                     # retry (overload smuggled into a 200, or a truncated stream).
@@ -7333,6 +7436,36 @@ class ChatSession:
             yield StreamTextDelta(text=_TRUNCATION_FAILURE_NOTICE)
         yield retry
 
+    async def _compact_proactively(self, usage: Usage) -> AsyncIterator[StreamEvent]:
+        """Compact history when the last call's prompt was large.
+
+        Stops for the turn after `_MAX_COMPACTION_FAILURES` failures. After any
+        attempt, waits `_COMPACTION_COOLDOWN_ROUNDS` tool rounds before the next one.
+        """
+        if self._compaction_failures_this_turn >= _MAX_COMPACTION_FAILURES:
+            return
+        if (
+            self._last_compaction_round is not None
+            and self._turn_tool_rounds - self._last_compaction_round < _COMPACTION_COOLDOWN_ROUNDS
+        ):
+            return
+        cap = self._context_compaction_max_tokens
+        if not (
+            usage.context_pressure > self._context_pressure_threshold
+            or (cap > 0 and usage.context_tokens >= cap)
+        ):
+            return
+        compacted = await self._summarize_history()
+        self._compact_scratchpads()
+        self._last_compaction_round = self._turn_tool_rounds
+        if compacted:
+            self._compacted_this_turn = True
+            yield StreamContextCompacted(
+                message="Context was getting long — older history has been summarized."
+            )
+        elif compacted is False:
+            self._compaction_failures_this_turn += 1
+
     async def _stream_and_handle_tools(
         self, user_message: str = ""
     ) -> AsyncIterator[StreamEvent]:
@@ -7340,8 +7473,6 @@ class ChatSession:
         await self._settle_image_offer()
         tools = self._build_tools()
         system = await self._build_system_prompt(user_message)
-        self._compacted_this_turn = False
-        self._compaction_failed_this_turn = False
 
         response: StreamComplete | None = None
 
@@ -7368,22 +7499,8 @@ class ChatSession:
                 return
             llm_response = response.response
 
-        # Proactive compaction — at most once per turn, and not re-attempted
-        # after a failure (see `_compaction_failed_this_turn`).
-        if (
-            not self._compacted_this_turn
-            and not self._compaction_failed_this_turn
-            and llm_response.usage.context_pressure > self._context_pressure_threshold
-        ):
-            compacted = await self._summarize_history()
-            self._compact_scratchpads()
-            if compacted:
-                self._compacted_this_turn = True
-                yield StreamContextCompacted(
-                    message="Context was getting long — older history has been summarized."
-                )
-            else:
-                self._compaction_failed_this_turn = True
+        async for event in self._compact_proactively(llm_response.usage):
+            yield event
 
         # Tool-call loop with circuit breaker, wrapped in a completion
         # verification outer loop that can restart the tool loop if the
@@ -7613,6 +7730,7 @@ class ChatSession:
                 import time as _time
 
                 tool_results: list[dict] = []
+                repeated_tools: set[str] = set()
                 for tc in llm_response.tool_calls:
                     # Nothing runs after a question nobody answered, whatever the
                     # model sent with it. Refuse before inspecting its arguments.
@@ -8155,10 +8273,24 @@ class ChatSession:
                             tool=tc.name,
                         )
                     self._record_root_cause(tool_ok, tool_reason, result_text)
+                    # A cell the user declined never ran, so asking again is not a loop.
+                    repeats = (
+                        0 if tool_reason in CELL_NOT_RUN_REASONS
+                        else self._repeated_calls.record(tc.name, tc.input, result_text)
+                    )
                     result_text = self._apply_error_tracking(
                         result_text, tc.name, error_streak, resilience_nudged,
                         ok=tool_ok,
                     )
+                    if repeats >= REPEATS_BEFORE_NOTICE:
+                        withhold = repeats >= REPEATS_BEFORE_WITHHOLD
+                        result_text += repeat_notice(tc.name, repeats, withhold)
+                        if withhold:
+                            repeated_tools.add(tc.name)
+                            logger.info(
+                                "identical-call loop: '%s' %d times, withholding it for the next round",
+                                tc.name, repeats,
+                            )
                     # ACC: tool_result emit. Prefer the handler's own verdict
                     # (ENG-1276); heuristic text-detection only for handlers
                     # that haven't declared one — the conventional
@@ -8242,6 +8374,8 @@ class ChatSession:
                 tools = self._build_tools()
                 if withhold_scratchpad:
                     tools = without_scratchpad(tools)
+                if repeated_tools:
+                    tools = without_tools(tools, repeated_tools)
 
                 # Signal that tools are done and LLM is now reasoning
                 _reasoning_t0 = _time.monotonic()
@@ -8291,23 +8425,8 @@ class ChatSession:
                         return
                     llm_response = response.response
 
-                # Proactive compaction during tool loop — at most once per
-                # turn, and not re-attempted after a failure.
-                if (
-                    not self._compacted_this_turn
-                    and not self._compaction_failed_this_turn
-                    and llm_response.usage.context_pressure
-                    > self._context_pressure_threshold
-                ):
-                    compacted = await self._summarize_history()
-                    self._compact_scratchpads()
-                    if compacted:
-                        self._compacted_this_turn = True
-                        yield StreamContextCompacted(
-                            message="Context was getting long — older history has been summarized."
-                        )
-                    else:
-                        self._compaction_failed_this_turn = True
+                async for event in self._compact_proactively(llm_response.usage):
+                    yield event
 
             # A cell that crosses the limit mid-round leaves the round's other
             # calls not run, and the model may answer that in text, which ends
@@ -8362,6 +8481,8 @@ class ChatSession:
                     message="Continuing past the time limit...",
                 )
                 response = None
+                # Rebuilt so a tool withheld for the last round is back.
+                tools = self._build_tools()
                 async for event in self.plan_stream_with_recovery(
                     system=system, tools=tools
                 ):
@@ -8413,6 +8534,8 @@ class ChatSession:
                         message="Taking your added message into account...",
                     )
                     response = None
+                    # Rebuilt so a tool withheld for the last round is back.
+                    tools = self._build_tools()
                     async for event in self.plan_stream_with_recovery(
                         system=system, tools=tools
                     ):

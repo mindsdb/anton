@@ -24,7 +24,7 @@ from typing import get_args
 import httpx2 as httpx
 import pytest
 
-from anton.core.interaction.elicit import AskAnswer, AskRequest
+from anton.core.interaction.elicit import APPROVAL_KIND, AskAnswer, AskRequest
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.llm.provider import StreamAskUser
 from anton.core.settings import CoreSettings
@@ -499,15 +499,41 @@ class _PathOnly(_Elicitor):
     supported_kinds = ("path",)
 
 
+class _ApprovalsOnly(_Elicitor):
+    """What a host lists for a turn nobody is known to be watching."""
+
+    supported_kinds = (APPROVAL_KIND,)
+
+
 @pytest.mark.parametrize("settings, elicitor", [
     (CoreSettings(), _Elicitor()),
     (CoreSettings(write_relay_url="  "), _Elicitor()),
     (CoreSettings(write_relay_url=RELAY_URL), None),
     (CoreSettings(write_relay_url=RELAY_URL), _PathOnly()),
-], ids=["no-relay", "blank-relay", "no-elicitor", "no-choice-cards"])
+    (CoreSettings(), _ApprovalsOnly()),
+], ids=["no-relay", "blank-relay", "no-elicitor", "no-choice-cards", "approvals-only-no-relay"])
 async def test_the_tool_is_absent_without_the_relay_or_a_way_to_ask(make_session, settings, elicitor):
     session = make_session(settings=settings, elicitor=elicitor)
     assert "approve_held_write" not in _tool_names(session)
+
+
+async def test_an_approvals_only_elicitor_gets_the_tool_and_no_ask_user(make_session):
+    """A turn nobody is known to be watching keeps the held write's card,
+    which a person who opens the run can approve, and loses `ask_user`."""
+    names = _tool_names(make_session(settings=CoreSettings(write_relay_url=RELAY_URL), elicitor=_ApprovalsOnly()))
+    assert "approve_held_write" in names
+    assert "ask_user" not in names
+
+
+async def test_an_approvals_only_elicitor_approves_a_held_request(held_session):
+    elicitor = _ApprovalsOnly(answer=APPROVE)
+    session = held_session(elicitor)
+    relay = _Relay(reads=[_held("pending"), _held("sent")])
+    outcome = await _approve(session, relay)
+    [card] = _cards(session)
+    assert card.id == HELD_ID and card.request.prompt == CARD
+    assert "The write relay sent it once, and the host answered 201" in outcome.content
+    assert relay.cancels == 0
 
 
 async def test_the_relay_url_setting_reads_its_environment_variable(make_session, monkeypatch):

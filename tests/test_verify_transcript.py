@@ -367,3 +367,73 @@ def test_the_judged_reply_survives_a_thread_longer_than_the_convo_budget():
     out = _render_verify_transcript(history)
     assert reply in out
     assert "chars elided" not in out
+
+
+def test_a_tool_call_names_its_target_but_not_its_code():
+    history = [
+        {"role": "user", "content": "write the report to out/report.csv"},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "scratchpad", "input": {
+            "action": "exec", "name": "main", "one_line_description": "Write out/report.csv",
+            "code": "SECRET_CODE_BODY = 1",
+        }}]},
+        {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]},
+        {"role": "assistant", "content": "Saved out/report.csv."},
+    ]
+    out = _render_verify_transcript(history)
+    assert (
+        "ASSISTANT called tool: scratchpad "
+        "(action=exec, name=main, one_line_description=Write out/report.csv)"
+    ) in out
+    assert "SECRET_CODE_BODY" not in out
+
+
+def test_a_token_in_a_tool_target_is_scrubbed():
+    token = "abcdefghijklmnopqrstuvwxyz0123456789"
+    history = [
+        {"role": "user", "content": "call the API"},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "scratchpad", "input": {
+            "one_line_description": f"GET /items with Authorization: Bearer {token}",
+        }}]},
+        {"role": "assistant", "content": "Done."},
+    ]
+    out = _render_verify_transcript(history)
+    assert token not in out
+    assert "[REDACTED_TOKEN]" in out
+
+
+def test_a_long_tool_target_is_clipped_with_a_marker():
+    path = "/work/" + "d" * 300 + "/end.csv"
+    history = [
+        {"role": "user", "content": "read it"},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "read_text_file", "input": {"path": path}}]},
+        {"role": "assistant", "content": "Read."},
+    ]
+    out = _render_verify_transcript(history)
+    assert "path=/work/ddd" in out
+    assert "/end.csv" in out
+    assert "chars elided" in out
+    assert path not in out
+
+
+def test_dropped_tool_events_are_counted():
+    history = [{"role": "user", "content": "do many steps"}]
+    for n in range(10):
+        history.append({"role": "assistant", "content": [{"type": "tool_use", "name": "scratchpad", "input": {}}]})
+        history.append({"role": "user", "content": [{"type": "tool_result", "content": f"step {n}"}]})
+    history.append({"role": "assistant", "content": "All done."})
+
+    out = _render_verify_transcript(history, max_tool=4)
+    lines = out.splitlines()
+    marker = lines.index("[... 16 earlier tool events omitted ...]")
+    assert lines[marker - 1] == "USER: do many steps"
+    assert "step 7" not in out and "step 8" in out
+
+
+def test_no_marker_when_every_tool_event_fits():
+    history = [
+        {"role": "user", "content": "one step"},
+        {"role": "assistant", "content": [{"type": "tool_use", "name": "scratchpad", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]},
+        {"role": "assistant", "content": "Done."},
+    ]
+    assert "omitted" not in _render_verify_transcript(history)

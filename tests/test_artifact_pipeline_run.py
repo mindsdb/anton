@@ -16,7 +16,7 @@ import pytest
 
 from anton.core.artifacts import ArtifactStore
 from anton.core.artifacts.internal_files import PRD_FILENAME
-from anton.core.interaction.elicit import AskAnswer
+from anton.core.interaction.elicit import APPROVAL_KIND, AskAnswer
 from anton.core.llm.provider import LLMResponse, ToolCall, Usage
 from anton.core.tools.generate_artifact.discovery import brief, checkpoint as cp, orchestrator
 from anton.core.tools.generate_artifact.discovery.state import PrdState
@@ -291,9 +291,9 @@ def _messages(state: PrdState) -> list[str]:
     return out
 
 
-def _never_ask(monkeypatch):
+def _never_ask(monkeypatch, *, why: str = "act-first must not ask to confirm the brief"):
     async def fail(session, request):
-        raise AssertionError("act-first must not ask to confirm the brief")
+        raise AssertionError(why)
 
     monkeypatch.setattr(brief.sub_tools, "ask_via_elicit", fail)
 
@@ -381,6 +381,43 @@ async def test_act_first_redraws_a_changed_call(tmp_path, monkeypatch, entry, sh
     assert calls == ["redraw", "write_prd"]
     assert _messages(state) == shown
     assert state.brief_shown is bool(shown)
+
+
+class _Lists:
+    """An elicitor that lists `kinds`. Nothing in these tests asks it."""
+
+    answer_hint = ""
+    timeout_s = None
+
+    def __init__(self, *kinds: str) -> None:
+        self.supported_kinds = kinds
+
+
+@pytest.mark.parametrize("elicitor, available", [
+    (None, False),
+    (_Lists("path"), False),
+    (_Lists(APPROVAL_KIND), False),
+    (_Lists("choice"), True),
+], ids=["none", "path-only", "approvals-only", "choice"])
+def test_only_an_elicitor_that_takes_a_choice_can_confirm_the_brief(elicitor, available):
+    assert orchestrator._elicit_available(SimpleNamespace(elicitor=elicitor)) is available
+
+
+async def test_a_changed_confirm_call_with_an_approvals_only_elicitor_writes_the_prd(tmp_path, monkeypatch):
+    """An elicitor that takes only approval cards, as on a turn nobody is
+    known to be watching, can't answer the brief's confirm question. A changed
+    repeat call redraws and writes the PRD, as with no elicitor, rather than
+    asking a question that comes back unavailable."""
+    state = _make_state(tmp_path)
+    state.session.elicitor = _Lists(APPROVAL_KIND)
+    state.call_changed = True
+    calls = _spy_steps(monkeypatch)
+    _never_ask(monkeypatch, why="an approvals-only elicitor can't answer the brief's confirm question")
+
+    result = await orchestrator.run_discovery(state, entry=cp.ENTRY_CONFIRM)
+
+    assert result == cp.STAGE_PRD_WRITTEN
+    assert calls == ["redraw", "write_prd"]
 
 
 async def test_act_first_new_iteration_with_the_same_call_drafts(tmp_path, monkeypatch):
