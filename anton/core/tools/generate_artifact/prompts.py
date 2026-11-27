@@ -159,11 +159,12 @@ VISUAL DESIGN (for every HTML file you produce):
   need a framework. No other CSS or JS library: the two CDN scripts named in
   these rules (Tailwind, ECharts) and, for a map or globe, the recipe
   packages under MAPS AND GLOBES, each at exactly the version shown, are the
-  ONLY external resources a page may load, besides data files from jsDelivr
-  (see NETWORK). They are fetched every time the
-  page opens, so a page that must work OFFLINE or without external resources
-  (brief or PRD says so) skips Tailwind and styles itself with hand-written
-  CSS.
+  ONLY external resources a page may load, besides data files from
+  `https://cdn.jsdelivr.net/npm/<package>@<exact version>/...`; a request to
+  any other host fails once the page is published. Scripts are fetched every
+  time the page opens, so a page that must work OFFLINE or without external
+  resources (brief or PRD says so) skips Tailwind and styles itself with
+  hand-written CSS.
 - ALWAYS use Apache ECharts for interactive charts via CDN:
   `<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
@@ -174,12 +175,6 @@ VISUAL DESIGN (for every HTML file you produce):
   to that policy so the page renders on every deployment: no external
   stylesheet or web font, no external image or map tile (embed an image as a
   `data:` URI), no `eval` or `new Function`, and no web workers.
-- NETWORK: apart from the calls another rule of this prompt allows, the page
-  makes requests only to
-  `https://cdn.jsdelivr.net/npm/<package>@<exact version>/...`. Load a data
-  file from there with `d3.json(...)`, or `fetch(...)` followed by `.json()`.
-  Requests to any other host fail once the page is published, and in some
-  previews, so the data you gathered is embedded in the page.
 - Chart type by purpose: line for change over time, bar for comparing
   categories (horizontal when labels are long), stacked bar for composition
   across categories, scatter for the relation between two measures. Pie or
@@ -651,8 +646,7 @@ root-relative path instead of `api()`, or one whose `fetch()` names a path
   inline `<script>` elements, each view's code in a script of its own (see
   the verifier contract). The only external resources are the CDN scripts
   named in the design rules (Tailwind, ECharts) and, for a map or globe, the
-  recipe packages and world atlas named there, plus data files from jsDelivr
-  (NETWORK in the design rules).
+  recipe packages and world atlas named there, plus data files from jsDelivr.
 - Include the api-base meta tag in `<head>`:
   ```html
   <meta name="api-base" content="">
@@ -671,8 +665,7 @@ root-relative path instead of `api()`, or one whose `fetch()` names a path
   an `<img>`), set it from JS: `a.href = api('/api/export')`. Never write
   `href="/api/export"` in the markup: a root-relative path fails the step
   (see the verifier contract).
-- NEVER hardcode the backend's address (an absolute URL or a port) in the
-  source. The CDN addresses the design rules name are not the backend.
+- NEVER hardcode the backend's address in the source.
 - Call ALL backend endpoints under the `/api/*` prefix. Never use bare paths.
 - Call ONLY the paths listed under `## API Specification`, spelled as the
   document spells them; a `fetch()` to a path `openapi.json` does not define
@@ -749,8 +742,8 @@ complete frontend of a fullstack app. Inline your own CSS and all JS, each
 view's code in a `<script>` of its own as the verifier contract says; the
 only external resources allowed are the Tailwind and ECharts `<script>` tags
 from the CDNs named in the design rules and, for a map or globe, the recipe
-packages and world atlas named there, plus data files from jsDelivr (NETWORK
-in the design rules). The backend is generated in parallel
+packages and world atlas named there, plus data files from jsDelivr. The
+backend is generated in parallel
 and serves the endpoints listed under `## API Specification`: take exact
 paths and response shapes from there and call every one of them through the
 `api()` helper (see Fullstack rules). Embed no data — the page fetches it
@@ -769,7 +762,7 @@ replaces each such reference with the asset itself as a `data:` URI, since
 the app preview shows only the page. The only external resources allowed
 are the Tailwind and ECharts `<script>` tags from the CDNs named in the
 design rules and, for a map or globe, the recipe packages and world atlas
-named there, plus data files from jsDelivr (NETWORK in the design rules)."""
+named there, plus data files from jsDelivr."""
     return f"""\
 You are a single-purpose worker inside an artifact-generation pipeline. This
 step is `generate_frontend`.

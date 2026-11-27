@@ -157,7 +157,7 @@ def test_the_generator_prompts_state_the_preview_policy():
         assert "so the page renders on every deployment" in flat
 
 
-_NETWORK_RULE = "Requests to any other host fail once the page is published, and in some previews"
+_NETWORK_RULE = "a request to any other host fails once the page is published"
 
 
 def test_the_generator_prompts_and_the_skill_state_one_network_rule():
@@ -166,7 +166,8 @@ def test_the_generator_prompts_and_the_skill_state_one_network_rule():
     for prompt in _GENERATOR_PROMPTS:
         flat = " ".join(prompt.split())
         assert _NETWORK_RULE in flat
-        assert "with `d3.json(...)`, or `fetch(...)` followed by `.json()`" in flat
+        assert "besides data files from `https://cdn.jsdelivr.net/npm/<package>@<exact version>/...`" in flat
+        assert "embedded in the page" not in flat
         assert "No absolute URL in any `fetch()` call except a data file from `https://cdn.jsdelivr.net/npm/`" in flat
         assert "relative paths only" not in flat
     skill = " ".join(_skill().split())
