@@ -254,8 +254,30 @@ _CUSTOM_MCP_CONNECTION_NAME = re.compile(r"cm-[0-9a-f]{32}")
 _CUSTOM_MCP_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]+")
 _CUSTOM_MCP_CONNECTION_KEYS = frozenset({"connection_id", "name", "label", "credential_version", "tools"})
 _CUSTOM_MCP_DEFINITION_KEYS = frozenset({"name", "description", "input_schema"})
-# auth's invisible characters: text the member cannot see but a model reads. The joiners U+200C and U+200D stay.
-_CUSTOM_MCP_INVISIBLE = re.compile("[\u061c\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff\U000e0000-\U000e007f]")
+# auth's refused default-ignorable, format and control characters: text the member cannot see but a model reads.
+_CUSTOM_MCP_INVISIBLE = re.compile(
+    r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f"
+    r"\u061c\u17b4\u17b5\u200b\u200e\u200f\u202a-\u202e\u2060-\u206f"
+    r"\u3164\ufeff\uffa0\ufff0-\ufffb"
+    r"\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a"
+    r"\U000e0000-\U000e00ff\U000e01f0-\U000e0fff]"
+)
+# auth's other invisible marks, used in emoji and writing systems. Each must follow a character outside the
+# group, so marks cannot pile up into a hidden run; the one pair allowed is a selector then a joiner.
+_CUSTOM_MCP_JOINERS = r"\u200c\u200d"
+_CUSTOM_MCP_SELECTORS = r"\u180b-\u180d\u180f\ufe00-\ufe0f\U000e0100-\U000e01ef"
+_CUSTOM_MCP_OTHER_MARKS = r"\u00ad\u034f\u115f\u1160\u180e"
+_CUSTOM_MCP_MARKS = _CUSTOM_MCP_JOINERS + _CUSTOM_MCP_SELECTORS + _CUSTOM_MCP_OTHER_MARKS
+_CUSTOM_MCP_MARK_OUT_OF_PLACE = re.compile(
+    rf"^[{_CUSTOM_MCP_MARKS}]"
+    rf"|[{_CUSTOM_MCP_JOINERS}{_CUSTOM_MCP_OTHER_MARKS}][{_CUSTOM_MCP_MARKS}]"
+    rf"|[{_CUSTOM_MCP_SELECTORS}][{_CUSTOM_MCP_SELECTORS}{_CUSTOM_MCP_OTHER_MARKS}]"
+)
+# A supplementary variation selector names a form of a CJK ideograph and must follow one.
+_CUSTOM_MCP_STRAY_IDEOGRAPH_SELECTOR = re.compile(
+    r"(?<![\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fffd\U00030000-\U0003fffd])"
+    r"[\U000e0100-\U000e01ef]"
+)
 _JSON_SCHEMA_TYPES = frozenset({"array", "boolean", "integer", "null", "number", "object", "string"})
 
 # The `turn_completed` key that names the artifact folders the turn touched.
@@ -495,13 +517,15 @@ def _finite_float(text: str) -> float:
 
 
 def _holds_unclean_text(value: object) -> bool:
-    """Whether any string or key inside ``value`` holds ``\\u0000``, an invisible character, or does not encode as UTF-8.
+    """Whether any string or key inside ``value`` holds ``\\u0000``, a refused or misplaced invisible mark, or does not encode as UTF-8.
 
     auth's text rule. An escaped lone surrogate passes the size step as ASCII
     and decodes to text no request can encode. The parser has bounded the depth.
     """
     if isinstance(value, str):
         if "\x00" in value or _CUSTOM_MCP_INVISIBLE.search(value):
+            return True
+        if _CUSTOM_MCP_MARK_OUT_OF_PLACE.search(value) or _CUSTOM_MCP_STRAY_IDEOGRAPH_SELECTOR.search(value):
             return True
         try:
             value.encode("utf-8")
