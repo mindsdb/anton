@@ -689,11 +689,13 @@ def _format_node_syntax_error(stderr: str, tmp_path: str) -> str:
 
 
 def check_inline_js_syntax(html: str, *, timeout_s: float = 3.0) -> list[str]:
-    """Syntax-check executable inline ``<script>`` blocks using ``node --check``.
+    """Syntax-check executable inline ``<script>`` blocks using Node.js.
 
-    Returns a list of concise syntax error messages (empty when all inline JS
-    parses cleanly, or when ``node`` is not installed on PATH). Runs outside
-    ``verify_frontend`` so ``verify_frontend`` remains pure and I/O-free.
+    Classic ``<script>`` blocks are compiled with ``vm.Script`` (exact ECMAScript
+    Script goal — no CommonJS wrapper globals like ``exports``/``module``/``require``
+    and no silent acceptance of top-level ``return``). ``type="module"`` blocks
+    use ``node --check`` on a ``.mjs`` file. Runs outside ``verify_frontend`` so
+    ``verify_frontend`` remains pure and I/O-free.
     """
     import shutil
     import subprocess
@@ -704,9 +706,8 @@ def check_inline_js_syntax(html: str, *, timeout_s: float = 3.0) -> list[str]:
         return []
     errors: list[str] = []
     for idx, (script_type, body) in enumerate(_extract_inline_scripts(html), start=1):
-        # `.cjs` prevents ancestor package.json `"type":"module"` or Node 22+
-        # ESM auto-detection from misparsing classic browser `<script>` blocks.
-        suffix = ".mjs" if script_type == "module" else ".cjs"
+        is_module = script_type == "module"
+        suffix = ".mjs" if is_module else ".js"
         tmp_path: str | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -714,8 +715,18 @@ def check_inline_js_syntax(html: str, *, timeout_s: float = 3.0) -> list[str]:
             ) as tf:
                 tf.write(body)
                 tmp_path = tf.name
+            if is_module:
+                cmd = [node, "--check", tmp_path]
+            else:
+                cmd = [
+                    node,
+                    "-e",
+                    "const fs=require('fs'),vm=require('vm');"
+                    "new vm.Script(fs.readFileSync(process.argv[1],'utf8'),{filename:'<script>'});",
+                    tmp_path,
+                ]
             proc = subprocess.run(
-                [node, "--check", tmp_path],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,

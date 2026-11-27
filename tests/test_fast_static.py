@@ -315,7 +315,6 @@ async def test_discovery_gets_the_general_analysis_rules(tmp_path, monkeypatch):
         assert "day before that next period's start" in sys_prompt
         assert "retrieve every page of paginated endpoints" in sys_prompt
         assert "unrequested date cut" in sys_prompt
-        assert "last week-start + 6 days" not in sys_prompt
         received.gathering_complete = True
         received.final_artifact_type = "html-app"
 

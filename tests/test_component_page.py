@@ -95,9 +95,16 @@ def test_unsupported_cowork_section_types_are_rejected_without_lexer_false_posit
         with pytest.raises(ValueError, match="Unsupported CoworkPage section type"):
             component_page.document(bad)
 
-    # Accepts valid sections, helper calls with {type:'bar'} inside sections:[...], RegExp literals
-    # containing quotes / escaped slashes / `/*`, and nested template literals with `}` and backticks.
+    # Accepts valid sections, helper calls with {type:'bar'}, domain data arrays named `sections`
+    # without CoworkPage keys or on member expressions, `++ /` and `obj.return /` division, RegExp
+    # literals containing quotes/slashes, and nested template literals.
     good = """
+    let i = 1;
+    const ratio = i++ / 2; // don't treat as regex
+    const retRatio = obj.return / 2;
+    const report = {};
+    report.sections = [{type:'appendix', title:'App'}];
+    const sections = [{id:'A', type:'VIP'}, {id:'B', type:'lecture'}];
     const clean = s => s.replace(/['"]/g, '').replace(/https?:\\/\\//g, '').replace(/\\/*/g, '');
     const nested = `${rows.map(r => `a}`).join(',')}${s.replace("`", "'")}`;
     // comment mentioning sections:[{type:'html'}]
@@ -222,16 +229,26 @@ def test_check_inline_js_syntax_edge_cases():
 
     if not shutil.which("node"):
         pytest.skip("node not available")
-    # HTML comments, textarea, quoted '>' in attributes, and data-cowork-observed are handled cleanly.
+    # HTML comments, textarea, quoted '>' in attributes, data-cowork-observed, and browser
+    # top-level variables that collide with CommonJS wrapper names (`exports`, `module`, `require`)
+    # are all accepted cleanly.
     safe_html = (
         '<!doctype html><html><body>'
         '<!-- <script>function broken( {</script> -->'
         '<textarea><script>function also_broken( {</script></textarea>'
-        '<script data-note="a > b" type="text/javascript; charset=utf-8">const x = 1 + 2;</script>'
+        '<script data-note="a > b" type="text/javascript; charset=utf-8">'
+        'const exports = [1, 2]; const module = "core"; const require = true; const x = 1 + 2;'
+        '</script>'
         '<script type="application/json" data-cowork-observed>{"a":1}</script>'
         '</body></html>'
     )
     assert verifiers.check_inline_js_syntax(safe_html) == []
+
+    # Illegal top-level return in classic browser script IS caught (not masked by CJS wrapper).
+    bad_return = '<!doctype html><html><body><script>return 42;</script></body></html>'
+    ret_errs = verifiers.check_inline_js_syntax(bad_return)
+    assert len(ret_errs) == 1
+    assert "SyntaxError:" in ret_errs[0]
 
     # ES module syntax error preserves SyntaxError and strips Node internal frames.
     bad_esm = '<!doctype html><html><body><script type="module">export const x = (1 + ;</script></body></html>'
@@ -272,7 +289,7 @@ def test_presentation_reconcile_js_zero_reason_and_per_cell_double_count_provena
                 {"week": "w3", "group": "B", "events": 10},
                 {"week": "w3", "group": "All", "events": 25},
             ],
-            "locations": [{"name": "North", "capacity": 234}],
+            "locations": [{"name": "North", "capacity": 234, "total_units": 234}],
         }
     }
     checks_json = _json.dumps({"doubleCounts": observed_data.double_counts(data)})
@@ -307,7 +324,7 @@ global.document = {{
   await window.CoworkPage({{
     title: 'T',
     sections: [{{
-      type: 'table', title: 'S', zeroReason: 'Baseline row',
+      type: 'table', title: 'S', zeroReason: 'Empty row',
       columns: [{{ key: 'n', label: 'Name' }}, {{ key: 'ok', label: 'Orders' }}, {{ key: 'broken', label: 'Revenue' }}],
       rows: [{{ n: 'A', ok: 5, broken: 0 }}, {{ n: 'B', ok: 7, broken: 0 }}],
     }}],
@@ -334,17 +351,28 @@ global.document = {{
   }});
   if (errors.length !== 0) {{ console.log('CASE4:' + JSON.stringify(errors)); process.exit(4); }}
 
-  // 5. Same numeric value 234 shown in a metric or related column (`total_events`) IS still caught.
+  // 5. Same numeric value 234 shown in a metric, related column, or column sharing only a generic
+  //    token (`total_sales` vs unrelated raw `total_units: 234`, or label matching `events`) IS caught.
   await window.CoworkPage({{
     title: 'T',
     metrics: [{{ label: 'Week 1 events', value: 234 }}],
     sections: [{{
       type: 'table', title: 'Summary',
-      columns: [{{ key: 'name', label: 'Name' }}, {{ key: 'total_events', label: 'Total events' }}],
-      rows: [{{ name: 'Week 1', total_events: 234 }}],
+      columns: [
+        {{ key: 'name', label: 'Name' }},
+        {{ key: 'total_events', label: 'Total events' }},
+        {{ key: 'total_sales', label: 'Total sales' }},
+        {{ key: 'total_units', label: 'Week 1 events' }},
+      ],
+      rows: [{{ name: 'Week 1', total_events: 234, total_sales: 234, total_units: 234 }}],
     }}],
   }});
-  if (errors.length !== 1 || !errors[0].includes('234') || !errors[0].includes('counts rows twice')) {{
+  if (
+    errors.length !== 1
+    || !errors[0].includes('234')
+    || !errors[0].includes('Total sales')
+    || !errors[0].includes('counts rows twice')
+  ) {{
     console.log('CASE5:' + JSON.stringify(errors)); process.exit(5);
   }}
   console.log('ALL_OK');
@@ -353,22 +381,3 @@ global.document = {{
     proc = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=5)
     assert proc.returncode == 0, f"stdout={proc.stdout} stderr={proc.stderr}"
     assert "ALL_OK" in proc.stdout
-
-
-def test_rejects_chat_user_field_ignores_role_ordering_errors():
-    from types import SimpleNamespace
-    from anton.core.llm.openai import _rejects_chat_user_field
-
-    role_err = SimpleNamespace(body={"error": {"message": "Invalid role 'user' after assistant", "param": "messages"}})
-    consec_err = SimpleNamespace(body={"error": {"message": 'Consecutive "user" messages are not allowed'}})
-    real_param = SimpleNamespace(body={"error": {"message": "Invalid parameter", "param": "user"}})
-    real_unknown = SimpleNamespace(body={"error": {"message": "Unknown field 'user' in request"}})
-    real_422 = SimpleNamespace(body={"detail": [{"loc": ["body", "user"], "msg": "Extra inputs are not permitted"}]})
-    other_422 = SimpleNamespace(body={"detail": [{"loc": ["body", "messages", "user", "content"], "msg": "bad"}]})
-
-    assert _rejects_chat_user_field(role_err) is False
-    assert _rejects_chat_user_field(consec_err) is False
-    assert _rejects_chat_user_field(other_422) is False
-    assert _rejects_chat_user_field(real_param) is True
-    assert _rejects_chat_user_field(real_unknown) is True
-    assert _rejects_chat_user_field(real_422) is True

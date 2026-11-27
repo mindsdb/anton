@@ -165,8 +165,8 @@ const baseCols = [
     sections: [{{
       type: 'table', title: 'Scenarios', columns: baseCols,
       rows: [
-        {{ zeroReason: 'No extra cost in baseline', s: 'Base', a: 0, b: 0, c: 0 }},
-        {{ s: 'Surge', a: 10, b: 20, c: 30 }},
+        {{ zeroReason: 'No fee in period', s: 'Standard', a: 0, b: 0, c: 0 }},
+        {{ s: 'Peak', a: 10, b: 20, c: 30 }},
       ],
     }}],
   }});
@@ -212,7 +212,7 @@ const baseCols = [
 """
     proc = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True)
     out = json.loads(proc.stdout)
-    assert out["r1"]["errs"] == [] and "No extra cost in baseline" in out["r1"]["caption"], out["r1"]
+    assert out["r1"]["errs"] == [] and "No fee in period" in out["r1"]["caption"], out["r1"]
     assert out["r2"]["errs"] == [] and "No A spend" in out["r2"]["caption"], out["r2"]
     assert len(out["r3"]["errs"]) == 1, out["r3"]
     assert 'row "Quiet"' in out["r3"]["errs"][0] and "Base" not in out["r3"]["errs"][0], out["r3"]
