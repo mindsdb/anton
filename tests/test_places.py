@@ -156,6 +156,15 @@ def test_ids_in_region_rows_do_not_crowd_out_a_late_town():
     assert "London" not in found
 
 
+def test_surnames_past_the_cap_are_not_pinned_as_towns():
+    orders = [{"order": f"order-{i:05d}"} for i in range(places.MAX_STRINGS + 50)]
+    customers = [{"last_name": f"Surname{i}", "province": "Ontario"} for i in range(20)]
+    customers.append({"last_name": "Hamilton", "province": "Ontario"})
+    found = places.index({"orders": orders, "customers": customers})
+    assert "Hamilton, Ontario" not in found
+    assert "Hamilton" not in found
+
+
 def test_index_resolves_each_code_pair_once(monkeypatch):
     calls = []
     real = places.resolve

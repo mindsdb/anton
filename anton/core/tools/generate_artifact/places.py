@@ -134,6 +134,7 @@ def index(data):
     _, regions, region_codes, names = _index()
     keys, scoped, values_seen = {}, {}, set()
     made_keys: set[str] = set()
+    dropped: dict[object, set[str]] = {}
     lookups: dict[str, object] = {}
 
     def lookup(text):  # one resolve per distinct text
@@ -152,6 +153,8 @@ def index(data):
                 keys.setdefault(text, set()).add(key)
         elif len(keys) < MAX_STRINGS:  # raw strings only arrive before any made name
             keys.setdefault(text, set()).add(key)
+        elif len(dropped.setdefault(key, set())) < MAX_STRINGS:
+            dropped[key].add(text)  # still counts toward its column's share of places
 
     def record(items, table_id):
         fields = {k: v for k, v in items.items() if isinstance(v, str) and 2 <= len(v) <= 60}
@@ -248,6 +251,8 @@ def index(data):
                 continue
         for k in ks:
             values.setdefault(k, set()).add(text)
+    for k, texts in dropped.items():
+        values.setdefault(k, set()).update(texts)
     placed = {k: sum(v in found or any(n in found for n in scoped.get(v, ())) for v in vs) / len(vs)
               for k, vs in values.items()}
     for text in list(found):
