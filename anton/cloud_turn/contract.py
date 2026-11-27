@@ -517,10 +517,11 @@ def _finite_float(text: str) -> float:
 
 
 def _holds_unclean_text(value: object) -> bool:
-    """Whether any string or key inside ``value`` holds ``\\u0000``, a refused or misplaced invisible mark, or does not encode as UTF-8.
+    """Whether any string or key inside ``value`` breaks auth's text rule.
 
-    auth's text rule. An escaped lone surrogate passes the size step as ASCII
-    and decodes to text no request can encode. The parser has bounded the depth.
+    That is: it holds ``\\u0000``, a refused or misplaced invisible mark, or does not
+    encode as UTF-8. An escaped lone surrogate passes the size step as ASCII and
+    decodes to text no request can encode. The parser has bounded the depth.
     """
     if isinstance(value, str):
         if "\x00" in value or _CUSTOM_MCP_INVISIBLE.search(value):

@@ -501,6 +501,150 @@
       "reason": null
     },
     {
+      "name": "line_breaks_and_signs",
+      "text": "{\"description\":\"Reads\\tfiles.\\r\\nOne per line.\u2028Then\u2029stops. \u0600\u0661 \u0605\u0661 \u06dd\u0661 \u070f\u0661 \u0890\u0661 \u0891\u0661 \u08e2\u0661 \ud804\udcbd\ud804\udcd0 \ud804\udccd\ud804\udcd0\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"line_breaks_and_signs\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ordinary_text",
+      "text": "{\"description\":\"\u201cQuoted\u201d \u2018text\u2019 \u2013 dash \u2014 ellipsis\u2026 no\u00a0break ~\u00a1\u00ac\u00ae\u034e\u0350\u061b\u061d\u115e\u1161\u17b3\u17b6\u180a\u1810\u200a\u2010\u2027\u202f\u205f\u2070\u3163\u3165\ufdfd\ufe10\ufefc\uff9f\ufffc\ud80d\udc2f\ud80d\udc40\ud82f\udc9f\ud834\udd72\ud834\udd7b\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ordinary_text\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_pair_u00ad",
+      "text": "{\"description\":\"a\u00ad\u00ad\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u034f",
+      "text": "{\"description\":\"a\u034f\u034f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u115f",
+      "text": "{\"description\":\"a\u115f\u115f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u1160",
+      "text": "{\"description\":\"a\u1160\u1160\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u180b",
+      "text": "{\"description\":\"a\u180b\u180b\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u180d",
+      "text": "{\"description\":\"a\u180d\u180d\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u180e",
+      "text": "{\"description\":\"a\u180e\u180e\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u180f",
+      "text": "{\"description\":\"a\u180f\u180f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u200c",
+      "text": "{\"description\":\"a\u200c\u200c\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u200d",
+      "text": "{\"description\":\"a\u200d\u200d\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_ufe00",
+      "text": "{\"description\":\"a\ufe00\ufe00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_ufe0f",
+      "text": "{\"description\":\"a\ufe0f\ufe0f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u33ff",
+      "text": "{\"description\":\"\u33ff\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u4dc0",
+      "text": "{\"description\":\"\u4dc0\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u4dff",
+      "text": "{\"description\":\"\u4dff\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_ua000",
+      "text": "{\"description\":\"\ua000\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_uf8ff",
+      "text": "{\"description\":\"\uf8ff\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_ufb00",
+      "text": "{\"description\":\"\ufb00\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u1ffff",
+      "text": "{\"description\":\"\ud83f\udfff\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u2fffe",
+      "text": "{\"description\":\"\ud87f\udffe\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u2ffff",
+      "text": "{\"description\":\"\ud87f\udfff\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u3fffe",
+      "text": "{\"description\":\"\ud8bf\udffe\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
       "name": "joiner_pair",
       "text": "{\"description\":\"Reads\u200d\u200d files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
       "usable": false,
@@ -557,6 +701,36 @@
     {
       "name": "supplementary_selector_after_latin",
       "text": "{\"description\":\"Reads a\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "supplementary_selector_ue01ef_after_latin",
+      "text": "{\"description\":\"Reads a\udb40\uddef\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "ideograph_selector_pair_ue0100",
+      "text": "{\"description\":\"\u845b\udb40\udd00\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "ideograph_selector_pair_ue01ef",
+      "text": "{\"description\":\"\u845b\udb40\uddef\udb40\uddef\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "ideograph_selector_then_soft_hyphen_ue0100",
+      "text": "{\"description\":\"\u845b\udb40\udd00\u00ad\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "ideograph_selector_then_soft_hyphen_ue01ef",
+      "text": "{\"description\":\"\u845b\udb40\uddef\u00ad\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
       "usable": false,
       "reason": "text"
     },
