@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import functools
 import json
 import os
 import re
@@ -688,6 +689,26 @@ def _format_node_syntax_error(stderr: str, tmp_path: str) -> str:
     return " | ".join(head)[:300]
 
 
+@functools.lru_cache(maxsize=4)
+def _node_parses_modern_js(node: str) -> bool:
+    """Whether ``node`` compiles optional chaining and ``??``.
+
+    The page's own runtime script uses both, so an older node (12 on Ubuntu
+    22.04) would call valid code a syntax error the model cannot repair. A node
+    that cannot be probed counts as unsupported, and the check is skipped.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [node, "-e", "new (require('vm').Script)('let a={};a?.b??1')"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 def check_inline_js_syntax(html: str, *, timeout_s: float = 3.0, cell_sandbox: CellSandbox | None = None) -> list[str]:
     """Syntax-check executable inline ``<script>`` blocks using Node.js.
 
@@ -705,7 +726,7 @@ def check_inline_js_syntax(html: str, *, timeout_s: float = 3.0, cell_sandbox: C
     if cell_sandbox is not None:
         return []
     node = shutil.which("node")
-    if not node or "<script" not in html.lower():
+    if not node or "<script" not in html.lower() or not _node_parses_modern_js(node):
         return []
     errors: list[str] = []
     for idx, (script_type, body) in enumerate(_extract_inline_scripts(html), start=1):

@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -125,14 +126,34 @@ _PROMPT_CACHE_KEY_REFUSED: set[tuple[str, str]] = set()
 _CHAT_USER_REFUSED: set[tuple[str, str]] = set()
 
 
-def _rejects_prompt_cache_key(exc: "openai.BadRequestError") -> bool:
-    """True when a 400 refuses the ``prompt_cache_key`` parameter."""
+def _detail_locs_name(body: object, field: str) -> bool:
+    """True when a FastAPI/Pydantic ``detail`` list has an error located at ``field``."""
+    if not (isinstance(body, dict) and isinstance(body.get("detail"), list)):
+        return False
+    for item in body["detail"]:
+        if isinstance(item, dict):
+            loc = item.get("loc")
+            if isinstance(loc, (list, tuple)) and 1 <= len(loc) <= 2 and loc[-1] == field:
+                return True
+    return False
+
+
+def _rejects_prompt_cache_key(exc: "openai.APIStatusError") -> bool:
+    """True when a 400/422 refuses the ``prompt_cache_key`` parameter."""
     body = _error_body(exc)
+    if _detail_locs_name(body, "prompt_cache_key"):
+        return True
     err = body.get("error", body) if isinstance(body, dict) else {}
     if not isinstance(err, dict):
         return False
     text = f"{err.get('param') or ''} {err.get('message') or ''}"
     return "prompt_cache_key" in text
+
+
+# The bare request field ``user``, quoted or backticked or not, and not the
+# message role ("user message", "user role").
+_USER_FIELD_TOKEN = re.compile(r"(?<![\w-])[`'\"]?user[`'\"]?(?![\w-])(?!\s+(?:message|role|turn|content))")
+_ROLE_ORDERING_WORDS = ("role", "consecutive", "alternat")
 
 
 def _rejects_chat_user_field(exc: "openai.APIStatusError") -> bool:
@@ -159,21 +180,16 @@ def _rejects_chat_user_field(exc: "openai.APIStatusError") -> bool:
         )
         # Never mistake message-role ordering errors ("Invalid role 'user'",
         # "Consecutive \"user\" messages") for rejection of the request `user` field.
+        # The word "messages" alone is not one: serde lists it among the fields it
+        # expected ("unknown field `user`, expected one of `model`, `messages`").
         if (
-            "role" not in msg
-            and "message" not in msg
+            not any(w in msg for w in _ROLE_ORDERING_WORDS)
             and any(p in msg for p in field_reject_phrases)
-            and any(tok in msg for tok in ("'user'", '"user"', "field user", "parameter user"))
+            and _USER_FIELD_TOKEN.search(msg)
         ):
             return True
     # Strict Pydantic 422 responses (e.g. FastAPI/Mistral) may place errors under `detail`.
-    if isinstance(body, dict) and isinstance(body.get("detail"), list):
-        for item in body["detail"]:
-            if isinstance(item, dict):
-                loc = item.get("loc")
-                if isinstance(loc, (list, tuple)) and 1 <= len(loc) <= 2 and loc[-1] == "user":
-                    return True
-    return False
+    return _detail_locs_name(body, "user")
 
 
 _CLAUDE_MODEL_WORDS = ("claude", "sonnet", "opus", "haiku", "fable")
@@ -2011,6 +2027,14 @@ class OpenAIProvider(LLMProvider):
         """
         try:
             return await self._client.responses.create(**kwargs)
+        except openai.UnprocessableEntityError as exc:
+            # A strict proxy may refuse the new field with a 422 (FastAPI ``detail``).
+            if "prompt_cache_key" in kwargs and _rejects_prompt_cache_key(exc):
+                logger.warning("prompt_cache_key refused for %s; continuing without it",
+                               kwargs.get("model"))
+                _PROMPT_CACHE_KEY_REFUSED.add((self._base_url or "", kwargs.get("model") or ""))
+                return await self._create_response({k: v for k, v in kwargs.items() if k != "prompt_cache_key"})
+            raise
         except openai.BadRequestError as exc:
             if _has_cache_breakpoint(kwargs) and _rejects_cache_breakpoint(exc):
                 logger.warning("explicit prompt cache breakpoints refused for %s; continuing without them",

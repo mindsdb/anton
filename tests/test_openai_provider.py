@@ -1057,3 +1057,25 @@ class TestSessionAffinityAndStreamedSummarize:
 
         with pytest.raises(TransientProviderError, match="without a completion response"):
             await client.summarize(system="s", messages=[{"role": "user", "content": "hi"}], max_tokens=256)
+
+
+class TestStrictEndpointFieldRefusals:
+    def test_chat_user_field_refusals_in_other_wordings(self):
+        from anton.core.llm.openai import _rejects_chat_user_field
+
+        def err(message):
+            return SimpleNamespace(body={"error": {"message": message}})
+
+        assert _rejects_chat_user_field(err("Unrecognized request argument supplied: user")) is True
+        assert _rejects_chat_user_field(
+            err("unknown field `user`, expected one of `model`, `messages`, `stream`")) is True
+        assert _rejects_chat_user_field(err('Consecutive "user" messages are not allowed')) is False
+        assert _rejects_chat_user_field(err("Unexpected user message at position 0")) is False
+
+    def test_prompt_cache_key_refusal_in_a_422_detail_list(self):
+        from anton.core.llm.openai import _rejects_prompt_cache_key
+
+        assert _rejects_prompt_cache_key(SimpleNamespace(
+            body={"detail": [{"loc": ["body", "prompt_cache_key"], "msg": "Extra inputs are not permitted"}]})) is True
+        assert _rejects_prompt_cache_key(SimpleNamespace(
+            body={"detail": [{"loc": ["body", "input"], "msg": "bad"}]})) is False

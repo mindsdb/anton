@@ -381,3 +381,10 @@ global.document = {{
     proc = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=5)
     assert proc.returncode == 0, f"stdout={proc.stdout} stderr={proc.stderr}"
     assert "ALL_OK" in proc.stdout
+
+
+def test_an_old_node_that_cannot_parse_modern_js_skips_the_inline_check(monkeypatch):
+    from anton.core.tools.generate_artifact import verifiers
+
+    monkeypatch.setattr(verifiers, "_node_parses_modern_js", lambda node: False)
+    assert verifiers.check_inline_js_syntax("<script>let = = 1</script>") == []

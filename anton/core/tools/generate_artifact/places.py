@@ -133,11 +133,24 @@ def index(data):
     ("London" alone would be the English city)."""
     _, regions, region_codes, _ = _index()
     keys, scoped, values_seen = {}, {}, set()
+    made_keys: set[str] = set()
+    lookups: dict[str, object] = {}
+
+    def lookup(text):  # one resolve per distinct text
+        if text not in lookups:
+            lookups[text] = resolve(text)
+        return lookups[text]
     table_values: dict[tuple[int, object], set[str]] = {}
     records: list[tuple[int, dict]] = []
 
-    def add(text, key):
-        if len(keys) < MAX_STRINGS:
+    def add(text, key, made=False):
+        # Raw strings and made-up "<town>, <region>" names are capped apart, so a
+        # large dataset cannot crowd the pairs out and leave "London, Ontario" as England.
+        if made:
+            if text in made_keys or len(made_keys) < MAX_STRINGS:
+                made_keys.add(text)
+                keys.setdefault(text, set()).add(key)
+        elif len(keys) < MAX_STRINGS:  # raw strings only arrive before any made name
             keys.setdefault(text, set()).add(key)
 
     def record(items, table_id):
@@ -180,7 +193,7 @@ def index(data):
                     continue
                 if in_regions:
                     made_name = f"{text}, {qualifier}"
-                    add(made_name, k)
+                    add(made_name, k, made=True)
                     scoped.setdefault(text, set()).add(made_name)
                 else:
                     code_candidates.setdefault((table_id, k, qk), set()).add((text, qualifier))
@@ -212,27 +225,32 @@ def index(data):
         for (table_id, k, qk), pairs in code_candidates.items():
             if (table_id, qk) not in passing_qks:
                 continue
-            total_pairs = full_col_pairs.get((table_id, k, qk), pairs)
-            resolved_all = sum(1 for text, qual in total_pairs if resolve(f"{text}, {qual}"))
+            # At most MAX_STRINGS pairs a column, as `add` bounds the raw strings.
+            total_pairs = sorted(full_col_pairs.get((table_id, k, qk), pairs))[:MAX_STRINGS]
+            resolved_all = sum(1 for text, qual in total_pairs if lookup(f"{text}, {qual}"))
             if total_pairs and resolved_all / len(total_pairs) > 0.5:
-                for text, qual in pairs:
-                    if resolve(f"{text}, {qual}"):
+                for text, qual in sorted(pairs)[:MAX_STRINGS]:
+                    if lookup(f"{text}, {qual}"):
                         made_name = f"{text}, {qual}"
-                        add(made_name, k)
+                        add(made_name, k, made=True)
                         scoped.setdefault(text, set()).add(made_name)
 
-    found = {text: place for text in sorted(keys) if (place := resolve(text))}
+    found = {text: place for text in sorted(keys) if (place := lookup(text))}
     made = {name for names in scoped.values() for name in names} - values_seen
     values = {}
     for text, ks in keys.items():
-        if text not in made:
-            for k in ks:
-                values.setdefault(k, set()).add(text)
+        if text in made:
+            # Counts for its town when the cap kept the bare town out of the keys.
+            text = text.rsplit(", ", 1)[0]
+            if text in keys:
+                continue
+        for k in ks:
+            values.setdefault(k, set()).add(text)
     placed = {k: sum(v in found or any(n in found for n in scoped.get(v, ())) for v in vs) / len(vs)
               for k, vs in values.items()}
     for text in list(found):
         base = text.rsplit(", ", 1)[0] if text in made else text
-        if not any(k is None or placed.get(k, 0) > 0.5 for k in keys.get(base, ()) | keys[text]):
+        if not any(k is None or placed.get(k, 0) > 0.5 for k in keys.get(base, set()) | keys[text]):
             del found[text]
     for text, names in scoped.items():
         here = [found[name] for name in names if name in found]

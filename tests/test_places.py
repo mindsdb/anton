@@ -139,3 +139,21 @@ def test_status_or_flag_columns_never_hijack_cities_in_index():
     assert regions["Albany, WA"]["country"] == "Australia"
     assert regions["San Antonio, VS"]["country"] == "Chile"
     assert regions["Campinas"]["country"] == "Brazil"
+
+
+def test_a_large_dataset_still_scopes_a_town_to_its_region():
+    ids = [{"order": f"order-{i:05d}"} for i in range(places.MAX_STRINGS + 50)]
+    found = places.index([*ids, {"city": "London", "state": "Ontario"}, {"city": "Toronto", "state": "Ontario"}])
+    assert found["London, Ontario"]["country"] == "Canada"
+    assert "London" not in found
+
+
+def test_index_resolves_each_code_pair_once(monkeypatch):
+    calls = []
+    real = places.resolve
+    monkeypatch.setattr(places, "resolve", lambda text: calls.append(text) or real(text))
+    places.index([
+        {"city": "London", "state": "ON"}, {"city": "Toronto", "state": "ON"},
+        {"city": "Ottawa", "state": "ON"},
+    ])
+    assert len(calls) == len(set(calls))

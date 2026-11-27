@@ -86,6 +86,8 @@ ALLOWLIST = (
      "the verifier's compile and import checks, through the launcher"),
     ("core/tools/generate_artifact/verifiers.py", "check_inline_js_syntax", "subprocess.run", REFUSED,
      "node's syntax-only compile of an inline script, which runs nothing; fast_static passes the policy and it returns first"),
+    ("core/tools/generate_artifact/verifiers.py", "_node_parses_modern_js", "subprocess.run", REFUSED,
+     "node compiling a fixed one-line sample, no page text; only check_inline_js_syntax calls it, after its policy return"),
     ("core/artifacts/backend_launcher.py", "launch_artifact_backend", "asyncio.create_subprocess_exec", REFUSED,
      "app backends; launch_artifact_backend returns BACKENDS_OFF_MESSAGE under a policy first"),
     ("core/artifact_editor/checkers.py", "_node_check", "asyncio.create_subprocess_exec", REFUSED,
