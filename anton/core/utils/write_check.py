@@ -12121,9 +12121,10 @@ _LINK_SIGNS = re.compile(r"(?<!un)(?<!is)(?<!read)(?<!hyper)link(?!edin)")
 # The words a bare Python program is named by (`_same_step_script`).
 _BARE_PYTHON = re.compile(r"python(?:3(?:\.\d+)?)?")
 # What the pad hands `python -c` before the script's path, with the real
-# folder the check read the run in and the SHA-256 of the text it read as
-# the two words between (`_run_code`), so the text stays out of the run's
-# words, which any local user may read. It takes both words out of
+# folder the check read the run in, the real folder it read the script in
+# and the SHA-256 of the text it read as the three words between
+# (`_run_code`), so the text stays out of the run's
+# words, which any local user may read. It takes all three words out of
 # `sys.argv`, so `sys.argv` is what running the file gives. It stops with
 # a one-line message, before any of the script runs, when the run starts
 # in another folder, as when the step made that folder a link, or when the
@@ -12136,13 +12137,14 @@ _BARE_PYTHON = re.compile(r"python(?:3(?:\.\d+)?)?")
 # a `PYTHONPATH` folder holds runs. `sys.path[0]`, which `-c` leaves at the
 # working folder, becomes the script's own real folder, as a run of the file
 # gives it, so a module beside the script imports as it did (the check reads
-# both folders, `_launch_entries`), and nothing
+# both folders, `_launch_entries`); the run stops when that folder isn't
+# the real folder the check read the script in (`real_own`), and nothing
 # names the file, so no child process runs the file again.
 _SCRIPT_PRELUDE = (
     "def _anton_run():\n"
     "    import os, sys\n"
     "    globals().pop('_anton_run')\n"
-    "    folder, digest = sys.argv.pop(1), sys.argv.pop(1)\n"
+    "    folder, held, digest = sys.argv.pop(1), sys.argv.pop(1), sys.argv.pop(1)\n"
     "    del sys.argv[0]\n"
     "    here = os.path.normcase(os.path.realpath(os.getcwd()))\n"
     "    if here != folder and not (folder.endswith(os.sep) and (here + os.sep).startswith(folder)):\n"
@@ -12159,8 +12161,12 @@ _SCRIPT_PRELUDE = (
     "        text = file.read()\n"
     "    if hashlib.sha256(text.encode('utf-8', 'surrogateescape')).hexdigest() != digest:\n"
     "        raise SystemExit(f'anton: {sys.argv[0]!r} did not run: it changed after the write check read it')\n"
+    "    own = os.path.normcase(os.path.dirname(os.path.realpath(sys.argv[0])))\n"
+    "    if own != held and not (held.endswith(os.sep) and (own + os.sep).startswith(held)):\n"
+    "        raise SystemExit(f'anton: {sys.argv[0]!r} did not run: its folder is not the one the write check '\n"
+    "                         'read it in')\n"
     "    if sys.path[:1] == ['']:\n"
-    "        sys.path[0] = os.path.dirname(os.path.realpath(sys.argv[0]))\n"
+    "        sys.path[0] = own\n"
     "    return compile(text, sys.argv[0], 'exec')\n"
     "exec(_anton_run())\n"
 )
@@ -12175,7 +12181,8 @@ class _Script:
     reach (`_Cell.search`); the script as the card names it, "" for a
     name's text, which the step doesn't save (`_exec_script`); and how the
     pad runs the text: through `-c` and the prelude, with the real folder
-    the check read the run in (`real_folder`) and the text's SHA-256, after
+    the check read the run in (`real_folder`), the real folder it read the
+    script in (`real_own`) and the text's SHA-256, after
     the program's word in the run's words `node` (`argv`), or as the text
     in place of the code `node` (`source`); and whether its code may find
     where its file lies (`_Cell.own_file`)."""
@@ -12187,6 +12194,7 @@ class _Script:
     node: ast.AST
     kind: Literal["argv", "source"]
     real_folder: str = ""
+    real_own: str = ""
     own_file: bool = False
 
 
@@ -12242,6 +12250,10 @@ def _same_step_script(call: ast.Call, name: str, reader: _Reader) -> _Script | N
     paths = reader.paths(words[1], cell=cell)
     if isinstance(paths, _Unknown) or len(paths) != 1 or paths[0].startswith("-") or _unplaced_script(paths[0]):
         return None
+    # The system walks a `..` after a link through it, which `normpath`
+    # folds away, so the script's folder would differ from the one read.
+    if ".." in paths[0].split("/") or "\\" in paths[0] or ntpath.splitdrive(paths[0])[0]:
+        return None
     folder: str | None = None
     cwd = _keyword(call, "cwd")
     if cwd is not None:
@@ -12265,13 +12277,13 @@ def _same_step_script(call: ast.Call, name: str, reader: _Reader) -> _Script | N
         os.path.join(reader.project_root, own, posixpath.basename(path))
     ):
         return None
-    real_folder = _real_folder(reader.project_root, runs_in)
+    real_folder, real_own = _real_folder(reader.project_root, runs_in), _real_folder(reader.project_root, own)
     text = _written_text(path, before=at, cell=cell, reader=reader)
-    if real_folder is None or text is not None and folder is not None and _LINK_SIGNS.search(text):
+    if real_folder is None or real_own is None or text is not None and folder is not None and _LINK_SIGNS.search(text):
         return None
     search = tuple(dict.fromkeys(f for f in (own, runs_in) if f))
     return _checked_script(text, folder=folder, search=search, name=_script_name(path, reader), node=call.args[0],
-                           kind="argv", real_folder=real_folder, apart=own != runs_in)
+                           kind="argv", real_folder=real_folder, real_own=real_own, apart=own != runs_in)
 
 
 def _bound_aside_before(name: str, at: int, *, cell: _Cell, reader: _Reader, member: bool = False) -> bool:
@@ -12928,7 +12940,8 @@ def _code_names(tree: ast.AST, *, depth: int = 0) -> set[str]:
 
 def _checked_script(
     text: str | None, *, folder: str | None, search: tuple[str, ...], name: str, node: ast.AST,
-    kind: Literal["argv", "source"], real_folder: str = "", apart: bool = False, own_file: bool = False,
+    kind: Literal["argv", "source"], real_folder: str = "", real_own: str = "", apart: bool = False,
+    own_file: bool = False,
 ) -> _Script | None:
     """The script of `text`, when the check reads it in place of its file:
     one that parses, with no NUL, within `_SCRIPT_TEXT_LIMIT` bytes, with
@@ -12960,7 +12973,7 @@ def _checked_script(
     if any(map(signs, strings)):
         return None
     return _Script(text=text, folder=folder, search=search, name=name, node=node, kind=kind,
-                   real_folder=real_folder, own_file=own_file or kind == "argv")
+                   real_folder=real_folder, real_own=real_own, own_file=own_file or kind == "argv")
 
 
 def _defines_class(tree: ast.AST, *, depth: int = 0) -> bool:
@@ -13266,7 +13279,7 @@ def _run_code(code: str, scripts: Sequence[_Script]) -> str | None:
         if comma is None:
             return None
         digest = hashlib.sha256(script.text.encode("utf-8", "surrogateescape")).hexdigest()
-        edits.append((comma, comma, f" '-c', {_SCRIPT_PRELUDE!r}, {script.real_folder!r}, {digest!r},"))
+        edits.append((comma, comma, f" '-c', {_SCRIPT_PRELUDE!r}, {script.real_folder!r}, {script.real_own!r}, {digest!r},"))
     for start, end, new in sorted(edits, reverse=True):
         data = data[:start] + new.encode("utf-8") + data[end:]
     out = data.decode("utf-8")

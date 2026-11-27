@@ -307,7 +307,7 @@ A request with no `skills` block at all stages no skills, with one rollout fallb
 
 The write check asks the person to approve a cell before it changes a database, a listed endpoint or an existing file. A card on a cell that writes nothing costs a click, or an unattended answer the whole card timeout, so the check is measured both ways: what it catches and what it asks about for no reason.
 
-A cell that runs code the check can't read gets the "This step can't be checked" card. A script the step saves or binds from a literal and runs is the exception. The check reads its text, and a local pad runs only that text (`CellWrites.run_code`). Python runs the file through a prelude, which stops the run unless the file holds that text in the folder the check read. Unlike a file run, `__file__` and `__cached__` are unset, `__loader__` is `BuiltinImporter`, a traceback starts with a `<string>` frame, and `sys.path[0]` is the script's own folder, as in a file run. So a script that writes nothing gets no card.
+A cell that runs code the check can't read gets the "This step can't be checked" card. A script the step saves or binds from a literal and runs is the exception. The check reads its text, and a local pad runs only that text (`CellWrites.run_code`). Python runs the file through a prelude, which stops the run unless the file holds that text, in a folder the check read, and the script's own folder is the one it read. Unlike a file run, `__file__` and `__cached__` are unset, `__loader__` is `BuiltinImporter`, a traceback starts with a `<string>` frame, and `sys.path[0]` is the script's own folder, as in a file run. So a script that writes nothing gets no card.
 
 The step stays unchecked when:
 

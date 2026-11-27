@@ -4844,13 +4844,13 @@ def test_a_swapped_run_hands_python_only_literals_and_no_script_text(tmp_path, m
     assert all(isinstance(a, ast.Constant) for a in added)
     assert [a.value for a in added] == [
         "-c", write_check._SCRIPT_PRELUDE, os.path.normcase(os.path.realpath(tmp_path)),
-        hashlib.sha256(body.encode()).hexdigest(),
+        os.path.normcase(os.path.realpath(tmp_path)), hashlib.sha256(body.encode()).hexdigest(),
     ]
     assert writes.run_code.count("sk-live-0123") == code.count("sk-live-0123") == 1
     assert _run_step(writes.run_code, tmp_path) == _run_step(code, tmp_path)
 
 
-def _prelude_run(*, checked: str, real_folder: str, cwd: Path, pythonpath: str = ""):
+def _prelude_run(*, checked: str, real_folder: str, cwd: Path, pythonpath: str = "", real_own: str | None = None):
     """Run `job.py` in `cwd` through the prelude, as a swapped run does, with
     `checked` as the text the check read, `real_folder` the folder it read
     the run in, and `PYTHONPATH` set to `pythonpath` when given."""
@@ -4862,7 +4862,8 @@ def _prelude_run(*, checked: str, real_folder: str, cwd: Path, pythonpath: str =
 
     digest = hashlib.sha256(checked.encode()).hexdigest()
     env = {**os.environ, "PYTHONPATH": pythonpath} if pythonpath else None
-    return subprocess.run([sys.executable, "-c", write_check._SCRIPT_PRELUDE, real_folder, digest, "job.py"],
+    return subprocess.run([sys.executable, "-c", write_check._SCRIPT_PRELUDE, real_folder,
+                           real_folder if real_own is None else real_own, digest, "job.py"],
                           cwd=cwd, capture_output=True, text=True, timeout=60, env=env)
 
 
@@ -4901,7 +4902,7 @@ def test_the_prelude_puts_the_scripts_own_folder_first_on_sys_path(tmp_path):
 
     ran = subprocess.run(
         [sys.executable, "-c", write_check._SCRIPT_PRELUDE, os.path.normcase(os.path.realpath(tmp_path)),
-         hashlib.sha256(text.encode()).hexdigest(), "scripts/job.py"],
+         os.path.normcase(os.path.realpath(tmp_path / "scripts")), hashlib.sha256(text.encode()).hexdigest(), "scripts/job.py"],
         cwd=tmp_path, capture_output=True, text=True, timeout=60,
     )
     assert (ran.returncode, ran.stderr) == (0, "")
@@ -4947,6 +4948,43 @@ def test_the_prelude_stops_the_run_before_the_script_runs(tmp_path, why):
     assert ran.stderr.count("\n") == 1 and ran.stderr.startswith("anton: 'job.py' did not run: ")
     assert message in ran.stderr
     assert not (tmp_path / "real" / "ran.txt").exists()
+
+
+def test_the_prelude_stops_a_run_whose_script_folder_isnt_the_one_the_check_read(tmp_path):
+    """A script path that reaches another folder than the one the check read,
+    as `sub/../job.py` does when `sub` became a link to a folder elsewhere,
+    stops before the script runs or anything beside it imports."""
+    project, elsewhere = tmp_path / "project", tmp_path / "elsewhere"
+    (elsewhere / "x").mkdir(parents=True)
+    project.mkdir()
+    text = "import helpers\nprint('hi')\n"
+    (project / "job.py").write_text(text)
+    (elsewhere / "job.py").write_text(text)
+    (elsewhere / "helpers.py").write_text("open('planted.txt', 'w').write('x')\n")
+    (project / "sub").symlink_to(elsewhere / "x", target_is_directory=True)
+    import hashlib
+    import subprocess
+    import sys
+
+    from anton.core.utils import write_check
+
+    here = os.path.normcase(os.path.realpath(project))
+    ran = subprocess.run(
+        [sys.executable, "-c", write_check._SCRIPT_PRELUDE, here, here,
+         hashlib.sha256(text.encode()).hexdigest(), "sub/../job.py"],
+        cwd=project, capture_output=True, text=True, timeout=60,
+    )
+    assert ran.returncode != 0 and "folder is not the one the write check read it in" in ran.stderr
+    assert not (project / "planted.txt").exists() and not (elsewhere / "planted.txt").exists()
+
+
+def test_a_saved_script_path_with_a_dotdot_part_stays_unread(tmp_path, monkeypatch):
+    """The system walks a `..` after a link through it, so the script's
+    folder could differ from the one the check read."""
+    (tmp_path / "sub").mkdir()
+    code = _SAVED_SCRIPT.format(body=_PRINTS, run="subprocess.run([sys.executable, 'sub/../job.py'])").replace(
+        "Path('job.py')", "Path('sub/../job.py')")
+    assert _script_writes(tmp_path, monkeypatch, code).unchecked
 
 
 def test_a_swapped_read_over_several_lines_keeps_every_line_number(tmp_path, monkeypatch):
