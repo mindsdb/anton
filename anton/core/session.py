@@ -3738,7 +3738,9 @@ class ChatSession:
                 create = STATIC_CREATE_ARTIFACT_TOOL if direct else STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS
                 generate = (STATIC_GENERATE_ARTIFACT_TOOL if direct
                             else STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS)
-            update = UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
+            # No `port` where the user cannot open a backend: a written port breaks the published preview.
+            update = (UPDATE_ARTIFACT_METADATA_TOOL if fullstack and self._app_backends_reachable
+                      else STATIC_UPDATE_ARTIFACT_METADATA_TOOL)
             listing = LIST_ARTIFACTS_TOOL
             # Inline pages and widgets exist only where the chat renders them
             # (Cowork); elsewhere no tool offers `display` (ENG-4684).

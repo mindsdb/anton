@@ -1507,6 +1507,13 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     kwargs: dict = {}
     if "primary" in tc_input:
         kwargs["primary"] = tc_input["primary"]
+    from anton.core.artifacts.backend_launcher import app_backends_reachable
+
+    if tc_input.get("port") is not None and not app_backends_reachable(session):
+        return SideEffectResult.failed(
+            "Error: `port` cannot be set in this deployment: the user opens apps through their published preview.",
+            reason="port_not_allowed",
+        )
     if "port" in tc_input:
         try:
             kwargs["port"] = int(tc_input["port"]) if tc_input["port"] is not None else None
