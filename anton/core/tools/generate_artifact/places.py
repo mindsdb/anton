@@ -253,7 +253,10 @@ def index(data):
             values.setdefault(k, set()).add(text)
     for k, texts in dropped.items():
         values.setdefault(k, set()).update(texts)
-    placed = {k: sum(v in found or any(n in found for n in scoped.get(v, ())) for v in vs) / len(vs)
+    # Values the raw cap dropped are resolved too, so a real town column keeps its share.
+    dropped_found = {text for texts in dropped.values() for text in texts if lookup(text)}
+    placed = {k: sum(v in found or v in dropped_found or any(n in found for n in scoped.get(v, ()))
+                     for v in vs) / len(vs)
               for k, vs in values.items()}
     for text in list(found):
         base = text.rsplit(", ", 1)[0] if text in made else text

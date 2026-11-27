@@ -165,6 +165,16 @@ def test_surnames_past_the_cap_are_not_pinned_as_towns():
     assert "Hamilton" not in found
 
 
+def test_a_town_column_past_the_cap_keeps_its_pins():
+    early = [{"city": name} for name in ("Toronto", "Berlin", "Madrid")]
+    ids = [{"order": f"order-{i:05d}"} for i in range(places.MAX_STRINGS + 50)]
+    late = [{"city": name} for name in (
+        "Moscow", "Tokyo", "Osaka", "Cairo", "Lima", "Oslo", "Dublin", "Athens", "Lisbon", "Prague",
+        "Warsaw", "Budapest", "Seoul", "Delhi", "Mumbai", "Sydney", "Vienna", "Chicago", "Boston")]
+    found = places.index([*early, *ids, *late])
+    assert {"Toronto", "Berlin", "Madrid"} <= set(found)
+
+
 def test_index_resolves_each_code_pair_once(monkeypatch):
     calls = []
     real = places.resolve
