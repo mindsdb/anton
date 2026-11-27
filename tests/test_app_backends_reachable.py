@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from anton.core.artifacts import ArtifactStore
 from anton.core.artifacts.backend_launcher import app_backends_reachable
+from anton.core.settings import CoreSettings
 from anton.core.tools.tool_handlers import handle_update_artifact_metadata
 from anton.workspace import Workspace
 
@@ -47,3 +48,17 @@ async def test_update_artifact_refuses_a_port_where_backends_are_unreachable(tmp
 
     assert outcome.ok is False and outcome.reason == "port_not_allowed"
     assert store.open(slug).port is None
+
+
+def test_an_allowlisted_editor_is_withheld_when_the_editor_is_off(make_session, tmp_path, monkeypatch):
+    """An allowlist name that matches no registered tool is fatal; the editor
+    setting decides whether core registers edit_artifact at all."""
+    monkeypatch.delenv("ANTON_ARTIFACT_EDITOR", raising=False)
+    session = make_session(
+        workspace=Workspace(tmp_path), settings=CoreSettings(artifact_editor="off"),
+        tool_allowlist=frozenset({"scratchpad", "edit_artifact"}),
+    )
+
+    session._build_tools()
+
+    assert "edit_artifact" not in {t.name for t in session.tool_registry.get_tool_defs()}

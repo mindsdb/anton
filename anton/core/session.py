@@ -3552,6 +3552,11 @@ class ChatSession:
             withheld = set() if getattr(self, "_image_offer", None) else {GENERATE_IMAGE_TOOL.name}
             # `inspect_artifact` is offered only where the chat shows inline pages.
             withheld.add(INSPECT_ARTIFACT_TOOL.name)
+            # `edit_artifact` is registered only with the artifact editor on.
+            from anton.core.tools.edit_artifact import EDIT_ARTIFACT_TOOL, editor_enabled
+
+            if not editor_enabled(self._settings):
+                withheld.add(EDIT_ARTIFACT_TOOL.name)
             unknown = set(self._tool_allowlist) - built - deferred - withheld
             if unknown:
                 raise ValueError(
