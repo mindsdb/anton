@@ -150,6 +150,9 @@ _SENTINEL_REASONS = {
     "out_of_repairs": (TIER_SELF, "invalid_argument"),
     "invalid_type": (TIER_SELF, "invalid_argument"),
     "invalid_port": (TIER_SELF, "invalid_argument"),
+    # `update_artifact` refuses `port` where the user cannot reach a backend
+    # (cloud turns): the agent's own argument, and the message says why.
+    "port_not_allowed": (TIER_SELF, "invalid_argument"),
     "invalid_display": (TIER_SELF, "invalid_argument"),
     "invalid_health_timeout": (TIER_SELF, "invalid_argument"),
     "invalid_datasources": (TIER_SELF, "invalid_argument"),
