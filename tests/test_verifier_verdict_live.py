@@ -1361,6 +1361,99 @@ _ASKS_AFTER_ONE_ATTEMPT = Case(
     source="ENG-2686 shadow replay (8/31 WAITING → INCOMPLETE on an earlier wording)",
 )
 
+# --- 13. Several searches, value not recorded, said so → COMPLETE -----------
+# Every source answered; none records the value. Guessed names that do not exist
+# are a search that found nothing, not failed approaches.
+_WARRANTY_QUESTION = "What is the warranty period on the HX-200 pumps at the North site?"
+_CONTRACT_SEARCH = (
+    "[output]\n0 of 48 pages mention 'warranty' or 'guarantee'.\n--- page 14 ---\n"
+    "Section 7. Delivery. The vendor delivers to the sites listed in Annex B. "
+    "Section 8. Maintenance. The vendor services each unit every 6 months. "
+    "Section 9. Term. This agreement runs for 36 months and renews unless either "
+    "party gives notice."
+)
+_ASSET_ROWS = (
+    "[output]\n asset_id | site  | model  | installed_on\n"
+    "----------+-------+--------+-------------\n"
+    " AS-1041  | North | HX-200 | 2024-03-02\n"
+    " AS-1042  | North | HX-200 | 2024-03-02\n(2 rows)"
+)
+_ENDPOINT_PROBES = (
+    "[output]\n/api/warranties 404 application/json {\"detail\": \"Not Found\"}\n"
+    "/api/v1/warranty 404 application/json {\"detail\": \"Not Found\"}\n"
+    "/api/assets/AS-1041/warranty 404 application/json {\"detail\": \"Not Found\"}"
+)
+
+
+# `_tool_call` cannot carry the scratchpad's own `name` input: it is that helper's parameter.
+def _scratchpad_step(tool_id: str, description: str, code: str) -> dict:
+    input_ = {"action": "exec", "name": "main", "one_line_description": description, "code": code}
+    return {
+        "role": "assistant",
+        "content": [{"type": "tool_use", "id": tool_id, "name": "scratchpad", "input": input_}],
+    }
+
+
+def _not_recorded_history(final_reply: str) -> list[dict]:
+    return [
+        {"role": "user", "content": _WARRANTY_QUESTION},
+        _scratchpad_step(
+            "toolu_131",
+            "Search every page of the service contract for warranty terms",
+            "print(search_pages(pdf, ['warranty', 'guarantee']))",
+        ),
+        _tool_result("toolu_131", _CONTRACT_SEARCH),
+        _scratchpad_step(
+            "toolu_132",
+            "List the HX-200 pumps at the North site",
+            "print(sql(\"SELECT asset_id, site, model, installed_on FROM assets "
+            "WHERE site = 'North' AND model = 'HX-200'\"))",
+        ),
+        _tool_result("toolu_132", _ASSET_ROWS),
+        _scratchpad_step(
+            "toolu_133",
+            "Check for a warranty end date column",
+            "print(sql(\"SELECT asset_id, warranty_end FROM assets WHERE site = 'North'\"))",
+        ),
+        _tool_result(
+            "toolu_133",
+            "[error] psycopg.errors.UndefinedColumn: column \"warranty_end\" does not exist",
+        ),
+        _scratchpad_step(
+            "toolu_134",
+            "Probe the asset API for a warranty endpoint",
+            "for path in WARRANTY_PATHS: print(path, *probe(path))",
+        ),
+        _tool_result("toolu_134", _ENDPOINT_PROBES),
+        {"role": "assistant", "content": final_reply},
+    ]
+
+
+_NOT_RECORDED_REPLY = (
+    "I couldn't retrieve a warranty period for the **HX-200** pumps at the North site. "
+    "None of the 48 contract pages mentions a warranty, the asset records have no "
+    "warranty field, and the API rejected the likely warranty endpoints."
+)
+_NOT_RECORDED = Case(
+    name="searched_several_sources_value_not_recorded",
+    user_message=_WARRANTY_QUESTION,
+    history=_not_recorded_history(_NOT_RECORDED_REPLY),
+    expected="COMPLETE",
+    source="correct not-recorded answers handed back as STUCK",
+)
+
+# --- 14. Same searches, then asks the user for a source → WAITING -----------
+_NOT_RECORDED_ASKS = Case(
+    name="searched_several_sources_then_asks_for_one",
+    user_message=_WARRANTY_QUESTION,
+    history=_not_recorded_history(
+        _NOT_RECORDED_REPLY
+        + " If you can point me to the vendor's warranty certificate, I can check the period there."
+    ),
+    expected="WAITING",
+    source="not-recorded answers that asked the user for a source, handed back as STUCK",
+)
+
 _CASES = [
     _RECOVERED,
     _IMPLIED_SUCCESS,
@@ -1374,6 +1467,8 @@ _CASES = [
     _USER_REQUESTED_ESTIMATE,
     _COMPUTED_TOTAL,
     _ASKS_AFTER_ONE_ATTEMPT,
+    _NOT_RECORDED,
+    _NOT_RECORDED_ASKS,
 ]
 
 
