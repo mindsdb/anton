@@ -282,10 +282,13 @@ def test_cloud_prompt_carries_artifact_delivery_guidance(tmp_path, monkeypatch):
     assert "127.0.0.1" in suffix
     assert "never repeat a path" in suffix
     # The base ARTIFACTS prompt tells the agent to include the primary file's
-    # path and to prefer launch_backend's (loopback) url — the cloud block must
-    # override both by name, not just coexist (review note on #461).
+    # path — the cloud block must override that instruction by name, not just
+    # coexist (review note on #461).
     assert "OVERRIDES the ARTIFACTS workflow instruction" in suffix
-    assert "launch_backend" in suffix
+    # The backend-URL instructions are removed by the session flag, so the block no longer names them.
+    assert "launch_backend" not in suffix
+    assert "opens in the artifact card's preview once it is published" in suffix
+    assert "published only after the user approves them" in suffix
 
 
 def test_cloud_workspace_does_not_create_anton_md(tmp_path, monkeypatch):
@@ -358,6 +361,8 @@ def test_config_uses_explicit_tool_allowlist(tmp_path, monkeypatch):
     assert cfg.tool_allowlist == CLOUD_TOOL_ALLOWLIST
     assert "launch_backend" not in cfg.tool_allowlist
     assert "scratchpad" in cfg.tool_allowlist
+    assert {"generate_artifact", "edit_artifact"} <= cfg.tool_allowlist
+    assert cfg.app_backends_reachable is False
 
 
 def test_model_override_applied(tmp_path, monkeypatch):
@@ -796,8 +801,33 @@ def test_the_tool_list_without_extra_tools_has_one_order_and_the_same_bytes_each
     assert first == second
     assert [tool["name"] for tool in json.loads(first)] == [
         "scratchpad", "read_image", "read_text_file", "memorize", "recall_skill", "create_skill_draft",
-        "create_artifact", "list_artifacts", "update_artifact",
+        "create_artifact", "list_artifacts", "update_artifact", "edit_artifact", "generate_artifact",
     ]
+
+
+async def test_a_cloud_turn_builds_artifacts_with_the_pipeline_and_no_backend_url(tmp_path, monkeypatch):
+    session = _real_cloud_session(tmp_path, monkeypatch)
+
+    session._build_tools()
+    tools = {t.name: t for t in session.tool_registry.get_tool_defs()}
+    prompt = await session._build_system_prompt()
+
+    assert {"generate_artifact", "edit_artifact"} <= set(tools)
+    assert "launch_backend" not in tools
+    assert "port" not in tools["update_artifact"].input_schema["properties"]
+    assert "call generate_artifact(name, user_request" in prompt
+    assert "use the running backend URL" not in prompt
+    assert "the entry point is the `url`" not in prompt
+
+
+def test_a_cloud_turn_with_the_editor_off_builds_without_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTON_ARTIFACT_EDITOR", "off")
+    session = _real_cloud_session(tmp_path, monkeypatch)
+
+    session._build_tools()
+
+    names = {t.name for t in session.tool_registry.get_tool_defs()}
+    assert "edit_artifact" not in names and "generate_artifact" in names
 
 
 def test_connector_drafts_add_only_the_draft_tool(tmp_path, monkeypatch):
@@ -1738,7 +1768,7 @@ def test_the_credential_context_states_parity_with_its_caveat(tmp_path, monkeypa
 #: sha256 of the credential block and the whole suffix as they read before a
 #: turn could build connector templates. A turn without the tool keeps them.
 _CREDENTIAL_CONTEXT_SHA256 = "196e8bd8c4c555fd1f5b99a0771454a40cd3a46fb52ffa2802c9573be5929552"
-_POD_SUFFIX_SHA256 = "a61d2d5379b5dd2b4d5252931a8049cc116de52a5c5dfc8a16a0d863394408f0"
+_POD_SUFFIX_SHA256 = "c5cce3dfec00358a98374853dbf2c84fb78ffeb37df2121ed023ec2ff8b6ba74"
 
 
 def test_without_connector_drafts_the_credential_text_is_unchanged(tmp_path, monkeypatch):
@@ -1811,6 +1841,9 @@ def test_no_pod_tool_can_capture_a_credential(tmp_path, monkeypatch):
         "generate_image",
         # Takes an artifact slug and reads two page files: no credential field.
         "inspect_artifact",
+        # The pipeline and the editor write only into an artifact folder.
+        "generate_artifact",
+        "edit_artifact",
     }
 
 

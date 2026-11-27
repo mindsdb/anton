@@ -99,6 +99,12 @@ CLOUD_TOOL_ALLOWLIST = frozenset(
         # Core registers it only on a Cowork surface (web for a pod), so the
         # session exempts it from the unknown-name check when withheld.
         "inspect_artifact",
+        # The artifact pipeline and the artifact editor write only into an
+        # artifact folder. A full-stack app's backend starts only inside this
+        # pod, for the pipeline's own health check; the user opens the app
+        # through its published preview (app_backends_reachable=False below).
+        "generate_artifact",
+        "edit_artifact",
     }
 )
 
@@ -118,8 +124,6 @@ _CORE_TOOL_NAMES = frozenset(
         "web_search",
         "web_fetch",
         "launch_backend",
-        "generate_artifact",
-        "edit_artifact",
         "browser",
         # Host tools of other surfaces that the session's dispatch treats specially.
         "connect_new_datasource",
@@ -918,14 +922,16 @@ def build_turn_content(base: Path, user_text: str) -> "str | list[dict]":
 # "AFTER FINISHING" workflow step — numbered 4 when this shipped, 6 since the
 # artifact pipeline became a single tool) instructs the OPPOSITE for the CLI
 # case — "include the primary
-# file's path … so it is clickable/openable in a plain CLI", and for
-# fullstack apps to prefer launch_backend's (loopback) url — so this block
-# overrides both BY NAME rather than merely contradicting them; suffix order
+# file's path … so it is clickable/openable in a plain CLI" — so this block
+# overrides it BY NAME rather than merely contradicting it; suffix order
 # gives it the last word, and naming the overridden rule is what makes the
 # model treat it as a deployment exception instead of a conflict (review
 # note from pnewsam on #461). When the pod is driven outside cowork (dev, CI) the panel it
 # names does not exist; that run has no end user reading prose, so the wrong
 # half of the trade is the one where a real user is told to click a dead path.
+# The backend-URL instructions are not overridden here: the session's
+# app_backends_reachable=False removes them, and this block says how a
+# full-stack app reaches the user instead.
 CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
     "Files you create as artifacts appear automatically in the Live Artifacts "
     "panel beside the chat, where the user previews them and uses the Download "
@@ -939,11 +945,12 @@ CLOUD_ARTIFACT_DELIVERY_GUIDANCE = (
     "never invent a download URL such as sandbox:/mnt/data/...; no link of "
     "that form works. This OVERRIDES the ARTIFACTS workflow instruction to "
     "include the primary file's path in your final message: here, point to "
-    "the artifact by name only — the panel is the pointer. It also overrides "
-    "the fullstack-app instruction to prefer the launch_backend url as the "
-    "pointer: that url is loopback inside this workspace and dead in the "
-    "user's browser; the artifact card's preview is how the user opens the "
-    "app. HTML and Markdown artifacts are shared to a live URL "
+    "the artifact by name only — the panel is the pointer. A full-stack app "
+    "opens in the artifact card's preview once it is published, a few "
+    "minutes after the turn ends; after a change, the preview shows the "
+    "previous version until then. An app that uses saved connections is "
+    "published only after the user approves them. HTML and Markdown "
+    "artifacts are shared to a live URL "
     "automatically at the end of the turn and that link appears on the "
     "artifact card — you do not know the link, so point at the card rather "
     "than guessing one. If the user says they cannot find, open, or download "
@@ -1261,6 +1268,8 @@ def build_cloud_chat_session(
         workspace_env_overlay=_cloud_turn_workspace_env(request, settings),
         web_search_enabled=False,
         web_fetch_enabled=False,
+        # The user's browser cannot reach a backend in this pod.
+        app_backends_reachable=False,
         browser=request.browser,
     )
 
