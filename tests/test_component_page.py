@@ -296,9 +296,9 @@ global.document = {{
   await window.CoworkPage({{
     title: 'T',
     sections: [{{
-      type: 'table', title: 'S', zeroReason: 'Baseline has zero delays',
-      columns: [{{ key: 'n', label: 'Name' }}, {{ key: 'd', label: 'Delay' }}],
-      rows: [{{ n: 'A', d: 0 }}, {{ n: 'B', d: 0 }}],
+      type: 'table', title: 'S', zeroReason: 'No records in this period',
+      columns: [{{ key: 'n', label: 'Name' }}, {{ key: 'v', label: 'Count' }}],
+      rows: [{{ n: 'A', v: 0 }}, {{ n: 'B', v: 0 }}],
     }}],
   }});
   if (errors.length !== 0) {{ console.log('CASE1:' + JSON.stringify(errors)); process.exit(1); }}

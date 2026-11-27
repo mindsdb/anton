@@ -48,10 +48,10 @@ The host reconciles shown figures with the data: a metric, lead value, table col
 timeline that shows only 0 or nothing is returned for repair, and so is a sum that counts a source's
 TOTAL ROWS beside their parts. When zero or empty is the true answer, attach zeroReason (a short
 reason in the user's language, shown only when it applies) to the exact owner that is zero: on the
-lead or metric object for a zero headline/metric; on each individual column object in `columns` for
-any table column that is all 0 in any control state (such as zero delays, cancellations, overtime or
-extra spend in a baseline scenario); and on the section object (or zero rows) for an empty table/timeline/map, an all-zero chart, or
-any table row whose numeric columns are all 0 (such as unaffected entities or baseline scenarios).
+lead or metric object for a zero headline or metric; on each individual column object in `columns`
+for any table column that is all 0 in any control state; and on the section object (or on individual
+zero rows) for an empty table, timeline, or map, an all-zero chart, or a table row whose numeric
+columns are all 0.
 
 Use normal JavaScript to select, join, group, sort and transform the complete bound data into
 these views. A filter's render callback must update the requested views consistently. For edits,

@@ -61,25 +61,64 @@ def test_a_field_that_is_mostly_not_places_is_left_out():
     assert found == {}
 
 
-def test_uppercase_canadian_and_australian_region_codes_resolve():
+def test_uppercase_iso_region_codes_resolve_globally():
+    # Diverse ISO 3166-2 subdivisions across continents (Europe, Americas, Asia, Africa, Oceania).
+    assert near(places.resolve("Munich, BY"), 48.14, 11.58)
+    assert near(places.resolve("Zurich, ZH"), 47.37, 8.54)
+    assert near(places.resolve("Rotterdam, ZH"), 51.92, 4.48)
+    assert near(places.resolve("Edinburgh, SCT"), 55.95, -3.19)
+    assert near(places.resolve("Campinas, SP"), -22.91, -47.06)
+    assert near(places.resolve("Guadalajara, JAL"), 20.67, -103.35)
+    assert near(places.resolve("Mumbai, MH"), 19.08, 72.88)
+    assert near(places.resolve("Guangzhou, GD"), 23.13, 113.26)
+    assert near(places.resolve("Johannesburg, GP"), -26.20, 28.05)
+    assert near(places.resolve("Auckland, AUK"), -36.85, 174.76)
     assert near(places.resolve("London, ON"), 42.98, -81.23)
-    assert near(places.resolve("Victoria, BC"), 48.43, -123.37)
-    assert near(places.resolve("St. John's, NL"), 47.56, -52.71)
     assert near(places.resolve("Sydney, NSW"), -33.87, 151.21)
-    # Existing country-code and US state-code lookups remain intact.
+    assert near(places.resolve("Perth, WA"), -31.95, 115.86)
+    # Existing country-code and US state-code lookups remain intact even on shared abbreviations.
     assert places.resolve("Amsterdam, NL")["country"] == "The Netherlands"
-    assert places.resolve("Midland, WA")["country"] == "United States"
+    assert places.resolve("St. John's, NL")["country"] == "Canada"
+    assert places.resolve("Seattle, WA")["country"] == "United States"
 
 
-def test_lowercase_or_titlecase_status_words_never_hijack_cities_in_index():
+def test_status_or_flag_columns_never_hijack_cities_in_index():
+    # Lowercase/titlecase words never match ISO region codes.
     found = places.index({
         "sites": [
             {"city": "London", "alerts": "on", "action": "Act"},
-            {"city": "Paris", "alerts": "On", "action": "act"},
-            {"city": "Perth", "alerts": "on", "action": "Act"},
+            {"city": "Rotterdam", "alerts": "On", "action": "act"},
+            {"city": "Auckland", "alerts": "on", "action": "Act"},
         ]
     })
     assert found["London"]["country"] == "United Kingdom"
-    assert found["Paris"]["country"] == "France"
-    assert found["Perth"]["country"] == "Australia"
-    assert "London, on" not in found and "Paris, On" not in found
+    assert found["Rotterdam"]["country"] == "The Netherlands"
+    assert found["Auckland"]["country"] == "New Zealand"
+    assert "London, on" not in found
+
+    # Uppercase non-region columns (e.g. ON/OFF flags) are rejected by the >50% region-field rule.
+    flags = places.index({
+        "sites": [
+            {"city": "London", "power": "ON"},
+            {"city": "Lyon", "power": "OFF"},
+            {"city": "Nice", "power": "OFF"},
+        ]
+    })
+    assert flags["London"]["country"] == "United Kingdom"
+    assert "London, ON" not in flags
+
+    # Genuine uppercase ISO region columns resolve and disambiguate globally.
+    regions = places.index({
+        "sites": [
+            {"city": "London", "state": "ON"},
+            {"city": "Santa Maria", "state": "RS"},
+            {"city": "Albany", "state": "WA"},
+            {"city": "San Antonio", "state": "VS"},
+            {"city": "Campinas", "state": "SP"},
+        ]
+    })
+    assert regions["London, ON"]["country"] == "Canada"
+    assert regions["Santa Maria, RS"]["country"] == "Brazil"
+    assert regions["Albany, WA"]["country"] == "Australia"
+    assert regions["San Antonio, VS"]["country"] == "Chile"
+    assert regions["Campinas"]["country"] == "Brazil"

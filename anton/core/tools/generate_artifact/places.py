@@ -13,29 +13,36 @@ from functools import lru_cache
 from pathlib import Path
 
 DATA = Path(__file__).parent / "data" / "places.tsv.gz"
+# ISO 3166-2 alphabetic admin1 codes across all countries (built by scripts/build_places.py).
+# Matched uppercase-only so ordinary words like "on" or "act" never hijack city lookups.
+REGION_CODES = Path(__file__).parent / "data" / "region_codes.tsv"
 # A bare name that several towns share still resolves when one is this many times larger
 DOMINANT = 10
 MAX_STRINGS = 4096
-
-# Uppercase-only postal codes for Canadian provinces/territories and non-US-colliding
-# Australian states (WA is omitted so US Washington lookups remain unambiguous).
-# Matched case-sensitively so ordinary words like "on" or "act" never hijack cities.
-_UPPERCASE_REGION_CODES: dict[str, tuple[str, ...]] = {
-    "CA.01": ("AB",), "CA.02": ("BC",), "CA.03": ("MB",), "CA.04": ("NB",),
-    "CA.05": ("NL",), "CA.07": ("NS",), "CA.08": ("ON",), "CA.09": ("PE",),
-    "CA.10": ("QC",), "CA.11": ("SK",), "CA.12": ("YT",), "CA.13": ("NT",), "CA.14": ("NU",),
-    "AU.01": ("ACT",), "AU.02": ("NSW",), "AU.03": ("NT",), "AU.04": ("QLD",),
-    "AU.05": ("SA",), "AU.06": ("TAS",), "AU.07": ("VIC",),
-}
 
 
 def normalized(value):
     return "".join(c for c in unicodedata.normalize("NFKD", str(value)).casefold() if c.isalnum())
 
 
+def _load_region_codes() -> dict[str, tuple[str, ...]]:
+    if not REGION_CODES.exists():
+        return {}
+    mapping: dict[str, list[str]] = {}
+    with REGION_CODES.open("r", encoding="utf-8") as rows:
+        for row in rows:
+            line = row.strip()
+            if not line or line.startswith("#"):
+                continue
+            code, abbr = line.split("\t", 1)
+            mapping.setdefault(code, []).append(abbr)
+    return {code: tuple(abbrs) for code, abbrs in mapping.items()}
+
+
 @lru_cache(maxsize=1)
 def _index():
     countries, regions, region_codes, names = {}, {}, {}, {}
+    iso_codes = _load_region_codes()
     with gzip.open(DATA, "rt", encoding="utf-8") as rows:
         for row in rows:
             kind, *f = row.rstrip("\n").split("\t")
@@ -50,7 +57,7 @@ def _index():
                 keys = {name, ascii_name} | ({region} if country == "US" else set())  # US.CA is "CA"
                 for key in keys:
                     regions.setdefault(normalized(key), set()).add((country, region))
-                for abbr in _UPPERCASE_REGION_CODES.get(code, ()):
+                for abbr in iso_codes.get(code, ()):
                     region_codes.setdefault(abbr, set()).add((country, region))
             else:
                 name, lat, lon, country, region, population, alternates = f
@@ -122,7 +129,7 @@ def index(data):
     <region>" ("London, Ontario"), and then the bare value no longer resolves elsewhere
     ("London" alone would be the English city)."""
     _, regions, region_codes, _ = _index()
-    keys, scoped, values_seen = {}, {}, set()
+    keys, scoped, values_seen, code_qual_keys = {}, {}, set(), {}
 
     def add(text, key):
         if len(keys) < MAX_STRINGS:
@@ -130,14 +137,18 @@ def index(data):
 
     def record(items):
         fields = {k: v for k, v in items.items() if isinstance(v, str) and 2 <= len(v) <= 60}
-        for qualifier in (
-            v for v in fields.values()
-            if normalized(v) in regions or (v.strip().isupper() and v.strip() in region_codes)
-        ):
+        for qk, qualifier in fields.items():
+            in_regions = normalized(qualifier) in regions
+            in_codes = not in_regions and qualifier.strip().isupper() and qualifier.strip() in region_codes
+            if not (in_regions or in_codes):
+                continue
             for k, text in fields.items():
                 if text != qualifier and "," not in text:
-                    add(f"{text}, {qualifier}", k)
-                    scoped.setdefault(text, set()).add(f"{text}, {qualifier}")
+                    made_name = f"{text}, {qualifier}"
+                    add(made_name, k)
+                    scoped.setdefault(text, set()).add(made_name)
+                    if in_codes:
+                        code_qual_keys.setdefault(made_name, set()).add(qk)
         for k, item in items.items():
             visit(item, k)
 
@@ -155,13 +166,25 @@ def index(data):
                 visit(item, key)
 
     visit(data)
-    found = {text: place for text in sorted(keys) if (place := resolve(text))}
     made = {name for names in scoped.values() for name in names} - values_seen
     values = {}
     for text, ks in keys.items():
         if text not in made:
             for k in ks:
                 values.setdefault(k, set()).add(text)
+    region_field = {
+        k: sum(normalized(v) in regions or (v.strip().isupper() and v.strip() in region_codes)
+               for v in vs) / len(vs) > 0.5
+        for k, vs in values.items()
+    }
+    for name, qks in code_qual_keys.items():
+        if name in made and not any(region_field.get(qk, False) for qk in qks):
+            keys.pop(name, None)
+            made.discard(name)
+            base = name.rsplit(", ", 1)[0]
+            if base in scoped:
+                scoped[base].discard(name)
+    found = {text: place for text in sorted(keys) if (place := resolve(text))}
     placed = {k: sum(v in found or any(n in found for n in scoped.get(v, ())) for v in vs) / len(vs)
               for k, vs in values.items()}
     for text in list(found):
