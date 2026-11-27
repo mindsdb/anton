@@ -153,10 +153,12 @@ def test_flag(monkeypatch):
 
 def test_every_artifacts_section_routes_edits_to_the_editor():
     from anton.core.llm import prompts
-    from anton.core.llm.static_artifact_prompt import ARTIFACTS, STATIC_ARTIFACTS
+    from anton.core.llm.static_artifact_prompt import ARTIFACTS, ARTIFACTS_PUBLISHED_APPS, STATIC_ARTIFACTS
 
     sections = [ARTIFACTS, STATIC_ARTIFACTS, prompts.ARTIFACTS_PROMPT, prompts.NO_DIRECT_REPORTS_ARTIFACTS_PROMPT,
-                prompts.STATIC_ARTIFACTS_PROMPT, prompts.NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT]
+                prompts.STATIC_ARTIFACTS_PROMPT, prompts.NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT,
+                ARTIFACTS_PUBLISHED_APPS, prompts.ARTIFACTS_PROMPT_PUBLISHED_APPS,
+                prompts.NO_DIRECT_REPORTS_ARTIFACTS_PROMPT_PUBLISHED_APPS]
     for section in sections:
         routed = route_section_to_editor(section)
         assert routed != section

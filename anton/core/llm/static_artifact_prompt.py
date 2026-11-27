@@ -74,6 +74,14 @@ STATIC_ARTIFACTS = cut_spans(
     (" For a fullstack app, use the running backend URL", "\nPure inline", ""),
 )
 
+# Where the user cannot open a backend the session starts
+# (`ChatSessionConfig.app_backends_reachable` is False): no backend URL as
+# the way to open an app.
+ARTIFACTS_PUBLISHED_APPS = cut_spans(
+    ARTIFACTS,
+    (" For a fullstack app, use the running backend URL", "\nPure inline", ""),
+)
+
 
 def visualizations(*, proactive):
     analysis = ("VISUALIZATIONS (charts, plots, maps, dashboards, reports):\n"

@@ -502,6 +502,14 @@ def _without_direct_reports(text: str) -> str:
 NO_DIRECT_REPORTS_ARTIFACTS_PROMPT = _without_direct_reports(ARTIFACTS_PROMPT)
 NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT = _without_direct_reports(STATIC_ARTIFACTS_PROMPT)
 
+# Where the user cannot open a backend the session starts
+# (`ChatSessionConfig.app_backends_reachable` is False): no backend URL as
+# the way to open an app.
+ARTIFACTS_PROMPT_PUBLISHED_APPS = cut_spans(
+    ARTIFACTS_PROMPT, (" For fullstack apps the entry point is the `url`", "\n", ""),
+)
+NO_DIRECT_REPORTS_ARTIFACTS_PROMPT_PUBLISHED_APPS = _without_direct_reports(ARTIFACTS_PROMPT_PUBLISHED_APPS)
+
 
 # ---------------------------------------------------------------------------
 # Visualization prompt variants — selected by ANTON_PROACTIVE_DASHBOARDS flag

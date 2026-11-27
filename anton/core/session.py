@@ -3428,6 +3428,7 @@ class ChatSession:
             ),
             deployment_identity=getattr(self, "_deployment_identity", None),
             fullstack_offered=getattr(self, "_fullstack_offered", True),
+            app_backends_reachable=getattr(self, "_app_backends_reachable", True),
             internet_research=getattr(self, "_internet_research_enabled", True),
             classify=getattr(self, "_classify_enabled", True),
             reading_files_offered=self._reading_files_offered(),
