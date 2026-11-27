@@ -688,19 +688,22 @@ def _format_node_syntax_error(stderr: str, tmp_path: str) -> str:
     return " | ".join(head)[:300]
 
 
-def check_inline_js_syntax(html: str, *, timeout_s: float = 3.0) -> list[str]:
+def check_inline_js_syntax(html: str, *, timeout_s: float = 3.0, cell_sandbox: CellSandbox | None = None) -> list[str]:
     """Syntax-check executable inline ``<script>`` blocks using Node.js.
 
     Classic ``<script>`` blocks are compiled with ``vm.Script`` (exact ECMAScript
     Script goal — no CommonJS wrapper globals like ``exports``/``module``/``require``
     and no silent acceptance of top-level ``return``). ``type="module"`` blocks
     use ``node --check`` on a ``.mjs`` file. Runs outside ``verify_frontend`` so
-    ``verify_frontend`` remains pure and I/O-free.
+    ``verify_frontend`` remains pure and I/O-free. Under a sandbox policy no
+    host process is started on the page, so the check is skipped.
     """
     import shutil
     import subprocess
     import tempfile
 
+    if cell_sandbox is not None:
+        return []
     node = shutil.which("node")
     if not node or "<script" not in html.lower():
         return []

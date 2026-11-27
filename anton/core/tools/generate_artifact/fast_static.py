@@ -363,7 +363,9 @@ async def run(state):
             geography=generated_requirement(state, state.artifact_path / primary),
         )
         if verdict.ok:
-            js_errors = await asyncio.to_thread(verifiers.check_inline_js_syntax, html)
+            js_errors = await asyncio.to_thread(
+                verifiers.check_inline_js_syntax, html, cell_sandbox=_cell_sandbox(state),
+            )
             if js_errors:
                 verdict.errors.extend(js_errors)
         if not verdict.ok:
