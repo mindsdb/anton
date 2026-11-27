@@ -66,6 +66,11 @@ source identifiers.
 """
 
 _COWORK_SECTION_TYPES = frozenset({"chart", "table", "map", "globe", "timeline", "text"})
+_COWORK_SECTION_SIBLING_KEYS = frozenset({
+    "title", "caption", "option", "columns", "rows", "points", "routes",
+    "items", "text", "html", "content", "body", "markup", "data",
+    "value", "metrics", "lead", "library", "center", "legend",
+})
 _REGEX_PREV_KEYWORDS = frozenset({
     "return", "case", "throw", "in", "of", "typeof", "void", "delete",
     "new", "yield", "await", "else", "do",
@@ -75,11 +80,13 @@ _REGEX_PREV_PUNCS = frozenset({
 })
 
 
-def _can_precede_regex(prev: tuple[str, str] | None) -> bool:
-    if prev is None:
+def _can_precede_regex(tokens: list[tuple[str, str]]) -> bool:
+    if not tokens:
         return True
-    kind, val = prev
+    kind, val = tokens[-1]
     if kind == "id" and val in _REGEX_PREV_KEYWORDS:
+        if len(tokens) >= 2 and tokens[-2] == ("punc", "."):
+            return False
         return True
     return kind in ("punc", "op") and val in _REGEX_PREV_PUNCS
 
@@ -103,7 +110,7 @@ def _scan_js_range(code: str, start: int, stop_on_rbrace: bool) -> tuple[list[tu
             end = code.find("*/", i + 2)
             i = n if end < 0 else end + 2
             continue
-        if ch == "/" and _can_precede_regex(tokens[-1] if tokens else None):
+        if ch == "/" and _can_precede_regex(tokens):
             j = i + 1
             in_class = False
             while j < n:
@@ -136,6 +143,8 @@ def _scan_js_range(code: str, start: int, stop_on_rbrace: bool) -> tuple[list[tu
                     buf.append(code[j + 1])
                     j += 2
                     continue
+                if c in ("\n", "\r"):
+                    break
                 if c == quote:
                     j += 1
                     break
@@ -192,6 +201,10 @@ def _scan_js_range(code: str, start: int, stop_on_rbrace: bool) -> tuple[list[tu
             tokens.append(("punc", ch))
             i += 1
             continue
+        if i + 1 < n and code[i : i + 2] in ("++", "--"):
+            tokens.append(("op", code[i : i + 2]))
+            i += 2
+            continue
         if ch in "=!&|?+-*%<>^~/":
             tokens.append(("op", ch))
             i += 1
@@ -201,10 +214,12 @@ def _scan_js_range(code: str, start: int, stop_on_rbrace: bool) -> tuple[list[tu
 
 
 def _check_section_obj(tokens: list[tuple[str, str]], start_brace: int, invalid: list[str]) -> int:
-    """Inspect only the direct (depth-1) `type: '<literal>'` property of one `{...}` section object."""
+    """Inspect only the direct (depth-1) `type: '<literal>'` property of one `{...}` CoworkPage section object."""
     n = len(tokens)
     depth = 1
     i = start_brace + 1
+    bad_types: list[str] = []
+    has_cowork_key = False
     while i < n and depth > 0:
         kind, val = tokens[i]
         if kind == "punc":
@@ -213,35 +228,42 @@ def _check_section_obj(tokens: list[tuple[str, str]], start_brace: int, invalid:
             elif val in ("}", "]", ")"):
                 depth -= 1
                 if depth == 0:
+                    if has_cowork_key:
+                        invalid.extend(bad_types)
                     return i + 1
-        elif depth == 1 and ((kind == "id" and val == "type") or (kind == "str" and val == "type")):
+        elif depth == 1 and kind in ("id", "str"):
             prev = tokens[i - 1] if i > start_brace else ("", "")
-            if (
-                prev in (("punc", "{"), ("punc", ","))
-                and i + 2 < n
-                and tokens[i + 1] == ("punc", ":")
-                and tokens[i + 2][0] == "str"
-            ):
-                sec_type = tokens[i + 2][1]
-                if sec_type not in _COWORK_SECTION_TYPES:
-                    invalid.append(sec_type)
-                i += 3
-                continue
+            if prev in (("punc", "{"), ("punc", ",")) and i + 1 < n:
+                nxt = tokens[i + 1]
+                if val == "type" and nxt == ("punc", ":") and i + 2 < n and tokens[i + 2][0] == "str":
+                    sec_type = tokens[i + 2][1]
+                    if sec_type not in _COWORK_SECTION_TYPES:
+                        bad_types.append(sec_type)
+                    i += 3
+                    continue
+                if val in _COWORK_SECTION_SIBLING_KEYS and (
+                    nxt == ("punc", ":") or (kind == "id" and nxt in (("punc", ","), ("punc", "}")))
+                ):
+                    has_cowork_key = True
         i += 1
+    if has_cowork_key:
+        invalid.extend(bad_types)
     return i
 
 
 def _invalid_cowork_section_types(program: str) -> list[str]:
-    """Find unsupported literal `type` values on direct section objects in `sections: [...]`,
-    `sections = [...]`, or `sections.push({...})`."""
+    """Find unsupported literal `type` values on direct CoworkPage section objects in
+    `sections: [...]`, `sections = [...]`, or `sections.push({...})`."""
     tokens, _ = _scan_js_range(program, 0, stop_on_rbrace=False)
     n = len(tokens)
     invalid: list[str] = []
     i = 0
     while i < n:
-        # Pattern A: `sections: [ {...}, ... ]` or `sections = [ {...}, ... ]`
+        is_member = i > 0 and tokens[i - 1] == ("punc", ".")
+        # Pattern A: `sections: [ {...}, ... ]` or `sections = [ {...}, ... ]` (not `obj.sections = [...]`)
         if (
-            tokens[i] in (("id", "sections"), ("str", "sections"))
+            not is_member
+            and tokens[i] in (("id", "sections"), ("str", "sections"))
             and i + 2 < n
             and tokens[i + 1] in (("punc", ":"), ("op", "="))
             and tokens[i + 2] == ("punc", "[")
@@ -264,9 +286,10 @@ def _invalid_cowork_section_types(program: str) -> list[str]:
                 j += 1
             i = j
             continue
-        # Pattern B: `sections.push({ ... }, ...)`
+        # Pattern B: `sections.push({ ... }, ...)` (not `obj.sections.push(...)`)
         if (
-            tokens[i] == ("id", "sections")
+            not is_member
+            and tokens[i] == ("id", "sections")
             and i + 3 < n
             and tokens[i + 1] == ("punc", ".")
             and tokens[i + 2] == ("id", "push")
@@ -330,8 +353,7 @@ def document(program):
     if bad_types:
         raise ValueError(
             f"Unsupported CoworkPage section type {bad_types[0]!r}: supported types are "
-            "'chart', 'table', 'map', 'globe', 'timeline', and 'text'. Use one of those or return "
-            "USE_HTML_WRITER when custom HTML is required."
+            "'chart', 'table', 'map', 'globe', 'timeline', and 'text'."
         )
     runtime = "\n".join((HERE / name).read_text() for name in ("presentation_contract.js", "presentation.js", "presentation_data.js", "presentation_geography.js",
                                                      "presentation_reconcile.js"))

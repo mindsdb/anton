@@ -58,10 +58,10 @@ def test_a_table_column_of_zeros_is_flagged_but_a_single_zero_cell_is_not():
       rows:[{store:'North',refund:0},{store:'South',refund:0}]}]});""")
     assert errors == [] and "No refunds were issued" in text
     errors, text = render("""await CoworkPage({title:'Sales',sections:[{type:'table',title:'By store',
-      zeroReason:'Baseline plan has no refunds or penalties',
+      zeroReason:'No refunds or penalties in period',
       columns:[{key:'store',label:'Store'},{key:'refund',label:'Refunds'},{key:'penalty',label:'Penalties'}],
       rows:[{store:'North',refund:0,penalty:0},{store:'South',refund:0,penalty:0}]}]});""")
-    assert errors == [] and "Baseline plan has no refunds or penalties" in text
+    assert errors == [] and "No refunds or penalties in period" in text
 
 
 def test_a_row_of_zeros_across_period_columns_is_flagged():

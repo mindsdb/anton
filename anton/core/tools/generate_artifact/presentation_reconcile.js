@@ -20,14 +20,23 @@
   const join = (text, reason) => [text, reason].filter(Boolean).join(' · ');
   const list = items => items.slice(0, 4).join(', ') + (items.length > 4 ? ' and ' + (items.length - 4) + ' more' : '');
   const hasReason = value => typeof value === 'string' && value.trim().length > 0;
+  const GENERIC_KEY_TOKENS = new Set([
+    'total', 'sum', 'count', 'value', 'values', 'amount', 'qty', 'quantity',
+    'avg', 'mean', 'min', 'max', 'net', 'gross', 'rate', 'pct', 'percent',
+    'num', 'number', 'all', 'by', 'per', 'of', 'the',
+  ]);
   const keyTokens = name => String(name || '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const specificTokens = name => keyTokens(name).filter(tok => !GENERIC_KEY_TOKENS.has(tok));
+  const normKey = name => keyTokens(name).join('_');
   const keysDisjoint = (a, b) => {
     const ta = keyTokens(a), tb = new Set(keyTokens(b));
     return ta.length > 0 && tb.size > 0 && ta.every(tok => !tb.has(tok));
   };
   const keysRelated = (a, b) => {
-    const ta = keyTokens(a), tb = new Set(keyTokens(b));
-    return ta.length > 0 && ta.some(tok => tb.has(tok));
+    const na = normKey(a), nb = normKey(b);
+    if (na && na === nb) return true;
+    const sa = specificTokens(a), sb = new Set(specificTokens(b));
+    return sa.length > 0 && sa.some(tok => sb.has(tok));
   };
   function collectRecordFields(value, out, depth = 0) {
     if (depth > 6 || !value || typeof value !== 'object') return;
@@ -47,8 +56,9 @@
     }
     for (const item of Object.values(value)) collectRecordFields(item, out, depth + 1);
   }
-  function isUnrelatedRawField(number, fieldKey, fact, rawFields) {
+  function isUnrelatedRawField(number, fieldKey, columnLabel, fact, rawFields) {
     if (!fieldKey || !keysDisjoint(fieldKey, fact.measure)) return false;
+    if (columnLabel && !keysDisjoint(columnLabel, fact.measure)) return false;
     const entries = rawFields.get(Math.round(number));
     if (!entries) return false;
     return entries.some(([k, v]) =>
@@ -112,7 +122,7 @@
         const numericCols = [];
         for (const column of rows.length ? section.columns || [] : []) {
           const values = rows.map(row => amount(row?.[column.key])).filter(value => value !== undefined);
-          values.forEach(value => shown.push([value, name + ', column ' + quote(column.label), column.key]));
+          values.forEach(value => shown.push([value, name + ', column ' + quote(column.label), column.key, column.label]));
           if (!values.length) continue;
           blocks.set(column.unit ?? '', [...blocks.get(column.unit ?? '') || [], column]);
           numericCols.push({column, allZero: values.every(value => value === 0 || !Number.isFinite(value))});
@@ -165,12 +175,12 @@
       return reasons.length ? {...section, caption: join(section.caption, [...new Set(reasons)].join(' · '))} : section;
     });
     if (!page.sections) delete result.sections;
-    for (const [value, label, fieldKey] of shown) {
+    for (const [value, label, fieldKey, columnLabel] of shown) {
       const number = amount(value);
       if (typeof number !== 'number' || !Number.isFinite(number)) continue;
       const fact = doubled.get(Math.round(number));
       if (fact && Math.abs(fact.value - number) <= 1e-6 * Math.max(1, Math.abs(fact.value))) {
-        if (isUnrelatedRawField(number, fieldKey, fact, rawFields)) continue;
+        if (isUnrelatedRawField(number, fieldKey, columnLabel, fact, rawFields)) continue;
         findings.push({fact, place: label + where});
       }
     }

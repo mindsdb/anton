@@ -69,14 +69,6 @@ def _index():
     return countries, regions, region_codes, names
 
 
-def _region_scopes(qualifier: str, regions: dict, region_codes: dict) -> set:
-    scopes = set(regions.get(normalized(qualifier), set()))
-    stripped = qualifier.strip()
-    if stripped.isupper():
-        scopes |= region_codes.get(stripped, set())
-    return scopes
-
-
 def resolve(text):
     """The one place a source string names, or None when it names none or several."""
     # A place name has a capital; a short all-capitals word is a code ("APAC", "ORD")
@@ -92,9 +84,20 @@ def resolve(text):
     if any(region is None for _, region in areas):
         found = [(p, own) for p, own in found if own and (p["country"], None) in areas]
     for qualifier in qualifiers:
-        scopes = _region_scopes(qualifier, regions, region_codes)
-        found = [(p, own) for p, own in found
-                 if (p["country"], None) in scopes or (p["country"], p["region"]) in scopes]
+        base_scopes = regions.get(normalized(qualifier), set())
+        base_found = [
+            (p, own) for p, own in found
+            if (p["country"], None) in base_scopes or (p["country"], p["region"]) in base_scopes
+        ]
+        if base_found:
+            found = base_found
+        else:
+            stripped = qualifier.strip()
+            code_scopes = region_codes.get(stripped, set()) if stripped.isupper() else set()
+            found = [
+                (p, own) for p, own in found
+                if (p["country"], None) in code_scopes or (p["country"], p["region"]) in code_scopes
+            ]
     # A town's own name outranks another town's alternate name
     own = [p for p, is_own in found if is_own] or [p for p, _ in found]
     places = sorted({id(p): p for p in own}.values(), key=lambda p: -p["population"])
@@ -129,62 +132,102 @@ def index(data):
     <region>" ("London, Ontario"), and then the bare value no longer resolves elsewhere
     ("London" alone would be the English city)."""
     _, regions, region_codes, _ = _index()
-    keys, scoped, values_seen, code_qual_keys = {}, {}, set(), {}
+    keys, scoped, values_seen = {}, {}, set()
+    table_values: dict[tuple[int, object], set[str]] = {}
+    records: list[tuple[int, dict]] = []
 
     def add(text, key):
         if len(keys) < MAX_STRINGS:
             keys.setdefault(text, set()).add(key)
 
-    def record(items):
+    def record(items, table_id):
         fields = {k: v for k, v in items.items() if isinstance(v, str) and 2 <= len(v) <= 60}
+        if fields:
+            records.append((table_id, fields))
+            for k, v in fields.items():
+                table_values.setdefault((table_id, k), set()).add(v)
+        for k, item in items.items():
+            visit(item, k)
+
+    def visit(value, key=None, table_id=0):
+        if isinstance(value, str):
+            values_seen.add(value)
+            add(value, key)
+        elif isinstance(value, dict):
+            record(value, table_id or id(value))
+        elif isinstance(value, list) and value and all(isinstance(row, list) for row in value):
+            tid = id(value)
+            for row in value:  # rows given as arrays: each column is a field
+                record({(key, i): item for i, item in enumerate(row)}, tid)
+        elif isinstance(value, list):
+            tid = id(value)
+            for item in value:
+                visit(item, key, tid)
+
+    visit(data)
+
+    # First synthesize pairs from full region/country names (never blocked by code heuristics),
+    # and collect candidate uppercase ISO-code pairs separately without consuming MAX_STRINGS.
+    code_candidates: dict[tuple[int, object, object], set[tuple[str, str]]] = {}
+    for table_id, fields in records:
         for qk, qualifier in fields.items():
             in_regions = normalized(qualifier) in regions
             in_codes = not in_regions and qualifier.strip().isupper() and qualifier.strip() in region_codes
             if not (in_regions or in_codes):
                 continue
             for k, text in fields.items():
-                if text != qualifier and "," not in text:
+                if text == qualifier or "," in text:
+                    continue
+                if in_regions:
                     made_name = f"{text}, {qualifier}"
                     add(made_name, k)
                     scoped.setdefault(text, set()).add(made_name)
-                    if in_codes:
-                        code_qual_keys.setdefault(made_name, set()).add(qk)
-        for k, item in items.items():
-            visit(item, k)
+                else:
+                    code_candidates.setdefault((table_id, k, qk), set()).add((text, qualifier))
 
-    def visit(value, key=None):
-        if isinstance(value, str):
-            values_seen.add(value)
-            add(value, key)
-        elif isinstance(value, dict):
-            record(value)
-        elif isinstance(value, list) and value and all(isinstance(row, list) for row in value):
-            for row in value:  # rows given as arrays: each column is a field
-                record({(key, i): item for i, item in enumerate(row)})
-        elif isinstance(value, list):
-            for item in value:
-                visit(item, key)
+    # Admit an uppercase ISO-code qualifier column only when (1) most distinct values in that
+    # table's column are valid regions/codes AND (2) >50% of ALL distinct (text, col_val) pairs
+    # across rows of that table actually resolve to known places — preventing status/flag columns
+    # ("ON"/"OK"/"UP") from saturating MAX_STRINGS or hijacking cities.
+    passing_qks: set[tuple[int, object]] = set()
+    for table_id, _, qk in code_candidates:
+        if (table_id, qk) in passing_qks:
+            continue
+        qvals = table_values.get((table_id, qk), ())
+        if qvals and (
+            sum(normalized(v) in regions or (v.strip().isupper() and v.strip() in region_codes)
+                for v in qvals) / len(qvals) > 0.5
+        ):
+            passing_qks.add((table_id, qk))
 
-    visit(data)
+    if passing_qks:
+        full_col_pairs: dict[tuple[int, object, object], set[tuple[str, str]]] = {}
+        for table_id, fields in records:
+            for qk, qualifier in fields.items():
+                if (table_id, qk) not in passing_qks:
+                    continue
+                for k, text in fields.items():
+                    if (table_id, k, qk) in code_candidates and text != qualifier and "," not in text:
+                        full_col_pairs.setdefault((table_id, k, qk), set()).add((text, qualifier))
+        for (table_id, k, qk), pairs in code_candidates.items():
+            if (table_id, qk) not in passing_qks:
+                continue
+            total_pairs = full_col_pairs.get((table_id, k, qk), pairs)
+            resolved_all = sum(1 for text, qual in total_pairs if resolve(f"{text}, {qual}"))
+            if total_pairs and resolved_all / len(total_pairs) > 0.5:
+                for text, qual in pairs:
+                    if resolve(f"{text}, {qual}"):
+                        made_name = f"{text}, {qual}"
+                        add(made_name, k)
+                        scoped.setdefault(text, set()).add(made_name)
+
+    found = {text: place for text in sorted(keys) if (place := resolve(text))}
     made = {name for names in scoped.values() for name in names} - values_seen
     values = {}
     for text, ks in keys.items():
         if text not in made:
             for k in ks:
                 values.setdefault(k, set()).add(text)
-    region_field = {
-        k: sum(normalized(v) in regions or (v.strip().isupper() and v.strip() in region_codes)
-               for v in vs) / len(vs) > 0.5
-        for k, vs in values.items()
-    }
-    for name, qks in code_qual_keys.items():
-        if name in made and not any(region_field.get(qk, False) for qk in qks):
-            keys.pop(name, None)
-            made.discard(name)
-            base = name.rsplit(", ", 1)[0]
-            if base in scoped:
-                scoped[base].discard(name)
-    found = {text: place for text in sorted(keys) if (place := resolve(text))}
     placed = {k: sum(v in found or any(n in found for n in scoped.get(v, ())) for v in vs) / len(vs)
               for k, vs in values.items()}
     for text in list(found):

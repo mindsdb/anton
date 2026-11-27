@@ -127,9 +127,6 @@ def build_region_codes(iso_json_path: Path, cldr_xml_path: Path) -> None:
             child_map = _match_country(iso_child[cc], geo_rows, allow_reg_eq=False)
             if len(child_map) > len(country_map):
                 country_map = child_map
-        for gcode, reg, _, _ in geo_rows:
-            if re.fullmatch(r"[A-Z]{2,3}", reg) and gcode not in country_map:
-                country_map[gcode] = reg
         matched.update(country_map)
 
     lines = [f"{gcode}\t{sub}" for gcode, sub in sorted(matched.items())]

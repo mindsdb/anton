@@ -170,8 +170,8 @@ def _rejects_chat_user_field(exc: "openai.APIStatusError") -> bool:
     if isinstance(body, dict) and isinstance(body.get("detail"), list):
         for item in body["detail"]:
             if isinstance(item, dict):
-                loc = item.get("loc") or ()
-                if loc and loc[-1] == "user":
+                loc = item.get("loc")
+                if isinstance(loc, (list, tuple)) and 1 <= len(loc) <= 2 and loc[-1] == "user":
                     return True
     return False
 

@@ -76,10 +76,17 @@ def test_uppercase_iso_region_codes_resolve_globally():
     assert near(places.resolve("London, ON"), 42.98, -81.23)
     assert near(places.resolve("Sydney, NSW"), -33.87, 151.21)
     assert near(places.resolve("Perth, WA"), -31.95, 115.86)
-    # Existing country-code and US state-code lookups remain intact even on shared abbreviations.
+    # Existing country-code and US state-code lookups remain intact without shadowing.
     assert places.resolve("Amsterdam, NL")["country"] == "The Netherlands"
     assert places.resolve("St. John's, NL")["country"] == "Canada"
     assert places.resolve("Seattle, WA")["country"] == "United States"
+    assert places.resolve("Midland, WA")["country"] == "United States"
+    assert places.resolve("San Marcos, CA")["country"] == "United States"
+    assert places.resolve("Victoria, AR")["country"] == "Argentina"
+    assert places.resolve("Vitoria, ES")["country"] == "Spain"
+    # Non-ISO GeoNames internal codes (e.g., TO.EU) are not loaded as region codes.
+    _, _, region_codes, _ = places._index()
+    assert ("TO", "EU") not in region_codes.get("EU", set())
 
 
 def test_status_or_flag_columns_never_hijack_cities_in_index():
@@ -96,16 +103,26 @@ def test_status_or_flag_columns_never_hijack_cities_in_index():
     assert found["Auckland"]["country"] == "New Zealand"
     assert "London, on" not in found
 
-    # Uppercase non-region columns (e.g. ON/OFF flags) are rejected by the >50% region-field rule.
-    flags = places.index({
-        "sites": [
-            {"city": "London", "power": "ON"},
-            {"city": "Lyon", "power": "OFF"},
-            {"city": "Nice", "power": "OFF"},
-        ]
-    })
-    assert flags["London"]["country"] == "United Kingdom"
-    assert "London, ON" not in flags
+    # Uppercase non-region columns (ON/OFF, all-ON, 3-value ON/OK/OFF) never hijack cities.
+    for rows in (
+        [{"city": "London", "power": "ON"}, {"city": "Lyon", "power": "OFF"}, {"city": "Nice", "power": "OFF"}],
+        [{"city": "London", "power": "ON"}, {"city": "Bristol", "power": "ON"}, {"city": "Leeds", "power": "ON"}],
+        [{"city": "London", "status": "ON"}, {"city": "Bristol", "status": "OK"}, {"city": "Leeds", "status": "OFF"}],
+    ):
+        flagged = places.index({"sites": rows})
+        assert flagged["London"]["country"] == "United Kingdom"
+        assert "London, ON" not in flagged
+
+    # Non-region uppercase flag columns on large tables do not exhaust MAX_STRINGS or drop real places.
+    large = {
+        "events": [
+            {"id": f"REC-{i}", "a": f"val-{i}", "b": f"tag-{i}", "c": f"grp-{i}", "power": "ON"}
+            for i in range(600)
+        ],
+        "sites": [{"city": "Lyon"}, {"city": "Porto"}, {"city": "Gdansk"}],
+    }
+    indexed = places.index(large)
+    assert {"Lyon", "Porto", "Gdansk"} <= set(indexed)
 
     # Genuine uppercase ISO region columns resolve and disambiguate globally.
     regions = places.index({
