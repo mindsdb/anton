@@ -50,6 +50,7 @@ PRELOAD_MODULES = (
     "anton.core.llm.client",
     "anton.core.llm.identity",
     "anton.core.llm.openai",
+    "anton.core.llm.static_artifact_prompt",
     "anton.core.session",
     "anton.workspace",
     # Running it: memory, tools, artifact checks, analytics.
