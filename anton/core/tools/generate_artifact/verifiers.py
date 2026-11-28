@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import functools
 import json
 import os
 import re
@@ -186,6 +187,32 @@ _UNIVERSAL_IMPORTANT = re.compile(r"\*\s*\{[^}]*!important")
 _EXEMPT_MEDIA_HEADER = re.compile(
     r"@media[^{]*(?:prefers-reduced-motion|\bprint\b)[^{]*\{", re.I
 )
+# Since Tailwind v4, `cdn.jsdelivr.net/npm/tailwindcss` has no browser bundle
+# (returns non-JS / ORB-blocked); the browser build is `@tailwindcss/browser`.
+_TAILWIND_V4_CDN = re.compile(
+    r"^(?:https?:)?//cdn\.jsdelivr\.net/npm/tailwindcss(?:@(?:latest|[\^~]?4(?:[.-][^/?#]*)?))?(?:/[^?#]*)?(?:[?#].*)?$",
+    re.I,
+)
+
+
+def _strip_html_comments_linear(html: str) -> str:
+    """Linear-time HTML comment removal (avoids O(N^2) backtracking on unclosed `<!--`)."""
+    if "<!--" not in html:
+        return html
+    out: list[str] = []
+    pos = 0
+    n = len(html)
+    while pos < n:
+        start = html.find("<!--", pos)
+        if start < 0:
+            out.append(html[pos:])
+            break
+        out.append(html[pos:start])
+        end = html.find("-->", start + 4)
+        if end < 0:
+            break
+        pos = end + 3
+    return "".join(out)
 
 
 def _exempt_media_spans(html: str) -> list[tuple[int, int]]:
@@ -501,6 +528,19 @@ def verify_frontend(
             "Escape only text values, never the page's own markup."
         )
 
+    # 5d. Tailwind v4 browserless CDN script: `cdn.jsdelivr.net/npm/tailwindcss@4...`
+    #     (or bare/latest) serves no browser build and fails with ORB/404 in previews.
+    if "tailwindcss" in low:
+        html_no_comments = _strip_html_comments_linear(html)
+        for tag in _SCRIPT_TAG.finditer(html_no_comments):
+            src = _attr_value(_SRC_ATTR, tag.group())
+            if src and _TAILWIND_V4_CDN.match(src.strip()):
+                errors.append(
+                    f"Tailwind v4 script {_shown_value(src)} has no browser build; "
+                    "load https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4 instead (or use inline CSS)."
+                )
+                break
+
     # 6. Forbidden globals / CSS.
     if "__antonCommentsLayer" in html:
         errors.append("Frontend must not use the global name window.__antonCommentsLayer.")
@@ -566,6 +606,169 @@ def verify_frontend(
         )
 
     return VerifyResult(errors=errors, warnings=warnings)
+
+
+_EXEC_JS_SCRIPT_TYPES = frozenset({
+    "",
+    "text/javascript",
+    "application/javascript",
+    "application/ecmascript",
+    "text/ecmascript",
+    "module",
+})
+
+
+def _extract_inline_scripts(html: str) -> list[tuple[str, str]]:
+    """Return ``(mime_type, body)`` for executable inline ``<script>`` tags.
+
+    Uses stdlib ``HTMLParser`` so HTML comments, quoted ``>`` inside attributes,
+    and ``<textarea>``/``<title>`` text cannot create false matches. Host-injected
+    ``data-cowork-observed`` tags and external ``src=`` tags are skipped.
+    """
+    from html.parser import HTMLParser
+
+    found: list[tuple[str, str]] = []
+
+    class _ScriptCollector(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=False)
+            self._script_type: str | None = None
+            self._chunks: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag.lower() != "script":
+                return
+            attr_map = {k.lower(): (v or "") for k, v in attrs}
+            if "src" in attr_map or "data-cowork-observed" in attr_map:
+                self._script_type = None
+                return
+            raw_type = attr_map.get("type", "")
+            mime = raw_type.split(";", 1)[0].strip().lower()
+            if mime in _EXEC_JS_SCRIPT_TYPES:
+                self._script_type = mime
+                self._chunks = []
+            else:
+                self._script_type = None
+
+        def handle_data(self, data: str) -> None:
+            if self._script_type is not None:
+                self._chunks.append(data)
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag.lower() == "script" and self._script_type is not None:
+                body = "".join(self._chunks)
+                if body.strip():
+                    found.append((self._script_type, body))
+                self._script_type = None
+                self._chunks = []
+
+    parser = _ScriptCollector()
+    parser.feed(html)
+    parser.close()
+    return found
+
+
+def _format_node_syntax_error(stderr: str, tmp_path: str) -> str:
+    """Keep location, offending source snippet, and SyntaxError line; drop Node internal frames."""
+    kept: list[str] = []
+    for raw in stderr.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("Node.js v") or stripped.startswith("at "):
+            continue
+        kept.append(stripped.replace(tmp_path, "<script>"))
+    if not kept:
+        return "JavaScript syntax error"
+    # Keep the opening location/code lines and always include the SyntaxError line if present.
+    err_lines = [line for line in kept if "SyntaxError:" in line]
+    head = kept[:3]
+    for line in err_lines[:1]:
+        if line not in head:
+            head.append(line)
+    return " | ".join(head)[:300]
+
+
+@functools.lru_cache(maxsize=4)
+def _node_parses_modern_js(node: str) -> bool:
+    """Whether ``node`` compiles optional chaining and ``??``.
+
+    The page's own runtime script uses both, so an older node (12 on Ubuntu
+    22.04) would call valid code a syntax error the model cannot repair. A node
+    that cannot be probed counts as unsupported, and the check is skipped.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [node, "-e", "new (require('vm').Script)('let a={};a?.b??1')"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def check_inline_js_syntax(html: str, *, timeout_s: float = 3.0, cell_sandbox: CellSandbox | None = None) -> list[str]:
+    """Syntax-check executable inline ``<script>`` blocks using Node.js.
+
+    Classic ``<script>`` blocks are compiled with ``vm.Script`` (exact ECMAScript
+    Script goal — no CommonJS wrapper globals like ``exports``/``module``/``require``
+    and no silent acceptance of top-level ``return``). ``type="module"`` blocks
+    use ``node --check`` on a ``.mjs`` file. Runs outside ``verify_frontend`` so
+    ``verify_frontend`` remains pure and I/O-free. Under a sandbox policy no
+    host process is started on the page, so the check is skipped.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    if cell_sandbox is not None:
+        return []
+    node = shutil.which("node")
+    if not node or "<script" not in html.lower() or not _node_parses_modern_js(node):
+        return []
+    errors: list[str] = []
+    for idx, (script_type, body) in enumerate(_extract_inline_scripts(html), start=1):
+        is_module = script_type == "module"
+        suffix = ".mjs" if is_module else ".js"
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=suffix, encoding="utf-8", delete=False
+            ) as tf:
+                tf.write(body)
+                tmp_path = tf.name
+            if is_module:
+                cmd = [node, "--check", tmp_path]
+            else:
+                cmd = [
+                    node,
+                    "-e",
+                    "const fs=require('fs'),vm=require('vm');"
+                    "new vm.Script(fs.readFileSync(process.argv[1],'utf8'),{filename:'<script>'});",
+                    tmp_path,
+                ]
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                check=False,
+            )
+            if proc.returncode != 0:
+                detail = _format_node_syntax_error(proc.stderr or proc.stdout or "", tmp_path)
+                errors.append(f"Inline <script> #{idx} has a JavaScript syntax error: {detail}")
+                break
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+    return errors
 
 
 def verify_frontend_live(

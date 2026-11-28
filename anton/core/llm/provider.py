@@ -2734,6 +2734,14 @@ class LLMProvider(ABC):
         """
         return False
 
+    @property
+    def supports_streamed_summarize(self) -> bool:
+        """Whether ``stream()`` performs genuine incremental streaming and
+        should be used by ``LLMClient.summarize`` to avoid gateway
+        non-streaming assembly timeouts on large compaction prompts.
+        """
+        return False
+
     def native_web_tools(self) -> set[str]:
         """Subset of {"web_search", "web_fetch"} this provider executes server-side.
 

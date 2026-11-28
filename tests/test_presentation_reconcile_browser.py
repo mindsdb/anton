@@ -57,6 +57,11 @@ def test_a_table_column_of_zeros_is_flagged_but_a_single_zero_cell_is_not():
       columns:[{key:'store',label:'Store'},{key:'refund',label:'Refunds',zeroReason:'No refunds were issued'}],
       rows:[{store:'North',refund:0},{store:'South',refund:0}]}]});""")
     assert errors == [] and "No refunds were issued" in text
+    errors, text = render("""await CoworkPage({title:'Sales',sections:[{type:'table',title:'By store',
+      zeroReason:'No refunds or penalties in period',
+      columns:[{key:'store',label:'Store'},{key:'refund',label:'Refunds'},{key:'penalty',label:'Penalties'}],
+      rows:[{store:'North',refund:0,penalty:0},{store:'South',refund:0,penalty:0}]}]});""")
+    assert errors == [] and "No refunds or penalties in period" in text
 
 
 def test_a_row_of_zeros_across_period_columns_is_flagged():
@@ -67,6 +72,9 @@ def test_a_row_of_zeros_across_period_columns_is_flagged():
       rows:[{store:'North',days:3,w1:4,w2:1,w3:5},{store:'South',days:2,w1:SOUTH,w2:0,w3:0}]}]});"""
     errors, _ = render(program.replace("SOUTH", "0"))
     assert len(errors) == 1 and 'shows 0 in all 3 "units" columns for row "South"' in errors[0]
+    errors, text = render(program.replace("{store:'South',days:2,w1:SOUTH,w2:0,w3:0}",
+                                          "{store:'South',days:2,w1:0,w2:0,w3:0,zeroReason:'South store closed'}"))
+    assert errors == [] and "South store closed" in text
     errors, _ = render(program.replace("SOUTH", "6"))
     assert errors == []
 
@@ -104,3 +112,33 @@ def test_a_figure_that_counts_total_rows_twice_is_flagged_with_the_correct_value
     assert 'including elements where category = "Total"' in errors[0] and "Counted once it is 705" in errors[0]
     errors, _ = render(program.replace("KEEP", "r=>r.category!=='Total'"), {"sales": rows})
     assert errors == []
+
+
+def test_double_count_check_does_not_false_positive_on_unrelated_measure_value():
+    # A separate record array holds a legitimate count (234) that numerically matches
+    # the double-counted sum of a different subtotaled measure (2 * 117 = 234).
+    data = {
+        "activity": [
+            {"week": "w1", "group": "A", "events": 70},
+            {"week": "w1", "group": "B", "events": 47},
+            {"week": "w1", "group": "All", "events": 117},
+            {"week": "w2", "group": "A", "events": 30},
+            {"week": "w2", "group": "B", "events": 20},
+            {"week": "w2", "group": "All", "events": 50},
+            {"week": "w3", "group": "A", "events": 15},
+            {"week": "w3", "group": "B", "events": 10},
+            {"week": "w3", "group": "All", "events": 25},
+        ],
+        "locations": [{"name": "North", "capacity": 234}],
+    }
+    program = """await CoworkPage({title:'Capacity',sections:[{type:'table',title:'Locations',
+      columns:[{key:'name',label:'Location'},{key:'capacity',label:'Capacity'}],
+      rows:window.ARTIFACT_DATA.key.locations}]});"""
+    errors, _ = render(program, data)
+    assert errors == []
+    # The exact same numeric value (234) in a metric or events summary remains caught.
+    bad_program = """const rows=window.ARTIFACT_DATA.key.activity;
+    await CoworkPage({title:'Activity',metrics:[{label:'Week 1 events',
+      value:rows.filter(r=>r.week==='w1').reduce((s,r)=>s+r.events,0)}]});"""
+    errors, _ = render(bad_program, data)
+    assert len(errors) == 1 and "234" in errors[0] and "counts rows twice" in errors[0]

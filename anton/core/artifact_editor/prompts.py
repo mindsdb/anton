@@ -97,7 +97,11 @@ only folder the backend serves. The page calls the backend's /api/ routes; keep 
 copy, retype or invent data.
 - A page compiled from a presentation program shows only the program, between /* cowork-presentation-begin */ \
 and /* cowork-presentation-end */, with <!-- anton:keep presentation-... --> lines for the compiled rest. Edit \
-only the program; keep those lines and both markers exactly.
+only the program; keep those lines and both markers exactly. In a CoworkPage program, supported `sections` types \
+are ONLY `'chart'`, `'table'`, `'map'`, `'globe'`, `'timeline'`, and `'text'` (never invent unsupported types \
+such as `'html'`); `map` supports `library: 'd3'` (default) or `'echarts'`, and `globe` uses `globe.gl`. When a \
+legitimate 0 triggers a `Figure check:` error, add a concise `zeroReason` in the page language on the lead, \
+metric, column, or section (for an empty view or all-zero rows).
 - Keep what already works: other views, tabs, charts, labels, data and the page's look, unless the user asked \
 to change them. A fix changes the code that is wrong; it never deletes a view or an error report to quiet a \
 failure.

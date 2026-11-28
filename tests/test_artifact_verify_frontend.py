@@ -686,3 +686,24 @@ def test_long_whitespace_after_an_attribute_name_is_checked_quickly():
     started = time.perf_counter()
     verify_frontend(html, is_fullstack=False)
     assert time.perf_counter() - started < 2
+
+
+def test_tailwind_v4_browserless_cdn_is_rejected():
+    for src in (
+        "https://cdn.jsdelivr.net/npm/tailwindcss@4.3.3",
+        "https://cdn.jsdelivr.net/npm/tailwindcss",
+        "https://cdn.jsdelivr.net/npm/tailwindcss@latest",
+        "//cdn.jsdelivr.net/npm/tailwindcss@4.1.0",
+    ):
+        res = verify_frontend(_with_markup(f'<script src="{src}"></script>'), is_fullstack=False)
+        assert any("Tailwind v4 script" in e and "@tailwindcss/browser" in e for e in res.errors), src
+
+    # Commented-out script must not trigger (and unclosed comments must stay linear-time)
+    commented = _with_markup('<!-- <script src="https://cdn.jsdelivr.net/npm/tailwindcss@4.3.3"></script> -->')
+    assert not any("Tailwind v4 script" in e for e in verify_frontend(commented, is_fullstack=False).errors)
+
+    v3 = _with_markup('<script src="https://cdn.jsdelivr.net/npm/tailwindcss@3.4.17"></script>')
+    assert not any("Tailwind v4 script" in e for e in verify_frontend(v3, is_fullstack=False).errors)
+
+    good = _with_markup('<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>')
+    assert not any("Tailwind v4 script" in e for e in verify_frontend(good, is_fullstack=False).errors)

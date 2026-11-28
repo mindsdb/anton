@@ -442,6 +442,8 @@ RULES: tuple[Rule, ...] = (
          (("html", "loading message that still shows"),)),
     Rule("errors", "Loaded in a headless browser, the page had ",
          (("html", "more distinct problems"),)),
+    Rule("errors", "Tailwind v4 script ",
+         _both(_FRONT_BOTH, "@tailwindcss/browser")),
     # ── verify_frontend, fullstack only ──
     Rule("errors", 'Missing <meta name="api-base" content=""> (required for fullstack frontends).',
          (("frontend", 'name="api-base"'),)),

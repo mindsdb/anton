@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import logging
 import os
+import re
+import secrets
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, NoReturn
@@ -111,6 +114,82 @@ def _rejects_cache_breakpoint(exc: "openai.BadRequestError") -> bool:
 # (base_url, model) pairs that refused an explicit cache breakpoint. Process-wide
 # because Cowork builds a provider per turn: one refusal is enough.
 _CACHE_BREAKPOINT_REFUSED: set[tuple[str, str]] = set()
+
+# Process-wide salt so distinct OpenAIProvider instances within the same
+# process (Cowork per-turn providers, planning/coding roles) hash the same
+# TraceContext.session_id to the exact same opaque sticky routing key.
+_AFFINITY_SALT: str = secrets.token_hex(16)
+
+# (base_url, model) pairs that refused `prompt_cache_key` on Responses API or
+# `user` on Chat Completions. Process-wide for the same per-turn provider reason.
+_PROMPT_CACHE_KEY_REFUSED: set[tuple[str, str]] = set()
+_CHAT_USER_REFUSED: set[tuple[str, str]] = set()
+
+
+def _detail_locs_name(body: object, field: str) -> bool:
+    """True when a FastAPI/Pydantic ``detail`` list has an error located at ``field``."""
+    if not (isinstance(body, dict) and isinstance(body.get("detail"), list)):
+        return False
+    for item in body["detail"]:
+        if isinstance(item, dict):
+            loc = item.get("loc")
+            if isinstance(loc, (list, tuple)) and 1 <= len(loc) <= 2 and loc[-1] == field:
+                return True
+    return False
+
+
+def _rejects_prompt_cache_key(exc: "openai.APIStatusError") -> bool:
+    """True when a 400/422 refuses the ``prompt_cache_key`` parameter."""
+    body = _error_body(exc)
+    if _detail_locs_name(body, "prompt_cache_key"):
+        return True
+    err = body.get("error", body) if isinstance(body, dict) else {}
+    if not isinstance(err, dict):
+        return False
+    text = f"{err.get('param') or ''} {err.get('message') or ''}"
+    return "prompt_cache_key" in text
+
+
+# The bare request field ``user``, quoted or backticked or not, and not the
+# message role ("user message", "user role").
+_USER_FIELD_TOKEN = re.compile(r"(?<![\w-])[`'\"]?user[`'\"]?(?![\w-])(?!\s+(?:message|role|turn|content))")
+_ROLE_ORDERING_WORDS = ("role", "consecutive", "alternat")
+
+
+def _rejects_chat_user_field(exc: "openai.APIStatusError") -> bool:
+    """True when a 400/422 refuses the Chat Completions ``user`` parameter."""
+    body = _error_body(exc)
+    err = body.get("error", body) if isinstance(body, dict) else {}
+    if isinstance(err, dict):
+        param = str(err.get("param") or "").strip().lower()
+        if param == "user":
+            return True
+        msg = str(err.get("message") or "").lower()
+        field_reject_phrases = (
+            "unknown",
+            "unrecognized",
+            "unsupported",
+            "extra",
+            "unexpected",
+            "forbidden",
+            "additional properties",
+            "invalid field",
+            "invalid parameter",
+            "not permitted",
+            "not allowed",
+        )
+        # Never mistake message-role ordering errors ("Invalid role 'user'",
+        # "Consecutive \"user\" messages") for rejection of the request `user` field.
+        # The word "messages" alone is not one: serde lists it among the fields it
+        # expected ("unknown field `user`, expected one of `model`, `messages`").
+        if (
+            not any(w in msg for w in _ROLE_ORDERING_WORDS)
+            and any(p in msg for p in field_reject_phrases)
+            and _USER_FIELD_TOKEN.search(msg)
+        ):
+            return True
+    # Strict Pydantic 422 responses (e.g. FastAPI/Mistral) may place errors under `detail`.
+    return _detail_locs_name(body, "user")
 
 
 _CLAUDE_MODEL_WORDS = ("claude", "sonnet", "opus", "haiku", "fable")
@@ -1192,6 +1271,22 @@ class OpenAIProvider(LLMProvider):
             kwargs["http_client"] = _http_client(verify=ssl_verify)
             self._client = openai.AsyncOpenAI(**kwargs, timeout=_SDK_TIMEOUT)
 
+        # Gate Chat Completions session-affinity (`user` + `x-session-id` /
+        # `x-session-affinity`) to trusted/curated or local inference endpoints
+        # (or explicit `ANTON_SESSION_AFFINITY=1` opt-in) so third-party
+        # gateways (Gemini, Mistral, Azure, OpenRouter) never receive unsolicited
+        # headers or unknown fields.
+        from .endpoints import ENDPOINT_LOCAL, ENDPOINT_MINDSHUB, classify_base_url
+
+        endpoint_class = classify_base_url(base_url or "")
+        self._emit_session_affinity = (
+            self._flavor == self.FLAVOR_MINDS_PASSTHROUGH
+            or endpoint_class in (ENDPOINT_MINDSHUB, ENDPOINT_LOCAL)
+            or os.environ.get("ANTON_SESSION_AFFINITY", "").strip().lower() in {"1", "true", "yes", "on"}
+        )
+        # Per-instance fallback key used only when no TraceContext.session_id is active.
+        self._default_affinity_key = f"anton-{secrets.token_hex(12)}"
+
         # After the if/else, not per branch: a future client flavor must not be
         # able to skip registration and leave its pool unclosed.
         register_provider(self)
@@ -1199,6 +1294,10 @@ class OpenAIProvider(LLMProvider):
     @property
     def accepts_large_output(self) -> bool:
         return self._flavor in (self.FLAVOR_OPENAI, self.FLAVOR_MINDS_PASSTHROUGH)
+
+    @property
+    def supports_streamed_summarize(self) -> bool:
+        return True
 
     def export_connection_info(self) -> ProviderConnectionInfo:
         return ProviderConnectionInfo(
@@ -1294,6 +1393,25 @@ class OpenAIProvider(LLMProvider):
         filter the tag out.
         """
         return "".join(c for c in tag if c.isprintable() and c != ",").strip()
+
+    def _session_affinity_key(self) -> str:
+        """Return an opaque, per-process sticky KV-cache routing key.
+
+        Hashes ``TraceContext.session_id`` with a process-wide random salt
+        (falling back to a per-instance random token when no session id is set)
+        so distinct ``OpenAIProvider`` instances (Cowork per-turn providers,
+        planning/coding roles) map the same conversation to the same warm
+        inference replica without leaking raw session IDs upstream.
+        """
+        from .tracing import get_trace_context
+
+        ctx = get_trace_context()
+        if ctx is not None and ctx.session_id:
+            digest = hashlib.sha256(
+                f"{_AFFINITY_SALT}:{ctx.session_id}".encode("utf-8", "replace")
+            ).hexdigest()[:24]
+            return f"anton-{digest}"
+        return self._default_affinity_key
 
     def _build_trace_headers(self) -> dict[str, str] | None:
         """Return langfuse-style headers for the active trace, or None.
@@ -1410,11 +1528,28 @@ class OpenAIProvider(LLMProvider):
         if tool_choice:
             kwargs["tool_choice"] = _translate_tool_choice(tool_choice)
         trace_headers = self._build_trace_headers()
-        if trace_headers:
+        if self._emit_session_affinity:
+            affinity_key = self._session_affinity_key()
+            if (self._base_url or "", model) not in _CHAT_USER_REFUSED:
+                kwargs["user"] = affinity_key
+            chat_headers = dict(trace_headers or {})
+            chat_headers["x-session-id"] = affinity_key
+            chat_headers["x-session-affinity"] = affinity_key
+            kwargs["extra_headers"] = chat_headers
+        elif trace_headers:
             kwargs["extra_headers"] = trace_headers
 
         try:
-            response = await self._client.chat.completions.create(**kwargs)
+            try:
+                response = await self._client.chat.completions.create(**kwargs)
+            except (openai.BadRequestError, openai.UnprocessableEntityError) as exc:
+                if "user" in kwargs and _rejects_chat_user_field(exc):
+                    logger.warning("chat.completions `user` field refused for %s; continuing without it", model)
+                    _CHAT_USER_REFUSED.add((self._base_url or "", model))
+                    retry_kwargs = {k: v for k, v in kwargs.items() if k != "user"}
+                    response = await self._client.chat.completions.create(**retry_kwargs)
+                else:
+                    raise
         except openai.BadRequestError as exc:
             _raise_for_bad_request(exc)
             raise
@@ -1514,7 +1649,14 @@ class OpenAIProvider(LLMProvider):
 
         oai_messages = _translate_messages(system, messages, supports_vision=self._supports_vision, vision_format=self._vision_format)
         if self._flavor == self.FLAVOR_MINDS_PASSTHROUGH:
-            oai_messages = _with_claude_cache_breakpoints(oai_messages, model)
+            # One-off compaction calls (`router` role) never resend the same
+            # transcript, so mark only the reusable system prompt (matching `complete`).
+            from .tracing import get_call_role
+
+            mark_messages = (get_call_role() or self.trace_role) != "router"
+            oai_messages = _with_claude_cache_breakpoints(
+                oai_messages, model, mark_messages=mark_messages
+            )
 
         kwargs = build_chat_completion_kwargs(
             model=model,
@@ -1532,7 +1674,15 @@ class OpenAIProvider(LLMProvider):
         if merged_tools:
             kwargs["tools"] = merged_tools
         trace_headers = self._build_trace_headers()
-        if trace_headers:
+        if self._emit_session_affinity:
+            affinity_key = self._session_affinity_key()
+            if (self._base_url or "", model) not in _CHAT_USER_REFUSED:
+                kwargs["user"] = affinity_key
+            chat_headers = dict(trace_headers or {})
+            chat_headers["x-session-id"] = affinity_key
+            chat_headers["x-session-affinity"] = affinity_key
+            kwargs["extra_headers"] = chat_headers
+        elif trace_headers:
             kwargs["extra_headers"] = trace_headers
 
         content_text = ""
@@ -1557,7 +1707,16 @@ class OpenAIProvider(LLMProvider):
 
         stream = None
         try:
-            stream = await self._client.chat.completions.create(**kwargs)
+            try:
+                stream = await self._client.chat.completions.create(**kwargs)
+            except (openai.BadRequestError, openai.UnprocessableEntityError) as exc:
+                if "user" in kwargs and _rejects_chat_user_field(exc):
+                    logger.warning("chat.completions `user` field refused for %s; continuing without it", model)
+                    _CHAT_USER_REFUSED.add((self._base_url or "", model))
+                    retry_kwargs = {k: v for k, v in kwargs.items() if k != "user"}
+                    stream = await self._client.chat.completions.create(**retry_kwargs)
+                else:
+                    raise
             stream_started = True
             async for chunk in stream:
                 served_model = getattr(chunk, "model", None) or served_model
@@ -1841,6 +2000,11 @@ class OpenAIProvider(LLMProvider):
             kwargs["tools"] = merged_tools
         if tool_choice:
             kwargs["tool_choice"] = _translate_tool_choice_to_responses(tool_choice)
+        if (
+            self._flavor == self.FLAVOR_OPENAI
+            and (self._base_url or "", model) not in _PROMPT_CACHE_KEY_REFUSED
+        ):
+            kwargs["prompt_cache_key"] = self._session_affinity_key()
         # Same trace headers as the chat.completions path.
         trace_headers = self._build_trace_headers()
         if trace_headers:
@@ -1863,12 +2027,25 @@ class OpenAIProvider(LLMProvider):
         """
         try:
             return await self._client.responses.create(**kwargs)
+        except openai.UnprocessableEntityError as exc:
+            # A strict proxy may refuse the new field with a 422 (FastAPI ``detail``).
+            if "prompt_cache_key" in kwargs and _rejects_prompt_cache_key(exc):
+                logger.warning("prompt_cache_key refused for %s; continuing without it",
+                               kwargs.get("model"))
+                _PROMPT_CACHE_KEY_REFUSED.add((self._base_url or "", kwargs.get("model") or ""))
+                return await self._create_response({k: v for k, v in kwargs.items() if k != "prompt_cache_key"})
+            raise
         except openai.BadRequestError as exc:
             if _has_cache_breakpoint(kwargs) and _rejects_cache_breakpoint(exc):
                 logger.warning("explicit prompt cache breakpoints refused for %s; continuing without them",
                                kwargs.get("model"))
                 _CACHE_BREAKPOINT_REFUSED.add((self._base_url or "", kwargs.get("model") or ""))
                 return await self._create_response(_without_cache_breakpoint(kwargs))
+            if "prompt_cache_key" in kwargs and _rejects_prompt_cache_key(exc):
+                logger.warning("prompt_cache_key refused for %s; continuing without it",
+                               kwargs.get("model"))
+                _PROMPT_CACHE_KEY_REFUSED.add((self._base_url or "", kwargs.get("model") or ""))
+                return await self._create_response({k: v for k, v in kwargs.items() if k != "prompt_cache_key"})
             reasoning = kwargs.get("reasoning") or {}
             if "summary" not in reasoning or not _rejects_reasoning_summary(exc):
                 raise

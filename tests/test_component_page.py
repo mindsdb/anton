@@ -85,6 +85,40 @@ def test_a_render_that_treats_the_selection_as_a_string_is_sent_back_for_repair(
         assert component_page.existing_program(component_page.document(program)) == program
 
 
+def test_unsupported_cowork_section_types_are_rejected_without_lexer_false_positives():
+    # Rejects direct unsupported types across sections:[...], sections=[...], and sections.push(...)
+    for bad in (
+        "const src = 'https://example.com'; await CoworkPage({title:'T', sections:[{type:'html', title:'X'}]});",
+        "const sections = [{type:'card', title:'KPI'}]; await CoworkPage({title:'T', sections});",
+        "const sections = []; sections.push({type:'text', title:'A'}, {type:'kpi', title:'B'}); await CoworkPage({title:'T', sections});",
+    ):
+        with pytest.raises(ValueError, match="Unsupported CoworkPage section type"):
+            component_page.document(bad)
+
+    # Accepts valid sections, helper calls with {type:'bar'}, domain data arrays named `sections`
+    # without CoworkPage keys or on member expressions, `++ /` and `obj.return /` division, RegExp
+    # literals containing quotes/slashes, and nested template literals.
+    good = """
+    let i = 1;
+    const ratio = i++ / 2; // don't treat as regex
+    const retRatio = obj.return / 2;
+    const report = {};
+    report.sections = [{type:'appendix', title:'App'}];
+    const sections = [{id:'A', type:'VIP'}, {id:'B', type:'lecture'}];
+    const clean = s => s.replace(/['"]/g, '').replace(/https?:\\/\\//g, '').replace(/\\/*/g, '');
+    const nested = `${rows.map(r => `a}`).join(',')}${s.replace("`", "'")}`;
+    // comment mentioning sections:[{type:'html'}]
+    await CoworkPage({title:'T', sections:[
+      buildChart(data, {type:'bar'}),
+      ...items.map(x => mkView(x, {type:'line'})),
+      {type:'table', title:'Assets', columns:[{key:'type', label:'Type'}], rows:[{type:'HTML'}, {type:'SVG'}]},
+      {type:'chart', title:'C', option:{toolbox:{feature:{saveAsImage:{type:'svg'}}}, series:[{type:'bar', data:[1]}]}},
+      {type:'text', title:'Note', text: clean(nested) + " type: 'html'"}
+    ]});
+    """
+    assert component_page.existing_program(component_page.document(good)) == good.strip()
+
+
 async def test_the_component_writer_is_told_how_render_receives_controls(tmp_path, monkeypatch):
     (tmp_path / "observed-data.json").write_text(json.dumps({"revenue": 42}))
     systems = []
@@ -156,3 +190,201 @@ async def test_component_pages_carry_the_figure_checks_and_html_pages_do_not(tmp
     assert ('id="cowork-figure-checks"' in page) is checked
     assert ("Figure check: " in page) is checked
     assert "zeroReason" in component_page.SYSTEM
+
+
+async def test_fast_static_catches_inline_js_syntax_error_and_repairs(tmp_path, monkeypatch):
+    import shutil
+
+    if not shutil.which("node"):
+        pytest.skip("node not available")
+    broken = (
+        '<!doctype html><html><head><meta name="viewport" content="width=device-width"></head>'
+        '<body><div id="app">ok</div><script>function broken(a, b { return a + b; }</script></body></html>'
+    )
+    fixed = (
+        '<!doctype html><html><head><meta name="viewport" content="width=device-width"></head>'
+        '<body><div id="app">ok</div><script>function fixed(a, b) { return a + b; }</script></body></html>'
+    )
+    replies = iter([broken, fixed])
+    seen = []
+
+    async def stream(**kwargs):
+        seen.append(kwargs["messages"])
+        yield StreamComplete(LLMResponse(content=next(replies)))
+
+    monkeypatch.setattr(fast_static.verifiers, "verify_frontend_live", lambda *a, **kw: BrowserCheck(status="passed"))
+    state = GenState(session=SimpleNamespace(history=[], _llm=SimpleNamespace(code_stream=stream)),
+                     artifact_type="html-app", artifact_path=tmp_path, slug="page", act_first=True)
+    result = await fast_static.run(state)
+    assert result["status"] == "generated"
+    assert len(seen) == 2
+    assert "JavaScript syntax error" in seen[1][-1]["content"]
+    assert "SyntaxError:" in seen[1][-1]["content"]
+    assert "node:internal" not in seen[1][-1]["content"]
+
+
+def test_check_inline_js_syntax_edge_cases():
+    import shutil
+    from anton.core.tools.generate_artifact import verifiers
+
+    if not shutil.which("node"):
+        pytest.skip("node not available")
+    # HTML comments, textarea, quoted '>' in attributes, data-cowork-observed, and browser
+    # top-level variables that collide with CommonJS wrapper names (`exports`, `module`, `require`)
+    # are all accepted cleanly.
+    safe_html = (
+        '<!doctype html><html><body>'
+        '<!-- <script>function broken( {</script> -->'
+        '<textarea><script>function also_broken( {</script></textarea>'
+        '<script data-note="a > b" type="text/javascript; charset=utf-8">'
+        'const exports = [1, 2]; const module = "core"; const require = true; const x = 1 + 2;'
+        '</script>'
+        '<script type="application/json" data-cowork-observed>{"a":1}</script>'
+        '</body></html>'
+    )
+    assert verifiers.check_inline_js_syntax(safe_html) == []
+
+    # Illegal top-level return in classic browser script IS caught (not masked by CJS wrapper).
+    bad_return = '<!doctype html><html><body><script>return 42;</script></body></html>'
+    ret_errs = verifiers.check_inline_js_syntax(bad_return)
+    assert len(ret_errs) == 1
+    assert "SyntaxError:" in ret_errs[0]
+
+    # ES module syntax error preserves SyntaxError and strips Node internal frames.
+    bad_esm = '<!doctype html><html><body><script type="module">export const x = (1 + ;</script></body></html>'
+    esm_errs = verifiers.check_inline_js_syntax(bad_esm)
+    assert len(esm_errs) == 1
+    assert "SyntaxError:" in esm_errs[0]
+    assert "node:internal" not in esm_errs[0]
+
+    # Classic script with MIME charset parameter is checked and caught.
+    bad_classic = '<!doctype html><html><body><script type="text/javascript; charset=utf-8">function f(a {</script></body></html>'
+    classic_errs = verifiers.check_inline_js_syntax(bad_classic)
+    assert len(classic_errs) == 1
+    assert "SyntaxError:" in classic_errs[0]
+    assert "node:internal" not in classic_errs[0]
+
+
+def test_presentation_reconcile_js_zero_reason_and_per_cell_double_count_provenance():
+    import json as _json
+    import shutil
+    import subprocess
+    from anton.core.tools.generate_artifact import observed_data
+
+    if not shutil.which("node"):
+        pytest.skip("node not available")
+    reconcile_js = (
+        component_page.HERE / "presentation_reconcile.js"
+    ).read_text(encoding="utf-8")
+    data = {
+        "key": {
+            "activity": [
+                {"week": "w1", "group": "A", "events": 70},
+                {"week": "w1", "group": "B", "events": 47},
+                {"week": "w1", "group": "All", "events": 117},
+                {"week": "w2", "group": "A", "events": 30},
+                {"week": "w2", "group": "B", "events": 20},
+                {"week": "w2", "group": "All", "events": 50},
+                {"week": "w3", "group": "A", "events": 15},
+                {"week": "w3", "group": "B", "events": 10},
+                {"week": "w3", "group": "All", "events": 25},
+            ],
+            "locations": [{"name": "North", "capacity": 234, "total_units": 234}],
+        }
+    }
+    checks_json = _json.dumps({"doubleCounts": observed_data.double_counts(data)})
+    data_json = _json.dumps(data)
+    harness = f"""
+const errors = [];
+console.error = (...args) => errors.push(args.join(' '));
+let drawn;
+global.window = {{
+  ARTIFACT_DATA: {data_json},
+  CoworkNumber: v => String(v),
+  CoworkSelection: s => s,
+  CoworkPage: async cfg => {{ drawn = cfg; }},
+}};
+global.document = {{
+  getElementById: id => id === 'cowork-figure-checks' ? {{ textContent: {_json.dumps(checks_json)} }} : null,
+}};
+{reconcile_js}
+(async () => {{
+  // 1. All-zero table honors section.zeroReason when EVERY numeric column is zero.
+  await window.CoworkPage({{
+    title: 'T',
+    sections: [{{
+      type: 'table', title: 'S', zeroReason: 'No records in this period',
+      columns: [{{ key: 'n', label: 'Name' }}, {{ key: 'v', label: 'Count' }}],
+      rows: [{{ n: 'A', v: 0 }}, {{ n: 'B', v: 0 }}],
+    }}],
+  }});
+  if (errors.length !== 0) {{ console.log('CASE1:' + JSON.stringify(errors)); process.exit(1); }}
+
+  // 2. Mixed table: section.zeroReason must NOT excuse an unannotated all-zero column.
+  await window.CoworkPage({{
+    title: 'T',
+    sections: [{{
+      type: 'table', title: 'S', zeroReason: 'Empty row',
+      columns: [{{ key: 'n', label: 'Name' }}, {{ key: 'ok', label: 'Orders' }}, {{ key: 'broken', label: 'Revenue' }}],
+      rows: [{{ n: 'A', ok: 5, broken: 0 }}, {{ n: 'B', ok: 7, broken: 0 }}],
+    }}],
+  }});
+  if (errors.length !== 1 || !errors[0].includes('column "Revenue"')) {{ console.log('CASE2:' + JSON.stringify(errors)); process.exit(2); }}
+  errors.length = 0;
+
+  // 3. Whitespace-only zeroReason must NOT hide errors.
+  await window.CoworkPage({{
+    title: 'T',
+    metrics: [{{ label: 'Unmatched', value: 0, zeroReason: '   ' }}],
+  }});
+  if (errors.length !== 1) {{ console.log('CASE3:' + JSON.stringify(errors)); process.exit(3); }}
+  errors.length = 0;
+
+  // 4. Per-cell doubleCount provenance: unrelated raw column `capacity: 234` is NOT flagged.
+  await window.CoworkPage({{
+    title: 'T',
+    sections: [{{
+      type: 'table', title: 'Locations',
+      columns: [{{ key: 'name', label: 'Name' }}, {{ key: 'capacity', label: 'Capacity' }}],
+      rows: window.ARTIFACT_DATA.key.locations,
+    }}],
+  }});
+  if (errors.length !== 0) {{ console.log('CASE4:' + JSON.stringify(errors)); process.exit(4); }}
+
+  // 5. Same numeric value 234 shown in a metric, related column, or column sharing only a generic
+  //    token (`total_sales` vs unrelated raw `total_units: 234`, or label matching `events`) IS caught.
+  await window.CoworkPage({{
+    title: 'T',
+    metrics: [{{ label: 'Week 1 events', value: 234 }}],
+    sections: [{{
+      type: 'table', title: 'Summary',
+      columns: [
+        {{ key: 'name', label: 'Name' }},
+        {{ key: 'total_events', label: 'Total events' }},
+        {{ key: 'total_sales', label: 'Total sales' }},
+        {{ key: 'total_units', label: 'Week 1 events' }},
+      ],
+      rows: [{{ name: 'Week 1', total_events: 234, total_sales: 234, total_units: 234 }}],
+    }}],
+  }});
+  if (
+    errors.length !== 1
+    || !errors[0].includes('234')
+    || !errors[0].includes('Total sales')
+    || !errors[0].includes('counts rows twice')
+  ) {{
+    console.log('CASE5:' + JSON.stringify(errors)); process.exit(5);
+  }}
+  console.log('ALL_OK');
+}})();
+"""
+    proc = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=5)
+    assert proc.returncode == 0, f"stdout={proc.stdout} stderr={proc.stderr}"
+    assert "ALL_OK" in proc.stdout
+
+
+def test_an_old_node_that_cannot_parse_modern_js_skips_the_inline_check(monkeypatch):
+    from anton.core.tools.generate_artifact import verifiers
+
+    monkeypatch.setattr(verifiers, "_node_parses_modern_js", lambda node: False)
+    assert verifiers.check_inline_js_syntax("<script>let = = 1</script>") == []

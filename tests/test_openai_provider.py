@@ -922,3 +922,160 @@ class TestKeepalive:
             provider = OpenAIProvider(api_key="sk-test", base_url="https://api.example/v1")
         pool = provider._client._client._transport._pool
         assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in pool._socket_options
+
+
+class TestSessionAffinityAndStreamedSummarize:
+    def test_rejects_chat_user_field_ignores_role_ordering_and_bad_loc(self):
+        from anton.core.llm.openai import _rejects_chat_user_field
+
+        role_err = SimpleNamespace(body={"error": {"message": "Invalid role 'user' after assistant", "param": "messages"}})
+        consec_err = SimpleNamespace(body={"error": {"message": 'Consecutive "user" messages are not allowed'}})
+        real_param = SimpleNamespace(body={"error": {"message": "Invalid parameter", "param": "user"}})
+        real_unknown = SimpleNamespace(body={"error": {"message": "Unknown field 'user' in request"}})
+        real_422 = SimpleNamespace(body={"detail": [{"loc": ["body", "user"], "msg": "Extra inputs are not permitted"}]})
+        other_422 = SimpleNamespace(body={"detail": [{"loc": ["body", "messages", "user", "content"], "msg": "bad"}]})
+        non_seq_loc = SimpleNamespace(body={"detail": [{"loc": {"field": "user"}, "msg": "bad"}, {"loc": 42}]})
+
+        assert _rejects_chat_user_field(role_err) is False
+        assert _rejects_chat_user_field(consec_err) is False
+        assert _rejects_chat_user_field(other_422) is False
+        assert _rejects_chat_user_field(non_seq_loc) is False
+        assert _rejects_chat_user_field(real_param) is True
+        assert _rejects_chat_user_field(real_unknown) is True
+        assert _rejects_chat_user_field(real_422) is True
+
+    async def test_session_affinity_gated_to_curated_and_local_endpoints(self):
+        with patch.dict("os.environ", {}, clear=True):
+            third_party = OpenAIProvider(api_key="sk-test", base_url="https://api.mistral.ai/v1")
+            local = OpenAIProvider(api_key="sk-test", base_url="http://localhost:11434/v1")
+            mindshub = OpenAIProvider(api_key="sk-test", base_url="https://api.mindshub.ai/v1")
+        assert third_party._emit_session_affinity is False
+        assert local._emit_session_affinity is True
+        assert mindshub._emit_session_affinity is True
+
+        with patch.dict("os.environ", {"ANTON_SESSION_AFFINITY": "1"}, clear=True):
+            opted_in = OpenAIProvider(api_key="sk-test", base_url="https://api.mistral.ai/v1")
+        assert opted_in._emit_session_affinity is True
+
+    async def test_chat_user_field_refusal_retries_and_remembers(self):
+        import openai as oai_mod
+        from anton.core.llm import openai as anton_oai
+
+        anton_oai._CHAT_USER_REFUSED.clear()
+        with patch("anton.core.llm.openai.openai.AsyncOpenAI") as mock_ctor:
+            mock_client = AsyncMock()
+            mock_ctor.return_value = mock_client
+            req = MagicMock()
+            resp_obj = MagicMock(status_code=400, headers={}, request=req)
+            err = oai_mod.BadRequestError(
+                "Unknown field 'user'", response=resp_obj, body={"error": {"param": "user", "message": "Unknown field 'user'"}}
+            )
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=[err, _make_mock_response(content="ok")]
+            )
+            provider = OpenAIProvider(api_key="sk-test", base_url="http://localhost:8000/v1")
+            res = await provider.complete(model="test-m", system="s", messages=[{"role": "user", "content": "hi"}])
+            assert res.content == "ok"
+            assert mock_client.chat.completions.create.call_count == 2
+            assert "user" in mock_client.chat.completions.create.call_args_list[0].kwargs
+            assert "user" not in mock_client.chat.completions.create.call_args_list[1].kwargs
+            assert ("http://localhost:8000/v1", "test-m") in anton_oai._CHAT_USER_REFUSED
+        anton_oai._CHAT_USER_REFUSED.clear()
+
+    async def test_anthropic_stream_skips_message_cache_breakpoints_for_router_role(self):
+        from anton.core.llm.anthropic import AnthropicProvider
+        from anton.core.llm.tracing import call_role
+
+        provider = AnthropicProvider(api_key="sk-ant-test")
+        captured: dict = {}
+
+        class _FakeStreamCtx:
+            def __init__(self):
+                self._events = iter([
+                    SimpleNamespace(
+                        type="message_delta",
+                        delta=SimpleNamespace(stop_reason="end_turn"),
+                        usage=SimpleNamespace(output_tokens=1),
+                    )
+                ])
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._events)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+        def fake_stream(**kwargs):
+            captured.update(kwargs)
+            return _FakeStreamCtx()
+
+        provider._client = SimpleNamespace(messages=SimpleNamespace(stream=fake_stream))
+        msgs = [{"role": "user", "content": "long transcript"}]
+        with call_role("router"):
+            events = [e async for e in provider.stream(model="claude-sonnet-4-6", system="s", messages=msgs)]
+        assert events
+        assert captured["messages"] == msgs  # no ephemeral cache_control injected on router call
+
+    async def test_llm_client_summarize_uses_stream_and_raises_on_truncated_stream(self):
+        from anton.core.llm.provider import LLMResponse, StreamComplete, TransientProviderError, Usage
+
+        class _StreamProvider(LLMProvider):
+            name = "fake"
+
+            def __init__(self, responses):
+                self._responses = iter(responses)
+
+            @property
+            def supports_streamed_summarize(self) -> bool:
+                return True
+
+            async def complete(self, **kwargs):
+                raise AssertionError("complete() should not be called when supports_streamed_summarize=True")
+
+            async def stream(self, **kwargs):
+                resp = next(self._responses)
+                if resp is not None:
+                    yield StreamComplete(response=resp)
+
+        ok_resp = LLMResponse(content="## Goal\ndone", usage=Usage(input_tokens=5, output_tokens=5))
+        prov = _StreamProvider([ok_resp, None])
+        client = LLMClient(
+            planning_provider=prov, planning_model="m",
+            coding_provider=prov, coding_model="m",
+        )
+        res = await client.summarize(system="s", messages=[{"role": "user", "content": "hi"}], max_tokens=256)
+        assert res.content == "## Goal\ndone"
+
+        with pytest.raises(TransientProviderError, match="without a completion response"):
+            await client.summarize(system="s", messages=[{"role": "user", "content": "hi"}], max_tokens=256)
+
+
+class TestStrictEndpointFieldRefusals:
+    def test_chat_user_field_refusals_in_other_wordings(self):
+        from anton.core.llm.openai import _rejects_chat_user_field
+
+        def err(message):
+            return SimpleNamespace(body={"error": {"message": message}})
+
+        assert _rejects_chat_user_field(err("Unrecognized request argument supplied: user")) is True
+        assert _rejects_chat_user_field(
+            err("unknown field `user`, expected one of `model`, `messages`, `stream`")) is True
+        assert _rejects_chat_user_field(err('Consecutive "user" messages are not allowed')) is False
+        assert _rejects_chat_user_field(err("Unexpected user message at position 0")) is False
+
+    def test_prompt_cache_key_refusal_in_a_422_detail_list(self):
+        from anton.core.llm.openai import _rejects_prompt_cache_key
+
+        assert _rejects_prompt_cache_key(SimpleNamespace(
+            body={"detail": [{"loc": ["body", "prompt_cache_key"], "msg": "Extra inputs are not permitted"}]})) is True
+        assert _rejects_prompt_cache_key(SimpleNamespace(
+            body={"detail": [{"loc": ["body", "input"], "msg": "bad"}]})) is False

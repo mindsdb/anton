@@ -336,7 +336,7 @@ async def test_compaction_reports_a_wait():
             _stream_of(_tool_response(context_pressure=0.95)),
             _stream_of(_text_response("done")),
         ],
-        completes=[_answer(_text_response("summary"), gate=gate), _answer(_verdict_response())],
+        completes=[_answer(_text_response("## Goal\nsummary"), gate=gate), _answer(_verdict_response())],
     )
     session = _session(provider)
     for i in range(6):

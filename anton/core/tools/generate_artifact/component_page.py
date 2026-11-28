@@ -18,7 +18,7 @@ config = {title, lang:'en' (the user's language code), subtitle?, overview?:{lea
   {id, label, type:'tabs' or 'select', value, options:[{value,label}]}],
   render: selection => ({lead?,metrics?,sections})}.
 Without controls, omit render and put lead, metrics, sections directly on config.
-overview stays visible while controls change the sections. Use it only for measures that remain true in every control state.
+overview stays visible while controls change the sections. Use it for measures that remain true in every control state, including headline totals across requested areas when tabs split the detail views.
 lead = {text: exact scoped finding, value?:formatted value, detail?:context, tone?:'warning'|'danger'|'good'}.
 metrics = [{label,value,unit?,detail?,tone?}]. Use up to four supporting metrics; put additional
 requested measures in readable details. All source values and units must remain correct.
@@ -31,6 +31,7 @@ sections are any of:
   Graph/sankey/scatter/line/bar/custom series work. Use proper category/value axes and stable series.
 - {type:'table',title,caption?,columns:[{key,label,unit?,format?:(value,row)=>string}],rows:[objects]}.
   Keys are literal keys (including dotted field names). All columns remain visible on phones.
+  Put shared unit or currency caveats in column headers or captions rather than repeating boilerplate in every cell.
 - {type:'map'|'globe',title,caption?,points:[{name,lat,lon,label?,color?} or {name,place,label?,color?}],
   routes?:[{from:[lon,lat] or place,to:[lon,lat] or place,label?,color?}],center?:[lon,lat],library?:'d3'|'echarts'}.
   A place is a place name exactly as in the data ("Hong Kong", or a record's town and region joined
@@ -45,8 +46,12 @@ sections are any of:
 
 The host reconciles shown figures with the data: a metric, lead value, table column, chart, map or
 timeline that shows only 0 or nothing is returned for repair, and so is a sum that counts a source's
-TOTAL ROWS beside their parts. When zero or empty is the true answer, give that metric, lead, table
-column or section zeroReason: a short reason in the user's language, shown only when it applies.
+TOTAL ROWS beside their parts. When zero or empty is the true answer, attach zeroReason (a short
+reason in the user's language, shown only when it applies) to the exact owner that is zero: on the
+lead or metric object for a zero headline or metric; on each individual column object in `columns`
+for any table column that is all 0 in any control state; and on the section object (or on individual
+zero rows) for an empty table, timeline, or map, an all-zero chart, or a table row whose numeric
+columns are all 0.
 
 Use normal JavaScript to select, join, group, sort and transform the complete bound data into
 these views. A filter's render callback must update the requested views consistently. For edits,
@@ -55,8 +60,262 @@ script tags, fetch, storage, backend, eval, new Function or extra library setup.
 
 The page must answer the user's actual question. Quantify all requested measures at their
 requested scope and show exact values in labels, a table or details as well as tooltips.
-Keep visible text in the user's language. Do not invent currency or translate source identifiers.
+Keep all visible text — including displayed status labels and short annotations when source
+values are in another language — in the user's language. Do not invent currency or translate
+source identifiers.
 """
+
+_COWORK_SECTION_TYPES = frozenset({"chart", "table", "map", "globe", "timeline", "text"})
+_COWORK_SECTION_SIBLING_KEYS = frozenset({
+    "title", "caption", "option", "columns", "rows", "points", "routes",
+    "items", "text", "html", "content", "body", "markup", "data",
+    "value", "metrics", "lead", "library", "center", "legend",
+})
+_REGEX_PREV_KEYWORDS = frozenset({
+    "return", "case", "throw", "in", "of", "typeof", "void", "delete",
+    "new", "yield", "await", "else", "do",
+})
+_REGEX_PREV_PUNCS = frozenset({
+    "(", "[", "{", ",", ";", ":", "=", "!", "?", "&", "|", "^", "+", "-", "*", "%", "<", ">", "~",
+})
+
+
+def _can_precede_regex(tokens: list[tuple[str, str]]) -> bool:
+    if not tokens:
+        return True
+    kind, val = tokens[-1]
+    if kind == "id" and val in _REGEX_PREV_KEYWORDS:
+        if len(tokens) >= 2 and tokens[-2] == ("punc", "."):
+            return False
+        return True
+    return kind in ("punc", "op") and val in _REGEX_PREV_PUNCS
+
+
+def _scan_js_range(code: str, start: int, stop_on_rbrace: bool) -> tuple[list[tuple[str, str]], int]:
+    """Single-pass O(N) JS lexer handling comments, strings, RegExp literals, and nested `${...}` templates."""
+    tokens: list[tuple[str, str]] = []
+    n = len(code)
+    i = start
+    brace_depth = 0
+    while i < n:
+        ch = code[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and code[i + 1] == "/":
+            nl = code.find("\n", i + 2)
+            i = n if nl < 0 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and code[i + 1] == "*":
+            end = code.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if ch == "/" and _can_precede_regex(tokens):
+            j = i + 1
+            in_class = False
+            while j < n:
+                c = code[j]
+                if c == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if c == "[":
+                    in_class = True
+                elif c == "]":
+                    in_class = False
+                elif c == "/" and not in_class:
+                    j += 1
+                    break
+                elif c in ("\n", "\r"):
+                    break
+                j += 1
+            while j < n and code[j].isalpha():
+                j += 1
+            tokens.append(("regex", code[i:j]))
+            i = j
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            j = i + 1
+            buf: list[str] = []
+            while j < n:
+                c = code[j]
+                if c == "\\" and j + 1 < n:
+                    buf.append(code[j + 1])
+                    j += 2
+                    continue
+                if c in ("\n", "\r"):
+                    break
+                if c == quote:
+                    j += 1
+                    break
+                buf.append(c)
+                j += 1
+            tokens.append(("str", "".join(buf)))
+            i = j
+            continue
+        if ch == "`":
+            j = i + 1
+            while j < n:
+                c = code[j]
+                if c == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if c == "$" and j + 1 < n and code[j + 1] == "{":
+                    _, j = _scan_js_range(code, j + 2, stop_on_rbrace=True)
+                    continue
+                if c == "`":
+                    j += 1
+                    break
+                j += 1
+            tokens.append(("tpl", ""))
+            i = j
+            continue
+        if ch.isalpha() or ch in ("_", "$"):
+            j = i + 1
+            while j < n and (code[j].isalnum() or code[j] in ("_", "$")):
+                j += 1
+            tokens.append(("id", code[i:j]))
+            i = j
+            continue
+        if ch.isdigit():
+            j = i + 1
+            while j < n and (code[j].isalnum() or code[j] in (".", "_")):
+                j += 1
+            tokens.append(("num", code[i:j]))
+            i = j
+            continue
+        if ch == "{":
+            brace_depth += 1
+            tokens.append(("punc", "{"))
+            i += 1
+            continue
+        if ch == "}":
+            if stop_on_rbrace and brace_depth == 0:
+                return tokens, i + 1
+            if brace_depth > 0:
+                brace_depth -= 1
+            tokens.append(("punc", "}"))
+            i += 1
+            continue
+        if ch in "[]():,.;":
+            tokens.append(("punc", ch))
+            i += 1
+            continue
+        if i + 1 < n and code[i : i + 2] in ("++", "--"):
+            tokens.append(("op", code[i : i + 2]))
+            i += 2
+            continue
+        if ch in "=!&|?+-*%<>^~/":
+            tokens.append(("op", ch))
+            i += 1
+            continue
+        i += 1
+    return tokens, i
+
+
+def _check_section_obj(tokens: list[tuple[str, str]], start_brace: int, invalid: list[str]) -> int:
+    """Inspect only the direct (depth-1) `type: '<literal>'` property of one `{...}` CoworkPage section object."""
+    n = len(tokens)
+    depth = 1
+    i = start_brace + 1
+    bad_types: list[str] = []
+    has_cowork_key = False
+    while i < n and depth > 0:
+        kind, val = tokens[i]
+        if kind == "punc":
+            if val in ("{", "[", "("):
+                depth += 1
+            elif val in ("}", "]", ")"):
+                depth -= 1
+                if depth == 0:
+                    if has_cowork_key:
+                        invalid.extend(bad_types)
+                    return i + 1
+        elif depth == 1 and kind in ("id", "str"):
+            prev = tokens[i - 1] if i > start_brace else ("", "")
+            if prev in (("punc", "{"), ("punc", ",")) and i + 1 < n:
+                nxt = tokens[i + 1]
+                if val == "type" and nxt == ("punc", ":") and i + 2 < n and tokens[i + 2][0] == "str":
+                    sec_type = tokens[i + 2][1]
+                    if sec_type not in _COWORK_SECTION_TYPES:
+                        bad_types.append(sec_type)
+                    i += 3
+                    continue
+                if val in _COWORK_SECTION_SIBLING_KEYS and (
+                    nxt == ("punc", ":") or (kind == "id" and nxt in (("punc", ","), ("punc", "}")))
+                ):
+                    has_cowork_key = True
+        i += 1
+    if has_cowork_key:
+        invalid.extend(bad_types)
+    return i
+
+
+def _invalid_cowork_section_types(program: str) -> list[str]:
+    """Find unsupported literal `type` values on direct CoworkPage section objects in
+    `sections: [...]`, `sections = [...]`, or `sections.push({...})`."""
+    tokens, _ = _scan_js_range(program, 0, stop_on_rbrace=False)
+    n = len(tokens)
+    invalid: list[str] = []
+    i = 0
+    while i < n:
+        is_member = i > 0 and tokens[i - 1] == ("punc", ".")
+        # Pattern A: `sections: [ {...}, ... ]` or `sections = [ {...}, ... ]` (not `obj.sections = [...]`)
+        if (
+            not is_member
+            and tokens[i] in (("id", "sections"), ("str", "sections"))
+            and i + 2 < n
+            and tokens[i + 1] in (("punc", ":"), ("op", "="))
+            and tokens[i + 2] == ("punc", "[")
+        ):
+            j = i + 3
+            arr_depth = 1
+            paren_depth = 0
+            while j < n and arr_depth > 0:
+                if tokens[j] == ("punc", "["):
+                    arr_depth += 1
+                elif tokens[j] == ("punc", "]"):
+                    arr_depth -= 1
+                elif tokens[j] == ("punc", "("):
+                    paren_depth += 1
+                elif tokens[j] == ("punc", ")") and paren_depth > 0:
+                    paren_depth -= 1
+                elif arr_depth == 1 and paren_depth == 0 and tokens[j] == ("punc", "{"):
+                    j = _check_section_obj(tokens, j, invalid)
+                    continue
+                j += 1
+            i = j
+            continue
+        # Pattern B: `sections.push({ ... }, ...)` (not `obj.sections.push(...)`)
+        if (
+            not is_member
+            and tokens[i] == ("id", "sections")
+            and i + 3 < n
+            and tokens[i + 1] == ("punc", ".")
+            and tokens[i + 2] == ("id", "push")
+            and tokens[i + 3] == ("punc", "(")
+        ):
+            j = i + 4
+            paren_depth = 1
+            arr_depth = 0
+            while j < n and paren_depth > 0:
+                if tokens[j] == ("punc", "("):
+                    paren_depth += 1
+                elif tokens[j] == ("punc", ")"):
+                    paren_depth -= 1
+                elif tokens[j] == ("punc", "["):
+                    arr_depth += 1
+                elif tokens[j] == ("punc", "]") and arr_depth > 0:
+                    arr_depth -= 1
+                elif paren_depth == 1 and arr_depth == 0 and tokens[j] == ("punc", "{"):
+                    j = _check_section_obj(tokens, j, invalid)
+                    continue
+                j += 1
+            i = j
+            continue
+        i += 1
+    return list(dict.fromkeys(invalid))
+
 
 def _compares_selection(program):
     """render(selection) used as a string: every control would show the same view."""
@@ -89,6 +348,12 @@ def document(program):
         raise ValueError(
             "render receives an object keyed by control ids, never a string. Read the control's value by "
             "its id, for example render: ({view}) => view === 'orders' ? ... or selection.view === 'orders'."
+        )
+    bad_types = _invalid_cowork_section_types(program)
+    if bad_types:
+        raise ValueError(
+            f"Unsupported CoworkPage section type {bad_types[0]!r}: supported types are "
+            "'chart', 'table', 'map', 'globe', 'timeline', and 'text'."
         )
     runtime = "\n".join((HERE / name).read_text() for name in ("presentation_contract.js", "presentation.js", "presentation_data.js", "presentation_geography.js",
                                                      "presentation_reconcile.js"))

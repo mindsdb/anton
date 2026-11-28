@@ -72,7 +72,18 @@ def build_pipeline_system_prompt(state: PrdState) -> str:
         "strict `<`. Example: weeks starting 2026-10-05 ... 2026-10-26 -> "
         "end = 2026-11-02, filter `col < '2026-11-02'`. This works the same "
         "for weekly, daily and timestamp columns. Never use the last period's "
-        "start as an inclusive end."
+        "start as an inclusive end; if a date-only API parameter is inclusive "
+        "(such as `to` or `end_date`), pass the day before that next period's "
+        "start (e.g., `2026-11-01`) or omit the upper API filter and apply "
+        "strict `<` in code. Always inspect actual date ranges and pagination "
+        "metadata first: retrieve every page of paginated endpoints, and do not "
+        "impose an unrequested date cut on a table already scoped to the "
+        "requested subject.\n\n"
+        "PLACE NAMES. When source records already provide recognizable place "
+        "names (towns, cities, ports, or a town with its region/country), "
+        "preserve those source place names directly rather than calling "
+        "external web geocoders during gathering; the page builder resolves "
+        "unambiguous place names offline."
         + fullstack_choice
         + "\n\n" + GEOGRAPHY_GUIDANCE,
         state.project_rules,

@@ -1448,7 +1448,7 @@ _SUMMARY_OUTPUT_BUDGET = 8192
 
 # A reply with none of these headings is not a record: a model can answer as
 # the agent ("Let me re-read the files") instead, and keeping that loses the task.
-_SUMMARY_HEADINGS = r"(?:Goal|Constraints|Completed|Active state|Blocked|Decisions|Remaining)"
+_SUMMARY_HEADINGS = r"(?:Goal|Constraints|Completed|Active state|Blocked|Failed\s*/\s*Ruled Out|Decisions|Remaining)"
 _SUMMARY_SECTION = re.compile(
     rf"^\s*(?:(?:#{{1,6}}|\*\*)\s*(?:\d+[.)]\s*)?{_SUMMARY_HEADINGS}\b|(?:\d+[.)]\s*)?{_SUMMARY_HEADINGS}\s*:)",
     re.M | re.I,
@@ -1466,6 +1466,7 @@ _SUMMARY_SYSTEM_PROMPT = (
     "## Active state — variables, data, files/artifacts in play and their "
     "current values or paths\n"
     "## Blocked — anything stuck and why\n"
+    "## Failed / Ruled Out — approaches tried and ruled out with exact cause, so they are not repeated\n"
     "## Decisions — choices made and the reason\n"
     "## Remaining — what is still left to do\n\n"
     "Preserve the date/time of key events when it matters (e.g. "
@@ -1474,7 +1475,8 @@ _SUMMARY_SYSTEM_PROMPT = (
     "If a PREVIOUS SUMMARY is provided, update it with the new turns "
     "instead of starting over. If the user changed direction, narrowed "
     "scope, or cancelled something, reflect that — drop superseded items "
-    "from Remaining, don't keep them. Keep it under ~1500 words."
+    "from Remaining, don't keep them. Keep it under ~1500 words. "
+    "Output the markdown state record directly with no preamble."
 )
 
 
@@ -4121,6 +4123,47 @@ class ChatSession:
                 messages=[{"role": "user", "content": user_content}],
                 max_tokens=output_budget_tokens,
             )
+            # Reasoning models occasionally emit an empty visible message on the
+            # first compaction attempt (e.g., hidden thinking consuming tokens or
+            # a short empty stop). Retry once with an explicit direct-output cue
+            # (skipping provider safety refusals, and doubling budget capped by
+            # client ceiling if truncated) before giving up on compaction.
+            if (
+                not _SUMMARY_SECTION.search(summary_response.content or "")
+                and summary_response.stop_reason not in ("content_filter", "refusal")
+            ):
+                retry_budget = (
+                    min(_SUMMARY_OUTPUT_BUDGET * 2, self._client_max_tokens())
+                    if looks_truncated(summary_response, output_budget_tokens)
+                    else output_budget_tokens
+                )
+                logger.info(
+                    "history summarization: missing state record on first attempt "
+                    "(stop_reason=%s) — retrying once (budget=%d)",
+                    summary_response.stop_reason,
+                    retry_budget,
+                )
+                try:
+                    retry_response = await self._llm.summarize(
+                        system=_SUMMARY_SYSTEM_PROMPT,
+                        messages=[{
+                            "role": "user",
+                            "content": (
+                                f"{user_content}\n\n"
+                                "Output the concise markdown state record directly starting with "
+                                "`## Goal` (no preamble or empty reply)."
+                            ),
+                        }],
+                        max_tokens=retry_budget,
+                    )
+                except Exception as retry_exc:
+                    logger.warning(
+                        "history summarization: retry failed (%s) — keeping first outcome",
+                        type(retry_exc).__name__,
+                    )
+                else:
+                    summary_response = retry_response
+                    output_budget_tokens = retry_budget
             # A truncated record is kept, not retried:
             # - hitting a cap 4x the requested length means the model ignored the
             #   length instruction, and more room only buys more of the same
@@ -4200,7 +4243,7 @@ class ChatSession:
             "request. The most recent user message takes priority; if the user changed "
             "direction, narrowed scope, or cancelled something, follow that and do NOT "
             "resume superseded work described below. Do not repeat approaches already "
-            "recorded under Completed or Blocked; work on what is under Remaining.\n\n"
+            "recorded under Completed, Blocked, or Failed / Ruled Out; work on what is under Remaining.\n\n"
             f"{summary}"
         )
         summary_msg = {"role": "user", "content": summary_body}
@@ -6574,11 +6617,16 @@ class ChatSession:
         # ENG-673: a mid-stream provider failure that had NO prior retry (an
         # overload smuggled into an HTTP-200 stream) gets budget-bounded
         # backoff-and-retry — separate from the instant, count-bounded recovery
-        # used for genuine errors. The clock starts on the first such error and
-        # is measured across the turn. Request-time transients (real 5xx/429,
-        # connection errors) carry session_backoff=False and skip this path.
-        _transient_deadline: float | None = None
+        # used for genuine errors. Accounted as TIME SLEPT (mirroring
+        # `_rate_limit_slept`) rather than a wall-clock deadline so long tool
+        # rounds or slow reasoning streams do not eat the retry budget, and
+        # reset on forward progress (`StreamComplete`) under a turn-wide cap.
+        # Request-time transients (real 5xx/429, connection errors) carry
+        # session_backoff=False and skip this path.
+        _transient_slept = 0.0
+        _transient_total_slept = 0.0
         _transient_attempt = 0
+        _max_turn_transient_slept = max(180.0, self._transient_budget_s)
         # ENG-1537: velocity rate-limits are budgeted separately from incidents
         # (see _rate_limit_budget_s) so neither starves the other in one turn.
         # Accounted as TIME SLEPT, not a wall-clock deadline: the cohort this
@@ -6657,6 +6705,8 @@ class ChatSession:
                     async for event in self._stream_and_handle_tools(user_msg_str):
                         if isinstance(event, StreamComplete):
                             _drop_retries = 0
+                            _transient_slept = 0.0
+                            _transient_attempt = 0
                         # The first model call after the drop sends the
                         # history without the dropped images; its completion
                         # shows they caused the refusal. Before the generator
@@ -6743,18 +6793,20 @@ class ChatSession:
                     # already retried them, so they fall through to the fast
                     # count-based path below with their honest typed message.
                     if isinstance(_agent_exc, TransientProviderError) and _agent_exc.session_backoff:
-                        now = asyncio.get_running_loop().time()
                         # ENG-1537: a velocity rate-limit runs on its own budget
-                        # and its own longer Retry-After cap. Everything else
-                        # keeps the ENG-673 incident budget unchanged.
+                        # and its own longer Retry-After cap. Incident retries
+                        # keep the 30s per-incident budget and 30s clamp, but
+                        # account time slept (like rate-limits) under a 180s
+                        # turn-wide cap so healthy tool rounds do not burn it.
                         _rate_limited = _agent_exc.code == "rate_limited"
                         if _rate_limited:
                             remaining_budget = self._rate_limit_budget_s - _rate_limit_slept
                             max_delay = self._rate_limit_max_delay_s
                         else:
-                            if _transient_deadline is None:
-                                _transient_deadline = now + self._transient_budget_s
-                            remaining_budget = _transient_deadline - now
+                            remaining_budget = min(
+                                self._transient_budget_s - _transient_slept,
+                                _max_turn_transient_slept - _transient_total_slept,
+                            )
                             max_delay = 30.0
                         self._seal_dangling_tool_uses("interrupted by a transient provider error")
                         # A hint longer than we are willing to sleep: card NOW
@@ -6789,10 +6841,11 @@ class ChatSession:
                             )
                             if _rate_limited:
                                 _rate_limit_attempt += 1
+                                _rate_limit_slept += delay
                             else:
                                 _transient_attempt += 1
-                            if _rate_limited:
-                                _rate_limit_slept += delay
+                                _transient_slept += delay
+                                _transient_total_slept += delay
                             # Tell the user WHY the turn is quiet. A silent
                             # 90s pause is indistinguishable from a hang, and
                             # that is how a correct wait gets reported as a

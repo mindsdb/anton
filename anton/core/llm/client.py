@@ -22,6 +22,7 @@ from .provider import (
     ProviderAuthError,
     StreamComplete,
     StreamEvent,
+    TransientProviderError,
 )
 from .tracing import call_role
 
@@ -784,9 +785,45 @@ class LLMClient:
         Falls back to the coding role when no router model is configured
         (the router_* kwargs default to the coding role in __init__), so
         this is behavior-preserving unless a distinct model is selected.
+
+        Real streaming providers (`supports_streamed_summarize`) run via
+        ``stream()`` so large reasoning-model compactions avoid gateway
+        non-streaming assembly timeouts (e.g. 110s non-streaming caps) and
+        continuously refresh the idle-timeout watchdog as deltas arrive.
         """
         listener = self.usage_listener
         budget = max_tokens or self._max_tokens
+        if getattr(self._router_provider, "supports_streamed_summarize", False) is True:
+            events = self._guarded_stream(
+                make_stream=lambda: _stream_with_auth_confirmation(
+                    lambda: self._router_provider.stream(
+                        model=self._router_model,
+                        system=system,
+                        messages=messages,
+                        max_tokens=budget,
+                    ),
+                    role=self._router_auth_role,
+                ),
+                role="router",
+                model=self._router_model,
+                max_tokens=budget,
+            )
+            response: LLMResponse | None = None
+            async with contextlib.aclosing(events):
+                async for event in events:
+                    if isinstance(event, StreamComplete):
+                        response = event.response
+            if response is None:
+                raise TransientProviderError(
+                    "Model stream ended without a completion response during history summarization.",
+                    provider="The model provider",
+                    code="truncated_stream",
+                    session_backoff=False,
+                    model=self._router_model,
+                )
+            self._notify_usage("router", self._router_model, response.usage, listener)
+            return response
+
         response = await self._guarded_call(
             operation=lambda: _call_with_auth_confirmation(
                 lambda: self._router_provider.complete(

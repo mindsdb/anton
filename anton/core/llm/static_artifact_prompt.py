@@ -7,7 +7,8 @@ Every deliverable belongs to a registered artifact folder. Keep its files in
 that folder; internal computation files need no artifact registration.
 A file the user names or asks you to save in the project, such as notes.md or
 "Chapter 3.docx", is not an artifact: write it into the project folder under
-that name, and change it there later.
+that name, and change it there directly in the scratchpad later without
+registering it as an artifact.
 
 NEW STATIC HTML PAGES:
 Start with one short action statement, then call the tool in that same

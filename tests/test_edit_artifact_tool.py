@@ -187,6 +187,26 @@ async def test_session_offers_the_editor_and_routes_generate(make_session, tmp_p
     off = make_session(workspace=workspace, settings=CoreSettings(artifact_editor="off"))
     assert "edit_artifact" not in _tool_names(off)
     assert not editor_offered(off)
+    off_prompt = await off._build_system_prompt("make the chart blue")
+    assert "edit_artifact" not in off_prompt
+    assert "directly in the scratchpad" in off_prompt
+    assert "never for plain project files" in prompt
+
+
+def test_base_artifacts_prompts_keep_plain_project_files_out_of_artifact_tools_without_leaking_editor():
+    from anton.core.llm import prompts
+    from anton.core.llm.static_artifact_prompt import ARTIFACTS, STATIC_ARTIFACTS
+
+    for section in (
+        ARTIFACTS,
+        STATIC_ARTIFACTS,
+        prompts.ARTIFACTS_PROMPT,
+        prompts.NO_DIRECT_REPORTS_ARTIFACTS_PROMPT,
+        prompts.STATIC_ARTIFACTS_PROMPT,
+        prompts.NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT,
+    ):
+        assert "edit_artifact" not in section
+        assert "directly in the scratchpad" in section
 
 
 async def test_browser_check_failed_routes_the_repair_to_the_editor(tmp_path):
