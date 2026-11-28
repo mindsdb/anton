@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pydantic import PrivateAttr, ValidationInfo, field_validator, model_validator
 
+from anton.core.llm.endpoints import mindshub_url_over_https
 from anton.core.settings import CoreSettings
 
 
@@ -231,8 +232,15 @@ class AntonSettings(CoreSettings):
         return v
 
     def model_post_init(self, __context) -> None:
-        """Derive openai vars from minds credentials when appropriate, then the decisions model."""
+        """Derive openai vars from minds credentials when appropriate, move MindsHub URLs to https, then the decisions model."""
         self._derive_openai_from_minds()
+        # Both URLs move together, because _resolve_openai_compatible_flavor
+        # (anton/core/llm/client.py) compares openai_base_url with minds_url,
+        # scheme included.
+        if self.minds_url:
+            self.minds_url = mindshub_url_over_https(url=self.minds_url)
+        if self.openai_base_url:
+            self.openai_base_url = mindshub_url_over_https(url=self.openai_base_url)
         if self.decisions_model is None:
             from anton.core.llm.jev import default_decisions_model
 

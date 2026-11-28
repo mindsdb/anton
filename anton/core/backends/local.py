@@ -53,6 +53,7 @@ from anton.core.backends.wire import (
     USAGE_MARKER,
     USAGE_MARKER_ENV,
 )
+from anton.core.llm.endpoints import mindshub_url_over_https
 from anton.core.llm.images import current_turn_images
 from anton.core.llm.provider import (
     USAGE_LOG_ENV,
@@ -1344,6 +1345,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             if base_url:
                 env["OPENAI_BASE_URL"] = base_url
                 env["ANTON_OPENAI_BASE_URL"] = base_url
+        # An http:// MindsHub URL reaches the pad over https, as AntonSettings
+        # loads it, whether it came from the environment or the runtime's own
+        # coding_base_url. Code in the pad reads these names as they stand, so
+        # this runs after their last write.
+        for name in ("ANTON_MINDS_URL", "ANTON_OPENAI_BASE_URL", "OPENAI_BASE_URL"):
+            if env.get(name):
+                env[name] = mindshub_url_over_https(url=env[name])
         uv = self._uv()
         if uv:
             env["ANTON_UV_PATH"] = uv
