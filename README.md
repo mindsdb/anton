@@ -160,6 +160,8 @@ When you run `anton` in a directory:
 - `.anton/memory/lessons.md` — factual knowledge: things I've learned (stock API quirks, dashboard patterns, data fetching notes).
 - `.anton/memory/topics/*` — topic-specific lessons: deeper notes organized by subject (dashboard-visualization, stock-data-api, etc.).
 
+The CLI creates the project’s `.anton/` and global `~/.anton/` with mode `0700` on macOS and Linux, and tightens an older project directory before it writes history or starts a chat. It keeps `~/.anton/.env` at `0600`. On Windows, the CLI removes inherited access from the project directory before writing there, grants access to SYSTEM, Administrators, the folder’s owner and the current user, and preserves explicit grants from administrators. It reads the directory’s list first and leaves a list that is already owner-only alone, so a start doesn’t rewrite every file below it. The global directory uses its Windows profile’s permissions; a `~/.anton` linked to a folder outside the profile gets the project’s list. A host that leaves its workspace unprivate, such as a managed server, keeps the operator’s modes on `~/.anton` too. When `~/.anton` is a link, as in a dotfiles setup, the CLI tightens the folder it resolves to if that folder is yours, and refuses one another account owns. A project’s `.anton` that is a link is refused. A filesystem that keeps no modes, such as WSL’s `/mnt/c`, exFAT or an SMB share, or a Windows drive with no access lists, such as FAT or exFAT, is used as it is, with a warning: no mode protects a folder there. If the project directory cannot be protected anywhere else, the CLI stops the affected operation. Cloud turns retain the permissions set on their mounted workspace.
+
 Override the working folder:
 ```bash
 anton --folder /path/to/workspace
@@ -456,7 +458,7 @@ Every push to `staging` publishes a **release candidate** through [`.github/work
 
 ### Running the test suite
 
-CI runs four unit-test shards on separate runners while stub E2E runs alongside them. Each shard collects the full unit suite, then selects whole files using a stable hash of their repository-relative paths. Separate checkouts keep the shared scratchpad workspaces isolated. The `run-tests` check requires every shard, stub E2E and the Windows installer tests to succeed; failed or skipped jobs cannot pass the gate. Test durations are printed for the slowest 20 cases.
+CI runs four unit-test shards on separate runners while stub E2E runs alongside them. Each shard collects the full unit suite, then selects whole files using a stable hash of their repository-relative paths. Separate checkouts keep the shared scratchpad workspaces isolated. The `run-tests` check requires every shard, stub E2E and the Windows job (the installer tests and the `.anton` access-list check) to succeed; failed or skipped jobs cannot pass the gate. Test durations are printed for the slowest 20 cases.
 
 Without shard options, pytest still runs the full selected suite. To reproduce one CI shard:
 

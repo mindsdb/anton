@@ -81,6 +81,27 @@ def test_skip_marker_written_on_version_mismatch(monkeypatch, tmp_path):
     assert "new_version" not in result
 
 
+def test_skip_marker_written_even_when_its_folder_cannot_be_made_private(monkeypatch, tmp_path):
+    # The marker holds only a public release tag, so a folder that cannot be
+    # made private (a link, another owner) must not leave it unwritten.
+    class _OkProc:
+        returncode = 0
+        stdout = b""
+
+    _stub_env(monkeypatch, tmp_path, latest_tag="v9.9.9.9.9", local_version="2.0.0", proc=_OkProc())
+    monkeypatch.setattr(updater, "_read_installed_anton_version", lambda: Version("2.0.0"))
+
+    def _refuse(*, path, **_options):
+        raise PermissionError("not private")
+
+    monkeypatch.setattr(updater, "require_private_dir", _refuse)
+
+    updater._check_and_update({}, settings=None)
+
+    marker = tmp_path / ".update_skip_tag"
+    assert marker.is_file() and marker.read_text().strip() == "v9.9.9.9.9"
+
+
 def test_read_installed_version_picks_anton_agent_not_legacy_anton(monkeypatch):
     """Real dual-tool state (confirmed on a live machine): a leftover legacy
     `anton` tool is listed BEFORE `anton-agent`. `_read_installed_anton_version`

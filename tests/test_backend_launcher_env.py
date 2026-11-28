@@ -1,7 +1,12 @@
 import os
+import stat
+import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
+
+import pytest
 
 import anton_state
 from anton.core.artifacts import backend_launcher
@@ -19,6 +24,152 @@ def test_pythonpath_dir_contains_only_anton_state():
     assert (Path(d) / "anton_state" / "__init__.py").resolve() == Path(
         anton_state.__file__
     ).resolve()
+
+
+# ── who can create or fill the import folder ────────────────────────────────
+#
+# The folder sits in the temp folder, which every account shares on Linux, and
+# Python imports any module on PYTHONPATH (`sitecustomize` at every start). So
+# a name another account could have made first must never reach PYTHONPATH.
+
+_posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX owners and modes")
+
+
+@pytest.fixture
+def temp_dir(tmp_path, monkeypatch):
+    """The temp folder as `tempfile.gettempdir()` reports it, fresh per test."""
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    # raising=False: the tests below also run against code without a fallback.
+    monkeypatch.setattr(backend_launcher, "_fallback_pythonpath_root", None, raising=False)
+    return temp
+
+
+def _names_another_account_could_take() -> list[str]:
+    """Every name in the temp folder the launcher may use: the old fixed one and the per-user one."""
+    return ["anton_state_pp", f"anton_state_pp-{os.getuid()}"]
+
+
+@_posix_only
+def test_the_import_folder_is_a_real_folder_only_this_user_can_open(temp_dir):
+    old_umask = os.umask(0o022)
+    try:
+        folder = _anton_state_pythonpath_dir()
+    finally:
+        os.umask(old_umask)
+
+    st = os.lstat(folder)
+    assert stat.S_ISDIR(st.st_mode)
+    assert st.st_uid == os.getuid()
+    assert stat.S_IMODE(st.st_mode) == 0o700
+    assert os.listdir(folder) == ["anton_state"]
+
+
+@_posix_only
+def test_a_world_writable_folder_planted_at_the_name_never_runs_its_code(temp_dir, tmp_path):
+    """Another account's `mkdir -m 1777` plus a sitecustomize.py: nothing it holds may run."""
+    marker = tmp_path / "planted-code-ran"
+    planted = []
+    for name in _names_another_account_could_take():
+        folder = temp_dir / name
+        folder.mkdir()
+        os.chmod(folder, 0o1777)
+        (folder / "sitecustomize.py").write_text(
+            f"import pathlib\npathlib.Path({str(marker)!r}).write_text('ran')\n"
+        )
+        planted.append(str(folder))
+
+    env = build_backend_env(None)
+    subprocess.run([sys.executable, "-c", "pass"], env=env, check=True)
+
+    assert not marker.exists()
+    assert env["PYTHONPATH"].split(os.pathsep)[0] not in planted
+    for folder in planted:
+        assert sorted(os.listdir(folder)) == ["sitecustomize.py"]
+
+
+@_posix_only
+def test_a_symlink_planted_at_the_name_is_never_followed(temp_dir, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    os.chmod(elsewhere, 0o777)
+    for name in _names_another_account_could_take():
+        (temp_dir / name).symlink_to(elsewhere, target_is_directory=True)
+
+    folder = _anton_state_pythonpath_dir()
+
+    assert os.listdir(elsewhere) == []
+    assert not os.path.islink(folder)
+    assert elsewhere.resolve() not in Path(folder).resolve().parents
+    assert Path(folder).resolve() != elsewhere.resolve()
+
+
+@_posix_only
+def test_a_folder_another_account_owns_is_not_used(temp_dir, monkeypatch):
+    """Simulated with a stubbed uid: the folders below are this test's, so to
+    that uid they belong to someone else."""
+    other_uid = os.getuid() + 1
+    # Only the candidate ownership is simulated. Keep this fixture's real
+    # temporary parent pinned while the effective uid is mocked.
+    monkeypatch.setattr(backend_launcher, "_trusted_temp_parent", lambda: temp_dir)
+    monkeypatch.setattr(os, "getuid", lambda: other_uid)
+    planted = []
+    for name in _names_another_account_could_take():
+        folder = temp_dir / name
+        folder.mkdir(mode=0o700)
+        planted.append(str(folder))
+
+    folder = _anton_state_pythonpath_dir()
+
+    assert folder not in planted
+    for name in planted:
+        assert os.listdir(name) == []
+
+
+@_posix_only
+def test_a_refused_name_gives_one_folder_for_the_life_of_the_process(temp_dir):
+    """The fallback is made once and kept: backends started from it go on
+    importing from it, and later launches reuse it."""
+    for name in _names_another_account_could_take():
+        (temp_dir / name).write_text("not a folder")
+
+    first = _anton_state_pythonpath_dir()
+    second = _anton_state_pythonpath_dir()
+
+    assert first == second
+    assert os.listdir(first) == ["anton_state"]
+    assert stat.S_IMODE(os.lstat(first).st_mode) == 0o700
+
+
+@_posix_only
+def test_configured_temp_with_writable_ancestor_uses_trusted_parent(temp_dir, monkeypatch):
+    shared = temp_dir.parent / "shared"
+    child = shared / "subdirectory"
+    child.mkdir(parents=True)
+    shared.chmod(0o777)
+    try:
+        monkeypatch.setattr(tempfile, "tempdir", str(child))
+        parent = backend_launcher._trusted_temp_parent()
+        assert shared not in (parent, *parent.parents)
+        assert parent != child
+    finally:
+        shared.chmod(0o700)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows profile lookup and ACLs")
+def test_windows_imports_use_the_profile_despite_configured_temp(tmp_path, monkeypatch):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    unrelated = tmp_path / "configured-temp"
+    unrelated.mkdir()
+    monkeypatch.setattr(backend_launcher, "_windows_profile", lambda: profile)
+    monkeypatch.setattr(tempfile, "tempdir", str(unrelated))
+
+    directory = Path(_anton_state_pythonpath_dir())
+
+    assert directory == profile / ".anton" / "anton_state_pp"
+    assert list(unrelated.iterdir()) == []
 
 
 def test_build_env_prepends_isolated_dir_to_pythonpath():

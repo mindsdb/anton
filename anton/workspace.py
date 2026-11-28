@@ -11,11 +11,13 @@ from __future__ import annotations
 import errno
 import os
 import re
+import stat
 from datetime import datetime
 from pathlib import Path
 
 from anton.config.settings import AntonSettings
 from anton.utils.nofollow import create_text_nofollow, make_dirs_nofollow, read_text_nofollow
+from anton.utils.private_dir import require_private_dir, write_private_text
 
 ANTON_MD_TEMPLATE = """\
 # Anton Workspace
@@ -79,19 +81,28 @@ def vault_key(env_path: Path, key: str = "ANTON_MINDS_API_KEY") -> str | None:
         return None
 
 
-def _write_private(path: Path, text: str) -> None:
-    """Write `text` to `path`, readable and writable only by its owner.
-
-    The file holds secrets, so it is created 0600 rather than under the
-    process umask. An existing file is tightened before the write, so a
-    mode an earlier version left behind does not outlive the next secret.
-    UTF-8, not the host locale, to match how the file is read back.
-    """
-    if path.exists():
-        os.chmod(path, _SECRET_FILE_MODE)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _SECRET_FILE_MODE)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
+def append_env_flag(*, env_path: Path, key: str) -> None:
+    """Append a first-run flag to a private dotenv, detaching external aliases on write."""
+    existing = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
+    if key in existing:
+        return
+    line = ("\n" if existing and not existing.endswith("\n") else "") + f"{key}=true\n"
+    try:
+        entry = env_path.lstat()
+    except FileNotFoundError:
+        entry = None
+    if entry and (stat.S_ISLNK(entry.st_mode) or entry.st_nlink > 1 or getattr(entry, "st_reparse_tag", 0)):
+        write_private_text(env_path, existing + line)
+        return
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(env_path, flags, _SECRET_FILE_MODE)
+    with os.fdopen(fd, "a", encoding="utf-8") as handle:
+        current = os.fstat(fd)
+        if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or not os.path.samestat(current, env_path.lstat()):
+            raise PermissionError(f"Cannot append to a linked or non-regular dotenv: {env_path}")
+        if os.name != "nt":
+            os.fchmod(fd, _SECRET_FILE_MODE)
+        handle.write(line)
 
 
 class Workspace:
@@ -105,6 +116,9 @@ class Workspace:
         self._anton_md_last_read: datetime | None = None
         # Set by initialize(refuse_links=True): the reads below refuse a link too.
         self._refuse_links = False
+        # Standalone secret writes protect the directory. Managed initialization
+        # selects the mount owner's permissions for subsequent writes too.
+        self._private_writes = True
 
         # Reuse a caller's settings so the cloud pod's dotenv-disabled
         # AntonSettings isn't bypassed by a second one built here. Only
@@ -154,8 +168,27 @@ class Workspace:
 
     # ── Initialization ───────────────────────────────────────────
 
-    def initialize(self, *, create_anton_md: bool = True, refuse_links: bool = False) -> list[str]:
+    def make_anton_dir_private(self) -> None:
+        """Create ``.anton`` so only the current user can open it, or make an existing one so.
+
+        It holds the project's memory, conversation records and .env. On
+        macOS and Linux it ends 0700. On Windows a project's ``.anton`` gets
+        the owner-only access list, because the project can sit outside
+        the user's profile, such as ``C:\\src\\app``. ``~/.anton``, the
+        ``.anton`` of a workspace at the home folder, sits in the profile, so
+        it keeps the profile's list.
+        """
+        base = os.path.normcase(os.path.abspath(self._base))
+        home = os.path.normcase(os.path.abspath(Path.home()))
+        # A workspace at the home folder is ~/.anton itself, which the user
+        # may link elsewhere; a project's .anton link stays refused.
+        require_private_dir(path=self._anton_dir, windows_acl=base != home, follow_link=base == home)
+
+    def initialize(self, *, create_anton_md: bool = True, refuse_links: bool = False, private: bool = False) -> list[str]:
         """Create the workspace structure. Returns list of actions taken.
+
+        Desktop and CLI callers pass ``private=True`` to enforce user-only access.
+        Managed callers retain the permissions selected for their mounted workspace.
 
         Retries once on ESTALE: on a shared NFS/EFS workspace another
         client (cowork-server re-staging `.anton/anton.md`, or a workspace
@@ -182,25 +215,27 @@ class Workspace:
         ``.anton`` is a link. The default follows links, as the desktop, the
         CLI and the cloud pod always have.
         """
+        self._private_writes = private
         if refuse_links:
             self._refuse_links = True
         try:
-            return self._initialize_once(create_anton_md=create_anton_md, refuse_links=refuse_links)
+            return self._initialize_once(create_anton_md=create_anton_md, refuse_links=refuse_links, private=private)
         except OSError as exc:
             if exc.errno != errno.ESTALE:
                 raise
-            return self._initialize_once(create_anton_md=create_anton_md, refuse_links=refuse_links)
+            return self._initialize_once(create_anton_md=create_anton_md, refuse_links=refuse_links, private=private)
 
-    def _initialize_once(self, *, create_anton_md: bool = True, refuse_links: bool = False) -> list[str]:
+    def _initialize_once(self, *, create_anton_md: bool, refuse_links: bool, private: bool) -> list[str]:
         actions: list[str] = []
 
-        # Create .anton/ directory and memory subdirectory
+        # Create .anton/ directory and memory subdirectory.
+        if private:
+            self.make_anton_dir_private()
         if refuse_links:
             self._base.mkdir(parents=True, exist_ok=True)
             make_dirs_nofollow(self._base, self._anton_dir / "memory")
         else:
-            self._anton_dir.mkdir(parents=True, exist_ok=True)
-            (self._anton_dir / "memory").mkdir(exist_ok=True)
+            (self._anton_dir / "memory").mkdir(parents=True, exist_ok=True)
         actions.append(f"Created {self._anton_dir}")
 
         # Create anton.md if it doesn't exist
@@ -242,7 +277,12 @@ class Workspace:
         if path.is_file():
             return False
         if private:
-            _write_private(path, text)
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _SECRET_FILE_MODE)
+            except FileExistsError:
+                return False
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
         else:
             path.write_text(text, encoding="utf-8")
         return True
@@ -360,7 +400,10 @@ class Workspace:
         if "\n" in value or "\r" in value:
             raise ValueError(f"{key} must not contain a newline")
 
-        self._anton_dir.mkdir(parents=True, exist_ok=True)
+        if self._private_writes:
+            self.make_anton_dir_private()
+        else:
+            self._anton_dir.mkdir(parents=True, exist_ok=True)
 
         # Read existing lines
         lines: list[str] = []
@@ -379,7 +422,7 @@ class Workspace:
         if not replaced:
             lines.append(f"{key}={value}")
 
-        _write_private(self._env_file, "\n".join(lines) + "\n")
+        write_private_text(self._env_file, "\n".join(lines) + "\n")
 
         # Also set in current process environment
         os.environ[key] = value
@@ -404,7 +447,9 @@ class Workspace:
             lines.append(line)
 
         if found:
-            _write_private(self._env_file, "\n".join(lines) + "\n")
+            if self._private_writes:
+                self.make_anton_dir_private()
+            write_private_text(self._env_file, "\n".join(lines) + "\n")
             os.environ.pop(key, None)
 
         return found

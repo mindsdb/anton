@@ -1328,16 +1328,10 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
 
 def _persist_first_run_done(settings) -> None:
     """Write ANTON_FIRST_RUN_DONE=true to ~/.anton/.env."""
-    from pathlib import Path
+    from anton.utils.private_dir import anton_home
+    from anton.workspace import append_env_flag
 
-    env_path = Path.home() / ".anton" / ".env"
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
-    if "ANTON_FIRST_RUN_DONE" not in existing:
-        with env_path.open("a", encoding="utf-8") as f:
-            if existing and not existing.endswith("\n"):
-                f.write("\n")
-            f.write("ANTON_FIRST_RUN_DONE=true\n")
+    append_env_flag(env_path=anton_home() / ".env", key="ANTON_FIRST_RUN_DONE")
     settings.first_run_done = True
 
 
@@ -1524,7 +1518,11 @@ async def _chat_loop(
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
     del dreg
 
-    global_memory_dir = Path.home() / ".anton" / "memory"
+    from anton.utils.private_dir import anton_home
+
+    # Created here, private, so the global memory and the skills the chat
+    # saves under ~/.anton never create it at the umask's mode.
+    global_memory_dir = anton_home() / "memory"
     project_memory_dir = settings.workspace_path / ".anton" / "memory"
 
     from anton.core.memory.episodes import EpisodicMemory

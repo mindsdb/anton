@@ -608,3 +608,13 @@ def test_an_exported_but_empty_key_still_names_the_environment(
     )
     assert "~/.cowork/.env" not in claim and "~/.anton/.env" not in claim, claim
     assert os.environ["ANTON_MINDS_API_KEY"] == "", "the empty export was altered"
+
+
+def test_gitignore_update_preserves_existing_encoded_comments(tmp_path):
+    from anton.cli import _ensure_vault_gitignored
+
+    ignore = tmp_path / ".gitignore"
+    original = "# résumé\r\n".encode("cp1252")
+    ignore.write_bytes(original)
+    assert _ensure_vault_gitignored(tmp_path)
+    assert ignore.read_bytes() == original + b".env*\n"

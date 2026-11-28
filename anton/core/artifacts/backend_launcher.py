@@ -22,6 +22,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import sys
 import tempfile
 import urllib.error
@@ -32,6 +33,7 @@ from typing import Any, Protocol
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
 from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, cell_sandbox_of
 from anton.utils.datasources import scrub_output
+from anton.utils.private_dir import PRIVATE_DIR_MODE, require_private_dir
 
 
 _log = logging.getLogger(__name__)
@@ -106,6 +108,11 @@ def build_datasource_env(vault, datasources, *, slug: str = "") -> dict[str, str
     return ds_env
 
 
+#: This process's own folder for `anton_state`, made when the per-user name is
+#: held by something only another account could have put there.
+_fallback_pythonpath_root: Path | None = None
+
+
 def _anton_state_pythonpath_dir() -> str:
     """A private directory exposing ONLY the `anton_state` package, for PYTHONPATH.
 
@@ -114,14 +121,23 @@ def _anton_state_pythonpath_dir() -> str:
     the scratchpad venv's own deps (fastapi/pydantic) — a local != published
     hazard. Instead we expose anton_state alone via a symlink (copy fallback).
     In the cloud the package is vendored into the bundle instead (see publisher).
+
+    The folder sits in the temp folder, which every account shares on Linux.
+    Python imports any module it finds on PYTHONPATH, and `sitecustomize` at
+    every start, so only the current user may be able to create, fill or
+    replace this folder. See `_anton_state_pythonpath_root` for how it is
+    chosen.
     """
     import anton_state
 
     pkg = Path(anton_state.__file__).resolve().parent
-    root = Path(tempfile.gettempdir()) / "anton_state_pp"
+    root = _anton_state_pythonpath_root()
     link = root / "anton_state"
-    root.mkdir(parents=True, exist_ok=True)
-    # Always reset the entry, then (re)link — keeps it fresh and simple.
+    # Already linked to this package: leave it, so a backend another process
+    # of this user is starting never finds the entry missing.
+    if link.is_symlink() and Path(os.readlink(link)) == pkg:
+        return str(root)
+    # Reset the entry, then (re)link, which keeps it fresh and simple.
     if link.is_symlink() or link.exists():
         if link.is_dir() and not link.is_symlink():
             shutil.rmtree(link)
@@ -132,6 +148,109 @@ def _anton_state_pythonpath_dir() -> str:
     except OSError:
         shutil.copytree(pkg, link)
     return str(root)
+
+
+def _anton_state_pythonpath_root() -> Path:
+    """The folder `_anton_state_pythonpath_dir` fills, one only this user can change.
+
+    On macOS and Linux it is ``<temp>/anton_state_pp-<uid>``, used only when it
+    is a real folder this user owns that no group or other account can write,
+    and pinned to 0700. Anything else at that name (a link, a file, another
+    account's folder, or a folder anyone can write, which may already hold
+    planted modules) is never used, and this process makes its own folder with
+    mkdtemp instead. Neither folder is ever removed, because backends started
+    from it keep importing from it after this call returns.
+
+    Windows uses the OS-provided profile, independently of temporary directory
+    overrides. POSIX verifies that every ancestor of the temporary directory
+    protects its entries, including the sticky bit on a shared system tmp.
+    """
+    if sys.platform == "win32":
+        parent = _windows_profile() / ".anton"
+        require_private_dir(path=parent)
+        root = parent / "anton_state_pp"
+        require_private_dir(path=root, windows_acl=True)
+        return root
+    temp = _trusted_temp_parent()
+    root = temp / f"anton_state_pp-{os.getuid()}"
+    try:
+        os.mkdir(root, PRIVATE_DIR_MODE)
+    except FileExistsError:
+        pass
+    refusal = _unsafe_folder_reason(path=root)
+    if refusal is None:
+        # A umask can leave a new folder narrower than 0700, and an older
+        # folder of this user's can be wider.
+        require_private_dir(path=root)
+        return root
+    return _own_pythonpath_root(parent=temp, refusal=refusal)
+
+
+def _windows_profile() -> Path:
+    """Get the current user's profile from Windows, outside configurable TEMP paths."""
+    import ctypes
+    from ctypes import wintypes
+
+    buffer = ctypes.create_unicode_buffer(260)
+    # CSIDL_PROFILE; SHGetFolderPathW takes the current user's token by default.
+    get_path = ctypes.WinDLL("shell32").SHGetFolderPathW
+    get_path.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR]
+    get_path.restype = ctypes.c_long
+    result = get_path(None, 0x28, None, 0, buffer)
+    if result or not buffer.value:
+        raise OSError(f"Could not locate the Windows user profile (HRESULT {result:#x})")
+    return Path(buffer.value)
+
+
+def _trusted_temp_parent() -> Path:
+    """Choose a canonical parent where another user cannot rename our import directory."""
+    for candidate in (Path(tempfile.gettempdir()), Path("/tmp"), Path.home()):
+        try:
+            directory = candidate.resolve(strict=True)
+            for ancestor in (*reversed(directory.parents), directory):
+                st = ancestor.lstat()
+                if not stat.S_ISDIR(st.st_mode) or st.st_uid not in (0, os.getuid()):
+                    break
+                if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
+                    break
+            else:
+                if os.access(directory, os.W_OK | os.X_OK):
+                    return directory
+        except (OSError, RuntimeError):
+            continue
+    raise PermissionError("Could not find a trusted parent for the backend import directory")
+
+
+def _own_pythonpath_root(*, parent: Path, refusal: str) -> Path:
+    """This process's mkdtemp folder for `anton_state`, made on first use."""
+    global _fallback_pythonpath_root
+    cached = _fallback_pythonpath_root
+    if cached is not None and cached.parent == parent and _unsafe_folder_reason(path=cached) is None:
+        return cached
+    _log.warning(
+        "Refused the shared anton_state import folder; using a fresh one",
+        extra={"event": "anton_state_folder_refused", "reason": refusal},
+    )
+    cached = Path(tempfile.mkdtemp(dir=parent, prefix=f"anton_state_pp-{os.getuid()}-"))
+    _fallback_pythonpath_root = cached
+    return cached
+
+
+def _unsafe_folder_reason(*, path: Path) -> str | None:
+    """Why ``path`` could hold another account's modules, or None when only this user can change it."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return "missing"
+    if stat.S_ISLNK(st.st_mode):
+        return "symlink"
+    if not stat.S_ISDIR(st.st_mode):
+        return "not_a_folder"
+    if st.st_uid != os.getuid():
+        return "other_owner"
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return "writable_by_others"
+    return None
 
 
 def build_backend_env(

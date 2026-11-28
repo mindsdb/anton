@@ -27,6 +27,7 @@ from anton.core.datasources.data_vault import (
     withheld_from_env,
 )
 from anton.core.datasources.datasource_registry import DatasourceRegistry, _YAML_BLOCK_RE
+from anton.utils.private_dir import require_private_dir
 
 if TYPE_CHECKING:
     from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
@@ -1697,7 +1698,7 @@ def persist_custom_engine(
     )
     existing = remove_engine_block(existing, slug)
 
-    user_ds_path.parent.mkdir(parents=True, exist_ok=True)
+    require_private_dir(path=user_ds_path.parent)
     tmp_path.write_text(existing + yaml_block, encoding="utf-8")
 
     parsed = registry.validate_file(tmp_path)

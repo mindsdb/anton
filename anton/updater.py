@@ -11,6 +11,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from anton.utils.private_dir import require_private_dir
+
 
 _TOTAL_TIMEOUT = 10  # Hard ceiling — update check never blocks startup longer than this
 
@@ -131,7 +133,12 @@ def _check_and_update(result: dict, settings) -> None:
         # Remember this tag so we don't force-reinstall it again next launch
         # (see _SKIP_MARKER) \u2014 that repeated reinstall is what bricks installs.
         try:
-            _SKIP_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            # The marker holds only a public release tag, so a folder that
+            # cannot be made private (a link, another owner) must not stop it.
+            try:
+                require_private_dir(path=_SKIP_MARKER.parent, follow_link=True)
+            except OSError:
+                _SKIP_MARKER.parent.mkdir(parents=True, exist_ok=True)
             _SKIP_MARKER.write_text(latest_tag)
         except Exception:
             pass

@@ -412,8 +412,10 @@ def get_installation_id() -> str:
             if path.is_file():
                 _cached_aid = path.read_text(encoding="utf-8").strip()[:16]
             else:
+                from anton.utils.private_dir import require_private_dir
+
                 _cached_aid = uuid.uuid4().hex[:16]
-                path.parent.mkdir(parents=True, exist_ok=True)
+                require_private_dir(path=path.parent, follow_link=True)
                 path.write_text(_cached_aid + "\n", encoding="utf-8")
         else:
             _cached_aid = hashlib.sha256(str(node).encode()).hexdigest()[:16]

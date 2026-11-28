@@ -4,10 +4,13 @@ import json
 import logging
 import os
 import re
+import stat
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+from anton.utils.private_dir import anton_home, require_private_dir, write_private_text
 
 logger = logging.getLogger(__name__)
 
@@ -225,14 +228,24 @@ class LocalDataVault:
     """File-based credential store in ~/.anton/data_vault/."""
 
     def __init__(self, vault_dir: Path | None = None) -> None:
+        # The default folder sits in ~/.anton, which holds keys and memory too,
+        # so ~/.anton is made private before the vault is.
+        self._in_anton_home = vault_dir is None
         self._dir = vault_dir or Path("~/.anton/data_vault").expanduser()
 
     def _path_for(self, engine: str, name: str) -> Path:
         return self._dir / f"{_sanitize(engine)}-{_sanitize(name)}"
 
     def _ensure_dir(self) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True)
-        self._dir.chmod(0o700)
+        if self._in_anton_home:
+            anton_home()
+        if self._dir.is_symlink() and os.name != "nt":
+            # A user-selected vault link keeps its target's mode. Each record
+            # is private from creation, even when the target allows listing.
+            target = self._dir.stat()
+            if stat.S_ISDIR(target.st_mode) and target.st_uid == os.getuid() and not target.st_mode & 0o022:
+                return
+        require_private_dir(path=self._dir, follow_link=self._in_anton_home)
 
     def save(
         self,
@@ -269,10 +282,7 @@ class LocalDataVault:
             # Stable order so the on-disk JSON diffs cleanly across
             # updates that don't change the secret-set membership.
             data["secure_keys"] = sorted(set(secure_keys))
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.chmod(0o600)
-        tmp.replace(path)
+        write_private_text(path, json.dumps(data, indent=2))
         return path
 
     def load(self, engine: str, name: str) -> dict[str, str] | None:

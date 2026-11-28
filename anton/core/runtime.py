@@ -59,6 +59,7 @@ async def build_chat_session(
     *,
     session_id: str,
     workspace_path: Optional[str] = None,
+    private_workspace: bool = False,
     model: Optional[str] = None,
     extra_tools: Optional[Sequence[Any]] = None,
     system_prompt_suffix: Optional[str] = None,
@@ -77,6 +78,8 @@ async def build_chat_session(
         Stable id used for episodic-memory resume + history-store load.
     workspace_path
         Project workspace root. None → current working directory.
+    private_workspace
+        Desktop hosts can opt in to user-only project permissions. Managed mounts retain their modes by default.
     model
         Override planning model on the resolved settings.
     extra_tools
@@ -108,6 +111,7 @@ async def build_chat_session(
     from anton.core.memory.hippocampus import Hippocampus
     from anton.core.session import ChatSession, ChatSessionConfig, SystemPromptContext
     from anton.memory.history_store import HistoryStore
+    from anton.utils.private_dir import anton_home
     from anton.workspace import Workspace
 
     try:
@@ -122,7 +126,7 @@ async def build_chat_session(
         settings.planning_model = model
 
     workspace = Workspace(base)
-    workspace.initialize()
+    workspace.initialize(private=private_workspace)
     workspace.apply_env_to_process()
 
     anton_dir = base / ".anton"
@@ -136,7 +140,10 @@ async def build_chat_session(
     llm_client = LLMClient.from_settings(settings)
     self_awareness = SelfAwarenessContext(context_dir)
 
-    global_memory_dir = Path.home() / ".anton" / "memory"
+    # A managed host keeps the operator's modes for the home, as it does for
+    # the project (`private_workspace`); desktop hosts get a private home.
+    home = anton_home() if private_workspace else Path.home() / ".anton"
+    global_memory_dir = home / "memory"
     global_memory_dir.mkdir(parents=True, exist_ok=True)
     cortex = Cortex(
         global_hc=Hippocampus(global_memory_dir),
