@@ -1180,6 +1180,16 @@ _CHECK_NOTE = "[Automatic completion check, not written by the user]"
 # How anton's notes open. "SYSTEM:" stays for histories saved before the notes were labelled.
 _NOTE_PREFIXES = ("SYSTEM:", _CHECK_NOTE, ANTON_NOTE)
 
+# Stop reasons that mean the provider refused the reply, so its text is the provider's
+# refusal ("I'm sorry, but I cannot assist with that request."), not an answer.
+_REFUSED_STOP_REASONS = ("content_filter", "refusal")
+
+
+def _reply_answers(*, response: LLMResponse) -> bool:
+    """Whether a reply is an answer the turn can end on: it has text, and no refusal stopped it."""
+    return bool((response.content or "").strip()) and response.stop_reason not in _REFUSED_STOP_REASONS
+
+
 # Appended to the work-limit pauses: a turn stopped mid-search filled the gap with a guess.
 _NO_GUESS_AT_LIMIT = (
     "Report only what your tool results actually showed. If you have not found the "
@@ -4758,7 +4768,9 @@ class ChatSession:
             # and an anton bug alike — indistinguishable in any query.
             tc.error_type = _safe_error_type(exc)
         elif tc.content_filtered:
-            # Wins over a hand-back's reason, so a client can tell the filter fired and rerun.
+            # A filtered reply wins over a hand-back's reason, so a client can tell the
+            # filter stopped the reply and rerun. A filtered diagnosis after an answer
+            # never marks the turn (`_stream_handback_diagnosis`).
             tc.ended_by = "content_filter"
 
         # Stamped at books-open; the live lookup remains only for bare-session
@@ -5707,13 +5719,17 @@ class ChatSession:
         hand-back so no consumer mistakes this diagnosis for the replacement
         answer that boundary promised.
 
-        `answered` says the reply before the diagnosis has text; the tool-loop
-        stops have none. A diagnosis the provider's content filter stops is
-        dropped; with no answer to end on, it is tried once more. When that try
-        is filtered too, anton streams and saves the report `_handback_report`
-        builds instead of calling the model a third time, so the user still
-        reads where the turn stopped. The filtered calls already marked the
-        turn, so it still ends `content_filter`.
+        `answered` says the reply before the diagnosis is an answer
+        (`_reply_answers`); the tool-loop stops have none. A diagnosis the
+        provider's content filter stops is dropped; with no answer to end on, it
+        is tried once more. When that try is filtered too, anton streams and
+        saves the report `_handback_report` builds instead of calling the model
+        a third time, so the user still reads where the turn stopped. With no
+        answer, the diagnosis stands in for the reply, so its filtered calls
+        mark the turn and it still ends `content_filter`. After an answer, a
+        filtered diagnosis doesn't mark the turn, and a diagnosis call that
+        fails is dropped too: the turn ends on the answer with the caller's
+        reason.
 
         `limit` names the limit that stopped the turn, if one did; the report
         opens with `_limit_reached`'s sentence for it.
@@ -5733,7 +5749,10 @@ class ChatSession:
             # last event, after the text has streamed.
             held_text: list[StreamTextDelta] = []
             filtered = False
-            stream = self.plan_stream_with_recovery(system=system)
+            # After an answer, this call's filter result is about the diagnosis, not
+            # the turn's reply, so it doesn't mark the turn. With no answer, the
+            # diagnosis is the reply, and a filtered one marks the turn as before.
+            stream = self.plan_stream_with_recovery(system=system, book_filter=not answered)
             try:
                 async for event in stream:
                     if isinstance(event, StreamTextDelta):
@@ -5756,6 +5775,23 @@ class ChatSession:
                                 yield delta
                         held_text = []
                     yield event
+            except Exception as exc:
+                # The errors the turn handler re-raises for the host's cards still
+                # end the turn: the person has to act on each one.
+                if not answered or _is_provider_auth_error(exc) or isinstance(
+                    exc, (TokenLimitExceeded, ModelUnavailableError, EndpointConfigurationError)
+                ):
+                    raise
+                # Raised on, the turn handler would run the agent again on a history
+                # that ends on this note, and that call's text streams live after the
+                # answer. The held text never streamed, so dropping it ends the turn
+                # on the answer.
+                log.warning(
+                    "hand-back diagnosis call failed after an answer; dropped, "
+                    "the turn ends on the answer"
+                )
+                self._drop_handback_note()
+                return
             finally:
                 await stream.aclose()
             if not filtered:
@@ -5814,6 +5850,7 @@ class ChatSession:
         wait_note: str | None = None,
         messages_factory: Callable[[], list[dict]] | None = None,
         allow_native_web_tools: bool = True,
+        book_filter: bool = True,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming analogue of plan_with_recovery.
 
@@ -5831,6 +5868,11 @@ class ChatSession:
         search could carry file paths or user content from it to a search
         backend. That call needs this method for the COMPACTION, not for the
         capabilities that ride along with it.
+
+        ``book_filter=False`` keeps a content-filter stop on this call from
+        marking the turn (`_book_content_filter`). Only a hand-back diagnosis
+        after an answer passes it, since that call's filter result says nothing
+        about the answer.
         """
         factory = messages_factory if messages_factory is not None else (lambda: self._history)
         # Same defensive pre-flight as plan_with_recovery — see the
@@ -5852,7 +5894,8 @@ class ChatSession:
 
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
-                self._book_content_filter(event)
+                if book_filter:
+                    self._book_content_filter(event)
                 self._confirm_user_inputs_read(event)
                 yield event
             return
@@ -5869,7 +5912,8 @@ class ChatSession:
             )
         try:
             async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
-                self._book_content_filter(event)
+                if book_filter:
+                    self._book_content_filter(event)
                 self._confirm_user_inputs_read(event)
                 yield event
             return
@@ -5881,7 +5925,8 @@ class ChatSession:
             message="Context still exceeded limits — older history was hard-truncated."
         )
         async for event in self._llm.plan_stream(messages=factory_validated(), **kwargs):
-            self._book_content_filter(event)
+            if book_filter:
+                self._book_content_filter(event)
             self._confirm_user_inputs_read(event)
             yield event
 
@@ -5892,6 +5937,9 @@ class ChatSession:
             and event.response.stop_reason == "content_filter"
             and self._turn_cost is not None
         ):
+            logger.warning(
+                "model call stopped by the provider's content filter; the turn ends content_filter"
+            )
             self._turn_cost.content_filtered = True
 
     def _acc_observe(
@@ -8463,7 +8511,7 @@ class ChatSession:
                         message="Reached this task's time limit — checking in with you...",
                     )
                     async for event in self._stream_handback_diagnosis(
-                        system=system, label="time-limit", answered=bool(reply.strip()),
+                        system=system, label="time-limit", answered=_reply_answers(response=llm_response),
                         cancels_continuation=self._continuation_pending, limit="time_limit",
                     ):
                         yield event
@@ -8600,7 +8648,7 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_budget"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="budget-exhausted", answered=bool(reply.strip()),
+                    system=system, label="budget-exhausted", answered=_reply_answers(response=llm_response),
                     cancels_continuation=self._continuation_pending,
                 ):
                     yield event
@@ -8624,9 +8672,10 @@ class ChatSession:
             # verdict attempt per window — which for a truncation is the whole
             # ladder, two calls, not one. See `_reprobe_turns_for` for why the
             # window depends on what failed last. A re-probe hitting a typed
-            # TransientProviderError still falls through to the honest
-            # diagnosis and leaves the latch set — those never latch by
-            # definition, so only a successful verdict clears it.
+            # TransientProviderError ends the turn on its answer, unverified, or
+            # falls through to the honest diagnosis when there is none, and
+            # leaves the latch set — those never latch by definition, so only a
+            # successful verdict clears it.
             if self._verifier_latch.latched:
                 self._verifier_latch.skips += 1
                 reprobe_turns = _reprobe_turns_for(self._verifier_latch.last_no_verdict)
@@ -8790,9 +8839,10 @@ class ChatSession:
                     # capability. A transient failure is the opposite claim:
                     # retryable, and typed ones are already retried upstream
                     # (ENG-673). Counting them would let two provider blips
-                    # disable verification for a whole re-probe window. The turn
-                    # still gets its honest diagnosis (ENG-1079); it just doesn't
-                    # latch. See `_TRANSIENT_VERDICT_ERRORS` for what qualifies.
+                    # disable verification for a whole re-probe window. After an
+                    # answer, the turn ends on it, unverified; with no answer, it
+                    # gets the honest diagnosis. Either way it doesn't latch. See
+                    # `_TRANSIENT_VERDICT_ERRORS` for what qualifies.
                     verdict_failure = "transient"
                     verdict_exc = exc
                     logger.warning(
@@ -8883,6 +8933,21 @@ class ChatSession:
                         "already-streamed reply"
                     )
                     # Unverified turn — see the latched-skip stamp above.
+                    if self._turn_cost is not None:
+                        self._turn_cost.verification_skipped = True
+                    break
+                if verdict_failure == "transient" and _reply_answers(response=llm_response):
+                    # The provider failed the verdict call, often a rate limit, after
+                    # the answer streamed. The turn ends quietly on that answer,
+                    # unverified, as for a deadline above. A diagnosis would be one
+                    # more call to the provider that just failed, and its content
+                    # filter or its error would then decide how an answered turn
+                    # ends. The latch is left alone: a provider error says nothing
+                    # about whether this model can produce a verdict.
+                    logger.warning(
+                        "completion-verifier got no verdict after a provider error; "
+                        "the turn ends on the streamed answer, unverified"
+                    )
                     if self._turn_cost is not None:
                         self._turn_cost.verification_skipped = True
                     break
@@ -8986,7 +9051,7 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_verifier_failure"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="verifier-failure", answered=bool(reply.strip()),
+                    system=system, label="verifier-failure", answered=_reply_answers(response=llm_response),
                     cancels_continuation=self._continuation_pending,
                 ):
                     yield event
@@ -9026,7 +9091,7 @@ class ChatSession:
                 if self._turn_cost is not None:
                     self._turn_cost.ended_by = "handback_stuck"
                 async for event in self._stream_handback_diagnosis(
-                    system=system, label="stuck", answered=bool(reply.strip()),
+                    system=system, label="stuck", answered=_reply_answers(response=llm_response),
                     cancels_continuation=self._continuation_pending,
                 ):
                     yield event
@@ -9085,7 +9150,7 @@ class ChatSession:
                         message="Reached this task's token budget — checking in with you...",
                     )
                     async for event in self._stream_handback_diagnosis(
-                        system=system, label="spend-ceiling", answered=bool(reply.strip()),
+                        system=system, label="spend-ceiling", answered=_reply_answers(response=llm_response),
                         cancels_continuation=self._continuation_pending, limit="spend_ceiling",
                     ):
                         yield event
@@ -9113,7 +9178,7 @@ class ChatSession:
                         message="Reached this task's time limit — checking in with you...",
                     )
                     async for event in self._stream_handback_diagnosis(
-                        system=system, label="time-limit", answered=bool(reply.strip()),
+                        system=system, label="time-limit", answered=_reply_answers(response=llm_response),
                         cancels_continuation=self._continuation_pending, limit="time_limit",
                     ):
                         yield event
