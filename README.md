@@ -307,9 +307,24 @@ A request with no `skills` block at all stages no skills, with one rollout fallb
 
 The write check asks the person to approve a cell before it changes a database, a listed endpoint or an existing file. A card on a cell that writes nothing costs a click, or an unattended answer the whole card timeout, so the check is measured both ways: what it catches and what it asks about for no reason.
 
+A cell that runs code the check can't read gets the "This step can't be checked" card. A script the step saves or binds from a literal and runs is the exception. The check reads its text, and a local pad runs only that text (`CellWrites.run_code`). Python runs the file through a prelude, which stops the run unless the file holds that text, in a folder the check read, and the script's own folder is the one it read. Unlike a file run, `__file__` and `__cached__` are unset, `__loader__` is `BuiltinImporter`, a traceback starts with a `<string>` frame, and `sys.path[0]` is the script's own folder, as in a file run. So a script that writes nothing gets no card.
+
+The step stays unchecked when:
+
+- the text isn't one literal the step saved or bound before the run;
+- an earlier step ran unread code, or a script as written;
+- a cell rebinds what the run calls, such as `subprocess.run`, `sys` or `exec`, or sets `PATH` for a bare `python`;
+- the run passes more words, `env=` or `shell=`;
+- the path lies in a temp folder or is picked at run time, or it or `cwd=` is a link;
+- the step runs or reads a saved file, and a cell calls `os.chdir` or sets a start-up setting such as `PYTHONPATH`;
+- the script defines a class, writes a path the check can't place, or names `chdir` or `multiprocessing`;
+- `exec()` gets a namespace other than `globals()` or a dict literal with string keys.
+
+Other routes, such as `sys.settrace`, still free a script, as under `python -c`. Under `write_approval_unchecked: all`, an unchecked step runs as written on Approve.
+
 With write approval on (`ANTON_WRITE_APPROVAL`, off by default), the page builder (`generate_artifact`) never shows a write card. Its cells go through the same check, but where the check would show a card, the builder's cell doesn't run: the builder gets a "Not run:" result, and no card appears. A builder cell the check lets run still runs, as a chat cell would: one that `write_approval_unchecked` frees, and a change the check doesn't hold, such as an append or a new file. The builder works from the data it could read and the data the chat already has, and its result names each step it skipped. Whatever the setting, the builder never resets or removes a scratchpad: it works in the chat's scratchpads, and a reset would clear the chat's variables and the earlier cells the check reads. A cell the chat agent runs keeps its card.
 
-`scripts/write_check_replay.py` replays `tests/fixtures/write_check_replay_corpus.yaml` through one anton tree's write check, cell by cell with each chat's earlier cells. The corpus holds about 100 synthetic analysis chats. They mix pandas, SQL reads, helper modules, restarts between turns, page builds and real writes, and each cell is labeled by hand. Each must-hold cell is paired with must-stay-free cells that share its `pair` id. The replay prints cards per 100 cells and per 100 questions by kind, real writes carded, cards on cells that write nothing, each pair's result, and the causes the cards name. It takes a few seconds:
+`scripts/write_check_replay.py` replays `tests/fixtures/write_check_replay_corpus.yaml` through one anton tree's write check, cell by cell with each chat's earlier cells. The corpus holds about 130 synthetic analysis chats. They mix pandas, SQL reads, helper modules, restarts between turns, page builds and real writes, and each cell is labeled by hand. Each must-hold cell is paired with must-stay-free cells that share its `pair` id. The replay prints cards per 100 cells and per 100 questions by kind, real writes carded, cards on cells that write nothing, each pair's result, and the causes the cards name. It takes a few seconds:
 
 ```bash
 uv run python -I scripts/write_check_replay.py                         # this tree
@@ -317,7 +332,7 @@ uv run python -I scripts/write_check_replay.py --tree /path/to/other/anton --com
 uv run python -I scripts/write_check_replay.py --tree . --compare other.json   # exit 1 on a lost hold or more noise
 ```
 
-It runs any anton commit's write check, the older `earlier_code=` form included. It exits 2 when it refuses to score: Python imported the check from anywhere but `--tree`, it can't import one there, or `--compare` got a scorecard of another corpus. A failed `--compare` exits 1. `--accept <yaml>` maps cells that write nothing and may newly ask to the reason each must, under `no_write_cards`; `--compare` doesn't count those cards against the base. A lost real-write card can't be accepted. A check that raises counts as a card, as it does in a session. `--code-root` passes the project folder as a local pad's `code_root` on a tree that takes it.
+It runs any anton commit's write check, the older `earlier_code=` form included. It exits 2 when it refuses to score: Python imported the check from anywhere but `--tree`, it can't import one there, or `--compare` got a scorecard of another corpus. A failed `--compare` exits 1. `--accept <yaml>` maps cells that write nothing and may newly ask to the reason each must, under `no_write_cards`; `--compare` doesn't count those cards against the base. A lost real-write card can't be accepted. A check that raises counts as a card, as it does in a session. `--code-root` passes the project folder as a local pad's `code_root` on a tree that takes it. A tree whose check takes `swaps` gets it, as a local pad runs the code the check hands it.
 
 Every cell has an `id`, its key in scorecards and the budget: the chat's code and a number. A new cell takes its chat's next free number, so no other key moves.
 

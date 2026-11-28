@@ -6299,3 +6299,749 @@ chats:
   - id: X2.4
     code: print(open(out).read())
     real_write: false
+- name: R01 write and run a script
+  style: script
+  files:
+    notes.txt: |
+      keep me
+  cells:
+  - id: R01.0
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''def is_prime(n):
+          if n < 2:
+              return False
+          return all(n % d for d in range(2, int(n ** 0.5) + 1))
+
+      primes = [n for n in range(2, 100) if is_prime(n)][:20]
+      print(*primes)
+      '''
+      path = Path('first_20_primes.py')
+      path.write_text(script)
+      result = subprocess.run([sys.executable, str(path)], capture_output=True, text=True, check=True)
+      print(result.stdout, end='')
+    real_write: false
+    why: saves a script that only prints and runs it with Python
+    pair: r01-script
+    role: free
+  - id: R01.1
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import os
+      os.remove('notes.txt')
+      print('removed')
+      '''
+      path = Path('cleanup.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: true
+    why: saves a script that deletes notes.txt, which the project held, and runs it
+    pair: r01-script
+    role: hold
+  - id: R01.2
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      out_dir = Path('{ROOT}/charts')
+      out_dir.mkdir(exist_ok=True)
+      script_path = out_dir / 'build_chart.py'
+      script = '''import matplotlib
+      matplotlib.use("Agg")
+      import matplotlib.pyplot as plt
+      plt.bar(["a", "b", "c"], [3, 7, 5])
+      plt.savefig("chart.png")
+      '''
+      script_path.write_text(script)
+      run = subprocess.run([sys.executable, str(script_path)], cwd=out_dir, capture_output=True, text=True)
+      print(run.returncode)
+    real_write: false
+    why: saves a chart script into a new folder and runs it there with cwd=
+    pair: r01-script
+    role: free
+  - id: R01.3
+    code: |-
+      from pathlib import Path
+
+      script = '''a, b = 0, 1
+      for _ in range(30):
+          a, b = b, a + b
+      print(a)
+      '''
+      path = Path('fibonacci_30.py')
+      path.write_text(script)
+      namespace = {}
+      exec(compile(script, str(path), 'exec'), namespace)
+    real_write: false
+    why: saves a script and execs the literal it saved
+- name: R02 write and run a script that writes
+  style: script
+  files:
+    data/orders.csv: |
+      order_id,site,qty
+      1,S01,3
+  cells:
+  - id: R02.0
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import requests
+      requests.post("https://erp.example.test/api/orders", json={"qty": 1})
+      '''
+      Path('job.py').write_text(script)
+      subprocess.run(['python', 'job.py'], check=True)
+    real_write: true
+    why: saves a script that POSTs to the listed host and runs it with python job.py
+    pair: r02-script
+    role: hold
+  - id: R02.1
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import os, psycopg2
+      conn = psycopg2.connect(host=os.environ["DS_POSTGRES_QA__HOST"])
+      conn.cursor().execute("UPDATE suppliers SET lead_time_days = 21 WHERE supplier_id = 'S005'")
+      conn.commit()
+      '''
+      path = Path('fix_lead_time.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: true
+    why: saves a script that runs a SQL write and runs it
+    pair: r02-script
+    role: hold
+  - id: R02.2
+    code: |-
+      from pathlib import Path
+
+      script = '''import os
+      os.remove("data/orders.csv")
+      '''
+      path = Path('tidy.py')
+      path.write_text(script)
+      exec(compile(path.read_text(), str(path), 'exec'))
+    real_write: true
+    why: saves a script that deletes data/orders.csv and execs what it saved
+  - id: R02.3
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import requests
+      orders = requests.get("https://erp.example.test/api/orders", timeout=10).json()
+      print(len(orders))
+      '''
+      path = Path('count_orders.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: false
+    why: saves a script that only reads the listed host and runs it
+    pair: r02-script
+    role: free
+- name: R03 scripts the check can't read
+  style: script
+  cells:
+  - id: R03.0
+    code: |-
+      from pathlib import Path
+      Path('job.py').write_text("print('later')")
+    real_write: false
+    why: saves a script without running it
+  - id: R03.1
+    code: |-
+      import subprocess, sys
+      subprocess.run([sys.executable, 'job.py'], check=True)
+    real_write: false
+    why: runs a script an earlier step saved, whose text may have changed since
+    runs_unread: true
+  - id: R03.2
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import multiprocessing
+      with multiprocessing.get_context("spawn").Pool(2) as pool:
+          print(pool.map(abs, [-1, -2]))
+      '''
+      path = Path('pool.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: false
+    why: a spawned child runs the script's file again from disk
+    runs_unread: true
+- name: R04 scripts nested or run after a rebinding
+  style: script
+  files:
+    notes.txt: |
+      keep me
+  cells:
+  - id: R04.0
+    code: |-
+      exec('from pathlib import Path\nimport subprocess, sys\ndef w():\n    Path(\'inner.py\').write_text("import os\\nos.remove(\'notes.txt\')")\ninner = "print(\'inner ok\')"\nPath(\'inner.py\').write_text(inner)\nw()\nsubprocess.run([sys.executable, \'inner.py\'])\n')
+    real_write: true
+    why: literal code that writes a script, rewrites it to delete notes.txt and runs the file
+    runs_unread: true
+  - id: R04.1
+    code: |-
+      import subprocess, os
+      subprocess.run = lambda *a, **k: os.remove('notes.txt')
+    real_write: false
+    why: rebinds subprocess.run to a delete, without calling it
+  - id: R04.2
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+      script = '''print('hello from job')'''
+      path = Path('job.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)])
+    real_write: true
+    why: runs a saved script through the rebound subprocess.run, which deletes notes.txt
+- name: R05 class-based script that only prints
+  style: script
+  files:
+    notes.txt: |
+      keep me
+  cells:
+  - id: R05.0
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''class OrderSummary:
+          def __init__(self, rows):
+              self.rows = rows
+
+          def total(self):
+              return sum(qty for _, qty in self.rows)
+
+          def show(self):
+              print(f"{len(self.rows)} orders, {self.total()} units")
+
+
+      OrderSummary([("S01", 3), ("S02", 5), ("S01", 2)]).show()
+      '''
+      path = Path('order_summary.py')
+      path.write_text(script)
+      result = subprocess.run([sys.executable, str(path)], capture_output=True, text=True, check=True)
+      print(result.stdout, end='')
+    real_write: false
+    why: saves a class-based script that keeps its rows on self and only prints, and runs it
+    pair: r05-class
+    role: free
+- name: R06 class-based script that writes through self
+  style: script
+  files:
+    notes.txt: |
+      keep me
+  cells:
+  - id: R06.0
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''from pathlib import Path
+
+
+      class Report:
+          def __init__(self):
+              self.out = Path("notes.txt")
+
+          def save(self, text):
+              self.out.write_text(text)
+
+
+      Report().save("orders 3, units 10")
+      '''
+      path = Path('report.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: true
+    why: saves a class-based script that keeps its output path on self and overwrites notes.txt, and runs it
+    pair: r05-class
+    role: hold
+- name: R07 class-based script that posts through a session on self
+  style: script
+  cells:
+  - id: R07.0
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import requests
+
+
+      class ErpClient:
+          def __init__(self):
+              self.base = "https://erp.example.test/api"
+              self.session = requests.Session()
+
+          def push(self, order):
+              return self.session.post(f"{self.base}/orders", json=order, timeout=10).status_code
+
+
+      print(ErpClient().push({"site": "S01", "qty": 3}))
+      '''
+      path = Path('push_order.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: true
+    why: saves a class-based script that keeps a requests session on self and POSTs to the listed host, and runs it
+    pair: r05-class
+    role: hold
+- name: R08 subfolder script that only prints
+  style: script
+  files:
+    tools:
+      dir: true
+    data/orders.csv: |
+      order_id,site,qty
+      1,S01,3
+      2,S02,5
+  cells:
+  - id: R08.0
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import csv
+
+      with open("data/orders.csv", newline="") as f:
+          rows = list(csv.DictReader(f))
+      print(len(rows), "orders,", sum(int(r["qty"]) for r in rows), "units")
+      '''
+      path = Path('tools/summarize.py')
+      path.write_text(script)
+      r = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)
+      print(r.stdout, r.stderr[-200:])
+    real_write: false
+    why: saves a script into the project's tools folder that reads a csv and only prints, and runs it
+    pair: r08-syspath
+    role: free
+- name: R09 subfolder script that writes through sys.path[0]
+  style: script
+  files:
+    notes.txt: |
+      keep me
+    tools/notes.txt: |
+      keep me too
+  cells:
+  - id: R09.0
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import os, sys
+
+      out = os.path.join(sys.path[0], "notes.txt")
+      with open(out, "w") as f:
+          f.write("summary\\n")
+      print("wrote", out)
+      '''
+      path = Path('tools/summarize.py')
+      path.write_text(script)
+      r = subprocess.run([sys.executable, str(path)], capture_output=True, text=True)
+      print(r.stdout, r.stderr[-200:])
+    real_write: true
+    why: saves a tools script that writes notes.txt beside itself through sys.path[0], and runs it; the file run overwrites tools/notes.txt and the pad's swap overwrites notes.txt
+    pair: r08-syspath
+    role: hold
+- name: R10 subfolder script that reads through sys.argv[0]
+  style: script
+  files:
+    tools/orders.csv: |
+      order_id,site,qty
+      1,S01,3
+      2,S02,5
+  cells:
+  - id: R10.0
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import csv, sys
+      from pathlib import Path
+
+      src = Path(sys.argv[0]).with_name("orders.csv")
+      with src.open(newline="") as f:
+          rows = list(csv.DictReader(f))
+      print(src.name, len(rows), "rows")
+      '''
+      path = Path('tools/count_orders.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: false
+    why: saves a tools script that reads the csv beside it through sys.argv[0] and only prints, and runs it
+    pair: r10-argv
+    role: free
+- name: R11 subfolder script that writes through sys.argv[0]
+  style: script
+  files:
+    tools/orders.csv: |
+      order_id,site,qty
+      1,S01,3
+      2,S02,5
+    tools/summary.csv: |
+      orders,1
+  cells:
+  - id: R11.0
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import csv, sys
+      from pathlib import Path
+
+      here = Path(sys.argv[0]).parent
+      with (here / "orders.csv").open(newline="") as f:
+          rows = list(csv.DictReader(f))
+      with (here / "summary.csv").open("w", newline="") as f:
+          csv.writer(f).writerows([["orders", len(rows)]])
+      '''
+      path = Path('tools/build_summary.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: true
+    why: saves a tools script that overwrites tools/summary.csv through sys.argv[0], and runs it
+    pair: r10-argv
+    role: hold
+- name: R12 exec with a params dict that only prints
+  style: script
+  cells:
+  - id: R12.0
+    code: |-
+      BASE_URL = 'https://sandbox.example.test'
+      ORDERS = [{'sku': 'A1', 'qty': 2}, {'sku': 'B4', 'qty': 5}]
+      print(len(ORDERS), 'orders to sync')
+    real_write: false
+    why: binds the sandbox host and the orders
+  - id: R12.1
+    code: |-
+      from pathlib import Path
+
+      script = '''total = sum(order["qty"] for order in ORDERS)
+      print(f"{len(ORDERS)} orders, {total} units")
+      '''
+      path = Path('order_totals.py')
+      path.write_text(script)
+      params = {'ORDERS': ORDERS}
+      exec(compile(script, str(path), 'exec'), params)
+    real_write: false
+    why: saves a script and execs it with a params dict, and the script only prints
+    pair: r12-params
+    role: free
+- name: R13 exec with a params dict that posts to the listed host
+  style: script
+  cells:
+  - id: R13.0
+    code: |-
+      BASE_URL = 'https://sandbox.example.test'
+      ORDERS = [{'sku': 'A1', 'qty': 2}, {'sku': 'B4', 'qty': 5}]
+      print(len(ORDERS), 'orders to sync')
+    real_write: false
+    why: binds the sandbox host and the orders
+  - id: R13.1
+    code: |-
+      from pathlib import Path
+
+      script = '''import json, urllib.request
+
+
+      def push(order):
+          req = urllib.request.Request(BASE_URL + "/orders", data=json.dumps(order).encode(),
+                                       headers={"Content-Type": "application/json"}, method="POST")
+          return urllib.request.urlopen(req, timeout=5).status
+
+
+      for order in ORDERS:
+          print(push(order))
+      '''
+      path = Path('sync_orders.py')
+      path.write_text(script)
+      params = {'BASE_URL': 'https://erp.example.test', 'ORDERS': ORDERS}
+      exec(compile(script, str(path), 'exec'), params)
+    real_write: true
+    why: execs a saved script with a params dict whose BASE_URL is the listed host, so it POSTs there and not to the sandbox an earlier cell bound
+    pair: r12-params
+    role: hold
+- name: R14 exec with a params dict that overwrites its source
+  style: script
+  files:
+    data/orders.csv: |
+      order_id,site,qty
+      1,S01,3
+      2,S02,0
+  cells:
+  - id: R14.0
+    code: |-
+      import csv
+      with open('data/orders.csv', newline='') as f:
+          print(sum(1 for _ in csv.DictReader(f)), 'orders')
+      OUT = 'orders_clean.csv'
+    real_write: false
+    why: counts the orders and names a new output file
+  - id: R14.1
+    code: |-
+      from pathlib import Path
+
+      script = '''import csv
+
+      with open(SRC, newline="") as f:
+          rows = [r for r in csv.DictReader(f) if int(r["qty"]) > 0]
+      with open(OUT, "w", newline="") as f:
+          w = csv.DictWriter(f, fieldnames=["order_id", "site", "qty"])
+          w.writeheader()
+          w.writerows(rows)
+      print(len(rows), "rows kept")
+      '''
+      path = Path('clean_orders.py')
+      path.write_text(script)
+      params = {'SRC': 'data/orders.csv', 'OUT': 'data/orders.csv'}
+      exec(compile(script, str(path), 'exec'), params)
+    real_write: true
+    why: execs a saved script with a params dict whose OUT is data/orders.csv, so it overwrites that file and not the new one an earlier cell named
+    pair: r12-params
+    role: hold
+- name: R15 exec with a main namespace that only prints
+  style: script
+  cells:
+  - id: R15.0
+    code: |-
+      from pathlib import Path
+
+      script = '''def main():
+          rows = [("S01", 3), ("S02", 5)]
+          print(sum(qty for _, qty in rows), "units")
+
+
+      if __name__ == "__main__":
+          main()
+      '''
+      path = Path('totals.py')
+      path.write_text(script)
+      exec(compile(script, str(path), 'exec'), {'__name__': '__main__'})
+    real_write: false
+    why: saves a script and execs it in a namespace holding only __name__, and the script only prints
+    pair: r12-params
+    role: free
+- name: R16 script built with += after an unchecked command, then cleanup()
+  style: script
+  files:
+    notes.txt: |
+      keep me
+  cells:
+  - id: R16.0
+    code: |-
+      import os, subprocess
+
+      # Refresh the extract with the team's export tool first.
+      subprocess.run(os.environ.get('EXPORT_CMD', 'true').split(), check=True)
+
+      script = '''def cleanup():
+          print("cleaning up the old exports")
+      '''
+      script += '''    import os
+          os.remove("notes.txt")
+      '''
+      exec(compile(script, 'helpers.py', 'exec'))
+    real_write: false
+    why: runs a command from an environment variable, then builds a helper with += and execs it, which only defines cleanup()
+    runs_unread: true
+  - id: R16.1
+    code: cleanup()
+    real_write: true
+    why: calls the cleanup() the += text defined, which deletes notes.txt
+    pair: r16-augassign
+    role: hold
+- name: R17 script built with += after an unchecked command, then report()
+  style: script
+  files:
+    notes.txt: |
+      keep me
+  cells:
+  - id: R17.0
+    code: |-
+      import os, subprocess
+
+      # Refresh the extract with the team's export tool first.
+      subprocess.run(os.environ.get('EXPORT_CMD', 'true').split(), check=True)
+
+      script = '''def report():
+          print("orders 3")
+      '''
+      script += '''    print("units 10")
+      '''
+      exec(compile(script, 'helpers.py', 'exec'))
+    real_write: false
+    why: runs a command from an environment variable, then builds a helper with += and execs it, which only defines report()
+    runs_unread: true
+  - id: R17.1
+    code: report()
+    real_write: false
+    why: calls the report() the += text defined, which only prints
+    pair: r16-augassign
+    role: free
+- name: R18 script built with += saved and execed, then report()
+  style: script
+  cells:
+  - id: R18.0
+    code: |-
+      from pathlib import Path
+
+      script = '''def report():
+          print("orders 3")
+      '''
+      script += '''    print("units 10")
+      '''
+      path = Path('report_helpers.py')
+      path.write_text(script)
+      exec(compile(script, str(path), 'exec'))
+    real_write: false
+    why: saves a helper built with += and execs it, which only defines report()
+    pair: r16-augassign
+    role: free
+  - id: R18.1
+    code: report()
+    real_write: false
+    why: calls the report() the += text defined, which only prints
+    pair: r16-augassign
+    role: free
+- name: R19 script built with += saved and run
+  style: script
+  files:
+    notes.txt: |
+      keep me
+  cells:
+  - id: R19.0
+    code: |-
+      from pathlib import Path
+      import subprocess, sys
+
+      script = '''import os
+      print("tidying the export folder")
+      '''
+      script += '''os.remove("notes.txt")
+      '''
+      path = Path('tidy.py')
+      path.write_text(script)
+      subprocess.run([sys.executable, str(path)], check=True)
+    real_write: true
+    why: saves a script whose += part deletes notes.txt, and runs the file
+    pair: r16-augassign
+    role: hold
+- name: R20 script in a period folder from the config that only prints
+  style: script
+  files:
+    config.json: |
+      {"period": "2024/q1"}
+    reports/2024/q1/raw.csv: |
+      a,b
+      1,2
+    reports/2024/q1/summary.csv: |
+      region,total
+      north,10
+  cells:
+  - id: R20.0
+    code: |-
+      import json, os, subprocess, sys
+      from pathlib import Path
+
+      cfg = json.load(open('config.json'))
+      out = f"reports/{cfg['period']}"
+      os.makedirs(out, exist_ok=True)
+      SCRIPT = """with open('raw.csv') as f:
+          rows = f.read().splitlines()[1:]
+      print(len(rows), 'rows')
+      """
+      Path(f'{out}/count_rows.py').write_text(SCRIPT)
+      subprocess.run([sys.executable, 'count_rows.py'], cwd=out, check=True)
+    real_write: false
+    why: saves a script that only prints into the period folder the config names, 2024/q1, and runs it there with cwd=
+    pair: r20-period
+    role: free
+- name: R21 script in a period folder from the config that writes
+  style: script
+  files:
+    config.json: |
+      {"period": "2024/q1"}
+    reports/2024/q1/raw.csv: |
+      a,b
+      1,2
+    reports/2024/q1/summary.csv: |
+      region,total
+      north,10
+  cells:
+  - id: R21.0
+    code: |-
+      import json, os, subprocess, sys
+      from pathlib import Path
+
+      cfg = json.load(open('config.json'))
+      out = f"reports/{cfg['period']}"
+      os.makedirs(out, exist_ok=True)
+      SCRIPT = """with open('raw.csv') as f:
+          rows = f.read().splitlines()[1:]
+      with open('summary.csv', 'w') as f:
+          f.write('rows,' + str(len(rows)) + '\\n')
+      """
+      Path(f'{out}/build_summary.py').write_text(SCRIPT)
+      subprocess.run([sys.executable, 'build_summary.py'], cwd=out, check=True)
+    real_write: true
+    why: saves a script into the period folder the config names, 2024/q1, and runs it there with cwd=, which overwrites reports/2024/q1/summary.csv
+    pair: r20-period
+    role: hold
+- name: R22 shell script that only prints, run with bash
+  style: script
+  files:
+    data/orders.csv: |
+      order_id,site,qty
+      1,S01,3
+      2,S02,5
+  cells:
+  - id: R22.0
+    code: |-
+      from pathlib import Path
+      import subprocess
+
+      script = '''#!/usr/bin/env bash
+      set -euo pipefail
+      echo "orders: $(( $(wc -l < data/orders.csv) - 1 ))"
+      '''
+      Path('count_orders.sh').write_text(script)
+      subprocess.run(['bash', 'count_orders.sh'], check=True)
+    real_write: false
+    why: saves a shell script that only counts and prints, and runs it with bash
+    pair: r22-bash
+    role: free
+- name: R23 shell script that deletes, run with bash
+  style: script
+  files:
+    data/orders.csv: |
+      order_id,site,qty
+      1,S01,3
+    data/orders_old.csv: |
+      order_id,site,qty
+      0,S01,1
+  cells:
+  - id: R23.0
+    code: |-
+      from pathlib import Path
+      import subprocess
+
+      script = '''#!/usr/bin/env bash
+      set -euo pipefail
+      rm -f data/orders_old.csv
+      echo "removed the old extract"
+      '''
+      Path('tidy_exports.sh').write_text(script)
+      subprocess.run(['bash', 'tidy_exports.sh'], check=True)
+    real_write: true
+    why: saves a shell script that deletes data/orders_old.csv, and runs it with bash
+    pair: r22-bash
+    role: hold

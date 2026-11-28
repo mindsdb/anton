@@ -13,6 +13,15 @@ CELL_DELIM = "__ANTON_CELL_END__"
 CELL_TRACE_MARKER = "__ANTON_CELL_TRACE__"
 RESULT_START = "__ANTON_RESULT__"
 RESULT_END = "__ANTON_RESULT_END__"
+# Optional first line of a cell, host to pad: a token the host makes for the
+# cell, which the pad writes after the start and end lines of the cell's
+# result (`result_markers`). A child process the cell starts writes to the
+# pad's stdout too, so the host reads only the result block that carries
+# the cell's token: a block a child prints, or the one the pad wrote for an
+# earlier cell, can't end the cell's read early or stand in for its result,
+# whose error and `stopped_at` the write check reads. Code that reads the
+# token out of the pad's own process can still write one.
+CELL_TOKEN_MARKER = "__ANTON_CELL_TOKEN__"
 PROGRESS_MARKER = "__ANTON_PROGRESS__"
 HEARTBEAT_MARKER = "__ANTON_HEARTBEAT__"
 STDOUT_CHUNK_MARKER = "__ANTON_STDOUT_CHUNK__"
@@ -105,6 +114,15 @@ BOOT_IMPORTS = frozenset({"anton", "contextlib", "dill", "io", "json", "logging"
 # line, so the host's write check (`_Reader.ran_before_stop`) reads none of
 # its names as bound, nor those of a cell that doesn't compile.
 NOTHING_KEPT = 1
+
+
+def result_markers(token: str | None) -> tuple[str, str]:
+    """The start and end lines of a cell's result block: each with the
+    cell's `token` after it (`CELL_TOKEN_MARKER`), or bare for a cell sent
+    without one."""
+    if not token:
+        return RESULT_START, RESULT_END
+    return f"{RESULT_START} {token}", f"{RESULT_END} {token}"
 
 
 def cell_stopped_at(tb: TracebackType | None, code: CodeType | None) -> int | None:

@@ -38,7 +38,10 @@ class Cell:
     cell runs, which runs the startup hooks a cell wrote. So does the cell a
     cancel records, with the code of the cell it stopped, a remote pad's
     cell whose service says it ended its process, and a remote pad's error,
-    whose service may have started a new process.
+    whose service may have started a new process. `ran_checked` says the
+    pad ran the code the cell's write check handed it in place of `code`
+    (`code_to_run`), so a later check may read a script the cell wrote and
+    ran as the text that ran.
     """
 
     code: str
@@ -49,6 +52,7 @@ class Cell:
     # most often, so a result cut there keeps them.
     stopped_at: int | None = None
     ended_process: bool = False
+    ran_checked: bool = False
     description: str = ""
     estimated_time: str = ""
     logs: str = ""
@@ -62,6 +66,7 @@ class CompactedCell:
     errored: bool
     stopped_at: int | None = None
     ended_process: bool = False
+    ran_checked: bool = False
 
 
 def stopped_line(value: object) -> int | None:
@@ -97,6 +102,29 @@ class ScratchpadRuntime(ABC):
     # the order they ran. The process still holds what those cells imported
     # and bound, so the write check reads them too (`hold_unapproved_write`).
     compacted_cells: tuple[CompactedCell, ...] = ()
+    # Whether this runtime runs the code `expect_run` hands it in place of a
+    # cell's own (`code_to_run`), so the write check may read a script a cell
+    # writes and runs as the text that runs (`find_cell_writes`, `swaps`).
+    runs_checked_code: bool = False
+    _pending_run: tuple[str, str | None] | None = None
+    # The code of the cell `code_to_run` last ran the checked code of, until
+    # `_record_cell` records that cell (`Cell.ran_checked`).
+    _ran_checked_code: str | None = None
+
+    def expect_run(self, code: str, run_code: str | None) -> None:
+        """The code to run in place of the next cell's `code`, as its write
+        check read it (`CellWrites.run_code`); None runs `code` as written."""
+        self._pending_run = (code, run_code)
+
+    def code_to_run(self, code: str) -> str:
+        """`code` as this runtime runs it: what `expect_run` gave for this
+        same code, once, else `code` itself."""
+        pending, self._pending_run = self._pending_run, None
+        self._ran_checked_code = None
+        if pending is not None and pending[0] == code and pending[1] is not None:
+            self._ran_checked_code = code
+            return pending[1]
+        return code
 
     def __init__(
         self,
@@ -200,9 +228,11 @@ class ScratchpadRuntime(ABC):
 
         Backends record every cell through here, so the streamed result, the
         model's tool result, the episodic log and ``dump`` all read scrubbed
-        output.
+        output. A cell whose code `code_to_run` last swapped for its checked
+        code says it ran that code (`Cell.ran_checked`).
         """
-        scrubbed = scrub_cell(cell)
+        checked, self._ran_checked_code = self._ran_checked_code, None
+        scrubbed = scrub_cell(replace(cell, ran_checked=checked is not None and checked == cell.code))
         self.cells.append(scrubbed)
         return scrubbed
 
@@ -344,10 +374,12 @@ class ScratchpadRuntime(ABC):
         summary_text = f"# Compacted {len(to_compact)} earlier cells:\n" + "\n".join(
             summary_lines
         )
+        # A cell that gives the line it stopped at stopped on an error, whatever its `error` says.
         self.compacted_cells = (
             *self.compacted_cells,
-            *(CompactedCell(code=cell.code, errored=bool(cell.error), stopped_at=cell.stopped_at,
-                            ended_process=cell.ended_process)
+            *(CompactedCell(code=cell.code, errored=bool(cell.error) or cell.stopped_at is not None,
+                            stopped_at=cell.stopped_at, ended_process=cell.ended_process,
+                            ran_checked=cell.ran_checked)
               for cell in to_compact if cell.code != _COMPACTED_CELL_CODE),
         )
         summary_cell = Cell(

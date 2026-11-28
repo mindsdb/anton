@@ -182,6 +182,48 @@ def test_an_older_tree_is_called_with_earlier_code(tmp_path):
     assert [r.card for r in card.results] == [False, True, True, True]
 
 
+SWAP_API = _COMMON + '''
+
+class EarlierCell(BaseModel):
+    code: str
+    errored: bool = False
+    ended_process: bool = False
+    ran_checked: bool = False
+
+
+class SwapWrites(Writes):
+    unchecked: bool = False
+    run_code: str | None = None
+
+
+def find_cell_writes(*, code, earlier, snapshots, http_rules=(), swaps=False):
+    # A call after a step cards unless the pad ran that step as its checked code.
+    if code.startswith("after"):
+        return SwapWrites(card=not earlier[-1].ran_checked)
+    unread = "unread" in code
+    return SwapWrites(card=unread, unchecked=unread, run_code="checked" if swaps else None)
+'''
+
+
+def test_a_cell_the_check_hands_run_code_and_reads_whole_counts_as_one_the_pad_ran_checked(tmp_path):
+    """As the pad does, the replay records each cell the check read whole
+    and handed code to run as one that ran it (`EarlierCell.ran_checked`),
+    so a later cell reads as following a checked step, not an unchecked one."""
+    tree = _fake_tree(tmp_path, SWAP_API)
+    corpus = tmp_path / "c.yaml"
+    corpus.write_text(yaml.safe_dump({"rule": CORPUS["rule"], "chats": [{"name": "S1 swaps", "style": "t", "cells": [
+        {"id": "S1.0", "code": "script = 1", "real_write": False},
+        {"id": "S1.1", "code": "after()", "real_write": False},
+        {"id": "S1.2", "code": "script = 2  # unread", "real_write": False},
+        {"id": "S1.3", "code": "after()", "real_write": False},
+    ]}]}))
+    out = tmp_path / "card.json"
+    done = _run("--tree", str(tree), "--corpus", str(corpus), "--commit", "fake", "--out", str(out))
+    assert done.returncode == 0, done.stderr
+    card = replay_tool.Scorecard.model_validate_json(out.read_text())
+    assert [r.card for r in card.results] == [False, False, True, True]
+
+
 def test_a_tree_without_the_write_check_is_refused(tmp_path):
     (tmp_path / "not_anton").mkdir()
     done = _run("--tree", str(tmp_path / "not_anton"), "--corpus", str(replay_tool.DEFAULT_CORPUS))

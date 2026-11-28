@@ -11,7 +11,9 @@ every turn end, and a check that raises counts as a card, since the product
 asks when it can't clear a cell.
 
 The tree may be any anton commit: the replay reads `find_cell_writes`'
-signature and calls the `earlier=` form or the older `earlier_code=` one. It
+signature and calls the `earlier=` form or the older `earlier_code=` one,
+with `swaps` where it takes it, as a local pad runs the code the check
+hands it in place of a cell's own. It
 imports the write check from `--tree` only. It exits 2 when it refuses to
 score: Python imported the write check from anywhere else, it can't import
 one under `--tree`, or two scorecards replayed different corpora.
@@ -241,6 +243,10 @@ class WriteCheck:
         if code_root and "code_root" not in params:
             _refuse("--code-root needs a tree whose find_cell_writes takes code_root")
         self.code_root = code_root
+        # A local pad runs the code the check hands it in place of the cell's
+        # own, so a tree that can read a script a cell writes and runs that
+        # way does.
+        self.swaps = "swaps" in params
         self.earlier_fields = set(getattr(wc, "EarlierCell").model_fields) if self.signature == "earlier" else set()
 
     def check(self, *, code: str, earlier: list[dict], snapshot, rules, root: Path):
@@ -252,6 +258,8 @@ class WriteCheck:
         kwargs = {"code": code, "earlier": cells, "snapshots": (snapshot,), "http_rules": rules}
         if self.code_root:
             kwargs["code_root"] = root
+        if self.swaps:
+            kwargs["swaps"] = True
         return self.wc.find_cell_writes(**kwargs)
 
 
@@ -288,13 +296,16 @@ def _replay_chat(check: WriteCheck, chat: Chat, rules, seed: int, first_turn: in
                     kinds = _bucket(writes.kinds()) if card else []
                     causes = sorted({c.kind for c in getattr(writes, "causes", ())}) if card else []
                     recorded = dict(getattr(writes, "code_files", {}) or {})
+                    # The pad runs the code the check hands it, and says so
+                    # for later checks (`EarlierCell.ran_checked`).
+                    ran_checked = getattr(writes, "run_code", None) is not None and not writes.unchecked
                 except Exception:  # the product asks when the check fails
-                    card, crashed, kinds, causes, recorded = True, True, ["unchecked"], ["crash"], {}
+                    card, crashed, kinds, causes, recorded, ran_checked = True, True, ["unchecked"], ["crash"], {}, False
                 results.append(CellResult(
                     id=cell.id, chat=chat.name, cell=i, turn=turn, style=chat.style, card=card, crashed=crashed, kinds=kinds,
                     causes=causes, real_write=cell.real_write, runs_unread=cell.runs_unread, pair=cell.pair,
                     role=cell.role, secs=round(time.time() - started, 3)))
-                entry = {"code": code, "errored": cell.errored, "ended_process": False}
+                entry = {"code": code, "errored": cell.errored, "ended_process": False, "ran_checked": ran_checked}
                 if recorded:
                     entry["code_files"] = recorded
                 earlier.append(entry)

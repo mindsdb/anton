@@ -19,6 +19,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import get_args
 
 import httpx2 as httpx
 import pytest
@@ -29,6 +30,8 @@ from anton.core.llm.provider import StreamAskUser
 from anton.core.settings import CoreSettings
 from anton.core.tools.registry import ToolOutcome
 from anton.core.utils import write_hold
+from anton.core.utils.scratchpad import RefusalCause, _refusal as cell_refusal
+from anton.core.utils.write_check import CellWrites
 from anton.core.utils.write_hold import WriteRelay, approve_held_write, parse_relay_hosts, relayed_host
 
 RELAY_URL = "http://write-relay:8090"
@@ -248,26 +251,31 @@ async def test_a_request_the_relay_forgets_while_waiting_is_unconfirmed(held_ses
 
 # ── No approval ───────────────────────────────────────────────────────────
 
-def _refused(why: str) -> str:
+_NEEDS_APPROVAL = "Tell the user what the request would change and that it needs their approval."
+# A card no one answered in time is closed, and anton cancels the request.
+_ASK_AGAIN = ("Tell the user what the request would change, that no one approved it in time so it wasn't sent, "
+              "and that they can ask again when they can answer the approval card.")
+
+
+def _refused(why: str, next_step: str = _NEEDS_APPROVAL) -> str:
     return (
         f"Not sent: the held POST request to {HOST} needs the user's approval, and {why}. Nothing was sent. "
         "The user didn't approve this change, so it must not be made another way: don't send the request "
-        "again, rewrite the cell, build the URL at run time, or use another tool for it. Tell the user what "
-        "the request would change and that it needs their approval."
+        f"again, rewrite the cell, build the URL at run time, or use another tool for it. {next_step}"
     )
 
 
-@pytest.mark.parametrize("elicitor, why", [
-    (_Elicitor(answer=CANCEL), "they declined it"),
-    (_Elicitor(answer=SKIP), "they declined it"),
-    (_Elicitor(answer=AskAnswer(status="answered", text="yes")), "they declined it"),
-    (_Elicitor(answer=TIMEOUT), "no one answered in time"),
-    (_Elicitor(raises=RuntimeError("broker down")), "the approval request failed"),
+@pytest.mark.parametrize("elicitor, why, next_step", [
+    (_Elicitor(answer=CANCEL), "they declined it", _NEEDS_APPROVAL),
+    (_Elicitor(answer=SKIP), "they declined it", _NEEDS_APPROVAL),
+    (_Elicitor(answer=AskAnswer(status="answered", text="yes")), "they declined it", _NEEDS_APPROVAL),
+    (_Elicitor(answer=TIMEOUT), "no one answered in time", _ASK_AGAIN),
+    (_Elicitor(raises=RuntimeError("broker down")), "the approval request failed", _NEEDS_APPROVAL),
 ], ids=["cancel", "skip", "typed", "timeout", "error"])
-async def test_no_approve_cancels_the_held_request_and_never_waits(held_session, elicitor, why):
+async def test_no_approve_cancels_the_held_request_and_never_waits(held_session, elicitor, why, next_step):
     relay = _Relay(reads=[_held("pending")])
     outcome = await _approve(held_session(elicitor), relay)
-    assert outcome == ToolOutcome(content=_refused(why), ok=True, reason="write_not_approved")
+    assert outcome == ToolOutcome(content=_refused(why, next_step), ok=True, reason="write_not_approved")
     assert relay.cancels == 1
     assert relay.gets == 1, "nothing polls for a send that can't come"
 
@@ -278,7 +286,7 @@ async def test_an_earlier_unanswered_card_refuses_without_asking(held_session):
     session._write_gate.unanswered = True
     relay = _Relay(reads=[_held("pending")])
     outcome = await _approve(session, relay)
-    assert outcome.content == _refused("an earlier approval request in this turn went unanswered")
+    assert outcome.content == _refused("an earlier approval request in this turn went unanswered", _ASK_AGAIN)
     assert elicitor.requests == [] and _cards(session) == []
     assert relay.cancels == 1 and relay.gets == 1
 
@@ -296,6 +304,20 @@ async def test_no_way_to_ask_cancels_and_refuses(held_session):
     outcome = await _approve(session, relay)
     assert outcome.content == _refused("there is no way to ask them here")
     assert relay.cancels == 1
+
+
+@pytest.mark.parametrize("cause", get_args(RefusalCause))
+def test_the_relay_s_refusal_ends_as_the_cell_gate_s_does_for_every_cause(cause):
+    """Both gates tell the model what to tell the user: after a card no one
+    answered in time, this one or an earlier one in the turn, that the user
+    can ask again, since the card is closed; after any other refusal, that
+    the change needs their approval."""
+    ask_again = cause in ("timeout", "unanswered_earlier")
+    request = write_hold._refusal(write_hold.HeldRequest.model_validate(_held("pending")), cause).content
+    assert request.endswith(_ASK_AGAIN if ask_again else _NEEDS_APPROVAL)
+    step = cell_refusal(CellWrites(unchecked=True), cause).content
+    assert step.endswith("they can ask again when they can answer the approval card.") == ask_again
+    assert step.endswith("Tell the user what the step would change and that it needs their approval.") != ask_again
 
 
 @pytest.mark.parametrize("elicitor, why", [
