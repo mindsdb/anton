@@ -105,6 +105,654 @@
       "reason": "text"
     },
     {
+      "name": "description_invisible_u0001",
+      "text": "{\"description\":\"Reads\\u0001 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u0008",
+      "text": "{\"description\":\"Reads\\b files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u000b",
+      "text": "{\"description\":\"Reads\\u000b files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u000c",
+      "text": "{\"description\":\"Reads\\f files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u000e",
+      "text": "{\"description\":\"Reads\\u000e files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u001f",
+      "text": "{\"description\":\"Reads\\u001f files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u007f",
+      "text": "{\"description\":\"Reads\u007f files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u009f",
+      "text": "{\"description\":\"Reads\u009f files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u17b4",
+      "text": "{\"description\":\"Reads\u17b4 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u17b5",
+      "text": "{\"description\":\"Reads\u17b5 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u2061",
+      "text": "{\"description\":\"Reads\u2061 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u2062",
+      "text": "{\"description\":\"Reads\u2062 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u2064",
+      "text": "{\"description\":\"Reads\u2064 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u2065",
+      "text": "{\"description\":\"Reads\u2065 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u206a",
+      "text": "{\"description\":\"Reads\u206a files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u206b",
+      "text": "{\"description\":\"Reads\u206b files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u206f",
+      "text": "{\"description\":\"Reads\u206f files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u3164",
+      "text": "{\"description\":\"Reads\u3164 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_uffa0",
+      "text": "{\"description\":\"Reads\uffa0 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_ufff0",
+      "text": "{\"description\":\"Reads\ufff0 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_ufff8",
+      "text": "{\"description\":\"Reads\ufff8 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_ufff9",
+      "text": "{\"description\":\"Reads\ufff9 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_ufffb",
+      "text": "{\"description\":\"Reads\ufffb files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u13430",
+      "text": "{\"description\":\"Reads\ud80d\udc30 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u1343f",
+      "text": "{\"description\":\"Reads\ud80d\udc3f files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u1bca0",
+      "text": "{\"description\":\"Reads\ud82f\udca0 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u1bca3",
+      "text": "{\"description\":\"Reads\ud82f\udca3 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u1d173",
+      "text": "{\"description\":\"Reads\ud834\udd73 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_u1d17a",
+      "text": "{\"description\":\"Reads\ud834\udd7a files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_ue0080",
+      "text": "{\"description\":\"Reads\udb40\udc80 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_ue00ff",
+      "text": "{\"description\":\"Reads\udb40\udcff files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_ue01f0",
+      "text": "{\"description\":\"Reads\udb40\uddf0 files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "description_invisible_ue0fff",
+      "text": "{\"description\":\"Reads\udb43\udfff files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_u00ad",
+      "text": "{\"description\":\"a\u00adb\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_u00ad\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_u034f",
+      "text": "{\"description\":\"a\u034fb\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_u034f\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_u115f",
+      "text": "{\"description\":\"a\u115fb\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_u115f\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_u1160",
+      "text": "{\"description\":\"a\u1160b\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_u1160\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_u180b",
+      "text": "{\"description\":\"a\u180bb\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_u180b\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_u180d",
+      "text": "{\"description\":\"a\u180db\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_u180d\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_u180e",
+      "text": "{\"description\":\"a\u180eb\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_u180e\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_u180f",
+      "text": "{\"description\":\"a\u180fb\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_u180f\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_u200c",
+      "text": "{\"description\":\"a\u200cb\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_u200c\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_u200d",
+      "text": "{\"description\":\"a\u200db\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_u200d\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_ufe00",
+      "text": "{\"description\":\"a\ufe00b\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_ufe00\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_ufe0f",
+      "text": "{\"description\":\"a\ufe0fb\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_ufe0f\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ideograph_u3400",
+      "text": "{\"description\":\"\u3400\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_u3400\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ideograph_u4dbf",
+      "text": "{\"description\":\"\u4dbf\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_u4dbf\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ideograph_u4e00",
+      "text": "{\"description\":\"\u4e00\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_u4e00\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ideograph_u9fff",
+      "text": "{\"description\":\"\u9fff\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_u9fff\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ideograph_uf900",
+      "text": "{\"description\":\"\uf900\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_uf900\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ideograph_ufaff",
+      "text": "{\"description\":\"\ufaff\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_ufaff\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ideograph_u20000",
+      "text": "{\"description\":\"\ud840\udc00\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_u20000\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ideograph_u2fffd",
+      "text": "{\"description\":\"\ud87f\udffd\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_u2fffd\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ideograph_u30000",
+      "text": "{\"description\":\"\ud880\udc00\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_u30000\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ideograph_u3fffd",
+      "text": "{\"description\":\"\ud8bf\udffd\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_u3fffd\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ideograph_ue01ef",
+      "text": "{\"description\":\"\u845b\udb40\uddef\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_ue01ef\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "zwj_family",
+      "text": "{\"description\":\"Family \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67 emoji\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"zwj_family\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "heart_on_fire",
+      "text": "{\"description\":\"Heart \u2764\ufe0f\u200d\ud83d\udd25 on fire\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"heart_on_fire\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "keycap",
+      "text": "{\"description\":\"Press #\ufe0f\u20e3\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"keycap\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "persian_zwnj",
+      "text": "{\"description\":\"\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"persian_zwnj\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "hindi_zwj_after_virama",
+      "text": "{\"description\":\"\u0915\u094d\u200d\u0937\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"hindi_zwj_after_virama\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "german_soft_hyphens",
+      "text": "{\"description\":\"Ver\u00adbin\u00addung\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"german_soft_hyphens\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "hebrew_grapheme_joiner",
+      "text": "{\"description\":\"\u05d1\u05b8\u034f\u05bc\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"hebrew_grapheme_joiner\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mongolian_vowel_separator",
+      "text": "{\"description\":\"\u1828\u1821\u1830\u180e\u1820\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mongolian_vowel_separator\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mongolian_variation_selector",
+      "text": "{\"description\":\"\u1820\u180b\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mongolian_variation_selector\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mongolian_selector_then_joiner",
+      "text": "{\"description\":\"\u1820\u180d\u200d\u1820 \u1820\u180f\u200d\u1820\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mongolian_selector_then_joiner\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ideograph_variation_selector",
+      "text": "{\"description\":\"\u845b\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ideograph_variation_selector\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "line_breaks_and_signs",
+      "text": "{\"description\":\"Reads\\tfiles.\\r\\nOne per line.\u2028Then\u2029stops. \u0600\u0661 \u0605\u0661 \u06dd\u0661 \u070f\u0661 \u0890\u0661 \u0891\u0661 \u08e2\u0661 \ud804\udcbd\ud804\udcd0 \ud804\udccd\ud804\udcd0\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"line_breaks_and_signs\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "ordinary_text",
+      "text": "{\"description\":\"\u201cQuoted\u201d \u2018text\u2019 \u2013 dash \u2014 ellipsis\u2026 no\u00a0break ~\u00a1\u061b\u061d\u17b3\u17b6\u200a\u2010\u2027\u202f\u205f\u2070\u3163\u3165\ufefc\uff9f\uffa1\ufffc\ud80d\udc2f\ud80d\udc40\ud82f\udc9f\ud834\udd72\ud834\udd7b\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"ordinary_text\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_neighbours",
+      "text": "{\"description\":\"a\u200d\u00ac a\u200d\u00ae a\u200d\u034e a\u200d\u0350 a\u200d\u115e a\u200d\u1161 a\u200d\u180a a\u200d\u1810 a\u200d\ufdff a\u200d\ufe10\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"mark_neighbours\"}",
+      "usable": true,
+      "reason": null
+    },
+    {
+      "name": "mark_pair_u00ad",
+      "text": "{\"description\":\"a\u00ad\u00ad\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u034f",
+      "text": "{\"description\":\"a\u034f\u034f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u115f",
+      "text": "{\"description\":\"a\u115f\u115f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u1160",
+      "text": "{\"description\":\"a\u1160\u1160\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u180b",
+      "text": "{\"description\":\"a\u180b\u180b\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u180d",
+      "text": "{\"description\":\"a\u180d\u180d\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u180e",
+      "text": "{\"description\":\"a\u180e\u180e\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u180f",
+      "text": "{\"description\":\"a\u180f\u180f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u200c",
+      "text": "{\"description\":\"a\u200c\u200c\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_u200d",
+      "text": "{\"description\":\"a\u200d\u200d\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_ufe00",
+      "text": "{\"description\":\"a\ufe00\ufe00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "mark_pair_ufe0f",
+      "text": "{\"description\":\"a\ufe0f\ufe0f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u33ff",
+      "text": "{\"description\":\"\u33ff\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u4dc0",
+      "text": "{\"description\":\"\u4dc0\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u4dff",
+      "text": "{\"description\":\"\u4dff\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_ua000",
+      "text": "{\"description\":\"\ua000\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_uf8ff",
+      "text": "{\"description\":\"\uf8ff\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_ufb00",
+      "text": "{\"description\":\"\ufb00\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u1ffff",
+      "text": "{\"description\":\"\ud83f\udfff\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u2fffe",
+      "text": "{\"description\":\"\ud87f\udffe\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u2ffff",
+      "text": "{\"description\":\"\ud87f\udfff\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_after_u3fffe",
+      "text": "{\"description\":\"\ud8bf\udffe\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "joiner_pair",
+      "text": "{\"description\":\"Reads\u200d\u200d files\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "joiner_run_64",
+      "text": "{\"description\":\"Reads\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\u200d\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "joiner_selector_alternating",
+      "text": "{\"description\":\"Reads files\u200d\udb40\udd00\u200d\udb40\udd01\u200d\udb40\udd02\u200d\udb40\udd03\u200d\udb40\udd04\u200d\udb40\udd05\u200d\udb40\udd06\u200d\udb40\udd07\u200d\udb40\udd08\u200d\udb40\udd09\u200d\udb40\udd0a\u200d\udb40\udd0b\u200d\udb40\udd0c\u200d\udb40\udd0d\u200d\udb40\udd0e\u200d\udb40\udd0f\u200d\udb40\udd10\u200d\udb40\udd11\u200d\udb40\udd12\u200d\udb40\udd13\u200d\udb40\udd14\u200d\udb40\udd15\u200d\udb40\udd16\u200d\udb40\udd17\u200d\udb40\udd18\u200d\udb40\udd19\u200d\udb40\udd1a\u200d\udb40\udd1b\u200d\udb40\udd1c\u200d\udb40\udd1d\u200d\udb40\udd1e\u200d\udb40\udd1f\u200d\udb40\udd20\u200d\udb40\udd21\u200d\udb40\udd22\u200d\udb40\udd23\u200d\udb40\udd24\u200d\udb40\udd25\u200d\udb40\udd26\u200d\udb40\udd27\u200d\udb40\udd28\u200d\udb40\udd29\u200d\udb40\udd2a\u200d\udb40\udd2b\u200d\udb40\udd2c\u200d\udb40\udd2d\u200d\udb40\udd2e\u200d\udb40\udd2f\u200d\udb40\udd30\u200d\udb40\udd31\u200d\udb40\udd32\u200d\udb40\udd33\u200d\udb40\udd34\u200d\udb40\udd35\u200d\udb40\udd36\u200d\udb40\udd37\u200d\udb40\udd38\u200d\udb40\udd39\u200d\udb40\udd3a\u200d\udb40\udd3b\u200d\udb40\udd3c\u200d\udb40\udd3d\u200d\udb40\udd3e\u200d\udb40\udd3f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "joiner_cgj_alternating",
+      "text": "{\"description\":\"Reads\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\u200d\u034f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "soft_hyphen_cgj_alternating",
+      "text": "{\"description\":\"Reads\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\u00ad\u034f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "selector_pair",
+      "text": "{\"description\":\"\u263a\ufe0f\ufe0f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "joiner_then_selector",
+      "text": "{\"description\":\"a\u200d\ufe0f\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "leading_selector",
+      "text": "{\"description\":\"\ufe0fReads\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "joiner_only",
+      "text": "{\"description\":\"\u200d\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "supplementary_selector_after_latin",
+      "text": "{\"description\":\"Reads a\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "supplementary_selector_ue01ef_after_latin",
+      "text": "{\"description\":\"Reads a\udb40\uddef\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "ideograph_selector_pair_ue0100",
+      "text": "{\"description\":\"\u845b\udb40\udd00\udb40\udd00\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "ideograph_selector_pair_ue01ef",
+      "text": "{\"description\":\"\u845b\udb40\uddef\udb40\uddef\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "ideograph_selector_then_soft_hyphen_ue0100",
+      "text": "{\"description\":\"\u845b\udb40\udd00\u00ad\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "ideograph_selector_then_soft_hyphen_ue01ef",
+      "text": "{\"description\":\"\u845b\udb40\uddef\u00ad\",\"input_schema\":{\"properties\":{},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
+      "name": "schema_value_selector_pair",
+      "text": "{\"description\":\"\",\"input_schema\":{\"properties\":{\"q\":{\"description\":\"\u263a\ufe0f\ufe0f\",\"type\":\"string\"}},\"type\":\"object\"},\"name\":\"text\"}",
+      "usable": false,
+      "reason": "text"
+    },
+    {
       "name": "schema_value_bidi_isolate",
       "text": "{\"description\":\"\",\"input_schema\":{\"properties\":{\"q\":{\"description\":\"\u2066x\u2069\",\"type\":\"string\"}},\"type\":\"object\"},\"name\":\"text\"}",
       "usable": false,
