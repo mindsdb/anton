@@ -165,6 +165,8 @@ A request with `jev_decisions` set to false never asks Jev, MindsHub's
 decision model, whether the agent finished: the organization opted out.
 A request with `jev_classify` set to false gives the agent no scratchpad
 classify() or classify_yes_no(), which label texts with Jev.
+A request with `web_search` set to false gives the agent no scratchpad
+web_search(): the organization has zero data retention.
 A request with `ui_locale` (a tag in `anton.core.llm.ui_locale.UI_LOCALE_NAMES`:
 en, es, pt-BR, de, fr, it, ja, ko, zh-CN) tells the agent which
 language the user's app is set to (ENG-4149); absent or unsupported adds nothing.
@@ -987,6 +989,9 @@ class TurnRequestV1:
     #: Whether the agent's scratchpad may label texts with Jev through
     #: classify() and classify_yes_no(). Read like `jev_decisions`.
     jev_classify: bool = True
+    #: Whether the agent's scratchpad offers web_search(); false under zero data
+    #: retention. Read like `jev_decisions`.
+    web_search: bool = True
     #: The language the user's app is set to, a tag in
     #: `anton.core.llm.ui_locale.UI_LOCALE_NAMES` (en, es, pt-BR, de, fr, it,
     #: ja, ko, zh-CN), which cowork-server read from the app's
@@ -1069,6 +1074,7 @@ class TurnRequestV1:
             tool_messages=d.get("tool_messages") is True,
             jev_decisions=d.get("jev_decisions", True) is True,
             jev_classify=d.get("jev_classify", True) is True,
+            web_search=d.get("web_search", True) is True,
             ui_locale=d.get("ui_locale") if isinstance(d.get("ui_locale"), str) else None,
             preview_checks=d.get("preview_checks") is True,
             # Same defensive isinstance check as oauth/trace.

@@ -1628,8 +1628,11 @@ def _budget_what(scope: str | None, period: str | None, model: str | None = None
 
 def mindshub_model_restriction(
     *, exc: BaseException, body: Any, status_code: int, model: str,
-) -> ModelRestrictedError | None:
+) -> ModelRestrictedError | ZdrRestrictedError | None:
     """The typed error for a gateway 403 caused by an org admin's model rule, or ``None``.
+
+    A ``zdr_restricted`` detail (zero data retention rules the model out) gets
+    :class:`ZdrRestrictedError` the same way.
 
     Shared by both provider mappers, so the carriers, the copy and the origin
     gate are decided in one place. The caller raises the result ``from exc``.
@@ -1657,6 +1660,12 @@ def mindshub_model_restriction(
         parsed.top.deny_detail,
         parsed.envelope.deny_detail,
     )
+    if _ZDR_RESTRICTED in carriers:
+        return ZdrRestrictedError(
+            f"Zero data retention is on for your organization, so the model '{model}' "
+            "isn't available. Choose another model in Settings.",
+            model=model,
+        )
     if _MODEL_RESTRICTED not in carriers:
         return None
     return ModelRestrictedError(
@@ -1897,6 +1906,21 @@ class ModelRestrictedError(ModelUnavailableError):
 
     def __init__(self, message: str, *, model: str) -> None:
         super().__init__(message, code=_MODEL_RESTRICTED, model=model)
+
+
+# The gateway's deny detail when zero data retention rules the model out.
+_ZDR_RESTRICTED = "zdr_restricted"
+
+
+class ZdrRestrictedError(ModelUnavailableError):
+    """403 with the ``zdr_restricted`` deny detail: the org's zero data retention rules the model out.
+
+    Raised beside :class:`ModelRestrictedError` and for the same reasons; its
+    class NAME is what a hosted turn's ``_scrub`` carries to cowork-server.
+    """
+
+    def __init__(self, message: str, *, model: str) -> None:
+        super().__init__(message, code=_ZDR_RESTRICTED, model=model)
 
 
 class ContentValidationError(ConnectionError):
@@ -2515,6 +2539,7 @@ CURATED_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
     # Subclass of ModelUnavailableError, listed by name for the same reason as
     # ContentTooLargeError below.
     ModelRestrictedError,
+    ZdrRestrictedError,
     ContentValidationError,
     # Subclass of ContentValidationError, so isinstance() already covered
     # it — listed anyway because the triage test compares NAMES, which is

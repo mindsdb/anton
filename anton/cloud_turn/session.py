@@ -1060,6 +1060,9 @@ def build_cloud_chat_session(
     if not request.jev_classify:
         # The organization turned off labelling texts with Jev.
         settings.classify_jev = "off"
+    if not request.web_search:
+        # Zero data retention: the scratchpad offers no web_search().
+        settings.scratchpad_web_search = "off"
     # The tenant's limits replace anton's own defaults, as the desktop harness
     # overlays them for an in-process turn. Without them a web turn stopped at
     # the defaults whatever the tenant set.

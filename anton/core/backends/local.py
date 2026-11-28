@@ -40,6 +40,7 @@ from anton.core.backends.wire import (
     INSTALL_START_MARKER,
     CLASSIFY_ENV,
     INTERNET_RESEARCH_ENV,
+    WEB_SEARCH_ENV,
     HEAD_OUTPUT,
     MAX_OUTPUT,
     TAIL_OUTPUT,
@@ -529,6 +530,7 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         coding_flavor: str | None = None,
         internet_research_enabled: bool = True,
         classify_enabled: bool = True,
+        scratchpad_web_search_enabled: bool = True,
         image_model: str | None = None,
         inherit_server_env: bool = False,
         _venvs_base: Path | None = None,
@@ -573,6 +575,8 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
         self._internet_research_enabled = internet_research_enabled
         # False: the boot script injects a classify() that only raises.
         self._classify_enabled = classify_enabled
+        # False: the boot script injects a web_search() that raises for zero data retention.
+        self._scratchpad_web_search_enabled = scratchpad_web_search_enabled
         # The model the pad's generate_image() asks for; None lets the boot
         # script resolve it (`anton.core.llm.images.resolve_image_model`).
         self._image_model: str | None = image_model
@@ -1286,6 +1290,10 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             env.pop(CLASSIFY_ENV, None)
         else:
             env[CLASSIFY_ENV] = "off"
+        if self._scratchpad_web_search_enabled:
+            env.pop(WEB_SEARCH_ENV, None)
+        else:
+            env[WEB_SEARCH_ENV] = "off"
         # Propagate provider credentials from the ANTON_* names into the SDK
         # names the scratchpad's nested get_llm() expects.
         if "ANTHROPIC_API_KEY" not in env and "ANTON_ANTHROPIC_API_KEY" in env:
@@ -2340,6 +2348,7 @@ def local_scratchpad_runtime_factory(
     coding_flavor: str | None = None,
     internet_research_enabled: bool = True,
     classify_enabled: bool = True,
+    scratchpad_web_search_enabled: bool = True,
     image_model: str | None = None,
     inherit_server_env: bool = False,
 ) -> ScratchpadRuntime:
@@ -2361,6 +2370,7 @@ def local_scratchpad_runtime_factory(
         coding_flavor=coding_flavor,
         internet_research_enabled=internet_research_enabled,
         classify_enabled=classify_enabled,
+        scratchpad_web_search_enabled=scratchpad_web_search_enabled,
         image_model=image_model,
         inherit_server_env=inherit_server_env,
     )

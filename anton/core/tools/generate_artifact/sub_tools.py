@@ -304,13 +304,16 @@ FINISH_SCHEMA: dict = {
 }
 
 
-def _scratchpad_schema() -> dict:
-    # Reuse the exact schema + description the main agent sees, so the
-    # sub-generator drives scratchpads with the same contract. Imported
-    # lazily to avoid a tool_defs <-> generate_artifact import cycle.
-    from anton.core.tools.tool_defs import SCRATCHPAD_TOOL
+def _scratchpad_schema(
+    *, internet_research: bool = True, classify: bool = True, web_search: bool = True
+) -> dict:
+    # The main agent's scratchpad schema; imported lazily to avoid a
+    # tool_defs <-> generate_artifact import cycle.
+    from anton.core.tools.tool_defs import scratchpad_tool
 
-    return tool_schema(SCRATCHPAD_TOOL)
+    return tool_schema(scratchpad_tool(
+        internet_research=internet_research, classify=classify, web_search=web_search
+    ))
 
 
 GEN_READ_TEXT_FILE_DESCRIPTION = (
@@ -344,8 +347,14 @@ def _read_text_file_schema() -> dict:
     return {**schema, "input_schema": input_schema}
 
 
-def tool_schemas() -> list[dict]:
-    return [WRITE_FILE_SCHEMA, _read_text_file_schema(), FINISH_SCHEMA, _scratchpad_schema()]
+def tool_schemas(
+    *, internet_research: bool = True, classify: bool = True, web_search: bool = True
+) -> list[dict]:
+    """The write loop's tools; the flags (`scratchpad_switches`) trim the scratchpad's helpers."""
+    scratchpad = _scratchpad_schema(
+        internet_research=internet_research, classify=classify, web_search=web_search
+    )
+    return [WRITE_FILE_SCHEMA, _read_text_file_schema(), FINISH_SCHEMA, scratchpad]
 
 
 def is_host_path(path: str) -> bool:

@@ -36,6 +36,7 @@ from anton.core.llm.provider import (
     ModelCallTimeoutError,
     ModelRestrictedError,
     ModelUnavailableError,
+    ZdrRestrictedError,
     ProviderAuthError,
     ProviderOverloadedError,
     RequestRefusedError,
@@ -334,6 +335,9 @@ _CURATED_SAMPLES = {
     ),
     ModelRestrictedError: lambda: ModelRestrictedError(
         "An admin in your organization restricted the model 'x'.", model="x"
+    ),
+    ZdrRestrictedError: lambda: ZdrRestrictedError(
+        "Zero data retention is on for your organization, so the model 'x' isn't available.", model="x"
     ),
     ContentValidationError: lambda: ContentValidationError("bad image block"),
     ContentTooLargeError: lambda: ContentTooLargeError("image too big"),

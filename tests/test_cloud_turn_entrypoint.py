@@ -477,6 +477,22 @@ def test_an_admin_model_restriction_names_itself_on_the_wire():
     )
 
 
+def test_a_zdr_restriction_names_itself_on_the_wire():
+    """As the admin rule: the host keys the ZDR card on the `TypeName:` prefix."""
+    body = {
+        "message": "Zero data retention is on, so the model 'latest:sonnet' is unavailable.",
+        "type": "permission_error",
+        "code": "permission_denied",
+        "deny_detail": "zdr_restricted",
+    }
+    events = _drive(_FakeSession(raise_on_stream=_mapped_denial(status=403, body=body)))
+    assert events[0]["kind"] == "turn_failed"
+    assert events[0]["error"] == (
+        "ZdrRestrictedError: Zero data retention is on for your organization, so the model "
+        "'latest:sonnet' isn't available. Choose another model in Settings."
+    )
+
+
 _RESET_AT = "2026-09-26T00:00:00Z"
 _RESET_AT_NORMALIZED = "2026-09-26T00:00:00+00:00"
 

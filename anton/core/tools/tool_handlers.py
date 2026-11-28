@@ -3270,6 +3270,7 @@ _IMAGE_FAILURE_REASONS = {
     "unsupported_model_kind": "image_unavailable",
     "model_not_found": "image_unavailable",
     "model_restricted": "image_unavailable",
+    "zdr_restricted": "image_unavailable",
     "model_access_denied": "image_unavailable",
     "model_disabled": "image_unavailable",
     "wallet_empty": "image_unavailable",

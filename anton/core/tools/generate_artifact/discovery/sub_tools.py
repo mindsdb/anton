@@ -162,14 +162,18 @@ FINISH_GATHERING_SCHEMA: dict = {
 }
 
 
-def _scratchpad_schema(*, internet_research: bool = True, classify: bool = True) -> dict:
+def _scratchpad_schema(
+    *, internet_research: bool = True, classify: bool = True, web_search: bool = True
+) -> dict:
     # Reuse the exact schema the main agent sees, so the gathering loop
     # drives scratchpads with the same contract. Imported lazily to avoid a
     # tool_defs <-> discovery import cycle (mirrors generate_artifact's
     # own sub_tools.py).
     from anton.core.tools.tool_defs import scratchpad_tool
 
-    return tool_schema(scratchpad_tool(internet_research=internet_research, classify=classify))
+    return tool_schema(scratchpad_tool(
+        internet_research=internet_research, classify=classify, web_search=web_search
+    ))
 
 
 def _web_search_schema() -> dict:
@@ -525,7 +529,7 @@ _STEP_TASK = {
 
 def pipeline_tool_schemas(
     types: tuple[str, ...] = GENERATOR_ARTIFACT_TYPES_ORDERED, *, internet_research: bool = True,
-    classify: bool = True,
+    classify: bool = True, web_search: bool = True,
 ) -> list[dict]:
     """The ONE tool array used by every call in phases A-D.
 
@@ -536,7 +540,8 @@ def pipeline_tool_schemas(
     (`GenState.buildable_types`). ``internet_research`` False
     (`GenState.internet_research`, fixed for the session) leaves out the two
     web tools and the scratchpad's web_search(). ``classify`` False leaves the
-    scratchpad's classify() out of its description.
+    scratchpad's classify() out of its description, and ``web_search`` False
+    its web_search().
     """
     finish = FINISH_GATHERING_SCHEMA
     if types != GENERATOR_ARTIFACT_TYPES_ORDERED:
@@ -553,7 +558,7 @@ def pipeline_tool_schemas(
         }
     web = [_web_search_schema(), _web_fetch_schema()] if internet_research else []
     return [
-        _scratchpad_schema(internet_research=internet_research, classify=classify),
+        _scratchpad_schema(internet_research=internet_research, classify=classify, web_search=web_search),
         *web,
         _ask_user_schema(),
         finish,

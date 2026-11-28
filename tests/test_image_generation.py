@@ -354,6 +354,21 @@ async def test_failures_come_back_as_messages_to_relay(status, body, headers, co
     assert phrase in str(caught.value)
 
 
+@pytest.mark.parametrize("detail, phrase", [
+    ("model_restricted", "restricted the model"),
+    ("zdr_restricted", "Zero data retention"),
+])
+async def test_a_gateway_model_rule_keeps_its_own_code(detail, phrase):
+    """An admin's rule and zero data retention each keep their code, and neither is retried."""
+    body = {"error": {"code": "permission_denied", "message": "refused", "deny_detail": detail}}
+    gateway = Gateway(status=403, body=body, headers={"X-MindsHub-Deny-Detail": detail})
+    with pytest.raises(images.ImageGenerationError) as caught:
+        await _client(gateway).generate_image(prompt="x")
+    assert caught.value.code == detail
+    assert phrase in str(caught.value)
+    assert th._IMAGE_FAILURE_REASONS[detail] == "image_unavailable"
+
+
 async def test_a_credits_refusal_tells_the_model_to_give_the_billing_link():
     """An image request never recalls the product skill, so the tool's message
     is all the model sees. Without these words, replies dropped the link and
