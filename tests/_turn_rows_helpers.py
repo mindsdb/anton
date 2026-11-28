@@ -120,7 +120,7 @@ def scripted_llm(*, mode: str, cut: bool = False, calls: PlanCalls | None = None
         return gen()
 
     llm.plan_stream = plan_stream
-    llm.summarize = AsyncMock(return_value=LLMResponse(content="SUMMARY of earlier turns"))
+    llm.summarize = AsyncMock(return_value=LLMResponse(content="## Goal\nSUMMARY of earlier turns"))
     return llm
 
 

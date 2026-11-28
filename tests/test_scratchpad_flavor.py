@@ -145,10 +145,15 @@ def test_the_cli_builds_its_manager_with_the_coding_providers_flavor():
     captured = {}
     llm = MagicMock()
     llm.coding_provider = _routed_provider(OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC)
+
+    def fake_factory(_settings, *, cancel_ends_turn, inherit_server_env):
+        captured["inherit_server_env"] = inherit_server_env
+
     with (
         patch.object(cli, "ScratchpadManager", lambda **kwargs: captured.update(kwargs)),
-        patch.object(cli, "get_runtime_factory", lambda _settings, *, cancel_ends_turn: None),
+        patch.object(cli, "get_runtime_factory", fake_factory),
     ):
         cli._build_scratchpad_manager(MagicMock(), llm)
 
     assert captured["coding_flavor"] == OpenAIProvider.FLAVOR_OPENAI_COMPATIBLE_GENERIC
+    assert captured["inherit_server_env"] is True

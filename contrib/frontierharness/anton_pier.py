@@ -27,7 +27,7 @@ class AntonPier(BaseInstalledAgent):
         return "anton"
 
     def install_spec(self) -> AgentInstallSpec:
-        ref = anton_common.anton_ref()
+        ref = anton_common.anton_ref(self._get_env)
         return AgentInstallSpec(
             agent_name=self.name(),
             version=ref,
@@ -39,10 +39,10 @@ class AntonPier(BaseInstalledAgent):
 
     def network_allowlist(self) -> NetworkAllowlist:
         # DeepSWE agents run with no network; the model gateway is the one exception.
-        return allowlist_from_urls([anton_common.base_url()])
+        return allowlist_from_urls([anton_common.base_url(self._get_env)])
 
     def version(self) -> str | None:
-        return anton_common.anton_ref()
+        return anton_common.anton_ref(self._get_env)
 
     @with_prompt_template
     async def run(
@@ -54,7 +54,7 @@ class AntonPier(BaseInstalledAgent):
         await self.exec_as_agent(
             environment,
             command=anton_common.run_script(instruction, str(EnvironmentPaths.agent_dir)),
-            env=self.build_process_env(anton_common.anton_env(self._get_env("ANTON_FH_API_KEY"))),
+            env=self.build_process_env(anton_common.anton_env(self._get_env, self.model_name)),
         )
 
     def populate_context_post_run(self, context: AgentContext) -> None:

@@ -544,6 +544,7 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
 
     from anton.config.settings import AntonSettings
     from anton.publish_access import (
+        WEBSITE_MODE,
         access_from_owner_side,
         resolve_access,
         resolve_publish_target,
@@ -699,6 +700,17 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
         req_access = access_from_owner_side(prev)  # preserve previous, do NOT reset to public
     else:
         req_access = {"mode": "public"}
+
+    if req_access.get("mode") == WEBSITE_MODE:
+        # Covers an explicit request outside the schema enum and an entry that
+        # records a website: only the owner's save in the Cowork app publishes one.
+        return (
+            "NOT PUBLISHED: publish_or_preview does not publish public websites. "
+            "A public website is turned on and off by the artifact's owner in the "
+            "Share panel of the Cowork app, and a website's saved changes are published "
+            "there. Tell the user this. Do not retry with another access mode unless "
+            "the user asks for one."
+        )
 
     eff_access, pwd_version, access_version, owner_side = resolve_access(None, req_access, prev)
 

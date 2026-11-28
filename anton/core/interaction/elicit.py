@@ -5,7 +5,8 @@ Replaces the narrower ``selection.py``. Two question kinds share one
 contract: ``kind="choice"`` (the ``ask_user`` tool — published to the host
 so a GUI can render buttons) and ``kind="path"`` (the ``select_path`` tool
 — rendered by the elicitor itself, since cowork has no file-browser
-widget yet).
+widget yet). An elicitor may also list ``APPROVAL_KIND``, which takes the
+host-built approval cards (``ApprovalRequest``) and no other question.
 """
 
 from __future__ import annotations
@@ -22,16 +23,39 @@ from anton.core.llm.provider import (
 )
 
 __all__ = [
+    "APPROVAL_KIND",
     "GUI_ANSWER_HINT",
     "MAX_QUESTIONS_PER_TURN",
     "AskAnswer",
     "AskOption",
     "AskRequest",
     "Elicitor",
+    "asks_approvals",
     "elicit",
     "validate_answer",
     "validate_request",
 ]
+
+# An elicitor capability, listed in `supported_kinds` beside the question
+# kinds. An elicitor that lists it takes every approval card
+# (`ApprovalRequest`: the write gate's, the write relay's, the browser step's
+# and the live app's launch and replacement cards) and no other question: not
+# the model's `ask_user`, the browser hand-over, the "keep going past a limit"
+# question or the file picker's confirmation. A host lists it without "choice"
+# for a turn nobody is known to be watching, so a person who opens the run can
+# still approve a held write while every other question is refused at once.
+# An elicitor that lists "choice" takes approval cards too. Approval cards keep
+# `kind="choice"`, which is what hosts render; this names a capability, not a
+# request kind.
+#
+# List it only on a session with write approval on: only the write gate
+# remembers an unanswered card (`WriteGate.unanswered`) and refuses the turn's
+# later cards without asking, so without it each card waits out its timeout.
+#
+# cowork-server reads this constant by name
+# (`cowork/harnesses/anton_harness/harness.py`), so renaming it turns the
+# capability off there.
+APPROVAL_KIND = "approval"
 
 # Shared across the outer agent and any sub-agent: the user does not care
 # which layer is interrupting them. Every question kind draws on this same
@@ -148,6 +172,11 @@ class Elicitor(Protocol):
     A Protocol on purpose: hosts satisfy it by shape. ``begin`` opens the
     answer channel, ``ask`` waits, ``end`` closes it — the three are paired
     by ``elicit()``, never by the implementation.
+
+    ``supported_kinds`` lists what the elicitor takes: "choice" (every
+    published question, approval cards included), "path" (a file picker), or
+    ``APPROVAL_KIND`` (approval cards only, for a turn nobody is known to be
+    watching).
     """
 
     supported_kinds: tuple[str, ...]
@@ -159,6 +188,15 @@ class Elicitor(Protocol):
     async def ask(self, question_id: str, request: AskRequest) -> AskAnswer: ...
 
     async def end(self, question_id: str) -> None: ...
+
+
+def asks_approvals(*, elicitor: Elicitor | None) -> bool:
+    """Whether *elicitor* takes approval cards: it lists "choice" or
+    ``APPROVAL_KIND``. A tool whose only question is an approval card is
+    offered on this; a tool that asks its own question reads "choice"."""
+    if elicitor is None:
+        return False
+    return "choice" in elicitor.supported_kinds or APPROVAL_KIND in elicitor.supported_kinds
 
 
 def validate_request(request: AskRequest) -> bool:
@@ -227,7 +265,15 @@ async def elicit(
     refused by it nor spending it.
     """
     elicitor = getattr(session, "elicitor", None)
-    if elicitor is None or request.kind not in elicitor.supported_kinds:
+    if elicitor is None:
+        return AskAnswer(status="unavailable")
+    # An approval card also reaches an elicitor that lists APPROVAL_KIND
+    # without "choice"; every other question needs its own kind listed.
+    # APPROVAL_KIND names a capability, never a request kind: a request whose
+    # kind is APPROVAL_KIND would publish no card, so it is refused here.
+    approval = isinstance(request, ApprovalRequest) and APPROVAL_KIND in elicitor.supported_kinds
+    own_kind = request.kind != APPROVAL_KIND and request.kind in elicitor.supported_kinds
+    if not (approval or own_kind):
         return AskAnswer(status="unavailable")
     if not validate_request(request):
         return AskAnswer(status="unavailable")

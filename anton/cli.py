@@ -26,6 +26,7 @@ from anton.core.llm.provider import close_live_providers, install_asyncgen_noise
 
 from anton.utils.prompt import prompt_or_cancel
 from anton.core.llm.openai import build_chat_completion_kwargs, _is_azure_endpoint
+from anton.core.llm.endpoints import ENDPOINT_LOCAL, classify_base_url
 
 from anton.chat import ChatSession
 from anton.chat_session import get_runtime_factory
@@ -67,7 +68,7 @@ def _build_scratchpad_manager(
     llm_client = llm_client or LLMClient.from_settings(settings)
     coding_conn = llm_client.coding_provider.export_connection_info()
     return ScratchpadManager(
-        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False),
+        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False, inherit_server_env=True),
         coding_provider=coding_conn.provider,
         coding_model=llm_client.coding_model,
         coding_api_key=coding_conn.api_key or "",
@@ -1175,12 +1176,12 @@ def _setup_other_provider(settings, ws) -> None:
 def _validate_with_spinner(console, label: str, fn) -> None:
     """Run a validation function with a spinner, print result."""
     with Live(
-        Spinner("dots", text=f"  Validating {label}...", style="anton.cyan"),
+        Spinner("dots", text=f"  Validating {escape(label)}...", style="anton.cyan"),
         console=console,
         transient=True,
     ):
         fn()
-    console.print(f"  [anton.success]Validated[/] [anton.muted]{label}[/]")
+    console.print(f"  [anton.success]Validated[/] [anton.muted]{escape(label)}[/]")
 
 
 def _normalize_probe_text(text: str | None) -> str:
@@ -1407,6 +1408,25 @@ def _strip_to_azure_endpoint(raw_url: str) -> str:
     return f"{scheme}://{host}"
 
 
+def _endpoint_url_with_scheme(*, typed: str) -> str:
+    """Return the endpoint URL the user typed, with a scheme added when it has none.
+
+    A typed ``http://`` or ``https://`` (any case) is kept as typed. Without
+    one, a host that ``classify_base_url`` calls local gets ``http://``,
+    since local servers such as Ollama and LM Studio usually serve plain
+    HTTP. Every other host gets ``https://``, so the API key does not cross
+    the internet in clear text. A string whose host cannot be parsed also
+    gets ``https://``.
+    """
+    if typed.lower().startswith(("http://", "https://")):
+        return typed
+    # The "//" marks where the host starts. Without it, ``classify_base_url``
+    # reads a typed URL that holds "//" (``localhost:11434//v1``) as it
+    # stands and finds no host.
+    scheme = "http" if classify_base_url(f"//{typed}") == ENDPOINT_LOCAL else "https"
+    return f"{scheme}://{typed}"
+
+
 def _setup_custom_openai(settings, ws) -> None:
     """Set up a custom OpenAI-compatible endpoint (Ollama, vLLM, Together, Groq, LM Studio, Azure, etc.)."""
     console.print()
@@ -1416,12 +1436,15 @@ def _setup_custom_openai(settings, ws) -> None:
     console.print()
 
     while True:
-        base_url = _setup_prompt("Base URL (e.g. http://localhost:11434/v1)").strip()
-        if base_url:
+        typed_url = _setup_prompt("Base URL (e.g. http://localhost:11434/v1)").strip()
+        if typed_url:
             break
         console.print("  [anton.warning]Base URL is required.[/]")
-    if not base_url.startswith("http://") and not base_url.startswith("https://"):
-        base_url = "http://" + base_url
+    base_url = _endpoint_url_with_scheme(typed=typed_url)
+    if base_url == f"https://{typed_url}":
+        console.print(
+            f"  [anton.muted]Using {escape(base_url)}. Type http:// or https:// to choose the scheme.[/]"
+        )
 
     api_key = _setup_prompt(
         "API key (Enter to skip if not needed)", is_password=True
@@ -1903,7 +1926,7 @@ def connect_data_source(
     scratchpads = _build_scratchpad_manager(settings, llm_client)
     session = ChatSession(ChatSessionConfig(
         llm_client=llm_client,
-        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False),
+        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False, inherit_server_env=True),
     ))
 
     async def _run() -> None:
@@ -1941,7 +1964,7 @@ def edit_data_source(
     scratchpads = _build_scratchpad_manager(settings, llm_client)
     session = ChatSession(ChatSessionConfig(
         llm_client=llm_client,
-        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False),
+        runtime_factory=get_runtime_factory(settings, cancel_ends_turn=False, inherit_server_env=True),
     ))
 
     async def _run() -> None:

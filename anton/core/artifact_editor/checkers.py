@@ -11,6 +11,11 @@ Mochi soft-passes a check nobody answered, anton does not.
   ``<script>`` tags balanced, and with ``node`` installed every inline script
   parses. Always first: a page whose script does not parse needs no browser to
   say so, and it costs milliseconds.
+* :class:`PackageChecker`: a Word, Excel or PowerPoint document whose parts
+  were edited still opens: the package is a sound zip, every edited part is
+  well-formed XML, and python-docx / openpyxl / python-pptx load it when they
+  are installed. A document has no page to load, so for an edit that touched
+  only documents this is the whole check.
 * :class:`RenderCheckChecker`: the render-check service (``POST /v1/check``),
   the headless Chromium that loads a page the way the app preview does. Static
   pages, in cowork-server and wherever ``ANTON_RENDER_CHECK_URL`` is set.
@@ -27,6 +32,7 @@ Mochi soft-passes a check nobody answered, anton does not.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -48,6 +54,7 @@ __all__ = [
     "ChainChecker",
     "ElectronChecker",
     "Finding",
+    "PackageChecker",
     "PreviewChecker",
     "RenderCheckChecker",
     "RenderUrlChecker",
@@ -85,7 +92,7 @@ class Finding:
 @dataclass
 class CheckResult:
     status: CheckStatus
-    channel: str  # "static" | "render" | "render-url" | "preview" | "electron"
+    channel: str  # "package" | "static" | "render" | "render-url" | "preview" | "electron"
     findings: list[Finding] = field(default_factory=list)
     screenshot_b64: str | None = None
     ms: int = 0
@@ -264,6 +271,133 @@ class StaticChecker:
                     source=path,
                 ))
         return findings
+
+
+# ── document packages ─────────────────────────────────────────────────
+
+# The library that opens each kind of package, and what to call the result.
+_PACKAGE_LOADERS = {
+    ".docx": ("docx", "Document", "a Word document"),
+    ".xlsx": ("openpyxl", "load_workbook", "an Excel workbook"),
+    ".pptx": ("pptx", "Presentation", "a PowerPoint presentation"),
+}
+
+
+def _load_with_library(package: str, data: bytes) -> Finding | None:
+    """A finding when the package's own library refuses it; None when it loads or the library is absent.
+
+    The libraries are feature-detected: cowork-server installs python-docx and
+    openpyxl, anton itself does not need them, and an absent one only means
+    this part of the check is skipped.
+    """
+    import importlib
+    import os
+
+    loader = _PACKAGE_LOADERS.get(os.path.splitext(package)[1].lower())
+    if loader is None:
+        return None
+    module_name, function, what = loader
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError:
+        return None
+    try:
+        loaded = getattr(module, function)(io.BytesIO(data))
+        close = getattr(loaded, "close", None)
+        if callable(close) and module_name == "openpyxl":
+            close()
+    except Exception as exc:  # noqa: BLE001 — any refusal is the finding
+        return Finding("broken_document", f"{package} no longer opens as {what}: {type(exc).__name__}: {exc}",
+                       source=package)
+    return None
+
+
+def package_findings(package: str, data: bytes, parts: Sequence[str]) -> list[Finding]:
+    """What is wrong with the document package DATA after PARTS of it were edited; [] when it opens."""
+    import zipfile
+    from xml.etree import ElementTree
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except (zipfile.BadZipFile, OSError, ValueError, EOFError) as exc:
+        return [Finding("broken_document", f"{package} is no longer a valid zip package: {exc}", source=package)]
+    findings: list[Finding] = []
+    with zf:
+        try:
+            bad = zf.testzip()
+        except (zipfile.BadZipFile, RuntimeError, NotImplementedError, OSError, EOFError, ValueError) as exc:
+            bad = str(exc)
+        if bad is not None:
+            findings.append(Finding("broken_document", f"{package} has a damaged member: {bad}", source=package))
+        names = {info.filename.lower(): info for info in zf.infolist()}
+        if "[content_types].xml" not in names:
+            findings.append(Finding("broken_document", f"{package} has lost [Content_Types].xml", source=package))
+        for part in dict.fromkeys(parts):
+            info = names.get(part.lower())
+            if info is None:
+                findings.append(Finding("broken_document", f"{package}/{part} is missing from the package",
+                                        source=f"{package}/{part}"))
+                continue
+            try:
+                ElementTree.fromstring(zf.read(info))
+            except ElementTree.ParseError as exc:
+                findings.append(Finding("invalid_xml", f"{package}/{part} is not well-formed XML: {exc}",
+                                        source=f"{package}/{part}"))
+            except (zipfile.BadZipFile, RuntimeError, OSError, EOFError, ValueError) as exc:
+                findings.append(Finding("broken_document", f"{package}/{part} cannot be unpacked: {exc}",
+                                        source=f"{package}/{part}"))
+    if findings:
+        # A package that is not sound XML would only add the library's
+        # version of the same complaint.
+        return findings
+    refused = _load_with_library(package, data)
+    return [refused] if refused is not None else []
+
+
+class PackageChecker:
+    """Do the Word, Excel and PowerPoint documents an edit touched still open?
+
+    Runs first in the chain. Its verdict on an edit that touched only document
+    parts is final: ``passed`` ends the check, as there is no page for a
+    browser to load. When the edit also changed other files, a sound package
+    is ``unverified`` with no note, so the rest of the chain goes on to check
+    those; an edit that touched no document is not this checker's business and
+    is answered the same way.
+    """
+
+    channel = "package"
+
+    async def check(self, ws: "ArtifactWorkspace", changed: list[str]) -> CheckResult:
+        from anton.core.artifact_editor.workspace import WorkspaceError
+
+        started = time.monotonic()
+        packages: dict[str, list[str]] = {}
+        others = False
+        for path in changed:
+            package = ws.package_of(path)
+            if package is None:
+                others = True
+            else:
+                packages.setdefault(package, []).append(path[len(package) + 1:])
+        if not packages:
+            return CheckResult("unverified", self.channel, ms=_ms(started))
+        findings: list[Finding] = []
+        for package, parts in packages.items():
+            try:
+                data = ws.read_package(package)
+            except WorkspaceError as exc:
+                findings.append(Finding("broken_document", str(exc), source=package))
+                continue
+            if data is None:
+                findings.append(Finding("broken_document", f"{package} is gone", source=package))
+                continue
+            findings += await asyncio.to_thread(package_findings, package, data, parts)
+        if findings:
+            return CheckResult("failed", self.channel, findings, ms=_ms(started))
+        if others:
+            return CheckResult("unverified", self.channel, ms=_ms(started))
+        return CheckResult("passed", self.channel, ms=_ms(started),
+                           note="the edited document opens: valid package, well-formed parts")
 
 
 # ── render check (service) ────────────────────────────────────────────
@@ -487,7 +621,8 @@ class PreviewChecker:
 class ChainChecker:
     """Static first, then each browser channel in turn until one gives a verdict.
 
-    A static failure ends the check (no browser needed to say a script does not
+    The package check, when present, leads: it fails or passes only an edit to
+    a document and is otherwise silent (unverified, no note). A static failure ends the check (no browser needed to say a script does not
     parse). A browser channel that comes back unverified hands over to the next
     one; when none can vouch for the page the result is unverified, with every
     reason in its note.
@@ -540,6 +675,7 @@ def select_checker(
 ) -> ChainChecker:
     """The checks this environment can run for an artifact of ``kind``.
 
+    * the document package check first (it answers only for edited documents);
     * static checks always;
     * a static page: the render-check service when configured, else the
       desktop's Electron when present and agent code is not sandboxed;
@@ -549,7 +685,7 @@ def select_checker(
     """
     from anton.core.artifacts import html_lint, render_check
 
-    chain: list[Checker] = [StaticChecker(cell_sandbox=cell_sandbox)]
+    chain: list[Checker] = [PackageChecker(), StaticChecker(cell_sandbox=cell_sandbox)]
     service = render_check.configured_url() is not None
     if kind in FULLSTACK_KINDS:
         if service and live_app_address is not None:

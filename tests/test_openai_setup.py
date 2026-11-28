@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from typing import NamedTuple
 from unittest.mock import MagicMock, patch
 
 import openai
+import pytest
 
 import anton.minds_client as minds_client
 from anton.cli import _setup_openai, _validate_openai_probe_response
@@ -848,6 +850,174 @@ class TestSetupCustomOpenAIAzure:
 
         assert not azure_called
         assert settings.openai_api_version == "2025-01"
+
+
+class _CustomSetupRun(NamedTuple):
+    settings: AntonSettings
+    output: str
+    spinner_texts: list[str]
+
+
+class TestCustomEndpointScheme:
+    """A base URL typed without a scheme gets https://, unless its host is local.
+
+    Plain HTTP to a public host would send the API key in clear text, so only
+    hosts on this machine or the local network (Ollama, LM Studio) get http://.
+    """
+
+    @pytest.mark.parametrize(
+        ("typed", "expected"),
+        [
+            # Public hosts and public IPs get https://.
+            ("api.example.com/v1", "https://api.example.com/v1"),
+            ("api.mindshub.ai/v1", "https://api.mindshub.ai/v1"),
+            ("8.8.8.8/v1", "https://8.8.8.8/v1"),
+            ("[2606:4700::1111]/v1", "https://[2606:4700::1111]/v1"),
+            # IPv6 forms that carry a public IPv4 address (mapped, 6to4) get https://.
+            ("[::ffff:34.120.10.20]:8000/v1", "https://[::ffff:34.120.10.20]:8000/v1"),
+            ("[2002:2278:a14::1]:8000/v1", "https://[2002:2278:a14::1]:8000/v1"),
+            # A dotless name can resolve anywhere, so it gets https:// too.
+            ("gpu-box:8000/v1", "https://gpu-box:8000/v1"),
+            # Local names get http://.
+            ("localhost:11434/v1", "http://localhost:11434/v1"),
+            ("localhost.:11434/v1", "http://localhost.:11434/v1"),
+            ("ollama.localhost:11434/v1", "http://ollama.localhost:11434/v1"),
+            ("ollama.local:11434", "http://ollama.local:11434"),
+            ("host.docker.internal:11434/v1", "http://host.docker.internal:11434/v1"),
+            ("ollama.internal:11434/v1", "http://ollama.internal:11434/v1"),
+            ("gpu-box.lan:11434/v1", "http://gpu-box.lan:11434/v1"),
+            ("nas.home.arpa:11434/v1", "http://nas.home.arpa:11434/v1"),
+            # A path that holds "//" keeps its host.
+            ("localhost:11434//v1", "http://localhost:11434//v1"),
+            # Loopback, private, link-local and shared-address IPs get http://.
+            ("127.0.0.1:8000/v1", "http://127.0.0.1:8000/v1"),
+            ("192.168.1.10:1234/v1", "http://192.168.1.10:1234/v1"),
+            ("10.0.0.5/v1", "http://10.0.0.5/v1"),
+            ("172.16.0.2:8000/v1", "http://172.16.0.2:8000/v1"),
+            ("169.254.10.20:8080/v1", "http://169.254.10.20:8080/v1"),
+            ("100.101.102.103:11434/v1", "http://100.101.102.103:11434/v1"),
+            ("[::1]:11434/v1", "http://[::1]:11434/v1"),
+            ("[fd00::5]:8000/v1", "http://[fd00::5]:8000/v1"),
+            # A typed scheme is kept exactly as typed, in any case.
+            ("http://api.example.com/v1", "http://api.example.com/v1"),
+            ("https://localhost:11434/v1", "https://localhost:11434/v1"),
+            ("HTTPS://x.y/v1", "HTTPS://x.y/v1"),
+            # A host that cannot be parsed gets the safe default.
+            ("[::1/v1", "https://[::1/v1"),
+        ],
+    )
+    def test_endpoint_url_with_scheme(self, typed, expected):
+        from anton.cli import _endpoint_url_with_scheme
+
+        assert _endpoint_url_with_scheme(typed=typed) == expected
+
+    def test_setup_probes_and_saves_https_for_a_public_host_typed_without_scheme(self, monkeypatch):
+        """The setup flow itself applies the default, to the probe and to the saved URL."""
+        from anton.cli import _setup_custom_openai
+
+        settings = AntonSettings(_env_file=None)
+        workspace = MagicMock()
+
+        # base_url, api_key, model, api_version (blank)
+        prompts = iter(["api.example.com/v1", "key", "my-model", ""])
+        monkeypatch.setattr("anton.cli._setup_prompt", lambda *a, **kw: next(prompts))
+        monkeypatch.setattr("anton.cli._validate_with_spinner", lambda _c, _l, fn: fn())
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = MagicMock(choices=[MagicMock(
+            finish_reason="stop",
+            message=MagicMock(content="pong"),
+        )])
+
+        with patch("anton.cli.openai") as mock_openai_mod:
+            mock_openai_mod.OpenAI.return_value = mock_client
+            _setup_custom_openai(settings, workspace)
+
+        assert mock_openai_mod.OpenAI.call_args.kwargs["base_url"] == "https://api.example.com/v1"
+        assert settings.openai_base_url == "https://api.example.com/v1"
+        workspace.set_secret.assert_any_call("ANTON_OPENAI_BASE_URL", "https://api.example.com/v1")
+
+    def _run_setup(self, monkeypatch, *, typed: str) -> _CustomSetupRun:
+        """Run the custom setup against a probe that answers, with the real spinner and a recording console."""
+        import anton.cli as cli
+        from rich.console import Console
+
+        from anton.channel.theme import build_rich_theme
+
+        console = Console(record=True, width=300, theme=build_rich_theme("dark"))
+        monkeypatch.setattr(cli, "console", console)
+        spinners = []
+        real_spinner = cli.Spinner
+
+        def recording_spinner(*args, **kwargs):
+            spinner = real_spinner(*args, **kwargs)
+            spinners.append(spinner)
+            return spinner
+
+        monkeypatch.setattr(cli, "Spinner", recording_spinner)
+        # base_url, api_key, model, api_version (blank)
+        prompts = iter([typed, "key", "my-model", ""])
+        monkeypatch.setattr(cli, "_setup_prompt", lambda *a, **kw: next(prompts))
+
+        settings = AntonSettings(_env_file=None)
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = MagicMock(choices=[MagicMock(
+            finish_reason="stop",
+            message=MagicMock(content="pong"),
+        )])
+        with patch("anton.cli.openai") as mock_openai_mod:
+            mock_openai_mod.OpenAI.return_value = mock_client
+            cli._setup_custom_openai(settings, MagicMock())
+
+        return _CustomSetupRun(
+            settings=settings,
+            output=console.export_text(),
+            spinner_texts=[spinner.text.plain for spinner in spinners],
+        )
+
+    def test_setup_says_when_it_added_https(self, monkeypatch):
+        """A wrong https:// guess fails setup with only "Connection error", so the kept line names the URL and the way out."""
+        run = self._run_setup(monkeypatch, typed="gpu-box:8000/v1")
+
+        assert "Using https://gpu-box:8000/v1. Type http:// or https:// to choose the scheme." in run.output
+
+    def test_setup_says_nothing_when_it_added_http(self, monkeypatch):
+        run = self._run_setup(monkeypatch, typed="localhost:11434/v1")
+
+        assert run.settings.openai_base_url == "http://localhost:11434/v1"
+        assert "to choose the scheme" not in run.output
+
+    def test_setup_says_nothing_when_the_user_typed_the_scheme(self, monkeypatch):
+        run = self._run_setup(monkeypatch, typed="https://api.example.com/v1")
+
+        assert run.settings.openai_base_url == "https://api.example.com/v1"
+        assert "to choose the scheme" not in run.output
+
+    def test_validated_line_keeps_a_bracketed_ipv6_host(self, monkeypatch):
+        """Rich reads "[fd00::5]" as a markup tag and drops it unless the label is escaped."""
+        run = self._run_setup(monkeypatch, typed="[fd00::5]:8000/v1")
+
+        assert "Validated my-model at http://[fd00::5]:8000/v1" in run.output
+        assert run.spinner_texts == ["  Validating my-model at http://[fd00::5]:8000/v1..."]
+
+    def test_schemeless_mindshub_url_gets_the_passthrough_flavor(self, monkeypatch):
+        """The URL saved for a typed api.mindshub.ai/v1 selects the same flavor as a typed https:// one."""
+        from anton.core.llm.client import _resolve_openai_compatible_flavor
+        from anton.core.llm.openai import OpenAIProvider
+
+        saved_url = self._run_setup(monkeypatch, typed="api.mindshub.ai/v1").settings.openai_base_url
+        settings = AntonSettings(
+            planning_provider="openai-compatible",
+            coding_provider="openai-compatible",
+            minds_api_key="k",
+            minds_url="https://api.mindshub.ai",
+            openai_api_key="k",
+            openai_base_url=saved_url,
+            _env_file=None,
+        )
+
+        assert saved_url == "https://api.mindshub.ai/v1"
+        assert _resolve_openai_compatible_flavor(settings) == OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
 
 
 # ─────────────────────────────────────────────────────────────────────────────

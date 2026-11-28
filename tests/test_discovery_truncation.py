@@ -243,7 +243,7 @@ async def test_gathering_cut_while_winding_down_is_not_retried():
 
 
 async def test_second_cut_round_does_not_repeat_the_attempt_line(monkeypatch):
-    async def fake_scratchpad(session, inp):
+    async def fake_scratchpad(session, inp, *, origin):
         return "ok"
 
     monkeypatch.setattr("anton.core.tools.tool_handlers.handle_scratchpad", fake_scratchpad)

@@ -338,6 +338,9 @@ def test_single_valued_cases_still_demand_that_exact_verdict():
         # And the shadow-replay finding: a failed attempt followed by asking
         # the user is WAITING. INCOMPLETE here IS ENG-716's incident.
         "asks_user_after_one_failed_attempt": "WAITING",
+        # STUCK here IS the incident: a correct "not recorded" answer handed back.
+        "searched_several_sources_value_not_recorded": "COMPLETE",
+        "searched_several_sources_then_asks_for_one": "WAITING",
     }
     assert set(single) | {"implied_success_data_never_arrived", "disclaimered_fabrication"} == set(by_name), (
         "a new case was added without deciding here whether it is single-valued"
@@ -661,6 +664,7 @@ def test_every_scope_marker_resolves_to_a_span_in_the_code():
         "_VerifierVerdict", "_VERIFIER_TOKEN_BUDGETS", "_VERIFIER_NO_PREAMBLE",
         "_VERIFIER_JUDGMENT_RUBRIC", "_build_verify_request", "_render_verify_transcript",
         "_render_tool_result_content", "_clip_keep_cause", "_IMAGE_PLACEHOLDER",
+        "_render_verify_tool_call", "_VERIFY_TOOL_TARGET_KEYS",
     }
     # The forced-tool-call body, not only the delegators that call it: a
     # tool_choice mutation inside _generate_object_with read "guard" before.

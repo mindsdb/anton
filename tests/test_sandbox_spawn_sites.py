@@ -566,7 +566,7 @@ async def test_a_dotenv_key_the_server_holds_never_carries_the_servers_value_in(
     await pad.start()
 
     env = seen["payload"]["env"]
-    assert "OPERATOR_ONLY_SECRET" not in env
+    assert env["OPERATOR_ONLY_SECRET"] == "x"
     assert "server-value-not-for-cells" not in json.dumps(env)
     assert env["FOO"] == "from-dotenv"
 

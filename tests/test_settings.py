@@ -162,6 +162,50 @@ class TestMindsOpenAIBaseUrlDerivation:
         assert s.openai_base_url is None
 
 
+class TestMindsHubUrlsMoveToHttps:
+    """A saved http:// MindsHub URL loads as https://.
+
+    MindsHub hosts answer plain HTTP only with a redirect to https, which the
+    openai SDK follows with the key, so a saved http:// URL sent the key in
+    clear on every request. Every other http:// URL stays as saved.
+    """
+
+    @pytest.mark.parametrize(
+        ("saved", "loaded"),
+        [
+            ("http://api.mindshub.ai/v1", "https://api.mindshub.ai/v1"),
+            ("HTTP://api.mindshub.ai/v1", "https://api.mindshub.ai/v1"),
+            ("http://api-direct.mindshub.ai/v1", "https://api-direct.mindshub.ai/v1"),
+            ("http://localhost:11434/v1", "http://localhost:11434/v1"),
+            ("http://api.example.com/v1", "http://api.example.com/v1"),
+            ("https://api.mindshub.ai/v1", "https://api.mindshub.ai/v1"),
+            ("http://mindshub.ai.attacker.example/v1", "http://mindshub.ai.attacker.example/v1"),
+        ],
+    )
+    def test_saved_base_url(self, monkeypatch, saved, loaded):
+        monkeypatch.setenv("ANTON_OPENAI_BASE_URL", saved)
+        assert AntonSettings(_env_file=None).openai_base_url == loaded
+
+    def test_base_url_derived_from_an_http_minds_url_keeps_the_passthrough_flavor(self, monkeypatch):
+        """minds_url moves with openai_base_url, since the flavor check compares the two."""
+        from anton.core.llm.client import _resolve_openai_compatible_flavor
+        from anton.core.llm.openai import OpenAIProvider
+
+        for k in _ANTON_MODEL_KEYS + ["ANTON_OPENAI_API_KEY", "ANTON_OPENAI_BASE_URL"]:
+            monkeypatch.delenv(k, raising=False)
+        s = AntonSettings(
+            minds_api_key="mdb_test",
+            minds_url="http://api.mindshub.ai",
+            planning_provider="openai-compatible",
+            coding_provider="openai-compatible",
+            _env_file=None,
+        )
+
+        assert s.minds_url == "https://api.mindshub.ai"
+        assert s.openai_base_url == "https://api.mindshub.ai/v1"
+        assert _resolve_openai_compatible_flavor(s) == OpenAIProvider.FLAVOR_MINDS_PASSTHROUGH
+
+
 class TestMindsCloudProviderNormalization:
     """A shared/desktop config sets provider = 'minds-cloud', but the CLI's
     LLMClient registry only has 'openai-compatible' (MindsHub speaks the

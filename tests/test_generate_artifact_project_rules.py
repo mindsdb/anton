@@ -147,7 +147,7 @@ async def test_each_step_builds_its_prompt_with_the_run_rules(
     )
 
     with pytest.raises(_Built):
-        await getattr(orchestrator, step)(state)
+        await getattr(orchestrator, step)(state=state)
 
     assert seen["project_rules"] == RULES
 

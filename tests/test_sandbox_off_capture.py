@@ -1,10 +1,10 @@
-"""With no sandbox policy, every spawn of agent code is the call it always was.
+"""With no sandbox policy, what each spawn of agent code is called with.
 
 Each test captures one real spawn site's argv, environment, cwd and keyword
 arguments under a fixed parent environment, and compares them with literal
-expectations written from the call as it stood before the sandbox existed.
-None of these tests names the sandbox, so the file runs unchanged against the
-code before it.
+expectations. Every spawn is the call it was before the sandbox existed,
+except the cell's environment: it is the allowlisted one unless the pad is
+built for the CLI, which keeps the server's.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from anton.core.tools.generate_artifact import verifiers
 
 # The parent's environment for every test here: server secrets, a package
 # mirror's password, an inherited DS_* and a loader variable, all of which
-# reach every child today.
+# reach every child but a non-CLI cell.
 _PARENT_ENV = {
     "PATH": "/usr/bin:/bin",
     "HOME": "/home/anton",
@@ -95,7 +95,8 @@ def _pad(tmp_path: Path, **kwargs) -> LocalScratchpadRuntime:
     return pad
 
 
-async def test_the_cell_spawn_is_unchanged(tmp_path, monkeypatch, parent_env):
+async def _capture_cell_spawn(tmp_path, monkeypatch, **pad_kwargs) -> tuple[dict, dict]:
+    """Start a pad and return the cell spawn's keyword arguments and the expected host values."""
     monkeypatch.setattr(LocalScratchpadRuntime, "_find_uv", staticmethod(lambda: None))
     pad = _pad(
         tmp_path,
@@ -105,6 +106,7 @@ async def test_the_cell_spawn_is_unchanged(tmp_path, monkeypatch, parent_env):
         coding_base_url="https://llm.example/v1",
         scratchpad_ds_env={"DS_PG_MAIN__PASSWORD": "pad-ds"},
         workspace_env_overlay={"FOO": "from-dotenv", "PATH": "/evil"},
+        **pad_kwargs,
     )
     monkeypatch.setattr(pad, "_verify_venv_python", lambda: True)
     calls: list[tuple[tuple, dict]] = []
@@ -126,8 +128,7 @@ async def test_the_cell_spawn_is_unchanged(tmp_path, monkeypatch, parent_env):
     assert boot.name.startswith("anton_scratchpad_") and boot.suffix == ".py"
     assert boot_text == local._read_boot_script()
     anton_root = str(Path(local.__file__).resolve().parent.parent.parent.parent)
-    expected_env = {
-        **{k: v for k, v in _environ().items() if k != "DS_OLD__PASSWORD"},
+    host_values = {
         "PYTHONUTF8": "1",
         "FOO": "from-dotenv",
         "DS_PG_MAIN__PASSWORD": "pad-ds",
@@ -140,16 +141,37 @@ async def test_the_cell_spawn_is_unchanged(tmp_path, monkeypatch, parent_env):
         "ANTON_SCRATCHPAD_WORKSPACE_PATH": str((tmp_path / "project").resolve()),
         "PYTHONPATH": anton_root,
     }
-    assert kwargs == {
+    assert {k: v for k, v in kwargs.items() if k != "env"} == {
         "stdin": asyncio.subprocess.PIPE,
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
-        "env": expected_env,
         "cwd": str(tmp_path / "project"),
         "start_new_session": sys.platform != "win32",
     }
     await pad._stop_process()
     assert not boot.exists()
+    return kwargs, host_values
+
+
+async def test_the_cell_spawn_gets_only_the_allowlisted_environment(tmp_path, monkeypatch, parent_env):
+    kwargs, host_values = await _capture_cell_spawn(tmp_path, monkeypatch)
+
+    assert kwargs["env"] == {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/home/anton",
+        "ANTON_OPENAI_API_KEY": "anton-openai-key",
+        "PIP_INDEX_URL": "https://mirror.internal/simple",
+        **host_values,
+    }
+
+
+async def test_a_cli_cell_spawn_keeps_the_servers_environment(tmp_path, monkeypatch, parent_env):
+    kwargs, host_values = await _capture_cell_spawn(tmp_path, monkeypatch, inherit_server_env=True)
+
+    assert kwargs["env"] == {
+        **{k: v for k, v in _environ().items() if k != "DS_OLD__PASSWORD"},
+        **host_values,
+    }
 
 
 def test_the_venv_health_check_is_unchanged(tmp_path, monkeypatch, parent_env):

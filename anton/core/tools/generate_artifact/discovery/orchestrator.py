@@ -40,6 +40,9 @@ def _elicit_available(session) -> bool:
     correction is conditioned on it so that an environment without a user
     never enters a confirm/return cycle.
 
+    The confirm question is a "choice" question, so an elicitor that takes
+    only approval cards (`APPROVAL_KIND`) or only paths reads as no channel.
+
     A heuristic, and knowingly so: a host can hold an elicitor that never
     renders the question. Being wrong here is safe in the direction
     that matters — the question comes back `unavailable`, the run returns
@@ -47,7 +50,8 @@ def _elicit_available(session) -> bool:
     `awaiting_confirmation`. The path still converges; it just spends one
     extra call getting there.
     """
-    return getattr(session, "elicitor", None) is not None
+    elicitor = getattr(session, "elicitor", None)
+    return elicitor is not None and "choice" in elicitor.supported_kinds
 
 
 # Not the primary stopping mechanism — the shared question budget is (every

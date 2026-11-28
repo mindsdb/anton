@@ -30,7 +30,7 @@ from anton.core.tools.generate_artifact.progress import (
 )
 from anton.core.llm.provider import StreamTextDelta
 from anton.core.tools.generate_artifact.state import (
-    FetchVerdict, GenState, RequiredData, RequiredDataItem, VerifyResult,
+    FetchOutcome, FetchVerdict, GenState, RequiredData, RequiredDataItem, VerifyResult,
 )
 
 
@@ -350,7 +350,7 @@ async def test_the_data_phase_reports_its_iteration_as_the_attempt(tmp_path: Pat
             else FetchVerdict(possible=True, reasoning="yes")
         )
     )
-    fetches = iter([("failed", False), ("pulled a sample", True)])
+    fetches = iter([FetchOutcome("failed", False), FetchOutcome("pulled a sample", True)])
 
     async def fake_fetch(state, required_text=""):
         return next(fetches)
