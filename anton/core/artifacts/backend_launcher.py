@@ -36,6 +36,23 @@ from anton.utils.datasources import scrub_output
 
 _log = logging.getLogger(__name__)
 
+# Told to the agent about a full-stack app that declares saved connections,
+# where the app reaches the user only once published: the publisher sends a
+# connection's credentials only after a person approves them for that app.
+CONNECTIONS_NEED_APPROVAL = (
+    "This app uses saved connections. Their credentials are sent only with the user's approval, so the app "
+    "appears in the preview after the user publishes it from the artifact card and approves its connections, "
+    "unless they approved them for this app before. Tell the user that."
+)
+
+
+def app_backends_reachable(session) -> bool:
+    """Whether the user's browser can open a backend this session starts
+    (`ChatSessionConfig.app_backends_reachable`). A session object without
+    the attribute (a test double) counts as reachable."""
+    return getattr(session, "_app_backends_reachable", True) is not False
+
+
 # What this launcher answers on a sandboxed deployment with live apps on.
 SLOT_ONLY_MESSAGE = (
     "Error: on this deployment a live app runs only in an app slot, started by "

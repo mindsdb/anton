@@ -1425,12 +1425,15 @@ async def _run_and_verify_app(state: GenState) -> "str | object | None":
             port = launch["port"]
             state.app_port = port
             state.app_url = launch.get("url") or f"http://127.0.0.1:{port}"
+            from anton.core.artifacts.backend_launcher import app_backends_reachable
             from anton.core.tools.tool_handlers import resolve_artifact_store
 
+            reachable = app_backends_reachable(state.session)
             store = resolve_artifact_store(state.session)
-            if store is not None:
+            # A pod-local port in metadata makes org-mode cowork-server refuse the preview.
+            if store is not None and reachable:
                 store.update(state.slug, port=port)
-            state.record("run_app", "done", f"port {port}")
+            state.record("run_app", "done", f"port {port}" if reachable else "started in the pod")
             state.step_started("verify_fullstack", attempt=attempt)
             probe_err = await _probe_app(state, port)
             if probe_err is None:
@@ -1441,7 +1444,7 @@ async def _run_and_verify_app(state: GenState) -> "str | object | None":
                 if live_err is not None:
                     state.error = live_err
                     return live_err
-                state.record("verify_fullstack", "ok", f"port {port}")
+                state.record("verify_fullstack", "ok", f"port {port}" if reachable else "in the pod")
                 return None
             state.record("verify_fullstack", "fail", probe_err)
             problem = probe_err
@@ -1806,6 +1809,8 @@ def _result_shell(state: GenState, *, built: bool = False) -> dict:
     """The fields a generated, not-launched or budget-stopped result
     carries. `built` is true only for a result that built a page
     (`_finish`)."""
+    from anton.core.artifacts.backend_launcher import app_backends_reachable
+
     shell = {
         "files_written": state.files_written,
         # Generation input, not output: it physically sits in the artifact folder
@@ -1839,7 +1844,7 @@ def _result_shell(state: GenState, *, built: bool = False) -> dict:
     # entry point of a fullstack app: the
     # port was in the trace, the URL nowhere, and the system prompt's "prefer
     # the url the launch step returned" had nothing to prefer.
-    if state.app_url:
+    if state.app_url and app_backends_reachable(state.session):
         shell["url"] = state.app_url
         if state.app_port is not None:
             shell["port"] = state.app_port

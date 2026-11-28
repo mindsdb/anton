@@ -1507,6 +1507,13 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     kwargs: dict = {}
     if "primary" in tc_input:
         kwargs["primary"] = tc_input["primary"]
+    from anton.core.artifacts.backend_launcher import app_backends_reachable
+
+    if tc_input.get("port") is not None and not app_backends_reachable(session):
+        return SideEffectResult.failed(
+            "Error: `port` cannot be set in this deployment: the user opens apps through their published preview.",
+            reason="port_not_allowed",
+        )
     if "port" in tc_input:
         try:
             kwargs["port"] = int(tc_input["port"]) if tc_input["port"] is not None else None
@@ -2031,14 +2038,25 @@ async def _generate_with_progress_close(coro, queue) -> "dict | str | BrowserChe
         queue.put_nowait(None)
 
 
-# What every `generated` instruction says after its opening, verified in a
-# browser or not.
-_GENERATED_REPORTING = (
+# Where the entry point is: a running backend's URL, or the primary file.
+_URL_REPORTING = (
     "When the result carries `url`, the backend is running there and that URL "
     "is the app's entry point: give the user the URL, not the path of "
     "`static/index.html` — opened from disk the page cannot reach its "
     "`/api/*`. Without `url` (html-app), the entry point is "
-    "`<path>/<primary>`. `checks_skipped` lists verifier checks that "
+    "`<path>/<primary>`. "
+)
+# The same, where the user cannot open a backend this session starts.
+_PUBLISHED_APP_REPORTING = (
+    "A full-stack app cannot be opened at any address from this turn: it appears in the artifact card's "
+    "preview a few minutes after the turn ends, once it is published. Tell the user that, and give no URL "
+    "or file path. "
+)
+
+# What every `generated` instruction says after its opening, verified in a
+# browser or not.
+_GENERATED_REPORTING = _URL_REPORTING + (
+    "`checks_skipped` lists verifier checks that "
     "could not run (for example, no headless browser to load the page) "
     "and `warnings` what the verifier flagged without failing the step: "
     "when either is non-empty, tell the user in one sentence what was "
@@ -2176,6 +2194,31 @@ _STATUS_INSTRUCTIONS = {
         "`agent_understanding`, with `user_request` left as it was."
     ),
 }
+
+
+def _published_apps_variant(text: str) -> str:
+    if _URL_REPORTING not in text:
+        raise ValueError("a generated instruction lost the entry-point sentence the published variant replaces")
+    return text.replace(_URL_REPORTING, _PUBLISHED_APP_REPORTING)
+
+
+_STATUS_INSTRUCTIONS_PUBLISHED_APPS = {
+    key: _published_apps_variant(_STATUS_INSTRUCTIONS[key])
+    for key in ("generated", "generated_unverified")
+}
+
+
+def _published_app_facts(store, slug: str) -> tuple[bool, bool]:
+    """(is full-stack, declares connections), read from the metadata as the
+    run left it: gathering may have changed the type."""
+    try:
+        artifact = store.open(slug)
+    except Exception:  # noqa: BLE001 - a metadata read must not fail the result
+        return False, False
+    if artifact is None:
+        return False, False
+    fullstack = str(getattr(artifact, "type", "")) in ("fullstack-stateless-app", "fullstack-stateful-app")
+    return fullstack, fullstack and bool(getattr(artifact, "datasources", None))
 
 
 async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
@@ -2502,7 +2545,16 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     instruction_key = status
     if status == "generated" and not result.get("verified_in_browser"):
         instruction_key = "generated_live_app" if result.get("live_app") else "generated_unverified"
-    instruction = _STATUS_INSTRUCTIONS.get(instruction_key, _STATUS_INSTRUCTIONS["generated_unverified"])
+    from anton.core.artifacts.backend_launcher import CONNECTIONS_NEED_APPROVAL, app_backends_reachable
+
+    # Only a full-stack app waits for its publish; an html-app's preview shows the file on disk.
+    published_app, connections = (False, False)
+    if not app_backends_reachable(session):
+        published_app, connections = _published_app_facts(store, slug)
+    instructions = {**_STATUS_INSTRUCTIONS, **_STATUS_INSTRUCTIONS_PUBLISHED_APPS} if published_app else _STATUS_INSTRUCTIONS
+    instruction = instructions.get(instruction_key, instructions["generated_unverified"])
+    if connections and instruction_key.startswith("generated"):
+        instruction = f"{instruction} {CONNECTIONS_NEED_APPROVAL}"
     if result.get("changes_from_previous"):
         instruction = f"{instruction} {_CHANGES_INSTRUCTION}"
     if restored is not None:

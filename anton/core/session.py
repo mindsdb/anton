@@ -2029,6 +2029,10 @@ class ChatSessionConfig:
     # the agent, not a network block. Separate from the web tool flags:
     # cloud_turn turns those off while its scratchpads keep the internet.
     internet_research_enabled: bool = True
+    # False: the user's browser cannot open a backend this session starts
+    # (cloud turns). A full-stack app then reaches the user only through its
+    # published preview, so no backend address or port is handed out.
+    app_backends_reachable: bool = True
     # When the task (conversation) was created. Rendered as a fixed
     # "Conversation started: …" line in the cache-stable prompt prefix — it
     # never changes across turns, so it doesn't bust the prefix cache. The
@@ -2452,6 +2456,7 @@ class ChatSession:
         from anton.core.artifacts.live_app_slots import fullstack_offered
 
         self._fullstack_offered = fullstack_offered(config.cell_sandbox)
+        self._app_backends_reachable = config.app_backends_reachable
 
         self.tool_registry = ToolRegistry()
         # Procedural memory: brain-inspired skills (Stage 1 = declarative).
@@ -3423,6 +3428,7 @@ class ChatSession:
             ),
             deployment_identity=getattr(self, "_deployment_identity", None),
             fullstack_offered=getattr(self, "_fullstack_offered", True),
+            app_backends_reachable=getattr(self, "_app_backends_reachable", True),
             internet_research=getattr(self, "_internet_research_enabled", True),
             classify=getattr(self, "_classify_enabled", True),
             reading_files_offered=self._reading_files_offered(),
@@ -3546,6 +3552,11 @@ class ChatSession:
             withheld = set() if getattr(self, "_image_offer", None) else {GENERATE_IMAGE_TOOL.name}
             # `inspect_artifact` is offered only where the chat shows inline pages.
             withheld.add(INSPECT_ARTIFACT_TOOL.name)
+            # `edit_artifact` is registered only with the artifact editor on.
+            from anton.core.tools.edit_artifact import EDIT_ARTIFACT_TOOL, editor_enabled
+
+            if not editor_enabled(self._settings):
+                withheld.add(EDIT_ARTIFACT_TOOL.name)
             unknown = set(self._tool_allowlist) - built - deferred - withheld
             if unknown:
                 raise ValueError(
@@ -3733,7 +3744,9 @@ class ChatSession:
                 create = STATIC_CREATE_ARTIFACT_TOOL if direct else STATIC_CREATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS
                 generate = (STATIC_GENERATE_ARTIFACT_TOOL if direct
                             else STATIC_GENERATE_ARTIFACT_TOOL_NO_DIRECT_REPORTS)
-            update = UPDATE_ARTIFACT_METADATA_TOOL if fullstack else STATIC_UPDATE_ARTIFACT_METADATA_TOOL
+            # No `port` where the user cannot open a backend: a written port breaks the published preview.
+            update = (UPDATE_ARTIFACT_METADATA_TOOL if fullstack and self._app_backends_reachable
+                      else STATIC_UPDATE_ARTIFACT_METADATA_TOOL)
             listing = LIST_ARTIFACTS_TOOL
             # Inline pages and widgets exist only where the chat renders them
             # (Cowork); elsewhere no tool offers `display` (ENG-4684).

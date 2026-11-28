@@ -1,9 +1,11 @@
 """Sub-tools exposed to the pipeline's shared-prefix region (phases A-D).
 
-Four tools are always offered: `scratchpad`, `web_search`, `web_fetch` (thin
+Four tools are offered: `scratchpad`, `web_search`, `web_fetch` (thin
 schema copies of the existing top-level tools — dispatch reuses their real
 handlers, see engine.py) and `finish_gathering` (the control tool the model
 calls once the artifact type is clear and enough data has been gathered).
+The web tools are offered only where the session offers them (internet
+research on and the session's web tools).
 
 `ask_user` is offered conditionally (see `tool_schemas`'s `include_ask_user`)
 and, unlike every other sub-tool here, is NOT dispatched through the existing
@@ -525,7 +527,7 @@ _STEP_TASK = {
 
 def pipeline_tool_schemas(
     types: tuple[str, ...] = GENERATOR_ARTIFACT_TYPES_ORDERED, *, internet_research: bool = True,
-    classify: bool = True,
+    classify: bool = True, web_tools: frozenset[str] | None = None,
 ) -> list[dict]:
     """The ONE tool array used by every call in phases A-D.
 
@@ -536,7 +538,9 @@ def pipeline_tool_schemas(
     (`GenState.buildable_types`). ``internet_research`` False
     (`GenState.internet_research`, fixed for the session) leaves out the two
     web tools and the scratchpad's web_search(). ``classify`` False leaves the
-    scratchpad's classify() out of its description.
+    scratchpad's classify() out of its description. ``web_tools``
+    (`GenState.web_tools`, fixed for the session) leaves out a web tool the
+    session does not offer.
     """
     finish = FINISH_GATHERING_SCHEMA
     if types != GENERATOR_ARTIFACT_TYPES_ORDERED:
@@ -551,7 +555,10 @@ def pipeline_tool_schemas(
                 },
             },
         }
-    web = [_web_search_schema(), _web_fetch_schema()] if internet_research else []
+    web = [
+        build() for name, build in (("web_search", _web_search_schema), ("web_fetch", _web_fetch_schema))
+        if internet_research and (web_tools is None or name in web_tools)
+    ]
     return [
         _scratchpad_schema(internet_research=internet_research, classify=classify),
         *web,

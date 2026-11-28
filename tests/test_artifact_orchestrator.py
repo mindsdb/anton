@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from anton.core.artifacts import ArtifactStore
 from anton.core.datasources.data_vault import LocalDataVault
 from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import engine, orchestrator, prompts
@@ -2660,3 +2661,50 @@ async def test_a_call_that_resumes_before_the_spec_stops_on_the_skipped_gatherin
     err = await orchestrator.run(second, entry=entry)
     assert err == ("steps skipped read-only: no source has them.\nSkipped steps:\n"
                    "- Update the sites (it would change data in a connected source)\n" + _HTML_APP_KNOWN_DATA)
+
+
+def _launchable_state(tmp_path: Path, monkeypatch, *, reachable: bool):
+    store = ArtifactStore(tmp_path / "artifacts")
+    slug = store.create(name="Orders", description="d", type="fullstack-stateless-app").slug
+    st = _state(tmp_path, artifact_type="fullstack-stateless-app", is_fullstack=True, slug=slug)
+    st.session._workspace = SimpleNamespace(artifacts_dir=tmp_path / "artifacts")
+    st.session._app_backends_reachable = reachable
+    st.api_spec = "{}"
+
+    async def fake_launch(**kw):
+        return {"port": 5000, "url": "http://127.0.0.1:5000"}
+
+    async def fake_probe(state, port):
+        return None
+
+    monkeypatch.setattr(orchestrator, "_launch_backend", fake_launch)
+    monkeypatch.setattr(orchestrator, "_probe_app", fake_probe)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_app_live", lambda url, *, cell_sandbox: VerifyResult(errors=[]))
+    return store, slug, st
+
+
+async def test_an_unreachable_backend_stays_out_of_metadata_the_trace_and_the_result(tmp_path: Path, monkeypatch):
+    """In org mode cowork-server refuses the preview of an artifact whose
+    metadata has a port, and a pod-local address is dead in the user's browser."""
+    store, slug, st = _launchable_state(tmp_path, monkeypatch, reachable=False)
+
+    assert await orchestrator._run_and_verify_app(st) is None
+
+    assert store.open(slug).port is None
+    assert [r.detail for r in st.trace if r.node == "run_app"] == ["started in the pod"]
+    assert [r.detail for r in st.trace if r.node == "verify_fullstack"] == ["in the pod"]
+    assert not any("5000" in r.detail for r in st.trace)
+    shell = orchestrator._result_shell(st)
+    assert "url" not in shell and "port" not in shell
+
+
+async def test_a_reachable_backend_keeps_its_port_and_url(tmp_path: Path, monkeypatch):
+    store, slug, st = _launchable_state(tmp_path, monkeypatch, reachable=True)
+
+    assert await orchestrator._run_and_verify_app(st) is None
+
+    assert store.open(slug).port == 5000
+    assert [r.detail for r in st.trace if r.node == "run_app"] == ["port 5000"]
+    assert [r.detail for r in st.trace if r.node == "verify_fullstack"] == ["port 5000"]
+    shell = orchestrator._result_shell(st)
+    assert shell["url"] == "http://127.0.0.1:5000" and shell["port"] == 5000

@@ -9,12 +9,14 @@ from anton.core.artifacts.geography_guidance import GEOGRAPHY_GUIDANCE
 from .identity import DeploymentIdentity, build_runtime_identity_section
 from .prompts import (
     ARTIFACTS_PROMPT,
+    ARTIFACTS_PROMPT_PUBLISHED_APPS,
     BASE_VISUALIZATIONS_PROMPT,
     BACKEND_GENERATION_PROMPT,
     CHAT_SYSTEM_PROMPT,
     CONVERSATION_DISCIPLINE_ACT_FIRST,
     CONVERSATION_DISCIPLINE_ASK_FIRST,
     NO_DIRECT_REPORTS_ARTIFACTS_PROMPT,
+    NO_DIRECT_REPORTS_ARTIFACTS_PROMPT_PUBLISHED_APPS,
     NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT,
     NO_DIRECT_REPORTS_VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
     NO_DIRECT_REPORTS_VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
@@ -230,6 +232,7 @@ class ChatSystemPromptBuilder:
         reading_files_offered: bool = True,
         ui_locale_context: str = "",
         chart_blocks: bool = False,
+        app_backends_reachable: bool = True,
     ) -> str:
         """``fullstack_offered`` False (`live_app_slots.fullstack_offered`)
         leaves out the fullstack types, the backend section and the backend
@@ -242,7 +245,9 @@ class ChatSystemPromptBuilder:
         the language line (`anton.core.llm.ui_locale.ui_locale_line`); empty
         adds nothing. ``chart_blocks`` True (`renders_chart_blocks` of the
         session's surface) teaches ```chartjs / ```mermaid blocks and inline
-        artifacts, which only the Cowork chat draws."""
+        artifacts, which only the Cowork chat draws.
+        ``app_backends_reachable`` False (`ChatSessionConfig.app_backends_reachable`)
+        leaves out the instruction to hand out a running backend's URL."""
         direct_generation = any(getattr(tool, "name", "") == "generate_artifact"
                                 and "name" in tool.input_schema.get("properties", {})
                                 for tool in tool_defs or [])
@@ -253,16 +258,22 @@ class ChatSystemPromptBuilder:
             direct_reports=direct_reports,
             chart_blocks=chart_blocks,
         )
-        if fullstack_offered:
+        if fullstack_offered and app_backends_reachable:
             artifacts_section = ARTIFACTS_PROMPT if direct_reports else NO_DIRECT_REPORTS_ARTIFACTS_PROMPT
+        elif fullstack_offered:
+            artifacts_section = (ARTIFACTS_PROMPT_PUBLISHED_APPS if direct_reports
+                                 else NO_DIRECT_REPORTS_ARTIFACTS_PROMPT_PUBLISHED_APPS)
         else:
             artifacts_section = (STATIC_ARTIFACTS_PROMPT if direct_reports
                                  else NO_DIRECT_REPORTS_STATIC_ARTIFACTS_PROMPT)
         # The single-call path has its own artifact instructions, which have no direct report path
         if direct_generation:
-            from .static_artifact_prompt import ARTIFACTS, STATIC_ARTIFACTS
+            from .static_artifact_prompt import ARTIFACTS, ARTIFACTS_PUBLISHED_APPS, STATIC_ARTIFACTS
 
-            artifacts_section = ARTIFACTS if fullstack_offered else STATIC_ARTIFACTS
+            if not fullstack_offered:
+                artifacts_section = STATIC_ARTIFACTS
+            else:
+                artifacts_section = ARTIFACTS if app_backends_reachable else ARTIFACTS_PUBLISHED_APPS
         # With the artifact editor offered (ENG-4207), changes and repairs go to it.
         if any(getattr(tool, "name", "") == "edit_artifact" for tool in tool_defs or []):
             from anton.core.tools.edit_artifact import route_section_to_editor
