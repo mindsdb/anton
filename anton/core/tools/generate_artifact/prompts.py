@@ -159,10 +159,12 @@ VISUAL DESIGN (for every HTML file you produce):
   need a framework. No other CSS or JS library: the two CDN scripts named in
   these rules (Tailwind, ECharts) and, for a map or globe, the recipe
   packages under MAPS AND GLOBES, each at exactly the version shown, are the
-  ONLY external resources a page may load. They are fetched every time the
-  page opens, so a page that must work OFFLINE or without external resources
-  (brief or PRD says so) skips Tailwind and styles itself with hand-written
-  CSS.
+  ONLY external resources a page may load, besides data files from
+  `https://cdn.jsdelivr.net/npm/<package>@<exact version>/...`; a request to
+  any other host fails once the page is published. Scripts are fetched every
+  time the page opens, so a page that must work OFFLINE or without external
+  resources (brief or PRD says so) skips Tailwind and styles itself with
+  hand-written CSS.
 - ALWAYS use Apache ECharts for interactive charts via CDN:
   `<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
@@ -233,7 +235,8 @@ A static verifier checks each of these after `finish`; a violation fails the
 step and costs a regeneration, unless the item says it is only a warning:
 - A complete HTML document with an explicit `<body>`...`</body>`.
 - `<meta name="viewport" content="width=device-width, initial-scale=1.0">`.
-- No absolute URL in any `fetch()` call — relative paths only.
+- No absolute URL in any `fetch()` call except a data file from
+  `https://cdn.jsdelivr.net/npm/`.
 - No root-relative path in `src`, `href`, `fetch()` or `new EventSource()`
   (a value that starts with a single `/`, `/api/...` included): the page is
   served under a path prefix, in the app preview and once published, and
@@ -643,7 +646,7 @@ root-relative path instead of `api()`, or one whose `fetch()` names a path
   inline `<script>` elements, each view's code in a script of its own (see
   the verifier contract). The only external resources are the CDN scripts
   named in the design rules (Tailwind, ECharts) and, for a map or globe, the
-  recipe packages and world atlas named there.
+  recipe packages and world atlas named there, plus data files from jsDelivr.
 - Include the api-base meta tag in `<head>`:
   ```html
   <meta name="api-base" content="">
@@ -662,7 +665,7 @@ root-relative path instead of `api()`, or one whose `fetch()` names a path
   an `<img>`), set it from JS: `a.href = api('/api/export')`. Never write
   `href="/api/export"` in the markup: a root-relative path fails the step
   (see the verifier contract).
-- NEVER hardcode an absolute URL in the source.
+- NEVER hardcode the backend's address in the source.
 - Call ALL backend endpoints under the `/api/*` prefix. Never use bare paths.
 - Call ONLY the paths listed under `## API Specification`, spelled as the
   document spells them; a `fetch()` to a path `openapi.json` does not define
@@ -739,7 +742,8 @@ complete frontend of a fullstack app. Inline your own CSS and all JS, each
 view's code in a `<script>` of its own as the verifier contract says; the
 only external resources allowed are the Tailwind and ECharts `<script>` tags
 from the CDNs named in the design rules and, for a map or globe, the recipe
-packages and world atlas named there. The backend is generated in parallel
+packages and world atlas named there, plus data files from jsDelivr. The
+backend is generated in parallel
 and serves the endpoints listed under `## API Specification`: take exact
 paths and response shapes from there and call every one of them through the
 `api()` helper (see Fullstack rules). Embed no data — the page fetches it
@@ -758,7 +762,7 @@ replaces each such reference with the asset itself as a `data:` URI, since
 the app preview shows only the page. The only external resources allowed
 are the Tailwind and ECharts `<script>` tags from the CDNs named in the
 design rules and, for a map or globe, the recipe packages and world atlas
-named there."""
+named there, plus data files from jsDelivr."""
     return f"""\
 You are a single-purpose worker inside an artifact-generation pipeline. This
 step is `generate_frontend`.
@@ -1675,7 +1679,7 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
   locally and as an AWS Lambda.
 - All API endpoints live under the `/api/*` prefix.
 - The launcher assigns the port at run time: never mention a port number or
-  an absolute URL anywhere in the spec.
+  the backend's address anywhere in the spec.
 - Frontend: one self-contained HTML file (`static/index.html` for fullstack
   types) — vanilla JavaScript, Tailwind CSS via CDN for styling (hand-written
   CSS where needed), Apache ECharts for charts. For Earth geography, use
